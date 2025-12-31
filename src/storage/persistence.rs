@@ -93,7 +93,11 @@ impl Checkpoint {
 
     /// Save checkpoint to disk
     pub fn save(&self, path: &Path) -> Result<()> {
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| {
+        let parent_dir = path.parent().ok_or_else(|| {
+            StorageError::IoError(format!("Invalid checkpoint path: no parent directory for {:?}", path))
+        })?;
+
+        std::fs::create_dir_all(parent_dir).map_err(|e| {
             StorageError::IoError(format!("Failed to create checkpoint directory: {}", e))
         })?;
 
