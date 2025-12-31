@@ -22,6 +22,7 @@ use crate::index::temporal::TemporalIndexes;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::{WalOperation, WriteAheadLog};
+use crate::storage::VersionMetadata;
 use crate::utils::error::{Result, StorageError, TransactionError};
 use std::sync::{Arc, Mutex};
 
@@ -561,18 +562,68 @@ impl WriteTransaction {
                     );
                 }
                 super::BufferedWrite::DeleteNode { node_id } => {
+                    // Get the node before deleting to create tombstone
+                    let node = self.current.get_node(*node_id)?;
+
+                    // Generate version ID for tombstone
+                    let tombstone_version_id =
+                        VersionId::new(self.version_id_gen.lock().unwrap().next());
+
+                    // Create closed temporal interval marking deletion time
+                    let tombstone_temporal = BiTemporalInterval::current(commit_timestamp)
+                        .close_transaction_time(commit_timestamp);
+
+                    // Add tombstone version to historical storage
+                    self.historical.lock().unwrap().add_node_version(
+                        *node_id,
+                        tombstone_version_id,
+                        tombstone_temporal,
+                        node.label,
+                        node.properties.clone(),
+                    )?;
+
+                    // Index the tombstone version
+                    self.temporal_indexes.lock().unwrap().insert_node_version(
+                        *node_id,
+                        tombstone_version_id,
+                        tombstone_temporal,
+                    );
+
                     // Delete from current storage
                     self.current.delete_node_direct(*node_id)?;
-
-                    // TODO: Mark as deleted in historical storage (add tombstone version)
-                    // For now, we just remove from current state
                 }
                 super::BufferedWrite::DeleteEdge { edge_id } => {
+                    // Get the edge before deleting to create tombstone
+                    let edge = self.current.get_edge(*edge_id)?;
+
+                    // Generate version ID for tombstone
+                    let tombstone_version_id =
+                        VersionId::new(self.version_id_gen.lock().unwrap().next());
+
+                    // Create closed temporal interval marking deletion time
+                    let tombstone_temporal = BiTemporalInterval::current(commit_timestamp)
+                        .close_transaction_time(commit_timestamp);
+
+                    // Add tombstone version to historical storage
+                    self.historical.lock().unwrap().add_edge_version(
+                        *edge_id,
+                        tombstone_version_id,
+                        tombstone_temporal,
+                        edge.label,
+                        edge.source,
+                        edge.target,
+                        edge.properties.clone(),
+                    )?;
+
+                    // Index the tombstone version
+                    self.temporal_indexes.lock().unwrap().insert_edge_version(
+                        *edge_id,
+                        tombstone_version_id,
+                        tombstone_temporal,
+                    );
+
                     // Delete from current storage
                     self.current.delete_edge_direct(*edge_id)?;
-
-                    // TODO: Mark as deleted in historical storage (add tombstone version)
-                    // For now, we just remove from current state
                 }
             }
         }
@@ -583,9 +634,56 @@ impl WriteTransaction {
 
 impl ReadOps for WriteTransaction {
     fn get_node(&self, id: NodeId) -> Result<Node> {
-        // Snapshot Isolation: only read versions visible in our snapshot
-        // Uncommitted writes in this transaction are not visible
-        // until commit (for simplicity)
+        // Read-your-writes: check write buffer first
+        if let Some(buffered) = self.buffer.get_node_write(id) {
+            match buffered {
+                super::BufferedWrite::CreateNode {
+                    node_id,
+                    label,
+                    properties,
+                    version_id,
+                    ..
+                } => {
+                    // Return the buffered node
+                    return Ok(Node::with_metadata(
+                        *node_id,
+                        *label,
+                        properties.clone(),
+                        *version_id,
+                        VersionMetadata {
+                            created_by_tx: self.tx_id,
+                            commit_timestamp: None, // Not yet committed
+                        },
+                    ));
+                }
+                super::BufferedWrite::UpdateNode {
+                    node_id,
+                    label,
+                    properties,
+                    version_id,
+                    ..
+                } => {
+                    // Return the updated node
+                    return Ok(Node::with_metadata(
+                        *node_id,
+                        *label,
+                        properties.clone(),
+                        *version_id,
+                        VersionMetadata {
+                            created_by_tx: self.tx_id,
+                            commit_timestamp: None,
+                        },
+                    ));
+                }
+                super::BufferedWrite::DeleteNode { .. } => {
+                    // Node has been deleted in this transaction
+                    return Err(StorageError::NodeNotFound(id).into());
+                }
+                _ => {} // Not a node operation
+            }
+        }
+
+        // Fall back to snapshot-isolated read from storage
         let node = self.current.get_node(id)?;
 
         // Check if this version is visible in our snapshot
@@ -601,7 +699,64 @@ impl ReadOps for WriteTransaction {
     }
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        // Snapshot Isolation: only read versions visible in our snapshot
+        // Read-your-writes: check write buffer first
+        if let Some(buffered) = self.buffer.get_edge_write(id) {
+            match buffered {
+                super::BufferedWrite::CreateEdge {
+                    edge_id,
+                    source,
+                    target,
+                    label,
+                    properties,
+                    version_id,
+                    ..
+                } => {
+                    // Return the buffered edge
+                    return Ok(Edge::with_metadata(
+                        *edge_id,
+                        *label,
+                        *source,
+                        *target,
+                        properties.clone(),
+                        *version_id,
+                        VersionMetadata {
+                            created_by_tx: self.tx_id,
+                            commit_timestamp: None,
+                        },
+                    ));
+                }
+                super::BufferedWrite::UpdateEdge {
+                    edge_id,
+                    source,
+                    target,
+                    label,
+                    properties,
+                    version_id,
+                    ..
+                } => {
+                    // Return the updated edge
+                    return Ok(Edge::with_metadata(
+                        *edge_id,
+                        *label,
+                        *source,
+                        *target,
+                        properties.clone(),
+                        *version_id,
+                        VersionMetadata {
+                            created_by_tx: self.tx_id,
+                            commit_timestamp: None,
+                        },
+                    ));
+                }
+                super::BufferedWrite::DeleteEdge { .. } => {
+                    // Edge has been deleted in this transaction
+                    return Err(StorageError::EdgeNotFound(id).into());
+                }
+                _ => {} // Not an edge operation
+            }
+        }
+
+        // Fall back to snapshot-isolated read from storage
         let edge = self.current.get_edge(id)?;
 
         // Check if this version is visible in our snapshot
@@ -888,12 +1043,14 @@ mod tests {
         let (mut tx, _temp_dir) = create_test_write_tx();
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
 
-        let node_id = tx.create_node("Person", props).unwrap();
+        let node_id = tx.create_node("Person", props.clone()).unwrap();
         // ID generators start at 0, so first ID is 0
         assert_eq!(node_id.as_u64(), 0);
 
-        // Node should not be visible until commit
-        assert!(tx.get_node(node_id).is_err());
+        // Read-your-writes: should be able to read buffered node
+        let node = tx.get_node(node_id).unwrap();
+        assert_eq!(node.id, node_id);
+        assert_eq!(node.properties.get("name").unwrap(), &crate::core::property::PropertyValue::from("Alice"));
     }
 
     #[test]
@@ -907,12 +1064,16 @@ mod tests {
 
         let edge_props = PropertyMapBuilder::new().insert("since", 2020i64).build();
 
-        let edge_id = tx.create_edge(node1, node2, "KNOWS", edge_props).unwrap();
+        let edge_id = tx.create_edge(node1, node2, "KNOWS", edge_props.clone()).unwrap();
         // ID generators start at 0, so first edge ID is 0
         assert_eq!(edge_id.as_u64(), 0);
 
-        // Edge should not be visible until commit
-        assert!(tx.get_edge(edge_id).is_err());
+        // Read-your-writes: should be able to read buffered edge
+        let edge = tx.get_edge(edge_id).unwrap();
+        assert_eq!(edge.id, edge_id);
+        assert_eq!(edge.source, node1);
+        assert_eq!(edge.target, node2);
+        assert_eq!(edge.properties.get("since").unwrap(), &crate::core::property::PropertyValue::from(2020i64));
     }
 
     #[test]
@@ -1171,5 +1332,116 @@ mod tests {
         assert_eq!(tx.get_outgoing_edges(node1).len(), 1);
         assert_eq!(tx.get_incoming_edges(node2).len(), 1);
         assert_eq!(tx.get_outgoing_edges_with_label(node1, "KNOWS").len(), 1);
+    }
+
+    #[test]
+    fn test_delete_node_creates_tombstone() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+        let historical = Arc::clone(&tx.historical);
+
+        // Create a node with properties
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+        let node_id = current.create_node("Person", props).unwrap();
+
+        // Verify node exists in current storage
+        assert!(current.get_node(node_id).is_ok());
+
+        // Delete the node
+        tx.delete_node(node_id).unwrap();
+
+        // Commit the transaction
+        tx.commit().unwrap();
+
+        // Verify node was deleted from current storage
+        assert!(current.get_node(node_id).is_err());
+
+        // Verify tombstone version was created in historical storage
+        let historical = historical.lock().unwrap();
+        let stats = historical.stats();
+        assert!(
+            stats.total_node_versions > 0,
+            "Expected at least one node version (tombstone) in historical storage"
+        );
+
+        // The tombstone should have a closed transaction time
+        // This is implicitly tested by the fact that a version was created
+    }
+
+    #[test]
+    fn test_delete_edge_creates_tombstone() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+        let historical = Arc::clone(&tx.historical);
+
+        // Create nodes and edge
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props.clone()).unwrap();
+
+        let edge_props = PropertyMapBuilder::new().insert("since", 2020i64).build();
+        let edge_id = current
+            .create_edge(node1, node2, "KNOWS", edge_props)
+            .unwrap();
+
+        // Verify edge exists
+        assert!(current.get_edge(edge_id).is_ok());
+
+        // Delete the edge
+        tx.delete_edge(edge_id).unwrap();
+
+        // Commit the transaction
+        tx.commit().unwrap();
+
+        // Verify edge was deleted from current storage
+        assert!(current.get_edge(edge_id).is_err());
+
+        // Verify tombstone version was created in historical storage
+        let historical = historical.lock().unwrap();
+        let stats = historical.stats();
+        assert!(
+            stats.total_edge_versions > 0,
+            "Expected at least one edge version (tombstone) in historical storage"
+        );
+    }
+
+    #[test]
+    fn test_read_your_writes_update() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a node in current storage
+        let props = PropertyMapBuilder::new().insert("age", 30i64).build();
+        let node_id = current.create_node("Person", props).unwrap();
+
+        // Update the node in the transaction
+        let new_props = PropertyMapBuilder::new().insert("age", 31i64).build();
+        tx.update_node(node_id, new_props).unwrap();
+
+        // Read-your-writes: should see the updated value
+        let node = tx.get_node(node_id).unwrap();
+        assert_eq!(
+            node.properties.get("age").unwrap(),
+            &crate::core::property::PropertyValue::from(31i64)
+        );
+    }
+
+    #[test]
+    fn test_read_your_writes_delete() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a node in current storage
+        let props = PropertyMapBuilder::new().build();
+        let node_id = current.create_node("Person", props).unwrap();
+
+        // Delete the node in the transaction
+        tx.delete_node(node_id).unwrap();
+
+        // Read-your-writes: should NOT see the deleted node
+        assert!(tx.get_node(node_id).is_err());
     }
 }

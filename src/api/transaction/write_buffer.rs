@@ -156,6 +156,20 @@ impl WriteBuffer {
         self.modified_edges.contains_key(&edge_id)
     }
 
+    /// Get the buffered write for a node, if any
+    pub fn get_node_write(&self, node_id: NodeId) -> Option<&BufferedWrite> {
+        self.modified_nodes
+            .get(&node_id)
+            .map(|&index| &self.operations[index])
+    }
+
+    /// Get the buffered write for an edge, if any
+    pub fn get_edge_write(&self, edge_id: EdgeId) -> Option<&BufferedWrite> {
+        self.modified_edges
+            .get(&edge_id)
+            .map(|&index| &self.operations[index])
+    }
+
     /// Clear all buffered operations
     pub fn clear(&mut self) {
         self.operations.clear();
