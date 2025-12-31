@@ -292,14 +292,17 @@ impl WriteTransaction {
                         temporal,
                     }
                 }
-                super::BufferedWrite::DeleteNode { node_id: _ } => {
-                    // For now, we'll skip delete operations in WAL
-                    // In a full implementation, we'd add DeleteNode and DeleteEdge variants to WalOperation
-                    continue;
+                super::BufferedWrite::DeleteNode { node_id } => {
+                    WalOperation::DeleteNode {
+                        node_id: *node_id,
+                        temporal,
+                    }
                 }
-                super::BufferedWrite::DeleteEdge { edge_id: _ } => {
-                    // Skip delete operations for now
-                    continue;
+                super::BufferedWrite::DeleteEdge { edge_id } => {
+                    WalOperation::DeleteEdge {
+                        edge_id: *edge_id,
+                        temporal,
+                    }
                 }
             };
 
@@ -832,5 +835,196 @@ mod tests {
 
         // Node should not be visible (auto-rollback)
         assert!(current.get_node(node_id).is_err());
+    }
+
+    #[test]
+    fn test_update_node() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a node first in current storage
+        let props = PropertyMapBuilder::new().insert("age", 30i64).build();
+        let node_id = current.create_node("Person", props).unwrap();
+
+        // Update the node properties
+        let new_props = PropertyMapBuilder::new().insert("age", 31i64).build();
+        tx.update_node(node_id, new_props.clone()).unwrap();
+
+        // Commit the transaction
+        tx.commit().unwrap();
+
+        // Verify the update was applied
+        let node = current.get_node(node_id).unwrap();
+        assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(31));
+    }
+
+    #[test]
+    fn test_update_node_not_found() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+
+        let props = PropertyMapBuilder::new().insert("age", 30i64).build();
+        let result = tx.update_node(NodeId::new(999), props);
+
+        // Should fail because node doesn't exist
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_edge() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes and edge in current storage
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props).unwrap();
+
+        let edge_props = PropertyMapBuilder::new().insert("strength", 5i64).build();
+        let edge_id = current.create_edge(node1, node2, "KNOWS", edge_props).unwrap();
+
+        // Update the edge properties
+        let new_props = PropertyMapBuilder::new().insert("strength", 10i64).build();
+        tx.update_edge(edge_id, new_props.clone()).unwrap();
+
+        // Commit the transaction
+        tx.commit().unwrap();
+
+        // Verify the update was applied
+        let edge = current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("strength").and_then(|v| v.as_int()),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn test_update_edge_not_found() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+
+        let props = PropertyMapBuilder::new().insert("strength", 5i64).build();
+        let result = tx.update_edge(EdgeId::new(999), props);
+
+        // Should fail because edge doesn't exist
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delete_node() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a node first in current storage
+        let props = PropertyMapBuilder::new().build();
+        let node_id = current.create_node("Person", props).unwrap();
+
+        // Verify node exists
+        assert!(current.get_node(node_id).is_ok());
+
+        // Delete the node
+        tx.delete_node(node_id).unwrap();
+
+        // Commit the transaction
+        tx.commit().unwrap();
+
+        // Verify the node was deleted
+        assert!(current.get_node(node_id).is_err());
+    }
+
+    #[test]
+    fn test_delete_node_not_found() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+
+        let result = tx.delete_node(NodeId::new(999));
+
+        // Should fail because node doesn't exist
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delete_edge() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes and edge in current storage
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props).unwrap();
+
+        let edge_props = PropertyMapBuilder::new().build();
+        let edge_id = current
+            .create_edge(node1, node2, "KNOWS", edge_props)
+            .unwrap();
+
+        // Verify edge exists
+        assert!(current.get_edge(edge_id).is_ok());
+
+        // Delete the edge
+        tx.delete_edge(edge_id).unwrap();
+
+        // Commit the transaction
+        tx.commit().unwrap();
+
+        // Verify the edge was deleted
+        assert!(current.get_edge(edge_id).is_err());
+    }
+
+    #[test]
+    fn test_delete_edge_not_found() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+
+        let result = tx.delete_edge(EdgeId::new(999));
+
+        // Should fail because edge doesn't exist
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_commit_after_commit_fails() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+
+        let props = PropertyMapBuilder::new().build();
+        tx.create_node("Person", props).unwrap();
+
+        // First commit should succeed
+        tx.commit().unwrap();
+
+        // Try to commit again - should fail (can't create new tx from consumed one)
+        // This is prevented by the compiler since commit consumes self
+    }
+
+    #[test]
+    fn test_operations_after_commit_prevented_by_move() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+
+        let props = PropertyMapBuilder::new().build();
+        tx.create_node("Person", props).unwrap();
+
+        // Commit consumes tx
+        tx.commit().unwrap();
+
+        // Can't use tx after commit - prevented by compiler
+        // This test documents the behavior
+    }
+
+    #[test]
+    fn test_read_ops_delegation() {
+        let (tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create some data in current storage
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props.clone()).unwrap();
+        current
+            .create_edge(node1, node2, "KNOWS", props)
+            .unwrap();
+
+        // Test ReadOps methods on transaction
+        assert_eq!(tx.node_count(), 2);
+        assert_eq!(tx.edge_count(), 1);
+        assert!(tx.get_node(node1).is_ok());
+        assert_eq!(tx.get_outgoing_edges(node1).len(), 1);
+        assert_eq!(tx.get_incoming_edges(node2).len(), 1);
+        assert_eq!(tx.get_outgoing_edges_with_label(node1, "KNOWS").len(), 1);
     }
 }

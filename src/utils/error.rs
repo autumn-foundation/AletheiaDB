@@ -483,4 +483,188 @@ mod tests {
         assert_eq!(returns_result().unwrap(), 42);
         assert!(returns_error().is_err());
     }
+
+    #[test]
+    fn test_all_storage_error_variants() {
+        // Test EdgeNotFound
+        let err = StorageError::EdgeNotFound(EdgeId::new(1));
+        assert!(format!("{}", err).contains("Edge not found"));
+
+        // Test VersionNotFound
+        let err = StorageError::VersionNotFound(VersionId::new(1));
+        assert!(format!("{}", err).contains("Version not found"));
+
+        // Test DuplicateId
+        let err = StorageError::DuplicateId {
+            id: "42".to_string(),
+            kind: "node".to_string(),
+        };
+        assert!(format!("{}", err).contains("Duplicate"));
+        assert!(format!("{}", err).contains("node"));
+
+        // Test InconsistentState
+        let err = StorageError::InconsistentState {
+            reason: "test".to_string(),
+        };
+        assert!(format!("{}", err).contains("Inconsistent"));
+
+        // Test WalError
+        let err = StorageError::WalError {
+            reason: "flush failed".to_string(),
+        };
+        assert!(format!("{}", err).contains("Write-ahead log"));
+        assert!(format!("{}", err).contains("flush failed"));
+
+        // Test CheckpointError
+        let err = StorageError::CheckpointError {
+            reason: "save failed".to_string(),
+        };
+        assert!(format!("{}", err).contains("Checkpoint"));
+        assert!(format!("{}", err).contains("save failed"));
+
+        // Test IoError
+        let err = StorageError::IoError("file not found".to_string());
+        assert!(format!("{}", err).contains("I/O error"));
+        assert!(format!("{}", err).contains("file not found"));
+
+        // Test CorruptedData
+        let err = StorageError::CorruptedData("bad checksum".to_string());
+        assert!(format!("{}", err).contains("Corrupted data"));
+        assert!(format!("{}", err).contains("bad checksum"));
+    }
+
+    #[test]
+    fn test_all_temporal_error_variants() {
+        // Test InvalidTimeRange
+        let err = TemporalError::InvalidTimeRange {
+            start: 100,
+            end: 50,
+        };
+        assert!(format!("{}", err).contains("Invalid time range"));
+        assert!(format!("{}", err).contains("100"));
+        assert!(format!("{}", err).contains("50"));
+
+        // Test ValidTimeBeforeCreation
+        let err = TemporalError::ValidTimeBeforeCreation {
+            valid_time: 50,
+            creation_time: 100,
+        };
+        assert!(format!("{}", err).contains("precedes creation"));
+
+        // Test VersionAlreadyClosed
+        let err = TemporalError::VersionAlreadyClosed {
+            version_id: VersionId::new(42),
+        };
+        assert!(format!("{}", err).contains("already closed"));
+        assert!(format!("{}", err).contains("42"));
+
+        // Test CorruptedVersionChain
+        let err = TemporalError::CorruptedVersionChain {
+            entity_id: "node-123".to_string(),
+            reason: "missing delta".to_string(),
+        };
+        assert!(format!("{}", err).contains("Corrupted version chain"));
+        assert!(format!("{}", err).contains("node-123"));
+        assert!(format!("{}", err).contains("missing delta"));
+
+        // Test MissingAnchor
+        let err = TemporalError::MissingAnchor {
+            entity_id: "edge-456".to_string(),
+        };
+        assert!(format!("{}", err).contains("Missing anchor"));
+        assert!(format!("{}", err).contains("edge-456"));
+    }
+
+    #[test]
+    fn test_all_query_error_variants() {
+        // Test SyntaxError
+        let err = QueryError::SyntaxError {
+            message: "unexpected token".to_string(),
+        };
+        assert!(format!("{}", err).contains("syntax error"));
+        assert!(format!("{}", err).contains("unexpected token"));
+
+        // Test InvalidParameter
+        let err = QueryError::InvalidParameter {
+            parameter: "limit".to_string(),
+            reason: "must be positive".to_string(),
+        };
+        assert!(format!("{}", err).contains("Invalid query parameter"));
+        assert!(format!("{}", err).contains("limit"));
+        assert!(format!("{}", err).contains("must be positive"));
+
+        // Test LimitExceeded
+        let err = QueryError::LimitExceeded { limit: 1000 };
+        assert!(format!("{}", err).contains("limit"));
+        assert!(format!("{}", err).contains("1000"));
+        assert!(format!("{}", err).contains("exceeded"));
+
+        // Test InvalidTraversal
+        let err = QueryError::InvalidTraversal {
+            reason: "edge doesn't connect nodes".to_string(),
+        };
+        assert!(format!("{}", err).contains("Invalid graph traversal"));
+        assert!(format!("{}", err).contains("edge doesn't connect nodes"));
+    }
+
+    #[test]
+    fn test_all_transaction_error_variants() {
+        // Test InvalidState
+        let err = TransactionError::InvalidState {
+            current: "Committed".to_string(),
+            expected: "Active".to_string(),
+        };
+        assert!(format!("{}", err).contains("invalid state"));
+        assert!(format!("{}", err).contains("Committed"));
+        assert!(format!("{}", err).contains("Active"));
+
+        // Test AlreadyCommitted
+        let err = TransactionError::AlreadyCommitted { tx_id: 123 };
+        assert!(format!("{}", err).contains("already been committed"));
+        assert!(format!("{}", err).contains("123"));
+
+        // Test Aborted
+        let err = TransactionError::Aborted { tx_id: 456 };
+        assert!(format!("{}", err).contains("aborted"));
+        assert!(format!("{}", err).contains("456"));
+
+        // Test WriteConflict
+        let err = TransactionError::WriteConflict {
+            entity_id: "node-789".to_string(),
+            reason: "concurrent modification".to_string(),
+        };
+        assert!(format!("{}", err).contains("Write conflict"));
+        assert!(format!("{}", err).contains("node-789"));
+        assert!(format!("{}", err).contains("concurrent modification"));
+
+        // Test ValidationFailed
+        let err = TransactionError::ValidationFailed {
+            reason: "referential integrity violated".to_string(),
+        };
+        assert!(format!("{}", err).contains("validation failed"));
+        assert!(format!("{}", err).contains("referential integrity violated"));
+
+        // Test CommitFailed
+        let err = TransactionError::CommitFailed {
+            reason: "WAL write failed".to_string(),
+        };
+        assert!(format!("{}", err).contains("commit failed"));
+        assert!(format!("{}", err).contains("WAL write failed"));
+
+        // Test RollbackFailed
+        let err = TransactionError::RollbackFailed {
+            reason: "cleanup failed".to_string(),
+        };
+        assert!(format!("{}", err).contains("rollback failed"));
+        assert!(format!("{}", err).contains("cleanup failed"));
+    }
+
+    #[test]
+    fn test_transaction_error_conversions() {
+        let err = TransactionError::ValidationFailed {
+            reason: "test".to_string(),
+        };
+        let converted: Error = err.into();
+        assert!(matches!(converted, Error::Transaction(_)));
+    }
 }
