@@ -3,13 +3,16 @@
 //! Write transactions provide full ACID properties:
 //! - **Atomicity**: All-or-nothing commit via write buffering
 //! - **Consistency**: Referential integrity validation before commit
-//! - **Isolation**: Read Committed isolation level
-//! - **Durability**: WAL integration (Phase 4)
+//! - **Isolation**: Snapshot Isolation with write-write conflict detection
+//! - **Durability**: WAL with fsync guarantees
 //!
 //! Write transactions buffer all changes in memory until commit.
 //! On commit, changes are validated and applied atomically.
 
-use super::{ReadOps, TxId, TxMetadata, TxState, WriteBuffer, WriteOps};
+use super::{
+    ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager, WriteBuffer,
+    WriteOps,
+};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
@@ -19,7 +22,7 @@ use crate::index::temporal::TemporalIndexes;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::{WalOperation, WriteAheadLog};
-use crate::utils::error::{Result, TransactionError};
+use crate::utils::error::{Result, StorageError, TransactionError};
 use std::sync::{Arc, Mutex};
 
 /// Write transaction with full ACID guarantees.
@@ -40,6 +43,9 @@ pub struct WriteTransaction {
     start_timestamp: Timestamp,
     state: TxState,
 
+    // Snapshot for Snapshot Isolation
+    snapshot: TransactionSnapshot,
+
     // Write buffer for uncommitted changes
     buffer: WriteBuffer,
 
@@ -49,6 +55,7 @@ pub struct WriteTransaction {
     temporal_indexes: Arc<Mutex<TemporalIndexes>>,
     wal: Arc<Mutex<WriteAheadLog>>,
     current_timestamp: Arc<Mutex<Timestamp>>,
+    visibility_manager: Arc<TxVisibilityManager>,
 
     // ID generators (needed for creating new entities)
     node_id_gen: Arc<Mutex<IdGenerator>>,
@@ -61,11 +68,13 @@ impl WriteTransaction {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         tx_id: TxId,
+        snapshot: TransactionSnapshot,
         current: Arc<CurrentStorage>,
         historical: Arc<Mutex<HistoricalStorage>>,
         temporal_indexes: Arc<Mutex<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
+        visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<Mutex<IdGenerator>>,
         edge_id_gen: Arc<Mutex<IdGenerator>>,
         version_id_gen: Arc<Mutex<IdGenerator>>,
@@ -74,12 +83,14 @@ impl WriteTransaction {
             tx_id,
             start_timestamp: time::now(),
             state: TxState::Active,
+            snapshot,
             buffer: WriteBuffer::new(),
             current,
             historical,
             temporal_indexes,
             wal,
             current_timestamp,
+            visibility_manager,
             node_id_gen,
             edge_id_gen,
             version_id_gen,
@@ -123,6 +134,9 @@ impl WriteTransaction {
         // Validate all buffered writes
         self.validate()?;
 
+        // Detect write-write conflicts (Snapshot Isolation)
+        self.detect_conflicts()?;
+
         // Acquire commit timestamp
         let commit_timestamp = {
             let mut ts = self.current_timestamp.lock().unwrap();
@@ -144,6 +158,10 @@ impl WriteTransaction {
         // Apply all changes atomically
         self.apply_changes(commit_timestamp)?;
 
+        // Register commit with visibility manager
+        self.visibility_manager
+            .register_commit(self.tx_id, commit_timestamp);
+
         // Mark as committed
         self.state = TxState::Committed;
 
@@ -164,6 +182,10 @@ impl WriteTransaction {
 
         // Clear the write buffer
         self.buffer.clear();
+
+        // Register abort with visibility manager
+        self.visibility_manager.register_abort(self.tx_id);
+
         self.state = TxState::Aborted;
 
         Ok(())
@@ -201,6 +223,99 @@ impl WriteTransaction {
                 _ => {
                     // Other operations don't need validation
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Detect write-write conflicts for Snapshot Isolation.
+    ///
+    /// Checks if any entity modified by this transaction has been committed
+    /// by another transaction after our snapshot was taken. This implements
+    /// the First-Committer-Wins rule of Snapshot Isolation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SerializationFailure` if a write-write conflict is detected.
+    fn detect_conflicts(&self) -> Result<()> {
+        for write in self.buffer.operations() {
+            match write {
+                // UpdateNode: check if node was modified after our snapshot
+                super::BufferedWrite::UpdateNode { node_id, .. } => {
+                    // Get current version from storage
+                    if let Ok(current_node) = self.current.get_node(*node_id)
+                        && let Some(commit_ts) = current_node.metadata.commit_timestamp
+                        && commit_ts > self.snapshot.snapshot_timestamp
+                    {
+                        return Err(TransactionError::SerializationFailure {
+                            entity: format!("{:?}", node_id),
+                            reason: format!(
+                                "Version committed at {} after snapshot at {}",
+                                commit_ts, self.snapshot.snapshot_timestamp
+                            ),
+                        }
+                        .into());
+                    }
+                }
+
+                // UpdateEdge: check if edge was modified after our snapshot
+                super::BufferedWrite::UpdateEdge { edge_id, .. } => {
+                    // Get current version from storage
+                    if let Ok(current_edge) = self.current.get_edge(*edge_id)
+                        && let Some(commit_ts) = current_edge.metadata.commit_timestamp
+                        && commit_ts > self.snapshot.snapshot_timestamp
+                    {
+                        return Err(TransactionError::SerializationFailure {
+                            entity: format!("{:?}", edge_id),
+                            reason: format!(
+                                "Version committed at {} after snapshot at {}",
+                                commit_ts, self.snapshot.snapshot_timestamp
+                            ),
+                        }
+                        .into());
+                    }
+                }
+
+                // DeleteNode: check if node was modified after our snapshot
+                super::BufferedWrite::DeleteNode { node_id } => {
+                    // Get current version from storage
+                    if let Ok(current_node) = self.current.get_node(*node_id)
+                        && let Some(commit_ts) = current_node.metadata.commit_timestamp
+                        && commit_ts > self.snapshot.snapshot_timestamp
+                    {
+                        return Err(TransactionError::SerializationFailure {
+                            entity: format!("{:?}", node_id),
+                            reason: format!(
+                                "Version committed at {} after snapshot at {}",
+                                commit_ts, self.snapshot.snapshot_timestamp
+                            ),
+                        }
+                        .into());
+                    }
+                }
+
+                // DeleteEdge: check if edge was modified after our snapshot
+                super::BufferedWrite::DeleteEdge { edge_id } => {
+                    // Get current version from storage
+                    if let Ok(current_edge) = self.current.get_edge(*edge_id)
+                        && let Some(commit_ts) = current_edge.metadata.commit_timestamp
+                        && commit_ts > self.snapshot.snapshot_timestamp
+                    {
+                        return Err(TransactionError::SerializationFailure {
+                            entity: format!("{:?}", edge_id),
+                            reason: format!(
+                                "Version committed at {} after snapshot at {}",
+                                commit_ts, self.snapshot.snapshot_timestamp
+                            ),
+                        }
+                        .into());
+                    }
+                }
+
+                // CreateNode and CreateEdge don't need conflict detection
+                // since they're creating new entities that didn't exist before
+                _ => {}
             }
         }
 
@@ -292,18 +407,14 @@ impl WriteTransaction {
                         temporal,
                     }
                 }
-                super::BufferedWrite::DeleteNode { node_id } => {
-                    WalOperation::DeleteNode {
-                        node_id: *node_id,
-                        temporal,
-                    }
-                }
-                super::BufferedWrite::DeleteEdge { edge_id } => {
-                    WalOperation::DeleteEdge {
-                        edge_id: *edge_id,
-                        temporal,
-                    }
-                }
+                super::BufferedWrite::DeleteNode { node_id } => WalOperation::DeleteNode {
+                    node_id: *node_id,
+                    temporal,
+                },
+                super::BufferedWrite::DeleteEdge { edge_id } => WalOperation::DeleteEdge {
+                    edge_id: *edge_id,
+                    temporal,
+                },
             };
 
             // Append to WAL
@@ -472,14 +583,37 @@ impl WriteTransaction {
 
 impl ReadOps for WriteTransaction {
     fn get_node(&self, id: NodeId) -> Result<Node> {
-        // Read Committed: always read latest committed data
+        // Snapshot Isolation: only read versions visible in our snapshot
         // Uncommitted writes in this transaction are not visible
-        // until commit (for simplicity in Phase 3)
-        self.current.get_node(id)
+        // until commit (for simplicity)
+        let node = self.current.get_node(id)?;
+
+        // Check if this version is visible in our snapshot
+        if !self
+            .visibility_manager
+            .is_visible(&self.snapshot, node.metadata.created_by_tx)
+        {
+            // Version not visible - return NodeNotFound
+            return Err(StorageError::NodeNotFound(id).into());
+        }
+
+        Ok(node)
     }
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        self.current.get_edge(id)
+        // Snapshot Isolation: only read versions visible in our snapshot
+        let edge = self.current.get_edge(id)?;
+
+        // Check if this version is visible in our snapshot
+        if !self
+            .visibility_manager
+            .is_visible(&self.snapshot, edge.metadata.created_by_tx)
+        {
+            // Version not visible - return EdgeNotFound
+            return Err(StorageError::EdgeNotFound(id).into());
+        }
+
+        Ok(edge)
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
@@ -682,6 +816,8 @@ impl Drop for WriteTransaction {
         // Auto-rollback if not committed
         if self.state == TxState::Active {
             self.buffer.clear();
+            // Register abort with visibility manager
+            self.visibility_manager.register_abort(self.tx_id);
             self.state = TxState::Aborted;
         }
     }
@@ -715,13 +851,22 @@ mod tests {
         let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
 
+        // Create snapshot and visibility manager for testing
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: std::collections::HashSet::new(),
+        };
+
         let tx = WriteTransaction::new(
             tx_id_gen.next(),
+            snapshot,
             current,
             historical,
             temporal_indexes,
             wal,
             current_timestamp,
+            visibility_manager,
             node_id_gen,
             edge_id_gen,
             version_id_gen,
@@ -880,7 +1025,9 @@ mod tests {
         let node2 = current.create_node("Person", props).unwrap();
 
         let edge_props = PropertyMapBuilder::new().insert("strength", 5i64).build();
-        let edge_id = current.create_edge(node1, node2, "KNOWS", edge_props).unwrap();
+        let edge_id = current
+            .create_edge(node1, node2, "KNOWS", edge_props)
+            .unwrap();
 
         // Update the edge properties
         let new_props = PropertyMapBuilder::new().insert("strength", 10i64).build();
@@ -1015,9 +1162,7 @@ mod tests {
         let props = PropertyMapBuilder::new().build();
         let node1 = current.create_node("Person", props.clone()).unwrap();
         let node2 = current.create_node("Person", props.clone()).unwrap();
-        current
-            .create_edge(node1, node2, "KNOWS", props)
-            .unwrap();
+        current.create_edge(node1, node2, "KNOWS", props).unwrap();
 
         // Test ReadOps methods on transaction
         assert_eq!(tx.node_count(), 2);

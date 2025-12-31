@@ -346,6 +346,16 @@ pub enum TransactionError {
         /// Why there's a conflict
         reason: String,
     },
+    /// Snapshot Isolation serialization failure (write-write conflict).
+    ///
+    /// This occurs when two concurrent transactions try to modify the same entity
+    /// and one commits after the other's snapshot was taken.
+    SerializationFailure {
+        /// The entity involved in the conflict
+        entity: String,
+        /// Why serialization failed
+        reason: String,
+    },
     /// Validation failed before commit.
     ValidationFailed {
         /// Why validation failed
@@ -381,6 +391,9 @@ impl fmt::Display for TransactionError {
             }
             TransactionError::WriteConflict { entity_id, reason } => {
                 write!(f, "Write conflict on {}: {}", entity_id, reason)
+            }
+            TransactionError::SerializationFailure { entity, reason } => {
+                write!(f, "Serialization failure on {}: {}", entity, reason)
             }
             TransactionError::ValidationFailed { reason } => {
                 write!(f, "Transaction validation failed: {}", reason)

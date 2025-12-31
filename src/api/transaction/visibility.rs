@@ -44,8 +44,7 @@ impl TransactionSnapshot {
                 // Visible if:
                 // 1. Committed before our snapshot AND
                 // 2. Not created by a transaction that was active at snapshot time
-                ts <= self.snapshot_timestamp
-                    && !self.active_transactions.contains(&created_by_tx)
+                ts <= self.snapshot_timestamp && !self.active_transactions.contains(&created_by_tx)
             }
         }
     }
@@ -151,6 +150,12 @@ impl TxVisibilityManager {
     /// # Returns
     /// `true` if the version is visible, `false` otherwise
     pub fn is_visible(&self, snapshot: &TransactionSnapshot, created_by_tx: TxId) -> bool {
+        // Special case: TxId(0) is for pre-existing data (e.g., test fixtures, migrations)
+        // Always treat it as visible to ensure backward compatibility
+        if created_by_tx.as_u64() == 0 {
+            return true;
+        }
+
         // Check if transaction committed
         let committed = self.committed.lock().unwrap();
 

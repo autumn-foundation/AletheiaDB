@@ -1074,10 +1074,22 @@ mod tests {
         assert_eq!(entries.len(), 4);
 
         // Verify operation types
-        assert!(matches!(entries[0].operation, WalOperation::CreateNode { .. }));
-        assert!(matches!(entries[1].operation, WalOperation::CreateEdge { .. }));
-        assert!(matches!(entries[2].operation, WalOperation::DeleteNode { .. }));
-        assert!(matches!(entries[3].operation, WalOperation::DeleteEdge { .. }));
+        assert!(matches!(
+            entries[0].operation,
+            WalOperation::CreateNode { .. }
+        ));
+        assert!(matches!(
+            entries[1].operation,
+            WalOperation::CreateEdge { .. }
+        ));
+        assert!(matches!(
+            entries[2].operation,
+            WalOperation::DeleteNode { .. }
+        ));
+        assert!(matches!(
+            entries[3].operation,
+            WalOperation::DeleteEdge { .. }
+        ));
 
         Ok(())
     }

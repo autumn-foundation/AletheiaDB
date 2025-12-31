@@ -3,7 +3,9 @@
 //! This module provides the primary interface to the database, coordinating
 //! between current storage (fast path) and historical storage (temporal path).
 
-use crate::api::transaction::{ReadTransaction, TxIdGenerator, WriteOps, WriteTransaction};
+use crate::api::transaction::{
+    ReadTransaction, TxIdGenerator, TxVisibilityManager, WriteOps, WriteTransaction,
+};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId};
 use crate::core::property::PropertyMap;
@@ -34,6 +36,8 @@ pub struct GallifreyDB {
     current_timestamp: Arc<Mutex<Timestamp>>,
     /// Transaction ID generator for MVCC
     tx_id_gen: Arc<TxIdGenerator>,
+    /// Transaction visibility manager for Snapshot Isolation
+    visibility_manager: Arc<TxVisibilityManager>,
     /// ID generators for nodes, edges, and versions (shared with transactions)
     node_id_gen: Arc<Mutex<IdGenerator>>,
     edge_id_gen: Arc<Mutex<IdGenerator>>,
@@ -58,6 +62,7 @@ impl GallifreyDB {
             wal: Arc::new(Mutex::new(wal)),
             current_timestamp: Arc::new(Mutex::new(time::now())),
             tx_id_gen: Arc::new(TxIdGenerator::new()),
+            visibility_manager: Arc::new(TxVisibilityManager::new()),
             node_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             edge_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
@@ -69,7 +74,7 @@ impl GallifreyDB {
     /// Read-only transactions are lightweight and have zero overhead:
     /// - No write buffer
     /// - No WAL logging
-    /// - Direct reads from CurrentStorage
+    /// - Snapshot-based reads for consistency
     /// - No commit overhead
     ///
     /// # Example
@@ -81,7 +86,20 @@ impl GallifreyDB {
     /// ```
     pub fn read_transaction(&self) -> ReadTransaction {
         let tx_id = self.tx_id_gen.next();
-        ReadTransaction::new(tx_id, Arc::clone(&self.current))
+        let snapshot_timestamp = *self.current_timestamp.lock().unwrap();
+
+        // Register as active
+        self.visibility_manager.register_active(tx_id);
+
+        // Capture snapshot
+        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+
+        ReadTransaction::new(
+            tx_id,
+            snapshot,
+            Arc::clone(&self.current),
+            Arc::clone(&self.visibility_manager),
+        )
     }
 
     /// Execute a read-only operation in a transaction.
@@ -110,8 +128,8 @@ impl GallifreyDB {
     /// Write transactions provide full ACID guarantees:
     /// - **Atomicity**: All-or-nothing commit via write buffering
     /// - **Consistency**: Referential integrity validation before commit
-    /// - **Isolation**: Read Committed isolation level
-    /// - **Durability**: WAL integration (Phase 4)
+    /// - **Isolation**: Snapshot Isolation with write-write conflict detection
+    /// - **Durability**: WAL with fsync for true durability
     ///
     /// # Example
     ///
@@ -123,13 +141,23 @@ impl GallifreyDB {
     /// ```
     pub fn write_transaction(&self) -> WriteTransaction {
         let tx_id = self.tx_id_gen.next();
+        let snapshot_timestamp = *self.current_timestamp.lock().unwrap();
+
+        // Register as active
+        self.visibility_manager.register_active(tx_id);
+
+        // Capture snapshot
+        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+
         WriteTransaction::new(
             tx_id,
+            snapshot,
             Arc::clone(&self.current),
             Arc::clone(&self.historical),
             Arc::clone(&self.temporal_indexes),
             Arc::clone(&self.wal),
             Arc::clone(&self.current_timestamp),
+            Arc::clone(&self.visibility_manager),
             Arc::clone(&self.node_id_gen),
             Arc::clone(&self.edge_id_gen),
             Arc::clone(&self.version_id_gen),

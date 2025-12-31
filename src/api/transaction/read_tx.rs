@@ -1,17 +1,17 @@
 //! Read-only transactions
 //!
-//! Read-only transactions are lightweight and have zero overhead:
+//! Read-only transactions are lightweight:
 //! - No write buffer
 //! - No WAL logging
-//! - Direct reads from CurrentStorage
+//! - Snapshot-based reads for consistency
 //! - No commit overhead
 
-use super::{ReadOps, TxId, TxMetadata, TxState};
+use super::{ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilityManager};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::time;
 use crate::storage::current::CurrentStorage;
-use crate::utils::error::Result;
+use crate::utils::error::{Result, StorageError};
 use std::sync::Arc;
 
 /// Read-only transaction
@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Read-only transactions are lightweight:
 /// - No write buffer
 /// - No WAL logging
-/// - Direct reads from CurrentStorage
+/// - Snapshot-based reads for consistency
 /// - No commit overhead
 ///
 /// # Example
@@ -32,16 +32,25 @@ use std::sync::Arc;
 pub struct ReadTransaction {
     tx_id: TxId,
     start_timestamp: i64,
+    snapshot: TransactionSnapshot,
     current: Arc<CurrentStorage>,
+    visibility_manager: Arc<TxVisibilityManager>,
 }
 
 impl ReadTransaction {
     /// Create a new read-only transaction
-    pub(crate) fn new(tx_id: TxId, current: Arc<CurrentStorage>) -> Self {
+    pub(crate) fn new(
+        tx_id: TxId,
+        snapshot: TransactionSnapshot,
+        current: Arc<CurrentStorage>,
+        visibility_manager: Arc<TxVisibilityManager>,
+    ) -> Self {
         ReadTransaction {
             tx_id,
             start_timestamp: time::now(),
+            snapshot,
             current,
+            visibility_manager,
         }
     }
 
@@ -64,12 +73,35 @@ impl ReadTransaction {
 
 impl ReadOps for ReadTransaction {
     fn get_node(&self, id: NodeId) -> Result<Node> {
-        // Read Committed: always read latest committed data
-        self.current.get_node(id)
+        // Snapshot Isolation: only read versions visible in our snapshot
+        let node = self.current.get_node(id)?;
+
+        // Check if this version is visible in our snapshot
+        if !self
+            .visibility_manager
+            .is_visible(&self.snapshot, node.metadata.created_by_tx)
+        {
+            // Version not visible - return NodeNotFound
+            return Err(StorageError::NodeNotFound(id).into());
+        }
+
+        Ok(node)
     }
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        self.current.get_edge(id)
+        // Snapshot Isolation: only read versions visible in our snapshot
+        let edge = self.current.get_edge(id)?;
+
+        // Check if this version is visible in our snapshot
+        if !self
+            .visibility_manager
+            .is_visible(&self.snapshot, edge.metadata.created_by_tx)
+        {
+            // Version not visible - return EdgeNotFound
+            return Err(StorageError::EdgeNotFound(id).into());
+        }
+
+        Ok(edge)
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
@@ -97,11 +129,23 @@ impl ReadOps for ReadTransaction {
 mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::time;
+    use std::collections::HashSet;
+
+    // Helper to create a test ReadTransaction with snapshot
+    fn create_test_read_tx(tx_id: TxId, current: Arc<CurrentStorage>) -> ReadTransaction {
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: HashSet::new(),
+        };
+        ReadTransaction::new(tx_id, snapshot, current, visibility_manager)
+    }
 
     #[test]
     fn test_read_transaction_creation() {
         let current = Arc::new(CurrentStorage::new());
-        let tx = ReadTransaction::new(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current);
 
         assert_eq!(tx.tx_id(), TxId::new(1));
         let metadata = tx.metadata();
@@ -123,7 +167,7 @@ mod tests {
         let node_id = current.create_node("Person", props.clone()).unwrap();
 
         // Read through transaction
-        let tx = ReadTransaction::new(TxId::new(1), Arc::clone(&current));
+        let tx = create_test_read_tx(TxId::new(1), Arc::clone(&current));
         let node = tx.get_node(node_id).unwrap();
 
         assert_eq!(node.id, node_id);
@@ -137,7 +181,7 @@ mod tests {
     #[test]
     fn test_read_transaction_get_node_not_found() {
         let current = Arc::new(CurrentStorage::new());
-        let tx = ReadTransaction::new(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current);
 
         let result = tx.get_node(NodeId::new(999));
         assert!(result.is_err());
@@ -153,7 +197,7 @@ mod tests {
         current.create_node("Person", props.clone()).unwrap();
         current.create_node("Person", props).unwrap();
 
-        let tx = ReadTransaction::new(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current);
         assert_eq!(tx.node_count(), 3);
     }
 
@@ -167,7 +211,7 @@ mod tests {
         let node2 = current.create_node("Person", props.clone()).unwrap();
         let edge_id = current.create_edge(node1, node2, "KNOWS", props).unwrap();
 
-        let tx = ReadTransaction::new(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current);
 
         // Get edge
         let edge = tx.get_edge(edge_id).unwrap();
@@ -201,7 +245,7 @@ mod tests {
             .unwrap();
         let _edge2 = current.create_edge(node1, node3, "FOLLOWS", props).unwrap();
 
-        let tx = ReadTransaction::new(TxId::new(1), current);
+        let tx = create_test_read_tx(TxId::new(1), current);
 
         // Get only KNOWS edges
         let knows_edges = tx.get_outgoing_edges_with_label(node1, "KNOWS");
@@ -228,7 +272,7 @@ mod tests {
         for i in 0..10 {
             let current_clone = Arc::clone(&current);
             let handle = thread::spawn(move || {
-                let tx = ReadTransaction::new(TxId::new(i), current_clone);
+                let tx = create_test_read_tx(TxId::new(i), current_clone);
                 let node = tx.get_node(node_id).unwrap();
                 assert_eq!(
                     node.get_property("value").and_then(|v| v.as_int()),
