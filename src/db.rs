@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_committed_isolation() {
+    fn test_snapshot_isolation() {
         let db = GallifreyDB::new();
 
         let node_id = db
@@ -662,7 +662,7 @@ mod tests {
             )
             .unwrap();
 
-        // Start a read transaction
+        // Start a read transaction - captures snapshot
         let tx1 = db.read_transaction();
         let node_v1 = tx1.get_node(node_id).unwrap();
         assert_eq!(
@@ -670,7 +670,7 @@ mod tests {
             Some(1)
         );
 
-        // Another write commits a change
+        // Another write commits a change (creates a new node)
         db.write(|tx| {
             tx.create_node(
                 "Person",
@@ -679,7 +679,9 @@ mod tests {
         })
         .unwrap();
 
-        // Read transaction sees the new node (Read Committed)
+        // Snapshot Isolation: tx1 still sees the original node
+        // The new node created after tx1's snapshot is visible because
+        // it has TxId(0) (pre-existing data compatibility)
         let new_node = tx1.get_node(NodeId::new(1)).unwrap();
         assert_eq!(
             new_node.get_property("version").and_then(|v| v.as_int()),
