@@ -227,31 +227,32 @@ fn bench_batch_edge_updates(c: &mut Criterion) {
     let db = GallifreyDB::new();
 
     // Pre-create a graph with 1000 edges
-    let edge_ids: Vec<_> = db.write(|tx| {
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
+    let edge_ids: Vec<_> = db
+        .write(|tx| {
+            let mut nodes = Vec::new();
+            let mut edges = Vec::new();
 
-        for i in 0..1000 {
-            let node = tx.create_node(
-                "Node",
-                PropertyMapBuilder::new().insert("id", i as i64).build(),
-            )?;
-            nodes.push(node);
-        }
+            for i in 0..1000 {
+                let node = tx.create_node(
+                    "Node",
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                )?;
+                nodes.push(node);
+            }
 
-        for i in 0..999 {
-            let edge = tx.create_edge(
-                nodes[i],
-                nodes[i + 1],
-                "CONNECTS",
-                PropertyMapBuilder::new().build(),
-            )?;
-            edges.push(edge);
-        }
+            for i in 0..999 {
+                let edge = tx.create_edge(
+                    nodes[i],
+                    nodes[i + 1],
+                    "CONNECTS",
+                    PropertyMapBuilder::new().build(),
+                )?;
+                edges.push(edge);
+            }
 
-        Ok(edges)
-    })
-    .unwrap();
+            Ok(edges)
+        })
+        .unwrap();
 
     c.bench_function("batch_update_1000_edges", |b| {
         b.iter(|| {
@@ -277,31 +278,32 @@ fn bench_batch_edge_deletions(c: &mut Criterion) {
             || {
                 // Setup: create DB with 1000 edges
                 let db = GallifreyDB::new();
-                let edge_ids: Vec<_> = db.write(|tx| {
-                    let mut nodes = Vec::new();
-                    let mut edges = Vec::new();
+                let edge_ids: Vec<_> = db
+                    .write(|tx| {
+                        let mut nodes = Vec::new();
+                        let mut edges = Vec::new();
 
-                    for i in 0..1000 {
-                        let node = tx.create_node(
-                            "Node",
-                            PropertyMapBuilder::new().insert("id", i as i64).build(),
-                        )?;
-                        nodes.push(node);
-                    }
+                        for i in 0..1000 {
+                            let node = tx.create_node(
+                                "Node",
+                                PropertyMapBuilder::new().insert("id", i as i64).build(),
+                            )?;
+                            nodes.push(node);
+                        }
 
-                    for i in 0..999 {
-                        let edge = tx.create_edge(
-                            nodes[i],
-                            nodes[i + 1],
-                            "CONNECTS",
-                            PropertyMapBuilder::new().build(),
-                        )?;
-                        edges.push(edge);
-                    }
+                        for i in 0..999 {
+                            let edge = tx.create_edge(
+                                nodes[i],
+                                nodes[i + 1],
+                                "CONNECTS",
+                                PropertyMapBuilder::new().build(),
+                            )?;
+                            edges.push(edge);
+                        }
 
-                    Ok(edges)
-                })
-                .unwrap();
+                        Ok(edges)
+                    })
+                    .unwrap();
 
                 (db, edge_ids)
             },
@@ -327,71 +329,68 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
 
     // Test adding edges to graphs of different sizes
     for existing_edges in [1000, 10000] {
-        group.bench_function(
-            format!("add_1000_to_{}_existing", existing_edges),
-            |b| {
-                b.iter_batched(
-                    || {
-                        // Setup: create DB with existing edges
-                        let db = GallifreyDB::new();
+        group.bench_function(format!("add_1000_to_{}_existing", existing_edges), |b| {
+            b.iter_batched(
+                || {
+                    // Setup: create DB with existing edges
+                    let db = GallifreyDB::new();
 
-                        // Pre-populate with existing edges
-                        db.write(|tx| {
-                            let mut nodes = Vec::new();
-                            for i in 0..existing_edges {
-                                let node = tx.create_node(
-                                    "Node",
-                                    PropertyMapBuilder::new().insert("id", i as i64).build(),
-                                )?;
-                                nodes.push(node);
-                            }
+                    // Pre-populate with existing edges
+                    db.write(|tx| {
+                        let mut nodes = Vec::new();
+                        for i in 0..existing_edges {
+                            let node = tx.create_node(
+                                "Node",
+                                PropertyMapBuilder::new().insert("id", i as i64).build(),
+                            )?;
+                            nodes.push(node);
+                        }
 
-                            for i in 0..(existing_edges - 1) {
-                                tx.create_edge(
-                                    nodes[i],
-                                    nodes[i + 1],
-                                    "EXISTING",
-                                    PropertyMapBuilder::new().build(),
-                                )?;
-                            }
+                        for i in 0..(existing_edges - 1) {
+                            tx.create_edge(
+                                nodes[i],
+                                nodes[i + 1],
+                                "EXISTING",
+                                PropertyMapBuilder::new().build(),
+                            )?;
+                        }
 
-                            Ok(())
-                        })
-                        .unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
 
-                        db
-                    },
-                    |db| {
-                        // Add 1000 new edges to existing graph
-                        db.write(|tx| {
-                            let mut new_nodes = Vec::new();
-                            for i in 0..1001 {
-                                let node = tx.create_node(
-                                    "NewNode",
-                                    PropertyMapBuilder::new()
-                                        .insert("id", (i + 100000) as i64)
-                                        .build(),
-                                )?;
-                                new_nodes.push(node);
-                            }
+                    db
+                },
+                |db| {
+                    // Add 1000 new edges to existing graph
+                    db.write(|tx| {
+                        let mut new_nodes = Vec::new();
+                        for i in 0..1001 {
+                            let node = tx.create_node(
+                                "NewNode",
+                                PropertyMapBuilder::new()
+                                    .insert("id", (i + 100000) as i64)
+                                    .build(),
+                            )?;
+                            new_nodes.push(node);
+                        }
 
-                            for i in 0..1000 {
-                                tx.create_edge(
-                                    new_nodes[i],
-                                    new_nodes[i + 1],
-                                    "NEW",
-                                    PropertyMapBuilder::new().build(),
-                                )?;
-                            }
+                        for i in 0..1000 {
+                            tx.create_edge(
+                                new_nodes[i],
+                                new_nodes[i + 1],
+                                "NEW",
+                                PropertyMapBuilder::new().build(),
+                            )?;
+                        }
 
-                            Ok(())
-                        })
-                        .unwrap();
-                    },
-                    criterion::BatchSize::SmallInput,
-                );
-            },
-        );
+                        Ok(())
+                    })
+                    .unwrap();
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
     }
 
     group.finish();

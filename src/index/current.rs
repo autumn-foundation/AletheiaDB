@@ -424,8 +424,8 @@ mod tests {
 // Property-based tests for rebuild safety
 #[cfg(test)]
 mod proptests {
-    use super::*;
     use super::tests::create_test_edge;
+    use super::*;
     use proptest::prelude::*;
 
     #[derive(Debug, Clone)]
@@ -438,7 +438,8 @@ mod proptests {
     fn edge_op_strategy() -> impl Strategy<Value = Vec<EdgeOp>> {
         prop::collection::vec(
             prop_oneof![
-                (0u64..100, 0u64..10, 0u64..10).prop_map(|(id, src, tgt)| EdgeOp::Insert(id, src, tgt)),
+                (0u64..100, 0u64..10, 0u64..10)
+                    .prop_map(|(id, src, tgt)| EdgeOp::Insert(id, src, tgt)),
                 (0u64..100).prop_map(EdgeOp::Remove),
             ],
             1..50,

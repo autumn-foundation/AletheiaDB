@@ -19,10 +19,10 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
+use crate::storage::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::{WalOperation, WriteAheadLog};
-use crate::storage::VersionMetadata;
 use crate::utils::error::{Result, StorageError, TransactionError};
 use std::sync::{Arc, Mutex};
 
@@ -440,8 +440,13 @@ impl WriteTransaction {
                 } => {
                     // Create in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
-                    let node =
-                        Node::with_metadata(*node_id, *label, properties.clone(), *version_id, metadata);
+                    let node = Node::with_metadata(
+                        *node_id,
+                        *label,
+                        properties.clone(),
+                        *version_id,
+                        metadata,
+                    );
                     self.current.insert_node_direct(node)?;
 
                     // Store in historical storage
@@ -509,8 +514,13 @@ impl WriteTransaction {
                 } => {
                     // Update in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
-                    let node =
-                        Node::with_metadata(*node_id, *label, properties.clone(), *version_id, metadata);
+                    let node = Node::with_metadata(
+                        *node_id,
+                        *label,
+                        properties.clone(),
+                        *version_id,
+                        metadata,
+                    );
                     self.current.update_node_direct(node)?;
 
                     // Add new version to historical storage
@@ -1062,7 +1072,10 @@ mod tests {
         // Read-your-writes: should be able to read buffered node
         let node = tx.get_node(node_id).unwrap();
         assert_eq!(node.id, node_id);
-        assert_eq!(node.properties.get("name").unwrap(), &crate::core::property::PropertyValue::from("Alice"));
+        assert_eq!(
+            node.properties.get("name").unwrap(),
+            &crate::core::property::PropertyValue::from("Alice")
+        );
     }
 
     #[test]
@@ -1076,7 +1089,9 @@ mod tests {
 
         let edge_props = PropertyMapBuilder::new().insert("since", 2020i64).build();
 
-        let edge_id = tx.create_edge(node1, node2, "KNOWS", edge_props.clone()).unwrap();
+        let edge_id = tx
+            .create_edge(node1, node2, "KNOWS", edge_props.clone())
+            .unwrap();
         // ID generators start at 0, so first edge ID is 0
         assert_eq!(edge_id.as_u64(), 0);
 
@@ -1085,7 +1100,10 @@ mod tests {
         assert_eq!(edge.id, edge_id);
         assert_eq!(edge.source, node1);
         assert_eq!(edge.target, node2);
-        assert_eq!(edge.properties.get("since").unwrap(), &crate::core::property::PropertyValue::from(2020i64));
+        assert_eq!(
+            edge.properties.get("since").unwrap(),
+            &crate::core::property::PropertyValue::from(2020i64)
+        );
     }
 
     #[test]
