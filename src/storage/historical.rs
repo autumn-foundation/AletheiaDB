@@ -28,10 +28,6 @@ pub struct HistoricalStorage {
     node_versions: HashMap<VersionId, NodeVersion>,
     /// All edge versions, indexed by version ID
     edge_versions: HashMap<VersionId, EdgeVersion>,
-    /// Current version pointer for each node
-    node_current_version: HashMap<NodeId, VersionId>,
-    /// Current version pointer for each edge
-    edge_current_version: HashMap<EdgeId, VersionId>,
     /// Head version ID for each node (most recent)
     node_version_heads: HashMap<NodeId, VersionId>,
     /// Head version ID for each edge (most recent)
@@ -50,8 +46,6 @@ impl HistoricalStorage {
             config,
             node_versions: HashMap::new(),
             edge_versions: HashMap::new(),
-            node_current_version: HashMap::new(),
-            edge_current_version: HashMap::new(),
             node_version_heads: HashMap::new(),
             edge_version_heads: HashMap::new(),
         }
@@ -105,10 +99,10 @@ impl HistoricalStorage {
         };
 
         // Link the previous version to this one
-        if let Some(prev_id) = prev_version_id {
-            if let Some(prev) = self.node_versions.get_mut(&prev_id) {
-                prev.next_version = Some(version_id);
-            }
+        if let Some(prev_id) = prev_version_id
+            && let Some(prev) = self.node_versions.get_mut(&prev_id)
+        {
+            prev.next_version = Some(version_id);
         }
 
         // Store the version
@@ -119,6 +113,7 @@ impl HistoricalStorage {
     }
 
     /// Add a new version of an edge.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_edge_version(
         &mut self,
         edge_id: EdgeId,
@@ -163,10 +158,10 @@ impl HistoricalStorage {
             )
         };
 
-        if let Some(prev_id) = prev_version_id {
-            if let Some(prev) = self.edge_versions.get_mut(&prev_id) {
-                prev.next_version = Some(version_id);
-            }
+        if let Some(prev_id) = prev_version_id
+            && let Some(prev) = self.edge_versions.get_mut(&prev_id)
+        {
+            prev.next_version = Some(version_id);
         }
 
         self.edge_versions.insert(version_id, version);
@@ -481,10 +476,20 @@ mod tests {
         // v3: anchor (interval = 3)
         // v4: delta
 
-        assert!(storage.get_node_version(version_ids[0]).unwrap().is_anchor());
+        assert!(
+            storage
+                .get_node_version(version_ids[0])
+                .unwrap()
+                .is_anchor()
+        );
         assert!(storage.get_node_version(version_ids[1]).unwrap().is_delta());
         assert!(storage.get_node_version(version_ids[2]).unwrap().is_delta());
-        assert!(storage.get_node_version(version_ids[3]).unwrap().is_anchor());
+        assert!(
+            storage
+                .get_node_version(version_ids[3])
+                .unwrap()
+                .is_anchor()
+        );
         assert!(storage.get_node_version(version_ids[4]).unwrap().is_delta());
     }
 
@@ -547,10 +552,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(0, 1000),
-                    TimeRange::new(0, Timestamp::MAX),
-                ),
+                BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
                 label,
                 PropertyMapBuilder::new().insert("age", 30i64).build(),
             )

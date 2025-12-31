@@ -157,9 +157,7 @@ mod tests {
     #[test]
     fn test_edge_creation() {
         let label = GLOBAL_INTERNER.intern("KNOWS");
-        let props = PropertyMapBuilder::new()
-            .insert("since", 2020i64)
-            .build();
+        let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
 
         let edge = Edge::new(
             EdgeId::new(1),

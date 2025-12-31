@@ -310,8 +310,7 @@ impl PropertyMapBuilder {
     /// This will clone the underlying HashMap if the Arc has multiple references,
     /// implementing copy-on-write semantics.
     pub fn from_map(prop_map: PropertyMap) -> Self {
-        let map = Arc::try_unwrap(prop_map.inner)
-            .unwrap_or_else(|arc| (*arc).clone());
+        let map = Arc::try_unwrap(prop_map.inner).unwrap_or_else(|arc| (*arc).clone());
         PropertyMapBuilder { map }
     }
 
@@ -378,18 +377,15 @@ mod tests {
         assert!(PropertyValue::Null.is_null());
         assert_eq!(PropertyValue::Bool(true).as_bool(), Some(true));
         assert_eq!(PropertyValue::Int(42).as_int(), Some(42));
-        assert_eq!(PropertyValue::Float(3.14).as_float(), Some(3.14));
+        assert_eq!(PropertyValue::Float(2.5).as_float(), Some(2.5));
 
         let s = PropertyValue::string("hello");
         assert_eq!(s.as_str(), Some("hello"));
 
-        let b = PropertyValue::bytes(&[1, 2, 3]);
+        let b = PropertyValue::bytes([1, 2, 3]);
         assert_eq!(b.as_bytes(), Some(&[1u8, 2, 3][..]));
 
-        let arr = PropertyValue::array(vec![
-            PropertyValue::Int(1),
-            PropertyValue::Int(2),
-        ]);
+        let arr = PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]);
         assert_eq!(arr.as_array().unwrap().len(), 2);
     }
 
@@ -398,7 +394,7 @@ mod tests {
         let _: PropertyValue = true.into();
         let _: PropertyValue = 42i64.into();
         let _: PropertyValue = 42i32.into();
-        let _: PropertyValue = 3.14f64.into();
+        let _: PropertyValue = 2.5f64.into();
         let _: PropertyValue = "hello".into();
         let _: PropertyValue = String::from("world").into();
         let _: PropertyValue = vec![1u8, 2, 3].into();
@@ -430,18 +426,14 @@ mod tests {
 
     #[test]
     fn test_property_map_copy_on_write() {
-        let map1 = PropertyMapBuilder::new()
-            .insert("key", "value1")
-            .build();
+        let map1 = PropertyMapBuilder::new().insert("key", "value1").build();
 
         // Clone is cheap (just Arc increment)
         let map2 = map1.clone();
         assert_eq!(map1, map2);
 
         // Modify map2 (should not affect map1 due to copy-on-write)
-        let map2 = map2.builder()
-            .insert("key", "value2")
-            .build();
+        let map2 = map2.builder().insert("key", "value2").build();
 
         assert_ne!(map1, map2);
         assert_eq!(map1.get("key").and_then(|v| v.as_str()), Some("value1"));
@@ -485,13 +477,10 @@ mod tests {
         assert_eq!(format!("{}", PropertyValue::Null), "null");
         assert_eq!(format!("{}", PropertyValue::Bool(true)), "true");
         assert_eq!(format!("{}", PropertyValue::Int(42)), "42");
-        assert_eq!(format!("{}", PropertyValue::Float(3.14)), "3.14");
+        assert_eq!(format!("{}", PropertyValue::Float(2.5)), "2.5");
         assert_eq!(format!("{}", PropertyValue::string("hello")), "\"hello\"");
 
-        let arr = PropertyValue::array(vec![
-            PropertyValue::Int(1),
-            PropertyValue::Int(2),
-        ]);
+        let arr = PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]);
         assert_eq!(format!("{}", arr), "[1, 2]");
     }
 

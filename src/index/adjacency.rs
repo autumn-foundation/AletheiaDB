@@ -86,7 +86,7 @@ impl AdjacencyIndex {
         for (source, target, edge_id, label) in edges {
             adjacency_map
                 .entry(source)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(AdjacencyEntry::new(target, edge_id, label));
         }
 
@@ -255,9 +255,7 @@ mod tests {
     fn test_node_without_edges() {
         let knows = GLOBAL_INTERNER.intern("KNOWS");
 
-        let edges = vec![
-            (NodeId::new(0), NodeId::new(1), EdgeId::new(0), knows),
-        ];
+        let edges = vec![(NodeId::new(0), NodeId::new(1), EdgeId::new(0), knows)];
 
         let index = AdjacencyIndex::build(edges);
 

@@ -11,8 +11,8 @@
 
 use dashmap::DashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// A small, copyable handle to an interned string.
 ///
@@ -107,7 +107,9 @@ impl StringInterner {
     ///
     /// Returns None if the ID is not valid (was never interned).
     pub fn resolve(&self, id: InternedString) -> Option<Arc<str>> {
-        self.id_to_string.get(&id).map(|entry| Arc::clone(entry.value()))
+        self.id_to_string
+            .get(&id)
+            .map(|entry| Arc::clone(entry.value()))
     }
 
     /// Get the string as a &str without cloning the Arc.
@@ -127,7 +129,9 @@ impl StringInterner {
 
     /// Get the ID of a string if it has been interned.
     pub fn get_id<S: AsRef<str>>(&self, string: S) -> Option<InternedString> {
-        self.string_to_id.get(string.as_ref()).map(|entry| *entry.value())
+        self.string_to_id
+            .get(string.as_ref())
+            .map(|entry| *entry.value())
     }
 
     /// Get the number of interned strings.
@@ -174,6 +178,11 @@ impl Default for StringInterner {
 /// assert_eq!(string.as_ref(), "Person");
 /// ```
 use std::sync::LazyLock;
+
+/// Global string interner for sharing common strings across the database.
+///
+/// This static provides a single, thread-safe string interner that can be used
+/// throughout the application to deduplicate common strings like labels and property keys.
 pub static GLOBAL_INTERNER: LazyLock<StringInterner> = LazyLock::new(StringInterner::new);
 
 #[cfg(test)]
@@ -288,9 +297,7 @@ mod tests {
         }
 
         // Collect all results
-        let results: Vec<_> = handles.into_iter()
-            .map(|h| h.join().unwrap())
-            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         // All threads should have gotten the same IDs
         let (first_id1, first_id2) = results[0];

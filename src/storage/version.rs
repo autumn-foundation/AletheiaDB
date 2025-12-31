@@ -116,9 +116,15 @@ impl Default for PropertyDelta {
 #[derive(Debug, Clone, PartialEq)]
 pub enum VersionData {
     /// Full snapshot of properties (anchor point)
-    Anchor { properties: PropertyMap },
+    Anchor {
+        /// The complete property map
+        properties: PropertyMap,
+    },
     /// Delta from previous version
-    Delta { delta: PropertyDelta },
+    Delta {
+        /// The property changes
+        delta: PropertyDelta,
+    },
 }
 
 impl VersionData {
@@ -229,8 +235,9 @@ pub struct EdgeVersion {
     pub temporal: BiTemporalInterval,
     /// Label of the edge (may change over time)
     pub label: InternedString,
-    /// Source and target nodes (these don't change, but we store them for convenience)
+    /// Source node ID
     pub source: NodeId,
+    /// Target node ID
     pub target: NodeId,
     /// Version data (anchor or delta)
     pub data: VersionData,
@@ -265,6 +272,7 @@ impl EdgeVersion {
     }
 
     /// Create a new delta version (incremental change).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_delta(
         id: VersionId,
         edge_id: EdgeId,
@@ -337,7 +345,9 @@ mod tests {
             .build();
 
         let mut delta = PropertyDelta::new();
-        delta.changed.insert("age".to_string(), PropertyValue::Int(31));
+        delta
+            .changed
+            .insert("age".to_string(), PropertyValue::Int(31));
         delta
             .changed
             .insert("city".to_string(), PropertyValue::string("NYC"));
@@ -351,9 +361,7 @@ mod tests {
 
     #[test]
     fn test_empty_delta() {
-        let props = PropertyMapBuilder::new()
-            .insert("name", "Alice")
-            .build();
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
 
         let delta = PropertyDelta::from_diff(&props, &props);
         assert!(delta.is_empty());

@@ -11,6 +11,15 @@ use crate::core::property::PropertyMap;
 use crate::index::current::CurrentIndexes;
 use crate::utils::error::{Result, StorageError};
 
+/// Statistics about current storage
+#[derive(Debug, Clone)]
+pub struct CurrentStats {
+    /// Number of nodes
+    pub node_count: usize,
+    /// Number of edges
+    pub edge_count: usize,
+}
+
 /// Current-state storage engine.
 ///
 /// This storage engine maintains the current version of all nodes and edges,
@@ -123,7 +132,7 @@ impl CurrentStorage {
         let edge = self
             .indexes
             .remove_edge(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id))?;
+            .ok_or(StorageError::EdgeNotFound(id))?;
 
         // Rebuild adjacency indexes
         self.indexes.rebuild_adjacency();
@@ -152,11 +161,7 @@ impl CurrentStorage {
     }
 
     /// Get outgoing edges with a specific label.
-    pub fn get_outgoing_edges_with_label(
-        &self,
-        source: NodeId,
-        label: &str,
-    ) -> Vec<EdgeId> {
+    pub fn get_outgoing_edges_with_label(&self, source: NodeId, label: &str) -> Vec<EdgeId> {
         let label_id = match self.interner.get_id(label) {
             Some(id) => id,
             None => return Vec::new(), // Label doesn't exist
@@ -169,11 +174,7 @@ impl CurrentStorage {
     }
 
     /// Get incoming edges with a specific label.
-    pub fn get_incoming_edges_with_label(
-        &self,
-        target: NodeId,
-        label: &str,
-    ) -> Vec<EdgeId> {
+    pub fn get_incoming_edges_with_label(&self, target: NodeId, label: &str) -> Vec<EdgeId> {
         let label_id = match self.interner.get_id(label) {
             Some(id) => id,
             None => return Vec::new(),
@@ -207,6 +208,14 @@ impl CurrentStorage {
     #[inline]
     pub fn in_degree(&self, node: NodeId) -> usize {
         self.indexes.in_degree(node)
+    }
+
+    /// Get statistics about the current storage
+    pub fn stats(&self) -> CurrentStats {
+        CurrentStats {
+            node_count: self.node_count(),
+            edge_count: self.edge_count(),
+        }
     }
 }
 

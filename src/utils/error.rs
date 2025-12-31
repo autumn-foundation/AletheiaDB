@@ -89,15 +89,38 @@ pub enum StorageError {
     /// Version with the given ID was not found.
     VersionNotFound(VersionId),
     /// Attempted to create a node/edge with an ID that already exists.
-    DuplicateId { id: String, kind: String },
+    DuplicateId {
+        /// The duplicate ID
+        id: String,
+        /// The kind of entity (node/edge)
+        kind: String,
+    },
     /// Invalid property value or type.
-    InvalidProperty { key: String, reason: String },
+    InvalidProperty {
+        /// The property key
+        key: String,
+        /// Why the property is invalid
+        reason: String,
+    },
     /// Database is in an inconsistent state.
-    InconsistentState { reason: String },
+    InconsistentState {
+        /// Why the state is inconsistent
+        reason: String,
+    },
     /// Write-ahead log error.
-    WalError { reason: String },
+    WalError {
+        /// The error reason
+        reason: String,
+    },
     /// Checkpoint error.
-    CheckpointError { reason: String },
+    CheckpointError {
+        /// The error reason
+        reason: String,
+    },
+    /// I/O error during persistence operations.
+    IoError(String),
+    /// Corrupted data detected.
+    CorruptedData(String),
 }
 
 impl fmt::Display for StorageError {
@@ -121,6 +144,8 @@ impl fmt::Display for StorageError {
             StorageError::CheckpointError { reason } => {
                 write!(f, "Checkpoint error: {}", reason)
             }
+            StorageError::IoError(msg) => write!(f, "I/O error: {}", msg),
+            StorageError::CorruptedData(msg) => write!(f, "Corrupted data: {}", msg),
         }
     }
 }
@@ -132,24 +157,47 @@ impl std::error::Error for StorageError {}
 pub enum TemporalError {
     /// Transaction time is not monotonically increasing.
     NonMonotonicTransactionTime {
+        /// The previous transaction time
         previous: Timestamp,
+        /// The attempted transaction time
         attempted: Timestamp,
     },
     /// Invalid time range (start > end).
-    InvalidTimeRange { start: Timestamp, end: Timestamp },
+    InvalidTimeRange {
+        /// The start timestamp
+        start: Timestamp,
+        /// The end timestamp
+        end: Timestamp,
+    },
     /// Temporal paradox detected (e.g., deleting before creating).
-    TemporalParadox { reason: String },
+    TemporalParadox {
+        /// Description of the paradox
+        reason: String,
+    },
     /// Valid time precedes creation.
     ValidTimeBeforeCreation {
+        /// The valid time timestamp
         valid_time: Timestamp,
+        /// The creation time timestamp
         creation_time: Timestamp,
     },
     /// Attempted to modify closed version.
-    VersionAlreadyClosed { version_id: VersionId },
+    VersionAlreadyClosed {
+        /// The version ID
+        version_id: VersionId,
+    },
     /// Version chain is corrupted.
-    CorruptedVersionChain { entity_id: String, reason: String },
+    CorruptedVersionChain {
+        /// The entity ID
+        entity_id: String,
+        /// Why the chain is corrupted
+        reason: String,
+    },
     /// Anchor not found in version chain.
-    MissingAnchor { entity_id: String },
+    MissingAnchor {
+        /// The entity ID
+        entity_id: String,
+    },
 }
 
 impl fmt::Display for TemporalError {
@@ -200,18 +248,37 @@ impl std::error::Error for TemporalError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryError {
     /// Query syntax error.
-    SyntaxError { message: String },
+    SyntaxError {
+        /// The error message
+        message: String,
+    },
     /// Invalid query parameter.
-    InvalidParameter { parameter: String, reason: String },
+    InvalidParameter {
+        /// The parameter name
+        parameter: String,
+        /// Why it's invalid
+        reason: String,
+    },
     /// Query timeout.
-    Timeout { duration_ms: u64 },
+    Timeout {
+        /// Duration in milliseconds
+        duration_ms: u64,
+    },
     /// Query result limit exceeded.
-    LimitExceeded { limit: usize },
+    LimitExceeded {
+        /// The limit that was exceeded
+        limit: usize,
+    },
     /// Invalid traversal (e.g., edge doesn't connect specified nodes).
-    InvalidTraversal { reason: String },
+    InvalidTraversal {
+        /// Why the traversal is invalid
+        reason: String,
+    },
     /// Type mismatch in query.
     TypeMismatch {
+        /// The expected type
         expected: String,
+        /// The actual type
         actual: String,
     },
 }

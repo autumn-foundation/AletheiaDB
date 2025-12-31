@@ -9,7 +9,7 @@
 //! - Node lookup: <100ns
 //! - Edge creation: <10µs
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::{CurrentStorage, PropertyMapBuilder};
 
 /// Create a test graph with a specified number of nodes and edges.
@@ -24,9 +24,7 @@ fn create_test_graph(node_count: usize, out_degree: usize) -> CurrentStorage {
             storage
                 .create_node(
                     "Person",
-                    PropertyMapBuilder::new()
-                        .insert("id", i as i64)
-                        .build(),
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
                 )
                 .unwrap()
         })
@@ -157,7 +155,7 @@ fn bench_labeled_traversal(c: &mut Criterion) {
 fn bench_node_creation(c: &mut Criterion) {
     c.bench_function("node_creation", |b| {
         b.iter_batched(
-            || CurrentStorage::new(),
+            CurrentStorage::new,
             |mut storage| {
                 let props = PropertyMapBuilder::new()
                     .insert("name", "Alice")
@@ -188,9 +186,7 @@ fn bench_edge_creation(c: &mut Criterion) {
                 (storage, n1, n2)
             },
             |(mut storage, n1, n2)| {
-                let props = PropertyMapBuilder::new()
-                    .insert("since", 2020i64)
-                    .build();
+                let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
                 let edge = storage.create_edge(n1, n2, "KNOWS", props);
                 black_box(edge)
             },
