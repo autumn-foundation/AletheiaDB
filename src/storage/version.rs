@@ -337,7 +337,9 @@ mod tests {
             .build();
 
         let mut delta = PropertyDelta::new();
-        delta.changed.insert("age".to_string(), PropertyValue::Int(31));
+        delta
+            .changed
+            .insert("age".to_string(), PropertyValue::Int(31));
         delta
             .changed
             .insert("city".to_string(), PropertyValue::string("NYC"));
@@ -351,9 +353,7 @@ mod tests {
 
     #[test]
     fn test_empty_delta() {
-        let props = PropertyMapBuilder::new()
-            .insert("name", "Alice")
-            .build();
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
 
         let delta = PropertyDelta::from_diff(&props, &props);
         assert!(delta.is_empty());

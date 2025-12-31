@@ -6,7 +6,7 @@
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::property::PropertyMap;
-use crate::core::temporal::{time, BiTemporalInterval, Timestamp};
+use crate::core::temporal::{BiTemporalInterval, Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;

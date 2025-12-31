@@ -5,13 +5,16 @@
 //! - Slow path: Time-travel queries with version reconstruction
 //! - Version creation: Overhead of maintaining temporal history
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::{GallifreyDB, NodeId, PropertyMapBuilder};
 
 /// Create a test database with versioned history.
 ///
 /// Creates nodes and then updates them multiple times to build version chains.
-fn create_versioned_graph(node_count: usize, versions_per_node: usize) -> (GallifreyDB, Vec<NodeId>) {
+fn create_versioned_graph(
+    node_count: usize,
+    versions_per_node: usize,
+) -> (GallifreyDB, Vec<NodeId>) {
     let mut db = GallifreyDB::new();
     let mut node_ids = Vec::new();
 
@@ -34,7 +37,8 @@ fn create_versioned_graph(node_count: usize, versions_per_node: usize) -> (Galli
             node_ids[target],
             "LINKS_TO",
             PropertyMapBuilder::new().build(),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // Simulate updates by storing timestamps where we'd create new versions
@@ -68,14 +72,16 @@ fn bench_edge_creation_with_versioning(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let mut db = GallifreyDB::new();
-                let n1 = db.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
-                let n2 = db.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+                let n1 = db
+                    .create_node("Person", PropertyMapBuilder::new().build())
+                    .unwrap();
+                let n2 = db
+                    .create_node("Person", PropertyMapBuilder::new().build())
+                    .unwrap();
                 (db, n1, n2)
             },
             |(mut db, n1, n2)| {
-                let props = PropertyMapBuilder::new()
-                    .insert("since", 2020i64)
-                    .build();
+                let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
                 let edge = db.create_edge(n1, n2, "KNOWS", props);
                 black_box(edge)
             },
@@ -238,9 +244,7 @@ fn bench_batch_operations(c: &mut Criterion) {
                     || GallifreyDB::new(),
                     |mut db| {
                         for i in 0..size {
-                            let props = PropertyMapBuilder::new()
-                                .insert("id", i as i64)
-                                .build();
+                            let props = PropertyMapBuilder::new().insert("id", i as i64).build();
                             db.create_node("Node", props).unwrap();
                         }
                         black_box(db.node_count())

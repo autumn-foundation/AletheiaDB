@@ -3,15 +3,15 @@
 //! This module contains the fundamental types and data structures that
 //! everything else is built upon.
 
-pub mod id;
-pub mod temporal;
-pub mod property;
-pub mod interning;
 pub mod graph;
+pub mod id;
+pub mod interning;
+pub mod property;
+pub mod temporal;
 
 // Re-export commonly used types for convenience
-pub use id::{NodeId, EdgeId, VersionId, EntityId, IdGenerator};
-pub use temporal::{Timestamp, TimeRange, BiTemporalInterval, TIMESTAMP_MAX};
-pub use property::{PropertyKey, PropertyValue, PropertyMap, PropertyMapBuilder};
-pub use interning::{InternedString, StringInterner, GLOBAL_INTERNER};
-pub use graph::{Node, Edge};
+pub use graph::{Edge, Node};
+pub use id::{EdgeId, EntityId, IdGenerator, NodeId, VersionId};
+pub use interning::{GLOBAL_INTERNER, InternedString, StringInterner};
+pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
+pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};

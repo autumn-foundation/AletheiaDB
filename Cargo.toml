@@ -18,6 +18,7 @@ tracy-client = { version = "0.17", optional = true, default-features = false }
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1.4"
+tempfile = "3.8"
 
 [features]
 # Enable Tracy profiling (use with: cargo build --release --features tracy)
@@ -71,4 +72,10 @@ required-features = []
 name = "gallifreydb"
 harness = false
 path = "benches/gallifreydb.rs"
+required-features = []
+
+[[bench]]
+name = "persistence"
+harness = false
+path = "benches/persistence.rs"
 required-features = []

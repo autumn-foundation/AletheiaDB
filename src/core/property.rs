@@ -310,8 +310,7 @@ impl PropertyMapBuilder {
     /// This will clone the underlying HashMap if the Arc has multiple references,
     /// implementing copy-on-write semantics.
     pub fn from_map(prop_map: PropertyMap) -> Self {
-        let map = Arc::try_unwrap(prop_map.inner)
-            .unwrap_or_else(|arc| (*arc).clone());
+        let map = Arc::try_unwrap(prop_map.inner).unwrap_or_else(|arc| (*arc).clone());
         PropertyMapBuilder { map }
     }
 
@@ -386,10 +385,7 @@ mod tests {
         let b = PropertyValue::bytes(&[1, 2, 3]);
         assert_eq!(b.as_bytes(), Some(&[1u8, 2, 3][..]));
 
-        let arr = PropertyValue::array(vec![
-            PropertyValue::Int(1),
-            PropertyValue::Int(2),
-        ]);
+        let arr = PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]);
         assert_eq!(arr.as_array().unwrap().len(), 2);
     }
 
@@ -430,18 +426,14 @@ mod tests {
 
     #[test]
     fn test_property_map_copy_on_write() {
-        let map1 = PropertyMapBuilder::new()
-            .insert("key", "value1")
-            .build();
+        let map1 = PropertyMapBuilder::new().insert("key", "value1").build();
 
         // Clone is cheap (just Arc increment)
         let map2 = map1.clone();
         assert_eq!(map1, map2);
 
         // Modify map2 (should not affect map1 due to copy-on-write)
-        let map2 = map2.builder()
-            .insert("key", "value2")
-            .build();
+        let map2 = map2.builder().insert("key", "value2").build();
 
         assert_ne!(map1, map2);
         assert_eq!(map1.get("key").and_then(|v| v.as_str()), Some("value1"));
@@ -488,10 +480,7 @@ mod tests {
         assert_eq!(format!("{}", PropertyValue::Float(3.14)), "3.14");
         assert_eq!(format!("{}", PropertyValue::string("hello")), "\"hello\"");
 
-        let arr = PropertyValue::array(vec![
-            PropertyValue::Int(1),
-            PropertyValue::Int(2),
-        ]);
+        let arr = PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]);
         assert_eq!(format!("{}", arr), "[1, 2]");
     }
 

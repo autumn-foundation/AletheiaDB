@@ -98,6 +98,10 @@ pub enum StorageError {
     WalError { reason: String },
     /// Checkpoint error.
     CheckpointError { reason: String },
+    /// I/O error during persistence operations.
+    IoError(String),
+    /// Corrupted data detected.
+    CorruptedData(String),
 }
 
 impl fmt::Display for StorageError {
@@ -121,6 +125,8 @@ impl fmt::Display for StorageError {
             StorageError::CheckpointError { reason } => {
                 write!(f, "Checkpoint error: {}", reason)
             }
+            StorageError::IoError(msg) => write!(f, "I/O error: {}", msg),
+            StorageError::CorruptedData(msg) => write!(f, "Corrupted data: {}", msg),
         }
     }
 }
@@ -210,10 +216,7 @@ pub enum QueryError {
     /// Invalid traversal (e.g., edge doesn't connect specified nodes).
     InvalidTraversal { reason: String },
     /// Type mismatch in query.
-    TypeMismatch {
-        expected: String,
-        actual: String,
-    },
+    TypeMismatch { expected: String, actual: String },
 }
 
 impl fmt::Display for QueryError {

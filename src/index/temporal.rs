@@ -201,10 +201,7 @@ mod tests {
         indexes.insert_node_version(
             node_id,
             v1,
-            BiTemporalInterval::new(
-                TimeRange::new(0, 1000),
-                TimeRange::new(0, Timestamp::MAX),
-            ),
+            BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
         );
 
         indexes.insert_node_version(
@@ -226,10 +223,8 @@ mod tests {
         );
 
         // Query for versions in valid time range [500, 1500]
-        let results = indexes.find_node_versions_in_valid_time_range(
-            node_id,
-            TimeRange::new(500, 1500),
-        );
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(500, 1500));
 
         // Should find only v2 (starts at 1000, which is in range [500, 1500])
         // v1 starts at 0, which is before the range
@@ -267,10 +262,8 @@ mod tests {
         );
 
         // Query for versions recorded between 1500 and 2500
-        let results = indexes.find_edge_versions_in_transaction_time_range(
-            edge_id,
-            TimeRange::new(1500, 2500),
-        );
+        let results = indexes
+            .find_edge_versions_in_transaction_time_range(edge_id, TimeRange::new(1500, 2500));
 
         // Should find only v2
         assert_eq!(results.len(), 1);
@@ -281,10 +274,8 @@ mod tests {
     fn test_empty_index() {
         let indexes = TemporalIndexes::new();
 
-        let results = indexes.find_node_versions_in_valid_time_range(
-            NodeId::new(1),
-            TimeRange::new(0, 1000),
-        );
+        let results =
+            indexes.find_node_versions_in_valid_time_range(NodeId::new(1), TimeRange::new(0, 1000));
 
         assert_eq!(results.len(), 0);
     }
@@ -298,23 +289,13 @@ mod tests {
         let v1 = VersionId::new(100);
         let v2 = VersionId::new(101);
 
-        indexes.insert_node_version(
-            node1,
-            v1,
-            BiTemporalInterval::current(1000),
-        );
+        indexes.insert_node_version(node1, v1, BiTemporalInterval::current(1000));
 
-        indexes.insert_node_version(
-            node2,
-            v2,
-            BiTemporalInterval::current(1000),
-        );
+        indexes.insert_node_version(node2, v2, BiTemporalInterval::current(1000));
 
         // Query for node1 should only return v1
-        let results = indexes.find_node_versions_in_valid_time_range(
-            node1,
-            TimeRange::new(0, 2000),
-        );
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node1, TimeRange::new(0, 2000));
 
         assert_eq!(results.len(), 1);
         assert!(results.contains(&v1));

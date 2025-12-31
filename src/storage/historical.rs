@@ -481,10 +481,20 @@ mod tests {
         // v3: anchor (interval = 3)
         // v4: delta
 
-        assert!(storage.get_node_version(version_ids[0]).unwrap().is_anchor());
+        assert!(
+            storage
+                .get_node_version(version_ids[0])
+                .unwrap()
+                .is_anchor()
+        );
         assert!(storage.get_node_version(version_ids[1]).unwrap().is_delta());
         assert!(storage.get_node_version(version_ids[2]).unwrap().is_delta());
-        assert!(storage.get_node_version(version_ids[3]).unwrap().is_anchor());
+        assert!(
+            storage
+                .get_node_version(version_ids[3])
+                .unwrap()
+                .is_anchor()
+        );
         assert!(storage.get_node_version(version_ids[4]).unwrap().is_delta());
     }
 
@@ -547,10 +557,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(0, 1000),
-                    TimeRange::new(0, Timestamp::MAX),
-                ),
+                BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
                 label,
                 PropertyMapBuilder::new().insert("age", 30i64).build(),
             )

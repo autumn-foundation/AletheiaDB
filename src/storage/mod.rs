@@ -4,12 +4,18 @@
 //! - Current storage: Optimized for fast current-state queries (hot path)
 //! - Historical storage: Anchor+delta compression for temporal queries
 //! - Version management: Version chain structures and compression
+//! - WAL: Write-ahead log for durability and crash recovery
+//! - Persistence: Memory-mapped file storage and checkpointing
 
 pub mod current;
 pub mod historical;
+pub mod persistence;
 pub mod version;
+pub mod wal;
 
 // Re-export commonly used types
-pub use current::CurrentStorage;
+pub use current::{CurrentStats, CurrentStorage};
 pub use historical::{HistoricalStats, HistoricalStorage};
+pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
 pub use version::{AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData};
+pub use wal::{LSN, WalConfig, WalEntry, WalOperation, WriteAheadLog};

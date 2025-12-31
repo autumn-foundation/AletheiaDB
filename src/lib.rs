@@ -48,20 +48,19 @@
 #![warn(rust_2018_idioms)]
 
 pub mod core;
-pub mod utils;
-pub mod storage;
-pub mod index;
 pub mod db;
+pub mod index;
+pub mod storage;
+pub mod utils;
 
 // Re-export commonly used types at the crate root
 pub use core::{
-    NodeId, EdgeId, VersionId, EntityId, Node, Edge,
-    Timestamp, TimeRange, BiTemporalInterval,
-    PropertyKey, PropertyValue, PropertyMap, PropertyMapBuilder,
-    InternedString, StringInterner, GLOBAL_INTERNER,
+    BiTemporalInterval, Edge, EdgeId, EntityId, GLOBAL_INTERNER, InternedString, Node, NodeId,
+    PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue, StringInterner, TimeRange,
+    Timestamp, VersionId,
 };
 
-pub use utils::{Error, Result, StorageError, TemporalError, QueryError};
-pub use storage::CurrentStorage;
-pub use index::{AdjacencyIndex, CurrentIndexes, TemporalIndexes};
 pub use db::GallifreyDB;
+pub use index::{AdjacencyIndex, CurrentIndexes, TemporalIndexes};
+pub use storage::CurrentStorage;
+pub use utils::{Error, QueryError, Result, StorageError, TemporalError};

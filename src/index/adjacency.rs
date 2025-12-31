@@ -255,9 +255,7 @@ mod tests {
     fn test_node_without_edges() {
         let knows = GLOBAL_INTERNER.intern("KNOWS");
 
-        let edges = vec![
-            (NodeId::new(0), NodeId::new(1), EdgeId::new(0), knows),
-        ];
+        let edges = vec![(NodeId::new(0), NodeId::new(1), EdgeId::new(0), knows)];
 
         let index = AdjacencyIndex::build(edges);
 
