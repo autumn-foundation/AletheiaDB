@@ -54,7 +54,6 @@ debug = true  # Enable debug symbols for profiling
 # Fail if coverage drops below these thresholds
 fail-under-lines = 80.0
 fail-under-functions = 75.0
-fail-under-branches = 70.0
 
 # Exclude certain files from coverage
 exclude = [

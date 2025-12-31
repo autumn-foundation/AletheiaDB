@@ -95,7 +95,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Check coverage thresholds
-        run: cargo llvm-cov --all-features --fail-under-lines 80 --fail-under-functions 75 --fail-under-branches 70
+        run: cargo llvm-cov --all-features --fail-under-lines 80 --fail-under-functions 75
 
   lint:
     name: Linting

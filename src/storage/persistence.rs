@@ -94,7 +94,10 @@ impl Checkpoint {
     /// Save checkpoint to disk
     pub fn save(&self, path: &Path) -> Result<()> {
         let parent_dir = path.parent().ok_or_else(|| {
-            StorageError::IoError(format!("Invalid checkpoint path: no parent directory for {:?}", path))
+            StorageError::IoError(format!(
+                "Invalid checkpoint path: no parent directory for {:?}",
+                path
+            ))
         })?;
 
         std::fs::create_dir_all(parent_dir).map_err(|e| {
@@ -330,7 +333,8 @@ impl PersistenceManager {
         if let Ok(entries) = std::fs::read_dir(&self.config.checkpoint_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str()
-                    && name.starts_with("checkpoint_") && name.ends_with(".dat")
+                    && name.starts_with("checkpoint_")
+                    && name.ends_with(".dat")
                 {
                     checkpoints.push(entry.path());
                 }
@@ -393,7 +397,8 @@ impl PersistenceManager {
         if let Ok(entries) = std::fs::read_dir(&self.config.checkpoint_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str()
-                    && name.starts_with("checkpoint_") && name.ends_with(".dat")
+                    && name.starts_with("checkpoint_")
+                    && name.ends_with(".dat")
                 {
                     checkpoints.push(entry.path());
                 }
