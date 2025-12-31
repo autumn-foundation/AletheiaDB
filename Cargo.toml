@@ -79,3 +79,9 @@ name = "persistence"
 harness = false
 path = "benches/persistence.rs"
 required-features = []
+
+[[bench]]
+name = "transactions"
+harness = false
+path = "benches/transactions.rs"
+required-features = []

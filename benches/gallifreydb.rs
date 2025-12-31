@@ -15,7 +15,7 @@ fn create_versioned_graph(
     node_count: usize,
     _versions_per_node: usize,
 ) -> (GallifreyDB, Vec<NodeId>) {
-    let mut db = GallifreyDB::new();
+    let db = GallifreyDB::new();
     let mut node_ids = Vec::new();
 
     // Create initial nodes
@@ -53,7 +53,7 @@ fn bench_node_creation_with_versioning(c: &mut Criterion) {
     c.bench_function("gallifreydb_node_creation", |b| {
         b.iter_batched(
             GallifreyDB::new,
-            |mut db| {
+            |db| {
                 let props = PropertyMapBuilder::new()
                     .insert("name", "Alice")
                     .insert("age", 30i64)
@@ -71,7 +71,7 @@ fn bench_edge_creation_with_versioning(c: &mut Criterion) {
     c.bench_function("gallifreydb_edge_creation", |b| {
         b.iter_batched(
             || {
-                let mut db = GallifreyDB::new();
+                let db = GallifreyDB::new();
                 let n1 = db
                     .create_node("Person", PropertyMapBuilder::new().build())
                     .unwrap();
@@ -80,7 +80,7 @@ fn bench_edge_creation_with_versioning(c: &mut Criterion) {
                     .unwrap();
                 (db, n1, n2)
             },
-            |(mut db, n1, n2)| {
+            |(db, n1, n2)| {
                 let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
                 let edge = db.create_edge(n1, n2, "KNOWS", props);
                 black_box(edge)
@@ -242,7 +242,7 @@ fn bench_batch_operations(c: &mut Criterion) {
             |b, &size| {
                 b.iter_batched(
                     GallifreyDB::new,
-                    |mut db| {
+                    |db| {
                         for i in 0..size {
                             let props = PropertyMapBuilder::new().insert("id", i as i64).build();
                             db.create_node("Node", props).unwrap();

@@ -125,7 +125,7 @@ fn bench_checkpoint_creation(c: &mut Criterion) {
     for node_count in &[100, 1000, 10000] {
         group.bench_function(BenchmarkId::from_parameter(node_count), |b| {
             // Setup database with nodes
-            let mut current = CurrentStorage::new();
+            let current = CurrentStorage::new();
             let historical = HistoricalStorage::new();
 
             for i in 0..*node_count {
@@ -170,7 +170,7 @@ fn bench_checkpoint_load(c: &mut Criterion) {
     // Setup: Create checkpoints with different sizes
     for node_count in &[100, 1000, 10000] {
         let temp_dir = TempDir::new().unwrap();
-        let mut current = CurrentStorage::new();
+        let current = CurrentStorage::new();
         let historical = HistoricalStorage::new();
 
         for i in 0..*node_count {

@@ -6,7 +6,7 @@
 
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
-use crate::core::interning::StringInterner;
+use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMap;
 use crate::index::current::CurrentIndexes;
 use crate::utils::error::{Result, StorageError};
@@ -34,8 +34,6 @@ pub struct CurrentStorage {
     edge_id_gen: IdGenerator,
     /// ID generator for versions
     version_id_gen: IdGenerator,
-    /// String interner for labels (could use global, but keeping local for now)
-    interner: StringInterner,
 }
 
 impl CurrentStorage {
@@ -46,17 +44,16 @@ impl CurrentStorage {
             node_id_gen: IdGenerator::new(),
             edge_id_gen: IdGenerator::new(),
             version_id_gen: IdGenerator::new(),
-            interner: StringInterner::new(),
         }
     }
 
     /// Create a node with the given label and properties.
     ///
     /// Returns the ID of the newly created node.
-    pub fn create_node(&mut self, label: &str, properties: PropertyMap) -> Result<NodeId> {
+    pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         let node_id = NodeId::new(self.node_id_gen.next());
         let version_id = VersionId::new(self.version_id_gen.next());
-        let label_interned = self.interner.intern(label);
+        let label_interned = GLOBAL_INTERNER.intern(label);
 
         let node = Node::new(node_id, label_interned, properties, version_id);
         self.indexes.insert_node(node);
@@ -68,7 +65,7 @@ impl CurrentStorage {
     ///
     /// Returns the ID of the newly created edge.
     pub fn create_edge(
-        &mut self,
+        &self,
         source: NodeId,
         target: NodeId,
         label: &str,
@@ -84,7 +81,7 @@ impl CurrentStorage {
 
         let edge_id = EdgeId::new(self.edge_id_gen.next());
         let version_id = VersionId::new(self.version_id_gen.next());
-        let label_interned = self.interner.intern(label);
+        let label_interned = GLOBAL_INTERNER.intern(label);
 
         let edge = Edge::new(
             edge_id,
@@ -140,6 +137,56 @@ impl CurrentStorage {
         Ok(edge)
     }
 
+    // Direct insert/update/delete methods for transaction commit
+    // These methods are used by WriteTransaction to apply buffered changes
+
+    /// Insert a node directly (used by WriteTransaction).
+    /// Does not generate IDs - caller must provide them.
+    pub fn insert_node_direct(&self, node: Node) -> Result<()> {
+        self.indexes.insert_node(node);
+        Ok(())
+    }
+
+    /// Insert an edge directly (used by WriteTransaction).
+    /// Does not generate IDs or rebuild adjacency - caller must handle.
+    pub fn insert_edge_direct(&self, edge: Edge) -> Result<()> {
+        self.indexes.insert_edge(edge);
+        self.indexes.rebuild_adjacency();
+        Ok(())
+    }
+
+    /// Update a node directly (used by WriteTransaction).
+    pub fn update_node_direct(&self, node: Node) -> Result<()> {
+        // Remove old version and insert new
+        self.indexes.insert_node(node);
+        Ok(())
+    }
+
+    /// Update an edge directly (used by WriteTransaction).
+    pub fn update_edge_direct(&self, edge: Edge) -> Result<()> {
+        // Remove old version and insert new
+        self.indexes.insert_edge(edge);
+        self.indexes.rebuild_adjacency();
+        Ok(())
+    }
+
+    /// Delete a node directly (used by WriteTransaction).
+    pub fn delete_node_direct(&self, id: NodeId) -> Result<()> {
+        self.indexes
+            .remove_node(id)
+            .ok_or(StorageError::NodeNotFound(id))?;
+        Ok(())
+    }
+
+    /// Delete an edge directly (used by WriteTransaction).
+    pub fn delete_edge_direct(&self, id: EdgeId) -> Result<()> {
+        self.indexes
+            .remove_edge(id)
+            .ok_or(StorageError::EdgeNotFound(id))?;
+        self.indexes.rebuild_adjacency();
+        Ok(())
+    }
+
     /// Get all outgoing edges from a node.
     ///
     /// This is the critical "hot path" operation that must be fast.
@@ -162,26 +209,28 @@ impl CurrentStorage {
 
     /// Get outgoing edges with a specific label.
     pub fn get_outgoing_edges_with_label(&self, source: NodeId, label: &str) -> Vec<EdgeId> {
-        let label_id = match self.interner.get_id(label) {
+        let label_id = match GLOBAL_INTERNER.get_id(label) {
             Some(id) => id,
             None => return Vec::new(), // Label doesn't exist
         };
 
         self.indexes
             .get_outgoing_with_label(source, label_id)
+            .into_iter()
             .map(|entry| entry.edge_id)
             .collect()
     }
 
     /// Get incoming edges with a specific label.
     pub fn get_incoming_edges_with_label(&self, target: NodeId, label: &str) -> Vec<EdgeId> {
-        let label_id = match self.interner.get_id(label) {
+        let label_id = match GLOBAL_INTERNER.get_id(label) {
             Some(id) => id,
             None => return Vec::new(),
         };
 
         self.indexes
             .get_incoming_with_label(target, label_id)
+            .into_iter()
             .map(|entry| entry.edge_id)
             .collect()
     }
@@ -232,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_create_node() {
-        let mut storage = CurrentStorage::new();
+        let storage = CurrentStorage::new();
 
         let props = PropertyMapBuilder::new()
             .insert("name", "Alice")
@@ -253,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_create_edge() {
-        let mut storage = CurrentStorage::new();
+        let storage = CurrentStorage::new();
 
         let alice = storage
             .create_node("Person", PropertyMapBuilder::new().build())
@@ -284,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_create_edge_invalid_nodes() {
-        let mut storage = CurrentStorage::new();
+        let storage = CurrentStorage::new();
 
         let result = storage.create_edge(
             NodeId::new(999),
@@ -298,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_graph_traversal() {
-        let mut storage = CurrentStorage::new();
+        let storage = CurrentStorage::new();
 
         // Create nodes
         let n0 = storage
@@ -337,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_labeled_edges() {
-        let mut storage = CurrentStorage::new();
+        let storage = CurrentStorage::new();
 
         let n0 = storage
             .create_node("Person", PropertyMapBuilder::new().build())

@@ -16,7 +16,7 @@ use gallifreydb::{CurrentStorage, PropertyMapBuilder};
 ///
 /// Creates a directed graph where each node has `out_degree` outgoing edges.
 fn create_test_graph(node_count: usize, out_degree: usize) -> CurrentStorage {
-    let mut storage = CurrentStorage::new();
+    let storage = CurrentStorage::new();
 
     // Create nodes
     let node_ids: Vec<_> = (0..node_count)
@@ -156,7 +156,7 @@ fn bench_node_creation(c: &mut Criterion) {
     c.bench_function("node_creation", |b| {
         b.iter_batched(
             CurrentStorage::new,
-            |mut storage| {
+            |storage| {
                 let props = PropertyMapBuilder::new()
                     .insert("name", "Alice")
                     .insert("age", 30i64)
@@ -176,7 +176,7 @@ fn bench_edge_creation(c: &mut Criterion) {
     c.bench_function("edge_creation", |b| {
         b.iter_batched(
             || {
-                let mut storage = CurrentStorage::new();
+                let storage = CurrentStorage::new();
                 let n1 = storage
                     .create_node("Person", PropertyMapBuilder::new().build())
                     .unwrap();
@@ -185,7 +185,7 @@ fn bench_edge_creation(c: &mut Criterion) {
                     .unwrap();
                 (storage, n1, n2)
             },
-            |(mut storage, n1, n2)| {
+            |(storage, n1, n2)| {
                 let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
                 let edge = storage.create_edge(n1, n2, "KNOWS", props);
                 black_box(edge)

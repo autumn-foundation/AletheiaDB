@@ -47,6 +47,7 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+pub mod api;
 pub mod core;
 pub mod db;
 pub mod index;
@@ -60,7 +61,8 @@ pub use core::{
     Timestamp, VersionId,
 };
 
+pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
 pub use db::GallifreyDB;
 pub use index::{AdjacencyIndex, CurrentIndexes, TemporalIndexes};
 pub use storage::CurrentStorage;
-pub use utils::{Error, QueryError, Result, StorageError, TemporalError};
+pub use utils::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};

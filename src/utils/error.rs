@@ -20,6 +20,8 @@ pub enum Error {
     Temporal(TemporalError),
     /// Query-related errors.
     Query(QueryError),
+    /// Transaction-related errors.
+    Transaction(TransactionError),
     /// I/O errors.
     Io(io::Error),
     /// Other errors.
@@ -39,6 +41,7 @@ impl fmt::Display for Error {
             Error::Storage(e) => write!(f, "Storage error: {}", e),
             Error::Temporal(e) => write!(f, "Temporal error: {}", e),
             Error::Query(e) => write!(f, "Query error: {}", e),
+            Error::Transaction(e) => write!(f, "Transaction error: {}", e),
             Error::Io(e) => write!(f, "I/O error: {}", e),
             Error::Other(msg) => write!(f, "{}", msg),
         }
@@ -76,6 +79,12 @@ impl From<QueryError> for Error {
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Error::Io(e)
+    }
+}
+
+impl From<TransactionError> for Error {
+    fn from(e: TransactionError) -> Self {
+        Error::Transaction(e)
     }
 }
 
@@ -309,6 +318,84 @@ impl fmt::Display for QueryError {
 }
 
 impl std::error::Error for QueryError {}
+
+/// Errors related to transaction operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionError {
+    /// Transaction is not in the correct state for this operation.
+    InvalidState {
+        /// The current state
+        current: String,
+        /// The expected state
+        expected: String,
+    },
+    /// Transaction has already been committed.
+    AlreadyCommitted {
+        /// The transaction ID
+        tx_id: u64,
+    },
+    /// Transaction has been aborted.
+    Aborted {
+        /// The transaction ID
+        tx_id: u64,
+    },
+    /// Write conflict detected.
+    WriteConflict {
+        /// The entity ID involved in the conflict
+        entity_id: String,
+        /// Why there's a conflict
+        reason: String,
+    },
+    /// Validation failed before commit.
+    ValidationFailed {
+        /// Why validation failed
+        reason: String,
+    },
+    /// Commit failed.
+    CommitFailed {
+        /// Why commit failed
+        reason: String,
+    },
+    /// Rollback failed.
+    RollbackFailed {
+        /// Why rollback failed
+        reason: String,
+    },
+}
+
+impl fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TransactionError::InvalidState { current, expected } => {
+                write!(
+                    f,
+                    "Transaction in invalid state: expected {}, got {}",
+                    expected, current
+                )
+            }
+            TransactionError::AlreadyCommitted { tx_id } => {
+                write!(f, "Transaction {} has already been committed", tx_id)
+            }
+            TransactionError::Aborted { tx_id } => {
+                write!(f, "Transaction {} has been aborted", tx_id)
+            }
+            TransactionError::WriteConflict { entity_id, reason } => {
+                write!(f, "Write conflict on {}: {}", entity_id, reason)
+            }
+            TransactionError::ValidationFailed { reason } => {
+                write!(f, "Transaction validation failed: {}", reason)
+            }
+            TransactionError::CommitFailed { reason } => {
+                write!(f, "Transaction commit failed: {}", reason)
+            }
+            TransactionError::RollbackFailed { reason } => {
+                write!(f, "Transaction rollback failed: {}", reason)
+            }
+        }
+    }
+}
+
+impl std::error::Error for TransactionError {}
 
 #[cfg(test)]
 mod tests {
