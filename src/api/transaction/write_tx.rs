@@ -438,8 +438,10 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    // Create in current storage
-                    let node = Node::new(*node_id, *label, properties.clone(), *version_id);
+                    // Create in current storage with proper transaction metadata
+                    let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
+                    let node =
+                        Node::with_metadata(*node_id, *label, properties.clone(), *version_id, metadata);
                     self.current.insert_node_direct(node)?;
 
                     // Store in historical storage
@@ -467,14 +469,16 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    // Create in current storage
-                    let edge = Edge::new(
+                    // Create in current storage with proper transaction metadata
+                    let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
+                    let edge = Edge::with_metadata(
                         *edge_id,
                         *label,
                         *source,
                         *target,
                         properties.clone(),
                         *version_id,
+                        metadata,
                     );
                     self.current.insert_edge_direct(edge)?;
 
@@ -503,8 +507,10 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    // Update in current storage
-                    let node = Node::new(*node_id, *label, properties.clone(), *version_id);
+                    // Update in current storage with proper transaction metadata
+                    let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
+                    let node =
+                        Node::with_metadata(*node_id, *label, properties.clone(), *version_id, metadata);
                     self.current.update_node_direct(node)?;
 
                     // Add new version to historical storage
@@ -532,14 +538,16 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    // Update in current storage
-                    let edge = Edge::new(
+                    // Update in current storage with proper transaction metadata
+                    let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
+                    let edge = Edge::with_metadata(
                         *edge_id,
                         *label,
                         *source,
                         *target,
                         properties.clone(),
                         *version_id,
+                        metadata,
                     );
                     self.current.update_edge_direct(edge)?;
 

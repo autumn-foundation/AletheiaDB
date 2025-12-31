@@ -42,9 +42,9 @@ impl TransactionSnapshot {
             None => false, // Uncommitted version - not visible
             Some(ts) => {
                 // Visible if:
-                // 1. Committed before our snapshot AND
+                // 1. Committed strictly before our snapshot (not at the same time) AND
                 // 2. Not created by a transaction that was active at snapshot time
-                ts <= self.snapshot_timestamp && !self.active_transactions.contains(&created_by_tx)
+                ts < self.snapshot_timestamp && !self.active_transactions.contains(&created_by_tx)
             }
         }
     }

@@ -671,21 +671,26 @@ mod tests {
         );
 
         // Another write commits a change (creates a new node)
-        db.write(|tx| {
-            tx.create_node(
-                "Person",
-                PropertyMapBuilder::new().insert("version", 2i64).build(),
-            )
-        })
-        .unwrap();
+        let new_node_id = db
+            .write(|tx| {
+                tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("version", 2i64).build(),
+                )
+            })
+            .unwrap();
 
-        // Snapshot Isolation: tx1 still sees the original node
-        // The new node created after tx1's snapshot is visible because
-        // it has TxId(0) (pre-existing data compatibility)
-        let new_node = tx1.get_node(NodeId::new(1)).unwrap();
+        // Snapshot Isolation: tx1 should NOT see the new node
+        // because it was created and committed after tx1's snapshot
+        assert!(tx1.get_node(new_node_id).is_err());
+
+        // Verify tx1 still sees the original node
+        let node_v1_again = tx1.get_node(node_id).unwrap();
         assert_eq!(
-            new_node.get_property("version").and_then(|v| v.as_int()),
-            Some(2)
+            node_v1_again
+                .get_property("version")
+                .and_then(|v| v.as_int()),
+            Some(1)
         );
     }
 }
