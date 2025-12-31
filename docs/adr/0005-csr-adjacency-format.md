@@ -87,6 +87,8 @@ impl AdjacencyIndex {
 }
 ```
 
+**Future Optimization**: For high-degree nodes, sorting edges by label within each node's edge list during the build process would enable binary search in `get_edges_with_label`, reducing complexity from O(degree) to O(log(degree) + matches).
+
 ### Build Process
 
 ```rust

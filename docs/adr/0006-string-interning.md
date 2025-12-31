@@ -57,12 +57,13 @@ impl StringInterner {
             return *id;
         }
 
-        // Slow path: insert new string (with double-check)
+        // Slow path: use entry API for atomic insertion to avoid race conditions
         let arc: Arc<str> = s.into();
-        let id = InternedString(self.next_id.fetch_add(1, Ordering::Relaxed));
-        self.to_id.insert(arc.clone(), id);
-        self.to_string.insert(id, arc);
-        id
+        *self.to_id.entry(arc.clone()).or_insert_with(|| {
+            let new_id = InternedString(self.next_id.fetch_add(1, Ordering::Relaxed));
+            self.to_string.insert(new_id, arc);
+            new_id
+        })
     }
 
     /// Resolve an interned string back to its value

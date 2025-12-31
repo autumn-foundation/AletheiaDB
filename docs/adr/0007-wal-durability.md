@@ -67,12 +67,14 @@ pub struct WalEntry {
 
 pub enum WalOperation {
     CreateNode {
+        tx_id: TxId,
         node_id: NodeId,
         label: String,
         properties: PropertyMap,
         valid_time: TimeRange,
     },
     CreateEdge {
+        tx_id: TxId,
         edge_id: EdgeId,
         source: NodeId,
         target: NodeId,
@@ -81,19 +83,23 @@ pub enum WalOperation {
         valid_time: TimeRange,
     },
     UpdateNode {
+        tx_id: TxId,
         node_id: NodeId,
         properties: PropertyMap,
         valid_time: TimeRange,
     },
     UpdateEdge {
+        tx_id: TxId,
         edge_id: EdgeId,
         properties: PropertyMap,
         valid_time: TimeRange,
     },
     DeleteNode {
+        tx_id: TxId,
         node_id: NodeId,
     },
     DeleteEdge {
+        tx_id: TxId,
         edge_id: EdgeId,
     },
     BeginTransaction {

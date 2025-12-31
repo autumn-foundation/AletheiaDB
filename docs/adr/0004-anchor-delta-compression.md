@@ -109,7 +109,7 @@ fn reconstruct_at_version(&self, target_version_id: VersionId) -> PropertyMap {
 
 ### Positive
 
-- **5-6x storage reduction**: Significant space savings for frequently updated entities
+- **5-7x storage reduction**: Significant space savings for frequently updated entities
 - **Bounded reconstruction cost**: At most `anchor_interval` deltas to traverse
 - **Arc-based sharing**: Unchanged properties share memory via Arc
 - **Append-only friendly**: New versions append, old versions never modified
