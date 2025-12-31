@@ -325,10 +325,10 @@ impl PersistenceManager {
 
         if let Ok(entries) = std::fs::read_dir(&self.config.checkpoint_dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with("checkpoint_") && name.ends_with(".dat") {
-                        checkpoints.push(entry.path());
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && name.starts_with("checkpoint_") && name.ends_with(".dat")
+                {
+                    checkpoints.push(entry.path());
                 }
             }
         }
@@ -388,10 +388,10 @@ impl PersistenceManager {
 
         if let Ok(entries) = std::fs::read_dir(&self.config.checkpoint_dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with("checkpoint_") && name.ends_with(".dat") {
-                        checkpoints.push(entry.path());
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && name.starts_with("checkpoint_") && name.ends_with(".dat")
+                {
+                    checkpoints.push(entry.path());
                 }
             }
         }
@@ -416,8 +416,6 @@ impl PersistenceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::property::PropertyMap;
-    use crate::storage::version::AnchorConfig;
     use tempfile::TempDir;
 
     #[test]

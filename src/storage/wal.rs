@@ -44,38 +44,63 @@ impl LSN {
 pub enum WalOperation {
     /// Create a new node
     CreateNode {
+        /// The node ID
         node_id: NodeId,
+        /// The node label
         label: String,
+        /// The node properties
         properties: PropertyMap,
+        /// The bi-temporal interval
         temporal: BiTemporalInterval,
     },
     /// Create a new edge
     CreateEdge {
+        /// The edge ID
         edge_id: EdgeId,
+        /// The source node ID
         source: NodeId,
+        /// The target node ID
         target: NodeId,
+        /// The edge label
         label: String,
+        /// The edge properties
         properties: PropertyMap,
+        /// The bi-temporal interval
         temporal: BiTemporalInterval,
     },
     /// Update node (creates new version)
     UpdateNode {
+        /// The node ID
         node_id: NodeId,
+        /// The version ID
         version_id: VersionId,
+        /// The new label
         label: String,
+        /// The new properties
         properties: PropertyMap,
+        /// The bi-temporal interval
         temporal: BiTemporalInterval,
     },
     /// Update edge (creates new version)
     UpdateEdge {
+        /// The edge ID
         edge_id: EdgeId,
+        /// The version ID
         version_id: VersionId,
+        /// The new label
         label: String,
+        /// The new properties
         properties: PropertyMap,
+        /// The bi-temporal interval
         temporal: BiTemporalInterval,
     },
     /// Checkpoint marker - indicates a snapshot was taken
-    Checkpoint { lsn: LSN, timestamp: Timestamp },
+    Checkpoint {
+        /// The LSN at checkpoint
+        lsn: LSN,
+        /// When the checkpoint was created
+        timestamp: Timestamp,
+    },
 }
 
 /// A single WAL entry
@@ -272,17 +297,14 @@ impl WriteAheadLog {
 
         if let Ok(entries) = std::fs::read_dir(&self.config.wal_dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(".log") {
-                        if let Some(seg_id) = name
-                            .strip_suffix(".log")
-                            .and_then(|s| s.parse::<u64>().ok())
-                        {
-                            if seg_id < keep_from {
-                                let _ = std::fs::remove_file(entry.path());
-                            }
-                        }
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && name.ends_with(".log")
+                    && let Some(seg_id) = name
+                        .strip_suffix(".log")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    && seg_id < keep_from
+                {
+                    let _ = std::fs::remove_file(entry.path());
                 }
             }
         }
@@ -363,15 +385,13 @@ impl WriteAheadLog {
         let mut segments = Vec::new();
         if let Ok(dir_entries) = std::fs::read_dir(&self.config.wal_dir) {
             for entry in dir_entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(".log") {
-                        if let Some(seg_id) = name
-                            .strip_suffix(".log")
-                            .and_then(|s| s.parse::<u64>().ok())
-                        {
-                            segments.push((seg_id, entry.path()));
-                        }
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && name.ends_with(".log")
+                    && let Some(seg_id) = name
+                        .strip_suffix(".log")
+                        .and_then(|s| s.parse::<u64>().ok())
+                {
+                    segments.push((seg_id, entry.path()));
                 }
             }
         }
@@ -414,7 +434,6 @@ impl WriteAheadLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::temporal::TimeRange;
     use tempfile::TempDir;
 
     #[test]

@@ -178,6 +178,11 @@ impl Default for StringInterner {
 /// assert_eq!(string.as_ref(), "Person");
 /// ```
 use std::sync::LazyLock;
+
+/// Global string interner for sharing common strings across the database.
+///
+/// This static provides a single, thread-safe string interner that can be used
+/// throughout the application to deduplicate common strings like labels and property keys.
 pub static GLOBAL_INTERNER: LazyLock<StringInterner> = LazyLock::new(StringInterner::new);
 
 #[cfg(test)]

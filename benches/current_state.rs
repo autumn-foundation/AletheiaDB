@@ -155,7 +155,7 @@ fn bench_labeled_traversal(c: &mut Criterion) {
 fn bench_node_creation(c: &mut Criterion) {
     c.bench_function("node_creation", |b| {
         b.iter_batched(
-            || CurrentStorage::new(),
+            CurrentStorage::new,
             |mut storage| {
                 let props = PropertyMapBuilder::new()
                     .insert("name", "Alice")

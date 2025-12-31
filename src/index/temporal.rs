@@ -88,14 +88,14 @@ impl TemporalIndexes {
         let valid_key = TemporalKey::new(entity_id, temporal.valid_time().start());
         self.valid_time_index
             .entry(valid_key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(version_id);
 
         // Index by transaction time start
         let tx_key = TemporalKey::new(entity_id, temporal.transaction_time().start());
         self.transaction_time_index
             .entry(tx_key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(version_id);
     }
 

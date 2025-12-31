@@ -132,7 +132,7 @@ impl CurrentStorage {
         let edge = self
             .indexes
             .remove_edge(id)
-            .ok_or_else(|| StorageError::EdgeNotFound(id))?;
+            .ok_or(StorageError::EdgeNotFound(id))?;
 
         // Rebuild adjacency indexes
         self.indexes.rebuild_adjacency();

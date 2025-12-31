@@ -377,12 +377,12 @@ mod tests {
         assert!(PropertyValue::Null.is_null());
         assert_eq!(PropertyValue::Bool(true).as_bool(), Some(true));
         assert_eq!(PropertyValue::Int(42).as_int(), Some(42));
-        assert_eq!(PropertyValue::Float(3.14).as_float(), Some(3.14));
+        assert_eq!(PropertyValue::Float(2.5).as_float(), Some(2.5));
 
         let s = PropertyValue::string("hello");
         assert_eq!(s.as_str(), Some("hello"));
 
-        let b = PropertyValue::bytes(&[1, 2, 3]);
+        let b = PropertyValue::bytes([1, 2, 3]);
         assert_eq!(b.as_bytes(), Some(&[1u8, 2, 3][..]));
 
         let arr = PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]);
@@ -394,7 +394,7 @@ mod tests {
         let _: PropertyValue = true.into();
         let _: PropertyValue = 42i64.into();
         let _: PropertyValue = 42i32.into();
-        let _: PropertyValue = 3.14f64.into();
+        let _: PropertyValue = 2.5f64.into();
         let _: PropertyValue = "hello".into();
         let _: PropertyValue = String::from("world").into();
         let _: PropertyValue = vec![1u8, 2, 3].into();
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(format!("{}", PropertyValue::Null), "null");
         assert_eq!(format!("{}", PropertyValue::Bool(true)), "true");
         assert_eq!(format!("{}", PropertyValue::Int(42)), "42");
-        assert_eq!(format!("{}", PropertyValue::Float(3.14)), "3.14");
+        assert_eq!(format!("{}", PropertyValue::Float(2.5)), "2.5");
         assert_eq!(format!("{}", PropertyValue::string("hello")), "\"hello\"");
 
         let arr = PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]);

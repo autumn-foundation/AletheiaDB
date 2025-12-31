@@ -86,7 +86,7 @@ impl AdjacencyIndex {
         for (source, target, edge_id, label) in edges {
             adjacency_map
                 .entry(source)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(AdjacencyEntry::new(target, edge_id, label));
         }
 

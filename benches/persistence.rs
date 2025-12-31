@@ -153,11 +153,10 @@ fn bench_checkpoint_creation(c: &mut Criterion) {
 
             b.iter(|| {
                 let lsn = wal.current_lsn();
-                black_box(
-                    persistence
-                        .create_checkpoint(lsn, &current, &historical, &mut wal)
-                        .unwrap(),
-                );
+                persistence
+                    .create_checkpoint(lsn, &current, &historical, &mut wal)
+                    .unwrap();
+                black_box(());
             });
         });
     }
@@ -304,11 +303,10 @@ fn bench_checkpoint_frequency(c: &mut Criterion) {
             b.iter(|| {
                 let lsn = wal.current_lsn();
                 if persistence.should_checkpoint(lsn) {
-                    black_box(
-                        persistence
-                            .create_checkpoint(lsn, &current, &historical, &mut wal)
-                            .unwrap(),
-                    );
+                    persistence
+                        .create_checkpoint(lsn, &current, &historical, &mut wal)
+                        .unwrap();
+                    black_box(());
                 }
             });
         });

@@ -13,7 +13,7 @@ use gallifreydb::{GallifreyDB, NodeId, PropertyMapBuilder};
 /// Creates nodes and then updates them multiple times to build version chains.
 fn create_versioned_graph(
     node_count: usize,
-    versions_per_node: usize,
+    _versions_per_node: usize,
 ) -> (GallifreyDB, Vec<NodeId>) {
     let mut db = GallifreyDB::new();
     let mut node_ids = Vec::new();
@@ -52,7 +52,7 @@ fn create_versioned_graph(
 fn bench_node_creation_with_versioning(c: &mut Criterion) {
     c.bench_function("gallifreydb_node_creation", |b| {
         b.iter_batched(
-            || GallifreyDB::new(),
+            GallifreyDB::new,
             |mut db| {
                 let props = PropertyMapBuilder::new()
                     .insert("name", "Alice")
@@ -241,7 +241,7 @@ fn bench_batch_operations(c: &mut Criterion) {
             &batch_size,
             |b, &size| {
                 b.iter_batched(
-                    || GallifreyDB::new(),
+                    GallifreyDB::new,
                     |mut db| {
                         for i in 0..size {
                             let props = PropertyMapBuilder::new().insert("id", i as i64).build();
