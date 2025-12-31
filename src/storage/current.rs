@@ -151,7 +151,6 @@ impl CurrentStorage {
     /// Does not generate IDs or rebuild adjacency - caller must handle.
     pub fn insert_edge_direct(&self, edge: Edge) -> Result<()> {
         self.indexes.insert_edge(edge);
-        self.indexes.rebuild_adjacency();
         Ok(())
     }
 
@@ -166,7 +165,6 @@ impl CurrentStorage {
     pub fn update_edge_direct(&self, edge: Edge) -> Result<()> {
         // Remove old version and insert new
         self.indexes.insert_edge(edge);
-        self.indexes.rebuild_adjacency();
         Ok(())
     }
 
@@ -183,8 +181,15 @@ impl CurrentStorage {
         self.indexes
             .remove_edge(id)
             .ok_or(StorageError::EdgeNotFound(id))?;
-        self.indexes.rebuild_adjacency();
         Ok(())
+    }
+
+    /// Rebuild adjacency indexes from current edges.
+    ///
+    /// This should be called after batch edge operations to update the
+    /// adjacency indexes for efficient graph traversal.
+    pub fn rebuild_adjacency(&self) {
+        self.indexes.rebuild_adjacency();
     }
 
     /// Get all outgoing edges from a node.

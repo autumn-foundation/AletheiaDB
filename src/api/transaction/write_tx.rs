@@ -636,6 +636,10 @@ impl WriteTransaction {
             }
         }
 
+        // Rebuild adjacency indexes once after all edge operations
+        // This is much more efficient than rebuilding after each operation
+        self.current.rebuild_adjacency();
+
         Ok(())
     }
 }
