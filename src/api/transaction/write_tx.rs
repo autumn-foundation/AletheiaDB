@@ -1509,14 +1509,23 @@ mod tests {
         let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let tx_id_gen = TxIdGenerator::new();
 
+        // Create visibility manager and snapshot for testing
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+
         // Create initial transaction to set up nodes and one edge
+        let snapshot1 = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: std::collections::HashSet::new(),
+        };
         let mut tx1 = WriteTransaction::new(
             tx_id_gen.next(),
+            snapshot1,
             current.clone(),
             historical.clone(),
             temporal_indexes.clone(),
             wal.clone(),
             current_timestamp.clone(),
+            visibility_manager.clone(),
             node_id_gen.clone(),
             edge_id_gen.clone(),
             version_id_gen.clone(),
@@ -1536,13 +1545,19 @@ mod tests {
         assert_eq!(current.edge_count(), 1);
 
         // Create second transaction with interleaved operations
+        let snapshot2 = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: std::collections::HashSet::new(),
+        };
         let mut tx2 = WriteTransaction::new(
             tx_id_gen.next(),
+            snapshot2,
             current.clone(),
             historical.clone(),
             temporal_indexes.clone(),
             wal.clone(),
             current_timestamp.clone(),
+            visibility_manager.clone(),
             node_id_gen.clone(),
             edge_id_gen.clone(),
             version_id_gen.clone(),
