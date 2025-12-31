@@ -663,6 +663,31 @@ See `justfile` for complete list of commands.
 
 ## Future Considerations
 
+### Vector Search (SUPERRAG)
+
+**Status**: Designed, not yet implemented
+
+Adding vector search enables **Graph + Vector + Bi-temporal** queries - combining semantic similarity with relationship traversal and time-travel.
+
+See **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** for the complete design including:
+- Architecture integration with existing storage
+- 5-phase implementation plan
+- Temporal vector strategy (versioned embeddings)
+- HNSW index integration (usearch recommended)
+- Hybrid query patterns
+
+**Key query patterns this enables:**
+```rust
+// Semantic time-travel
+db.as_of(timestamp_2023).find_similar(embedding, k)
+
+// Graph + Vector: traverse then rank
+db.traverse(alice_id, "KNOWS").rank_by_similarity(bob_embedding, 10)
+
+// Knowledge evolution
+db.track_semantic_drift(node_id, time_range)
+```
+
 ### Scalability
 - Sharding for horizontal scale
 - Distributed transaction coordination

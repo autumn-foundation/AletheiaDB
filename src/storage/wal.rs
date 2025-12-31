@@ -94,6 +94,20 @@ pub enum WalOperation {
         /// The bi-temporal interval
         temporal: BiTemporalInterval,
     },
+    /// Delete a node
+    DeleteNode {
+        /// The node ID
+        node_id: NodeId,
+        /// The bi-temporal interval
+        temporal: BiTemporalInterval,
+    },
+    /// Delete an edge
+    DeleteEdge {
+        /// The edge ID
+        edge_id: EdgeId,
+        /// The bi-temporal interval
+        temporal: BiTemporalInterval,
+    },
     /// Checkpoint marker - indicates a snapshot was taken
     Checkpoint {
         /// The LSN at checkpoint
@@ -362,6 +376,14 @@ impl WriteAheadLog {
                 buffer.push(4); // operation type
                 buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
                 buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
+            }
+            WalOperation::DeleteNode { node_id, .. } => {
+                buffer.push(6); // operation type
+                buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            }
+            WalOperation::DeleteEdge { edge_id, .. } => {
+                buffer.push(7); // operation type
+                buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             }
             WalOperation::Checkpoint { lsn, timestamp } => {
                 buffer.push(5); // operation type
@@ -709,6 +731,56 @@ impl WriteAheadLog {
                         16,
                     )
                 }
+                6 => {
+                    // DeleteNode
+                    if offset + 8 > buffer.len() {
+                        break;
+                    }
+                    let node_id = NodeId::new(u64::from_le_bytes([
+                        buffer[offset],
+                        buffer[offset + 1],
+                        buffer[offset + 2],
+                        buffer[offset + 3],
+                        buffer[offset + 4],
+                        buffer[offset + 5],
+                        buffer[offset + 6],
+                        buffer[offset + 7],
+                    ]));
+                    offset += 8;
+
+                    (
+                        WalOperation::DeleteNode {
+                            node_id,
+                            temporal: BiTemporalInterval::current(timestamp),
+                        },
+                        8,
+                    )
+                }
+                7 => {
+                    // DeleteEdge
+                    if offset + 8 > buffer.len() {
+                        break;
+                    }
+                    let edge_id = EdgeId::new(u64::from_le_bytes([
+                        buffer[offset],
+                        buffer[offset + 1],
+                        buffer[offset + 2],
+                        buffer[offset + 3],
+                        buffer[offset + 4],
+                        buffer[offset + 5],
+                        buffer[offset + 6],
+                        buffer[offset + 7],
+                    ]));
+                    offset += 8;
+
+                    (
+                        WalOperation::DeleteEdge {
+                            edge_id,
+                            temporal: BiTemporalInterval::current(timestamp),
+                        },
+                        8,
+                    )
+                }
                 _ => {
                     // Unknown operation type, skip this entry
                     return Err(StorageError::CorruptedData(format!(
@@ -734,12 +806,23 @@ impl WriteAheadLog {
         Ok(entries)
     }
 
-    /// Flush all pending writes
+    /// Flush all pending writes and sync to disk
     pub fn flush(&mut self) -> Result<()> {
         if let Some(writer) = &mut self.writer {
+            // Step 1: Flush BufWriter buffer to OS
             writer
                 .flush()
-                .map_err(|e| StorageError::IoError(format!("Failed to flush WAL: {}", e)))?;
+                .map_err(|e| StorageError::IoError(format!("Failed to flush WAL buffer: {}", e)))?;
+
+            // Step 2: Force OS to sync data to disk (fsync)
+            // SAFETY: sync_data() ensures durability by forcing the OS to write buffered data to disk.
+            // This is critical for WAL correctness - without it, committed transactions could be lost
+            // on crash/power failure. We use sync_data() instead of sync_all() because we only need
+            // to sync file data, not metadata (faster).
+            writer
+                .get_mut() // Get underlying File from BufWriter
+                .sync_data()
+                .map_err(|e| StorageError::IoError(format!("Failed to fsync WAL: {}", e)))?;
         }
         Ok(())
     }
@@ -865,6 +948,148 @@ mod tests {
 
         // Should have rotated to multiple segments
         assert!(wal.current_segment > 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_delete_node_operation() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: false,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+
+        // Log a delete node operation
+        let operation = WalOperation::DeleteNode {
+            node_id: NodeId::new(42),
+            temporal: BiTemporalInterval::current(time::now()),
+        };
+
+        let lsn = wal.append(operation)?;
+        assert_eq!(lsn, LSN::initial());
+
+        // Flush to ensure it's written
+        wal.flush()?;
+
+        // Read it back
+        let entries = wal.read_from(LSN::initial())?;
+        assert_eq!(entries.len(), 1);
+
+        match &entries[0].operation {
+            WalOperation::DeleteNode { node_id, .. } => {
+                assert_eq!(node_id.as_u64(), 42);
+            }
+            _ => panic!("Expected DeleteNode operation"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_delete_edge_operation() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: false,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+
+        // Log a delete edge operation
+        let operation = WalOperation::DeleteEdge {
+            edge_id: EdgeId::new(99),
+            temporal: BiTemporalInterval::current(time::now()),
+        };
+
+        let lsn = wal.append(operation)?;
+        assert_eq!(lsn, LSN::initial());
+
+        // Flush to ensure it's written
+        wal.flush()?;
+
+        // Read it back
+        let entries = wal.read_from(LSN::initial())?;
+        assert_eq!(entries.len(), 1);
+
+        match &entries[0].operation {
+            WalOperation::DeleteEdge { edge_id, .. } => {
+                assert_eq!(edge_id.as_u64(), 99);
+            }
+            _ => panic!("Expected DeleteEdge operation"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_mixed_operations() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: false,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+
+        // Log a sequence of mixed operations
+        let ops = vec![
+            WalOperation::CreateNode {
+                node_id: NodeId::new(1),
+                label: "Person".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            },
+            WalOperation::CreateEdge {
+                edge_id: EdgeId::new(1),
+                source: NodeId::new(1),
+                target: NodeId::new(2),
+                label: "KNOWS".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            },
+            WalOperation::DeleteNode {
+                node_id: NodeId::new(3),
+                temporal: BiTemporalInterval::current(time::now()),
+            },
+            WalOperation::DeleteEdge {
+                edge_id: EdgeId::new(2),
+                temporal: BiTemporalInterval::current(time::now()),
+            },
+        ];
+
+        for op in ops {
+            wal.append(op)?;
+        }
+
+        wal.flush()?;
+
+        // Read all entries back
+        let entries = wal.read_from(LSN::initial())?;
+        assert_eq!(entries.len(), 4);
+
+        // Verify operation types
+        assert!(matches!(
+            entries[0].operation,
+            WalOperation::CreateNode { .. }
+        ));
+        assert!(matches!(
+            entries[1].operation,
+            WalOperation::CreateEdge { .. }
+        ));
+        assert!(matches!(
+            entries[2].operation,
+            WalOperation::DeleteNode { .. }
+        ));
+        assert!(matches!(
+            entries[3].operation,
+            WalOperation::DeleteEdge { .. }
+        ));
 
         Ok(())
     }

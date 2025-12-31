@@ -3,15 +3,20 @@
 //! This module provides the primary interface to the database, coordinating
 //! between current storage (fast path) and historical storage (temporal path).
 
+use crate::api::transaction::{
+    ReadTransaction, TxIdGenerator, TxVisibilityManager, WriteOps, WriteTransaction,
+};
 use crate::core::graph::{Edge, Node};
-use crate::core::id::{EdgeId, NodeId};
+use crate::core::id::{EdgeId, IdGenerator, NodeId};
 use crate::core::property::PropertyMap;
-use crate::core::temporal::{BiTemporalInterval, Timestamp, time};
+use crate::core::temporal::{Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
+use crate::storage::wal::{WalConfig, WriteAheadLog};
 use crate::utils::error::{Result, StorageError};
+use std::sync::{Arc, Mutex};
 
 /// Main GallifreyDB database.
 ///
@@ -19,14 +24,24 @@ use crate::utils::error::{Result, StorageError};
 /// It coordinates between current storage (for fast current-state queries)
 /// and historical storage (for temporal queries).
 pub struct GallifreyDB {
-    /// Current state storage (hot path)
-    current: CurrentStorage,
-    /// Historical version storage (temporal path)
-    historical: HistoricalStorage,
-    /// Temporal indexes for efficient time-based queries
-    temporal_indexes: TemporalIndexes,
-    /// Current logical timestamp for transaction time
-    current_timestamp: Timestamp,
+    /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
+    current: Arc<CurrentStorage>,
+    /// Historical version storage (temporal path) - Mutex-protected for write safety
+    historical: Arc<Mutex<HistoricalStorage>>,
+    /// Temporal indexes for efficient time-based queries - Mutex-protected for write safety
+    temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+    /// Write-Ahead Log for durability - Mutex-protected for write safety
+    wal: Arc<Mutex<WriteAheadLog>>,
+    /// Current logical timestamp for transaction time - Mutex-protected for thread-safe increment
+    current_timestamp: Arc<Mutex<Timestamp>>,
+    /// Transaction ID generator for MVCC
+    tx_id_gen: Arc<TxIdGenerator>,
+    /// Transaction visibility manager for Snapshot Isolation
+    visibility_manager: Arc<TxVisibilityManager>,
+    /// ID generators for nodes, edges, and versions (shared with transactions)
+    node_id_gen: Arc<Mutex<IdGenerator>>,
+    edge_id_gen: Arc<Mutex<IdGenerator>>,
+    version_id_gen: Arc<Mutex<IdGenerator>>,
 }
 
 impl GallifreyDB {
@@ -37,82 +52,162 @@ impl GallifreyDB {
 
     /// Create a new database with custom anchor configuration.
     pub fn with_config(config: AnchorConfig) -> Self {
+        // Create WAL with default config (can be made configurable later)
+        let wal = WriteAheadLog::new(WalConfig::default()).expect("Failed to create WAL");
+
         GallifreyDB {
-            current: CurrentStorage::new(),
-            historical: HistoricalStorage::with_config(config),
-            temporal_indexes: TemporalIndexes::new(),
-            current_timestamp: time::now(),
+            current: Arc::new(CurrentStorage::new()),
+            historical: Arc::new(Mutex::new(HistoricalStorage::with_config(config))),
+            temporal_indexes: Arc::new(Mutex::new(TemporalIndexes::new())),
+            wal: Arc::new(Mutex::new(wal)),
+            current_timestamp: Arc::new(Mutex::new(time::now())),
+            tx_id_gen: Arc::new(TxIdGenerator::new()),
+            visibility_manager: Arc::new(TxVisibilityManager::new()),
+            node_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
+            edge_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
+            version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
         }
+    }
+
+    /// Create a new read-only transaction.
+    ///
+    /// Read-only transactions are lightweight and have zero overhead:
+    /// - No write buffer
+    /// - No WAL logging
+    /// - Snapshot-based reads for consistency
+    /// - No commit overhead
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tx = db.read_transaction();
+    /// let node = tx.get_node(node_id)?;
+    /// // No commit needed - transaction is read-only
+    /// ```
+    pub fn read_transaction(&self) -> ReadTransaction {
+        let tx_id = self.tx_id_gen.next();
+        let snapshot_timestamp = *self.current_timestamp.lock().unwrap();
+
+        // Register as active
+        self.visibility_manager.register_active(tx_id);
+
+        // Capture snapshot
+        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+
+        ReadTransaction::new(
+            tx_id,
+            snapshot,
+            Arc::clone(&self.current),
+            Arc::clone(&self.visibility_manager),
+        )
+    }
+
+    /// Execute a read-only operation in a transaction.
+    ///
+    /// This is a closure-based API that automatically manages the transaction lifecycle.
+    /// The transaction is automatically cleaned up after the closure completes.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let name = db.read(|tx| {
+    ///     let node = tx.get_node(node_id)?;
+    ///     Ok(node.get_property("name").cloned())
+    /// })?;
+    /// ```
+    pub fn read<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&ReadTransaction) -> Result<T>,
+    {
+        let tx = self.read_transaction();
+        f(&tx)
+    }
+
+    /// Create a new write transaction.
+    ///
+    /// Write transactions provide full ACID guarantees:
+    /// - **Atomicity**: All-or-nothing commit via write buffering
+    /// - **Consistency**: Referential integrity validation before commit
+    /// - **Isolation**: Snapshot Isolation with write-write conflict detection
+    /// - **Durability**: WAL with fsync for true durability
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut tx = db.write_transaction();
+    /// let node_id = tx.create_node("Person", props)?;
+    /// tx.create_edge(node_id, other, "KNOWS", edge_props)?;
+    /// tx.commit()?;  // or tx.rollback()
+    /// ```
+    pub fn write_transaction(&self) -> WriteTransaction {
+        let tx_id = self.tx_id_gen.next();
+        let snapshot_timestamp = *self.current_timestamp.lock().unwrap();
+
+        // Register as active
+        self.visibility_manager.register_active(tx_id);
+
+        // Capture snapshot
+        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+
+        WriteTransaction::new(
+            tx_id,
+            snapshot,
+            Arc::clone(&self.current),
+            Arc::clone(&self.historical),
+            Arc::clone(&self.temporal_indexes),
+            Arc::clone(&self.wal),
+            Arc::clone(&self.current_timestamp),
+            Arc::clone(&self.visibility_manager),
+            Arc::clone(&self.node_id_gen),
+            Arc::clone(&self.edge_id_gen),
+            Arc::clone(&self.version_id_gen),
+        )
+    }
+
+    /// Execute a write operation in a transaction.
+    ///
+    /// This is a closure-based API that automatically manages the transaction lifecycle.
+    /// The transaction is automatically committed on Ok, or rolled back on Err.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let node_id = db.write(|tx| {
+    ///     let id = tx.create_node("Person", props)?;
+    ///     tx.create_edge(id, other, "KNOWS", edge_props)?;
+    ///     Ok(id)
+    /// })?;
+    /// ```
+    pub fn write<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut WriteTransaction) -> Result<T>,
+    {
+        let mut tx = self.write_transaction();
+        let result = f(&mut tx)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     /// Create a node with the given label and properties.
     ///
-    /// The node is created at the current timestamp in both valid and transaction time.
-    pub fn create_node(&mut self, label: &str, properties: PropertyMap) -> Result<NodeId> {
-        let timestamp = self.next_timestamp();
-        let temporal = BiTemporalInterval::current(timestamp);
-
-        // Create in current storage
-        let node_id = self.current.create_node(label, properties.clone())?;
-
-        // Get the version ID from the current node
-        let node = self.current.get_node(node_id)?;
-        let version_id = node.current_version;
-
-        // Store in historical storage
-        let label_interned = crate::core::interning::GLOBAL_INTERNER.intern(label);
-        self.historical.add_node_version(
-            node_id,
-            version_id,
-            temporal,
-            label_interned,
-            properties,
-        )?;
-
-        // Index in temporal indexes
-        self.temporal_indexes
-            .insert_node_version(node_id, version_id, temporal);
-
-        Ok(node_id)
+    /// This is a convenience method that internally uses a write transaction.
+    /// For multiple operations, prefer using `write()` or `write_transaction()`.
+    pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
+        self.write(|tx| tx.create_node(label, properties))
     }
 
     /// Create an edge between two nodes.
+    ///
+    /// This is a convenience method that internally uses a write transaction.
+    /// For multiple operations, prefer using `write()` or `write_transaction()`.
     pub fn create_edge(
-        &mut self,
+        &self,
         source: NodeId,
         target: NodeId,
         label: &str,
         properties: PropertyMap,
     ) -> Result<EdgeId> {
-        let timestamp = self.next_timestamp();
-        let temporal = BiTemporalInterval::current(timestamp);
-
-        // Create in current storage
-        let edge_id = self
-            .current
-            .create_edge(source, target, label, properties.clone())?;
-
-        // Get the version ID from the current edge
-        let edge = self.current.get_edge(edge_id)?;
-        let version_id = edge.current_version;
-
-        // Store in historical storage
-        let label_interned = crate::core::interning::GLOBAL_INTERNER.intern(label);
-        self.historical.add_edge_version(
-            edge_id,
-            version_id,
-            temporal,
-            label_interned,
-            source,
-            target,
-            properties,
-        )?;
-
-        // Index in temporal indexes
-        self.temporal_indexes
-            .insert_edge_version(edge_id, version_id, temporal);
-
-        Ok(edge_id)
+        self.write(|tx| tx.create_edge(source, target, label, properties))
     }
 
     /// Get the current state of a node.
@@ -151,20 +246,20 @@ impl GallifreyDB {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Node> {
+        let historical = self.historical.lock().unwrap();
+
         // Find the version valid at this time
-        let version_id = self
-            .historical
+        let version_id = historical
             .find_node_version_at_time(node_id, valid_time, transaction_time)
             .ok_or(StorageError::NodeNotFound(node_id))?;
 
         // Get the version
-        let version = self
-            .historical
+        let version = historical
             .get_node_version(version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
         // Reconstruct properties
-        let properties = self.historical.reconstruct_node_properties(version_id)?;
+        let properties = historical.reconstruct_node_properties(version_id)?;
 
         // Build node from version
         Ok(Node::new(
@@ -182,17 +277,17 @@ impl GallifreyDB {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Edge> {
-        let version_id = self
-            .historical
+        let historical = self.historical.lock().unwrap();
+
+        let version_id = historical
             .find_edge_version_at_time(edge_id, valid_time, transaction_time)
             .ok_or(StorageError::EdgeNotFound(edge_id))?;
 
-        let version = self
-            .historical
+        let version = historical
             .get_edge_version(version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        let properties = self.historical.reconstruct_edge_properties(version_id)?;
+        let properties = historical.reconstruct_edge_properties(version_id)?;
 
         Ok(Edge::new(
             version.edge_id,
@@ -230,14 +325,7 @@ impl GallifreyDB {
 
     /// Get statistics about the historical storage.
     pub fn historical_stats(&self) -> crate::storage::historical::HistoricalStats {
-        self.historical.stats()
-    }
-
-    /// Get the next timestamp and increment the counter.
-    fn next_timestamp(&mut self) -> Timestamp {
-        let ts = self.current_timestamp;
-        self.current_timestamp += 1;
-        ts
+        self.historical.lock().unwrap().stats()
     }
 }
 
@@ -250,11 +338,12 @@ impl Default for GallifreyDB {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::transaction::ReadOps;
     use crate::core::property::PropertyMapBuilder;
 
     #[test]
     fn test_create_node() {
-        let mut db = GallifreyDB::new();
+        let db = GallifreyDB::new();
 
         let props = PropertyMapBuilder::new()
             .insert("name", "Alice")
@@ -275,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_create_edge() {
-        let mut db = GallifreyDB::new();
+        let db = GallifreyDB::new();
 
         let alice = db
             .create_node("Person", PropertyMapBuilder::new().build())
@@ -302,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_time_travel_query() {
-        let mut db = GallifreyDB::new();
+        let db = GallifreyDB::new();
 
         // Create a node at time T1
         let props_v1 = PropertyMapBuilder::new()
@@ -311,7 +400,7 @@ mod tests {
             .build();
 
         let node_id = db.create_node("Person", props_v1).unwrap();
-        let t1 = db.current_timestamp - 1; // Timestamp when created
+        let t1 = *db.current_timestamp.lock().unwrap() - 1; // Timestamp when created
 
         // In a real implementation, we'd create a second version here with an update_node method
         // For now, just verify we can query at T1
@@ -333,7 +422,7 @@ mod tests {
 
     #[test]
     fn test_graph_traversal() {
-        let mut db = GallifreyDB::new();
+        let db = GallifreyDB::new();
 
         let n0 = db
             .create_node("Person", PropertyMapBuilder::new().build())
@@ -359,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_historical_stats() {
-        let mut db = GallifreyDB::new();
+        let db = GallifreyDB::new();
 
         db.create_node("Person", PropertyMapBuilder::new().build())
             .unwrap();
@@ -369,5 +458,239 @@ mod tests {
         let stats = db.historical_stats();
         assert_eq!(stats.total_node_versions, 2);
         assert_eq!(stats.node_anchor_count, 2); // First versions are always anchors
+    }
+
+    // ==================== Transaction API Tests ====================
+
+    #[test]
+    fn test_closure_based_write_api() {
+        let db = GallifreyDB::new();
+
+        // Use closure-based API for multiple operations
+        let (node_id, edge_id) = db
+            .write(|tx| {
+                let n1 = tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )?;
+                let n2 = tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Bob").build(),
+                )?;
+                let e = tx.create_edge(
+                    n1,
+                    n2,
+                    "KNOWS",
+                    PropertyMapBuilder::new().insert("since", 2024i64).build(),
+                )?;
+                Ok((n1, e))
+            })
+            .unwrap();
+
+        // Verify changes are visible
+        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.edge_count(), 1);
+
+        let node = db.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+
+        let edge = db.get_edge(edge_id).unwrap();
+        assert_eq!(edge.source, node_id);
+    }
+
+    #[test]
+    fn test_closure_based_read_api() {
+        let db = GallifreyDB::new();
+
+        let node_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Charlie").build(),
+            )
+            .unwrap();
+
+        // Use closure-based read API
+        let name = db
+            .read(|tx| {
+                let node = tx.get_node(node_id)?;
+                Ok(node
+                    .get_property("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()))
+            })
+            .unwrap();
+
+        assert_eq!(name, Some("Charlie".to_string()));
+    }
+
+    #[test]
+    fn test_explicit_write_transaction() {
+        let db = GallifreyDB::new();
+
+        let mut tx = db.write_transaction();
+        let n1 = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "David").build(),
+            )
+            .unwrap();
+        let n2 = tx
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Eve").build(),
+            )
+            .unwrap();
+        tx.create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Changes not visible before commit
+        assert_eq!(db.node_count(), 0);
+
+        // Commit
+        tx.commit().unwrap();
+
+        // Now visible
+        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    #[test]
+    fn test_explicit_read_transaction() {
+        let db = GallifreyDB::new();
+
+        let node_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("age", 42i64).build(),
+            )
+            .unwrap();
+
+        let tx = db.read_transaction();
+        let node = tx.get_node(node_id).unwrap();
+        assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(42));
+
+        // Read transactions don't need commit
+    }
+
+    #[test]
+    fn test_transaction_atomicity() {
+        let db = GallifreyDB::new();
+
+        // Create a valid node first
+        let valid_node = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Try to create multiple operations, one of which will fail
+        let result = db.write(|tx| {
+            tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            // This should fail validation (non-existent target)
+            tx.create_edge(
+                valid_node,
+                NodeId::new(9999),
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+            )?;
+            Ok(())
+        });
+
+        // Transaction should fail
+        assert!(result.is_err());
+
+        // No partial changes should be visible (atomicity)
+        // We started with 1 node, should still have 1 node
+        assert_eq!(db.node_count(), 1);
+        assert_eq!(db.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_transaction_rollback_on_error() {
+        let db = GallifreyDB::new();
+
+        // Closure returns an error - should auto-rollback
+        let result: Result<()> = db.write(|tx| {
+            tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            tx.create_node("Person", PropertyMapBuilder::new().build())?;
+            // Manually return an error
+            Err(crate::utils::error::Error::Storage(
+                crate::utils::error::StorageError::InconsistentState {
+                    reason: "test error".to_string(),
+                },
+            ))
+        });
+
+        assert!(result.is_err());
+
+        // All changes rolled back
+        assert_eq!(db.node_count(), 0);
+    }
+
+    #[test]
+    fn test_multiple_transactions() {
+        let db = GallifreyDB::new();
+
+        // Transaction 1
+        let n1 = db
+            .write(|tx| tx.create_node("Person", PropertyMapBuilder::new().build()))
+            .unwrap();
+
+        // Transaction 2
+        let n2 = db
+            .write(|tx| tx.create_node("Person", PropertyMapBuilder::new().build()))
+            .unwrap();
+
+        // Transaction 3
+        db.write(|tx| tx.create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build()))
+            .unwrap();
+
+        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.edge_count(), 1);
+    }
+
+    #[test]
+    fn test_snapshot_isolation() {
+        let db = GallifreyDB::new();
+
+        let node_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("version", 1i64).build(),
+            )
+            .unwrap();
+
+        // Start a read transaction - captures snapshot
+        let tx1 = db.read_transaction();
+        let node_v1 = tx1.get_node(node_id).unwrap();
+        assert_eq!(
+            node_v1.get_property("version").and_then(|v| v.as_int()),
+            Some(1)
+        );
+
+        // Another write commits a change (creates a new node)
+        let new_node_id = db
+            .write(|tx| {
+                tx.create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("version", 2i64).build(),
+                )
+            })
+            .unwrap();
+
+        // Snapshot Isolation: tx1 should NOT see the new node
+        // because it was created and committed after tx1's snapshot
+        assert!(tx1.get_node(new_node_id).is_err());
+
+        // Verify tx1 still sees the original node
+        let node_v1_again = tx1.get_node(node_id).unwrap();
+        assert_eq!(
+            node_v1_again
+                .get_property("version")
+                .and_then(|v| v.as_int()),
+            Some(1)
+        );
     }
 }

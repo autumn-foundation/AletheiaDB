@@ -9,7 +9,7 @@ use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Concurrent indexes for current-state graph queries.
 ///
@@ -20,10 +20,10 @@ pub struct CurrentIndexes {
     nodes: DashMap<NodeId, Node>,
     /// Edge ID → Edge (O(1) lookup)
     edges: DashMap<EdgeId, Edge>,
-    /// Outgoing edges: source node → adjacency list
-    outgoing: Arc<AdjacencyIndex>,
-    /// Incoming edges: target node → adjacency list
-    incoming: Arc<AdjacencyIndex>,
+    /// Outgoing edges: source node → adjacency list (RwLock for rebuild)
+    outgoing: Arc<RwLock<AdjacencyIndex>>,
+    /// Incoming edges: target node → adjacency list (RwLock for rebuild)
+    incoming: Arc<RwLock<AdjacencyIndex>>,
 }
 
 impl CurrentIndexes {
@@ -32,8 +32,8 @@ impl CurrentIndexes {
         CurrentIndexes {
             nodes: DashMap::new(),
             edges: DashMap::new(),
-            outgoing: Arc::new(AdjacencyIndex::new()),
-            incoming: Arc::new(AdjacencyIndex::new()),
+            outgoing: Arc::new(RwLock::new(AdjacencyIndex::new())),
+            incoming: Arc::new(RwLock::new(AdjacencyIndex::new())),
         }
     }
 
@@ -96,18 +96,20 @@ impl CurrentIndexes {
 
     /// Get outgoing edges for a node.
     ///
-    /// Returns the adjacency list for efficient traversal.
+    /// Returns a copy of the adjacency list for traversal.
     #[inline]
-    pub fn get_outgoing(&self, source: NodeId) -> &[AdjacencyEntry] {
-        self.outgoing.get_adjacency(source)
+    pub fn get_outgoing(&self, source: NodeId) -> Vec<AdjacencyEntry> {
+        let outgoing = self.outgoing.read().unwrap();
+        outgoing.get_adjacency(source).to_vec()
     }
 
     /// Get incoming edges for a node.
     ///
-    /// Returns the adjacency list for reverse traversal.
+    /// Returns a copy of the adjacency list for reverse traversal.
     #[inline]
-    pub fn get_incoming(&self, target: NodeId) -> &[AdjacencyEntry] {
-        self.incoming.get_adjacency(target)
+    pub fn get_incoming(&self, target: NodeId) -> Vec<AdjacencyEntry> {
+        let incoming = self.incoming.read().unwrap();
+        incoming.get_adjacency(target).to_vec()
     }
 
     /// Get outgoing edges with a specific label.
@@ -115,8 +117,12 @@ impl CurrentIndexes {
         &self,
         source: NodeId,
         label: InternedString,
-    ) -> impl Iterator<Item = &AdjacencyEntry> {
-        self.outgoing.get_adjacency_with_label(source, label)
+    ) -> Vec<AdjacencyEntry> {
+        let outgoing = self.outgoing.read().unwrap();
+        outgoing
+            .get_adjacency_with_label(source, label)
+            .copied()
+            .collect()
     }
 
     /// Get incoming edges with a specific label.
@@ -124,27 +130,33 @@ impl CurrentIndexes {
         &self,
         target: NodeId,
         label: InternedString,
-    ) -> impl Iterator<Item = &AdjacencyEntry> {
-        self.incoming.get_adjacency_with_label(target, label)
+    ) -> Vec<AdjacencyEntry> {
+        let incoming = self.incoming.read().unwrap();
+        incoming
+            .get_adjacency_with_label(target, label)
+            .copied()
+            .collect()
     }
 
     /// Get the out-degree of a node (number of outgoing edges).
     #[inline]
     pub fn out_degree(&self, node: NodeId) -> usize {
-        self.outgoing.degree(node)
+        let outgoing = self.outgoing.read().unwrap();
+        outgoing.degree(node)
     }
 
     /// Get the in-degree of a node (number of incoming edges).
     #[inline]
     pub fn in_degree(&self, node: NodeId) -> usize {
-        self.incoming.degree(node)
+        let incoming = self.incoming.read().unwrap();
+        incoming.degree(node)
     }
 
     /// Rebuild adjacency indexes from current edges.
     ///
     /// This should be called after batch edge insertions/deletions.
     /// It's more efficient to rebuild than to incrementally update for large changes.
-    pub fn rebuild_adjacency(&mut self) {
+    pub fn rebuild_adjacency(&self) {
         let mut outgoing_edges = Vec::new();
         let mut incoming_edges = Vec::new();
 
@@ -155,9 +167,9 @@ impl CurrentIndexes {
             incoming_edges.push((edge.target, edge.source, edge.id, edge.label));
         }
 
-        // Rebuild indexes
-        self.outgoing = Arc::new(AdjacencyIndex::build(outgoing_edges));
-        self.incoming = Arc::new(AdjacencyIndex::build(incoming_edges));
+        // Rebuild indexes with write locks
+        *self.outgoing.write().unwrap() = AdjacencyIndex::build(outgoing_edges);
+        *self.incoming.write().unwrap() = AdjacencyIndex::build(incoming_edges);
     }
 
     /// Iterate over all nodes.
@@ -255,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_adjacency_rebuild() {
-        let mut indexes = CurrentIndexes::new();
+        let indexes = CurrentIndexes::new();
 
         // Add nodes
         indexes.insert_node(create_test_node(0, "Person"));
@@ -286,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_labeled_traversal() {
-        let mut indexes = CurrentIndexes::new();
+        let indexes = CurrentIndexes::new();
 
         let knows = GLOBAL_INTERNER.intern("KNOWS");
         let follows = GLOBAL_INTERNER.intern("FOLLOWS");
@@ -299,15 +311,11 @@ mod tests {
         indexes.rebuild_adjacency();
 
         // Get only KNOWS edges
-        let knows_edges: Vec<_> = indexes
-            .get_outgoing_with_label(NodeId::new(0), knows)
-            .collect();
+        let knows_edges = indexes.get_outgoing_with_label(NodeId::new(0), knows);
         assert_eq!(knows_edges.len(), 2);
 
         // Get only FOLLOWS edges
-        let follows_edges: Vec<_> = indexes
-            .get_outgoing_with_label(NodeId::new(0), follows)
-            .collect();
+        let follows_edges = indexes.get_outgoing_with_label(NodeId::new(0), follows);
         assert_eq!(follows_edges.len(), 1);
     }
 
