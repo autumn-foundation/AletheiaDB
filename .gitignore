@@ -1,0 +1,40 @@
+# Rust build artifacts
+/target
+Cargo.lock
+
+# Coverage reports
+/coverage
+/lcov.info
+*.profdata
+*.profraw
+
+# Profiling data
+/flamegraph.svg
+/perf.data
+/perf.data.old
+*.trace
+
+# Tracy profiling
+/tracy_captures
+
+# Benchmark results
+/target/criterion
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test artifacts
+*.log
+/test_data
+
+# Backup files
+*.bak
+*.backup
+
+settings.local.json
+nul

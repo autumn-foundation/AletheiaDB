@@ -1,0 +1,74 @@
+[package]
+name = "gallifreydb"
+version = "0.1.0"
+edition = "2024"
+authors = ["GallifreyDB Contributors"]
+description = "A high-performance bi-temporal graph database for LLM integration"
+license = "MIT"
+repository = "https://github.com/yourusername/gallifreydb"
+keywords = ["database", "graph", "temporal", "bitemporal", "llm"]
+categories = ["database-implementations"]
+
+[dependencies]
+dashmap = "6.1"
+
+# Optional Tracy profiling support
+tracy-client = { version = "0.17", optional = true, default-features = false }
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1.4"
+
+[features]
+# Enable Tracy profiling (use with: cargo build --release --features tracy)
+tracy = ["tracy-client/enable"]
+
+# Default features
+default = []
+
+[profile.dev]
+# Fast compilation for development
+opt-level = 0
+debug = true
+
+[profile.test]
+# Optimize tests a bit for faster execution
+opt-level = 1
+
+[profile.release]
+# Maximum optimization for production
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = false  # Keep symbols for profiling
+
+[profile.bench]
+# Benchmark profile
+inherits = "release"
+debug = true  # Enable debug symbols for profiling
+
+# Coverage configuration for llvm-cov
+[package.metadata.llvm-cov]
+# Fail if coverage drops below these thresholds
+fail-under-lines = 80.0
+fail-under-functions = 75.0
+fail-under-branches = 70.0
+
+# Exclude certain files from coverage
+exclude = [
+    "src/main.rs",
+    "benches/*",
+    "tests/*",
+]
+
+[[bench]]
+name = "current_state"
+harness = false
+path = "benches/current_state.rs"
+required-features = []
+
+[[bench]]
+name = "gallifreydb"
+harness = false
+path = "benches/gallifreydb.rs"
+required-features = []

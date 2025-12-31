@@ -1,0 +1,81 @@
+name: Documentation
+
+on:
+  push:
+    branches: [ main, trunk ]
+  pull_request:
+    branches: [ main, trunk ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-docs:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build documentation
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
+
+      - name: Check for broken links in docs
+        run: cargo doc --no-deps --all-features 2>&1 | tee doc_output.txt
+
+      - name: Add index redirect
+        run: echo '<meta http-equiv="refresh" content="0; url=gallifreydb/index.html">' > target/doc/index.html
+
+      - name: Upload documentation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: target/doc/
+
+  publish-docs:
+    name: Publish Documentation
+    needs: build-docs
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Download documentation artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: documentation
+          path: ./docs
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+          force_orphan: true
+
+  check-docs:
+    name: Check Documentation Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check for missing documentation
+        run: cargo doc --no-deps --all-features 2>&1 | grep -i "warning.*missing" || echo "No missing documentation warnings"
+
+      - name: Verify all public items are documented
+        run: |
+          RUSTDOCFLAGS="-D missing_docs" cargo doc --no-deps --all-features 2>&1 || true

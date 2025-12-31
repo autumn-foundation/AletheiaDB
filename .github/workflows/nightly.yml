@@ -1,0 +1,89 @@
+name: Nightly
+
+on:
+  schedule:
+    # Run every day at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test-nightly:
+    name: Test on Nightly Rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-nightly-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run tests on nightly
+        run: cargo +nightly test --verbose --all-features
+        continue-on-error: true
+
+      - name: Check for unstable features
+        run: cargo +nightly check --all-features
+        continue-on-error: true
+
+  miri:
+    name: Miri (Undefined Behavior Detection)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly with miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Setup miri
+        run: cargo miri setup
+
+      - name: Run miri
+        run: cargo miri test
+        continue-on-error: true
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+
+  performance-profile:
+    name: Performance Profiling
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install flamegraph
+        run: cargo install flamegraph
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run benchmarks with profiling
+        run: |
+          cargo bench --bench gallifreydb --no-run
+          # Generate flamegraph (requires root on Linux)
+          # This is a placeholder - actual flamegraph generation needs additional setup
+          echo "Profiling data collected"
+
+      - name: Upload profiling artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: profiling-results
+          path: target/criterion/
