@@ -8,11 +8,57 @@
 //! - Anchors: Full snapshots of state (created periodically)
 //! - Deltas: Only the changed properties since the previous version
 
+use crate::api::transaction::types::TxId;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::{PropertyMap, PropertyValue};
-use crate::core::temporal::BiTemporalInterval;
+use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
+
+/// Metadata about version creation for Snapshot Isolation.
+///
+/// This tracks which transaction created a version and when it was committed,
+/// enabling proper visibility checking for Snapshot Isolation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionMetadata {
+    /// Transaction that created this version
+    pub created_by_tx: TxId,
+
+    /// When this version was committed (None if uncommitted)
+    pub commit_timestamp: Option<Timestamp>,
+}
+
+impl VersionMetadata {
+    /// Create new version metadata for a committed version.
+    pub fn new(created_by_tx: TxId, commit_timestamp: Timestamp) -> Self {
+        VersionMetadata {
+            created_by_tx,
+            commit_timestamp: Some(commit_timestamp),
+        }
+    }
+
+    /// Create metadata for an uncommitted version.
+    pub fn uncommitted(created_by_tx: TxId) -> Self {
+        VersionMetadata {
+            created_by_tx,
+            commit_timestamp: None,
+        }
+    }
+
+    /// Create default metadata for existing data (migration helper).
+    pub fn default_for_existing() -> Self {
+        VersionMetadata {
+            created_by_tx: TxId::new(0),
+            commit_timestamp: Some(0),
+        }
+    }
+}
+
+impl Default for VersionMetadata {
+    fn default() -> Self {
+        Self::default_for_existing()
+    }
+}
 
 /// Configuration for anchor creation strategy.
 #[derive(Debug, Clone)]

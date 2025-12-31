@@ -806,12 +806,23 @@ impl WriteAheadLog {
         Ok(entries)
     }
 
-    /// Flush all pending writes
+    /// Flush all pending writes and sync to disk
     pub fn flush(&mut self) -> Result<()> {
         if let Some(writer) = &mut self.writer {
+            // Step 1: Flush BufWriter buffer to OS
             writer
                 .flush()
-                .map_err(|e| StorageError::IoError(format!("Failed to flush WAL: {}", e)))?;
+                .map_err(|e| StorageError::IoError(format!("Failed to flush WAL buffer: {}", e)))?;
+
+            // Step 2: Force OS to sync data to disk (fsync)
+            // SAFETY: sync_data() ensures durability by forcing the OS to write buffered data to disk.
+            // This is critical for WAL correctness - without it, committed transactions could be lost
+            // on crash/power failure. We use sync_data() instead of sync_all() because we only need
+            // to sync file data, not metadata (faster).
+            writer
+                .get_mut() // Get underlying File from BufWriter
+                .sync_data()
+                .map_err(|e| StorageError::IoError(format!("Failed to fsync WAL: {}", e)))?;
         }
         Ok(())
     }

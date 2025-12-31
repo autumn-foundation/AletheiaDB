@@ -17,5 +17,5 @@ pub mod wal;
 pub use current::{CurrentStats, CurrentStorage};
 pub use historical::{HistoricalStats, HistoricalStorage};
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
-pub use version::{AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData};
+pub use version::{AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData, VersionMetadata};
 pub use wal::{LSN, WalConfig, WalEntry, WalOperation, WriteAheadLog};

@@ -7,6 +7,7 @@
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
+use crate::storage::VersionMetadata;
 
 /// A node in the current state of the graph.
 ///
@@ -22,6 +23,8 @@ pub struct Node {
     pub properties: PropertyMap,
     /// ID of the current version in the historical storage.
     pub current_version: VersionId,
+    /// Transaction metadata for Snapshot Isolation.
+    pub metadata: VersionMetadata,
 }
 
 impl Node {
@@ -37,6 +40,24 @@ impl Node {
             label,
             properties,
             current_version,
+            metadata: VersionMetadata::default(),
+        }
+    }
+
+    /// Create a new node with explicit metadata (for transactions).
+    pub fn with_metadata(
+        id: NodeId,
+        label: InternedString,
+        properties: PropertyMap,
+        current_version: VersionId,
+        metadata: VersionMetadata,
+    ) -> Self {
+        Node {
+            id,
+            label,
+            properties,
+            current_version,
+            metadata,
         }
     }
 
@@ -71,6 +92,8 @@ pub struct Edge {
     pub properties: PropertyMap,
     /// ID of the current version in the historical storage.
     pub current_version: VersionId,
+    /// Transaction metadata for Snapshot Isolation.
+    pub metadata: VersionMetadata,
 }
 
 impl Edge {
@@ -90,6 +113,28 @@ impl Edge {
             target,
             properties,
             current_version,
+            metadata: VersionMetadata::default(),
+        }
+    }
+
+    /// Create a new edge with explicit metadata (for transactions).
+    pub fn with_metadata(
+        id: EdgeId,
+        label: InternedString,
+        source: NodeId,
+        target: NodeId,
+        properties: PropertyMap,
+        current_version: VersionId,
+        metadata: VersionMetadata,
+    ) -> Self {
+        Edge {
+            id,
+            label,
+            source,
+            target,
+            properties,
+            current_version,
+            metadata,
         }
     }
 

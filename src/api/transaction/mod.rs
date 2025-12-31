@@ -1,7 +1,7 @@
 //! Transaction support for GallifreyDB
 //!
 //! This module provides MVCC (Multi-Version Concurrency Control) transactions
-//! with Read Committed isolation level.
+//! with Snapshot Isolation level.
 //!
 //! # Transaction Types
 //!
@@ -36,11 +36,13 @@
 
 pub mod read_tx;
 pub mod types;
+pub mod visibility;
 pub mod write_buffer;
 pub mod write_tx;
 
 pub use read_tx::ReadTransaction;
 pub use types::{TxId, TxIdGenerator, TxMetadata, TxState};
+pub use visibility::{TransactionSnapshot, TxVisibilityManager};
 pub use write_buffer::{BufferedWrite, WriteBuffer};
 pub use write_tx::WriteTransaction;
 
