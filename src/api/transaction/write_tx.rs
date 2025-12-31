@@ -1456,4 +1456,174 @@ mod tests {
         // Read-your-writes: should NOT see the deleted node
         assert!(tx.get_node(node_id).is_err());
     }
+
+    #[test]
+    fn test_empty_transaction_commit() {
+        let (tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Commit empty transaction (no operations buffered)
+        // This should not panic when rebuild_adjacency() is called
+        tx.commit().unwrap();
+
+        // Verify storage is still in valid state
+        assert_eq!(current.node_count(), 0);
+        assert_eq!(current.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_empty_transaction_with_only_node_operations() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create only nodes (no edges)
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        tx.create_node("Person", props).unwrap();
+
+        // Commit - should call rebuild_adjacency() with empty edge set
+        tx.commit().unwrap();
+
+        // Verify node was created and adjacency is valid
+        assert_eq!(current.node_count(), 1);
+        assert_eq!(current.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_interleaved_create_update_delete_operations() {
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+
+        // Create WAL with temp directory for tests
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: false, // Faster for tests
+            ..Default::default()
+        };
+        let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
+
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let tx_id_gen = TxIdGenerator::new();
+
+        // Create initial transaction to set up nodes and one edge
+        let mut tx1 = WriteTransaction::new(
+            tx_id_gen.next(),
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+        );
+
+        let props = PropertyMapBuilder::new().build();
+        let node1 = tx1.create_node("Person", props.clone()).unwrap();
+        let node2 = tx1.create_node("Person", props.clone()).unwrap();
+        let node3 = tx1.create_node("Person", props.clone()).unwrap();
+
+        let edge_props = PropertyMapBuilder::new().insert("weight", 5i64).build();
+        let edge1 = tx1.create_edge(node1, node2, "KNOWS", edge_props).unwrap();
+
+        tx1.commit().unwrap();
+
+        // Verify initial state
+        assert_eq!(current.edge_count(), 1);
+
+        // Create second transaction with interleaved operations
+        let mut tx2 = WriteTransaction::new(
+            tx_id_gen.next(),
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+        );
+
+        // 1. Create new edge
+        tx2.create_edge(
+            node2,
+            node3,
+            "FOLLOWS",
+            PropertyMapBuilder::new().insert("weight", 8i64).build(),
+        )
+        .unwrap();
+
+        // 2. Update existing edge
+        tx2.update_edge(
+            edge1,
+            PropertyMapBuilder::new().insert("weight", 7i64).build(),
+        )
+        .unwrap();
+
+        // 3. Create another edge
+        tx2.create_edge(node1, node3, "LIKES", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Commit all operations
+        tx2.commit().unwrap();
+
+        // After commit: verify final state
+        // edge1 (updated) + 2 new edges = 3 edges total
+        assert_eq!(current.edge_count(), 3);
+
+        // Verify edge1 was updated
+        let updated_edge = current.get_edge(edge1).unwrap();
+        assert_eq!(
+            updated_edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(7)
+        );
+
+        // Verify adjacency is correct after rebuild
+        assert_eq!(current.out_degree(node1), 2); // KNOWS and LIKES
+        assert_eq!(current.out_degree(node2), 1); // FOLLOWS
+        assert_eq!(current.in_degree(node3), 2); // receives FOLLOWS and LIKES
+    }
+
+    #[test]
+    fn test_batch_edge_operations_rebuild_once() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes
+        let mut nodes = Vec::new();
+        for i in 0..100 {
+            let node = tx
+                .create_node(
+                    "Node",
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                )
+                .unwrap();
+            nodes.push(node);
+        }
+
+        // Create 99 edges
+        for i in 0..99 {
+            tx.create_edge(
+                nodes[i],
+                nodes[i + 1],
+                "CONNECTS",
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+        }
+
+        // Commit should rebuild adjacency only once
+        tx.commit().unwrap();
+
+        // Verify all edges are in adjacency index
+        assert_eq!(current.edge_count(), 99);
+        for i in 0..99 {
+            assert_eq!(current.out_degree(nodes[i]), 1);
+            assert_eq!(current.in_degree(nodes[i + 1]), 1);
+        }
+    }
 }

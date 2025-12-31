@@ -320,6 +320,122 @@ fn bench_batch_edge_deletions(c: &mut Criterion) {
     });
 }
 
+/// Benchmark edge insertions with pre-populated graph (at-scale performance).
+/// Tests how adjacency rebuild performs when the graph already has existing edges.
+fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_insertions_prepopulated");
+
+    // Test adding edges to graphs of different sizes
+    for existing_edges in [1000, 10000] {
+        group.bench_function(
+            format!("add_1000_to_{}_existing", existing_edges),
+            |b| {
+                b.iter_batched(
+                    || {
+                        // Setup: create DB with existing edges
+                        let db = GallifreyDB::new();
+
+                        // Pre-populate with existing edges
+                        db.write(|tx| {
+                            let mut nodes = Vec::new();
+                            for i in 0..existing_edges {
+                                let node = tx.create_node(
+                                    "Node",
+                                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                                )?;
+                                nodes.push(node);
+                            }
+
+                            for i in 0..(existing_edges - 1) {
+                                tx.create_edge(
+                                    nodes[i],
+                                    nodes[i + 1],
+                                    "EXISTING",
+                                    PropertyMapBuilder::new().build(),
+                                )?;
+                            }
+
+                            Ok(())
+                        })
+                        .unwrap();
+
+                        db
+                    },
+                    |db| {
+                        // Add 1000 new edges to existing graph
+                        db.write(|tx| {
+                            let mut new_nodes = Vec::new();
+                            for i in 0..1001 {
+                                let node = tx.create_node(
+                                    "NewNode",
+                                    PropertyMapBuilder::new()
+                                        .insert("id", (i + 100000) as i64)
+                                        .build(),
+                                )?;
+                                new_nodes.push(node);
+                            }
+
+                            for i in 0..1000 {
+                                tx.create_edge(
+                                    new_nodes[i],
+                                    new_nodes[i + 1],
+                                    "NEW",
+                                    PropertyMapBuilder::new().build(),
+                                )?;
+                            }
+
+                            Ok(())
+                        })
+                        .unwrap();
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark concurrent read operations during adjacency rebuild.
+/// This tests the impact of rebuild on read performance.
+fn bench_read_during_rebuild(c: &mut Criterion) {
+    // Pre-populate a database with 10K edges
+    let db = GallifreyDB::new();
+    let node_ids: Vec<_> = db
+        .write(|tx| {
+            let mut nodes = Vec::new();
+            for i in 0..10000 {
+                let node = tx.create_node(
+                    "Node",
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                )?;
+                nodes.push(node);
+            }
+
+            for i in 0..9999 {
+                tx.create_edge(
+                    nodes[i],
+                    nodes[i + 1],
+                    "CONNECTS",
+                    PropertyMapBuilder::new().build(),
+                )?;
+            }
+
+            Ok(nodes)
+        })
+        .unwrap();
+
+    c.bench_function("read_traversal_existing_graph", |b| {
+        b.iter(|| {
+            // Perform graph traversal
+            for node_id in &node_ids[..100] {
+                let _ = db.get_outgoing_edges(black_box(*node_id));
+            }
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_read_transaction_creation,
@@ -334,6 +450,8 @@ criterion_group!(
     bench_batch_edge_insertions,
     bench_batch_edge_updates,
     bench_batch_edge_deletions,
+    bench_batch_insertions_with_prepopulated_graph,
+    bench_read_during_rebuild,
 );
 
 criterion_main!(benches);

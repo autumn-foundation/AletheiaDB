@@ -188,6 +188,24 @@ impl CurrentStorage {
     ///
     /// This should be called after batch edge operations to update the
     /// adjacency indexes for efficient graph traversal.
+    ///
+    /// # Concurrency Safety
+    ///
+    /// This method is safe to call concurrently with read operations:
+    /// - Uses `RwLock` on adjacency indexes for safe concurrent access
+    /// - Readers can continue traversing old indexes while rebuild occurs
+    /// - New index is swapped in atomically when rebuild completes
+    /// - No stale reads: readers either see old (consistent) or new (consistent) state
+    ///
+    /// However, concurrent writes should be serialized at a higher level
+    /// (e.g., through transaction isolation) to prevent race conditions.
+    ///
+    /// # Performance
+    ///
+    /// Complexity: O(E log E) where E is the total number of edges.
+    /// This operation acquires a write lock, which will block concurrent
+    /// readers for the duration of the rebuild (~microseconds for small graphs,
+    /// ~milliseconds for graphs with 10K+ edges).
     pub fn rebuild_adjacency(&self) {
         self.indexes.rebuild_adjacency();
     }
