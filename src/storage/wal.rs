@@ -23,6 +23,16 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+/// Magic bytes identifying a GallifreyDB WAL segment file.
+const WAL_MAGIC: [u8; 4] = *b"GWAL";
+
+/// Current WAL format version.
+/// Version 2: Full serialization of properties and temporal intervals.
+const WAL_VERSION: u8 = 2;
+
+/// Size of the WAL segment header (magic + version).
+const WAL_HEADER_SIZE: usize = 5;
+
 /// Log Sequence Number - monotonically increasing identifier for WAL entries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LSN(pub u64);
@@ -230,8 +240,23 @@ impl WriteAheadLog {
             StorageError::IoError(format!("Failed to get WAL segment metadata: {}", e))
         })?;
 
-        self.current_size = metadata.len() as usize;
-        self.writer = Some(BufWriter::new(file));
+        let file_size = metadata.len() as usize;
+        let mut writer = BufWriter::new(file);
+
+        // Write header for new segments
+        if file_size == 0 {
+            writer
+                .write_all(&WAL_MAGIC)
+                .map_err(|e| StorageError::IoError(format!("Failed to write WAL magic: {}", e)))?;
+            writer.write_all(&[WAL_VERSION]).map_err(|e| {
+                StorageError::IoError(format!("Failed to write WAL version: {}", e))
+            })?;
+            self.current_size = WAL_HEADER_SIZE;
+        } else {
+            self.current_size = file_size;
+        }
+
+        self.writer = Some(writer);
 
         Ok(())
     }
@@ -337,20 +362,28 @@ impl WriteAheadLog {
         let checksum_offset = buffer.len();
         buffer.extend_from_slice(&[0u8; 4]);
 
-        // Write operation type and data (simplified)
+        // Write operation type and data with full serialization
         match &entry.operation {
-            WalOperation::CreateNode { node_id, label, .. } => {
+            WalOperation::CreateNode {
+                node_id,
+                label,
+                properties,
+                temporal,
+            } => {
                 buffer.push(1); // operation type
                 buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
                 buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(label.as_bytes());
+                properties.serialize_into(&mut buffer);
+                temporal.serialize_into(&mut buffer);
             }
             WalOperation::CreateEdge {
                 edge_id,
                 source,
                 target,
                 label,
-                ..
+                properties,
+                temporal,
             } => {
                 buffer.push(2); // operation type
                 buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
@@ -358,32 +391,48 @@ impl WriteAheadLog {
                 buffer.extend_from_slice(&target.as_u64().to_le_bytes());
                 buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(label.as_bytes());
+                properties.serialize_into(&mut buffer);
+                temporal.serialize_into(&mut buffer);
             }
             WalOperation::UpdateNode {
                 node_id,
                 version_id,
-                ..
+                label,
+                properties,
+                temporal,
             } => {
                 buffer.push(3); // operation type
                 buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
                 buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(label.as_bytes());
+                properties.serialize_into(&mut buffer);
+                temporal.serialize_into(&mut buffer);
             }
             WalOperation::UpdateEdge {
                 edge_id,
                 version_id,
-                ..
+                label,
+                properties,
+                temporal,
             } => {
                 buffer.push(4); // operation type
                 buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
                 buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(label.as_bytes());
+                properties.serialize_into(&mut buffer);
+                temporal.serialize_into(&mut buffer);
             }
-            WalOperation::DeleteNode { node_id, .. } => {
+            WalOperation::DeleteNode { node_id, temporal } => {
                 buffer.push(6); // operation type
                 buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+                temporal.serialize_into(&mut buffer);
             }
-            WalOperation::DeleteEdge { edge_id, .. } => {
+            WalOperation::DeleteEdge { edge_id, temporal } => {
                 buffer.push(7); // operation type
                 buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+                temporal.serialize_into(&mut buffer);
             }
             WalOperation::Checkpoint { lsn, timestamp } => {
                 buffer.push(5); // operation type
@@ -453,7 +502,31 @@ impl WriteAheadLog {
             .read_to_end(&mut buffer)
             .map_err(|e| StorageError::IoError(format!("Failed to read WAL segment: {}", e)))?;
 
-        let mut offset = 0;
+        // Validate WAL header
+        if buffer.len() < WAL_HEADER_SIZE {
+            return Ok(Vec::new()); // Empty or invalid segment
+        }
+
+        // Check magic bytes
+        if buffer[0..4] != WAL_MAGIC {
+            return Err(StorageError::CorruptedData(
+                "Invalid WAL segment: missing magic bytes".to_string(),
+            )
+            .into());
+        }
+
+        // Check version
+        let version = buffer[4];
+        if version != WAL_VERSION {
+            return Err(StorageError::CorruptedData(format!(
+                "Unsupported WAL version: {} (expected {})",
+                version, WAL_VERSION
+            ))
+            .into());
+        }
+
+        // Skip header
+        let mut offset = WAL_HEADER_SIZE;
         while offset < buffer.len() {
             // Need at least 20 bytes for LSN (8) + timestamp (8) + checksum (4)
             if offset + 20 > buffer.len() {
@@ -536,14 +609,23 @@ impl WriteAheadLog {
                         String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
                     offset += label_len;
 
+                    // Deserialize properties
+                    let (properties, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                    offset += props_len;
+
+                    // Deserialize temporal
+                    let (temporal, temporal_len) =
+                        BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temporal_len;
+
                     (
                         WalOperation::CreateNode {
                             node_id,
                             label,
-                            properties: PropertyMap::new(),
-                            temporal: BiTemporalInterval::current(timestamp),
+                            properties,
+                            temporal,
                         },
-                        12 + label_len,
+                        0, // bytes_read not used
                     )
                 }
                 2 => {
@@ -602,21 +684,30 @@ impl WriteAheadLog {
                         String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
                     offset += label_len;
 
+                    // Deserialize properties
+                    let (properties, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                    offset += props_len;
+
+                    // Deserialize temporal
+                    let (temporal, temporal_len) =
+                        BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temporal_len;
+
                     (
                         WalOperation::CreateEdge {
                             edge_id,
                             source,
                             target,
                             label,
-                            properties: PropertyMap::new(),
-                            temporal: BiTemporalInterval::current(timestamp),
+                            properties,
+                            temporal,
                         },
-                        28 + label_len,
+                        0, // bytes_read not used
                     )
                 }
                 3 => {
                     // UpdateNode
-                    if offset + 16 > buffer.len() {
+                    if offset + 20 > buffer.len() {
                         break;
                     }
                     let node_id = NodeId::new(u64::from_le_bytes([
@@ -643,20 +734,44 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
+                    let label_len = u32::from_le_bytes([
+                        buffer[offset],
+                        buffer[offset + 1],
+                        buffer[offset + 2],
+                        buffer[offset + 3],
+                    ]) as usize;
+                    offset += 4;
+
+                    if offset + label_len > buffer.len() {
+                        break;
+                    }
+                    let label =
+                        String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
+                    offset += label_len;
+
+                    // Deserialize properties
+                    let (properties, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                    offset += props_len;
+
+                    // Deserialize temporal
+                    let (temporal, temporal_len) =
+                        BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temporal_len;
+
                     (
                         WalOperation::UpdateNode {
                             node_id,
                             version_id,
-                            label: String::new(),
-                            properties: PropertyMap::new(),
-                            temporal: BiTemporalInterval::current(timestamp),
+                            label,
+                            properties,
+                            temporal,
                         },
-                        16,
+                        0, // bytes_read not used
                     )
                 }
                 4 => {
                     // UpdateEdge
-                    if offset + 16 > buffer.len() {
+                    if offset + 20 > buffer.len() {
                         break;
                     }
                     let edge_id = EdgeId::new(u64::from_le_bytes([
@@ -683,15 +798,39 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
+                    let label_len = u32::from_le_bytes([
+                        buffer[offset],
+                        buffer[offset + 1],
+                        buffer[offset + 2],
+                        buffer[offset + 3],
+                    ]) as usize;
+                    offset += 4;
+
+                    if offset + label_len > buffer.len() {
+                        break;
+                    }
+                    let label =
+                        String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
+                    offset += label_len;
+
+                    // Deserialize properties
+                    let (properties, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                    offset += props_len;
+
+                    // Deserialize temporal
+                    let (temporal, temporal_len) =
+                        BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temporal_len;
+
                     (
                         WalOperation::UpdateEdge {
                             edge_id,
                             version_id,
-                            label: String::new(),
-                            properties: PropertyMap::new(),
-                            temporal: BiTemporalInterval::current(timestamp),
+                            label,
+                            properties,
+                            temporal,
                         },
-                        16,
+                        0, // bytes_read not used
                     )
                 }
                 5 => {
@@ -748,12 +887,14 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
+                    // Deserialize temporal
+                    let (temporal, temporal_len) =
+                        BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temporal_len;
+
                     (
-                        WalOperation::DeleteNode {
-                            node_id,
-                            temporal: BiTemporalInterval::current(timestamp),
-                        },
-                        8,
+                        WalOperation::DeleteNode { node_id, temporal },
+                        0, // bytes_read not used
                     )
                 }
                 7 => {
@@ -773,12 +914,14 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
+                    // Deserialize temporal
+                    let (temporal, temporal_len) =
+                        BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temporal_len;
+
                     (
-                        WalOperation::DeleteEdge {
-                            edge_id,
-                            temporal: BiTemporalInterval::current(timestamp),
-                        },
-                        8,
+                        WalOperation::DeleteEdge { edge_id, temporal },
+                        0, // bytes_read not used
                     )
                 }
                 _ => {
@@ -1090,6 +1233,370 @@ mod tests {
             entries[3].operation,
             WalOperation::DeleteEdge { .. }
         ));
+
+        Ok(())
+    }
+
+    // Tests for full serialization with properties and temporal data
+
+    #[test]
+    fn test_wal_create_node_full_roundtrip() -> Result<()> {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::temporal::TimeRange;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: false,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+
+        // Create properties with various types
+        let properties = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("active", true)
+            .insert("score", 98.5f64)
+            .build();
+
+        // Create specific temporal interval
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(1000, 2000),
+            TimeRange::new(3000, crate::core::temporal::TIMESTAMP_MAX),
+        );
+
+        let operation = WalOperation::CreateNode {
+            node_id: NodeId::new(42),
+            label: "Person".to_string(),
+            properties: properties.clone(),
+            temporal,
+        };
+
+        wal.append(operation)?;
+        wal.flush()?;
+
+        // Read it back
+        let entries = wal.read_from(LSN::initial())?;
+        assert_eq!(entries.len(), 1);
+
+        match &entries[0].operation {
+            WalOperation::CreateNode {
+                node_id,
+                label,
+                properties: p,
+                temporal: t,
+            } => {
+                assert_eq!(node_id.as_u64(), 42);
+                assert_eq!(label, "Person");
+
+                // Verify properties
+                assert_eq!(p.get("name").and_then(|v| v.as_str()), Some("Alice"));
+                assert_eq!(p.get("age").and_then(|v| v.as_int()), Some(30));
+                assert_eq!(p.get("active").and_then(|v| v.as_bool()), Some(true));
+
+                // Verify temporal
+                assert_eq!(t.valid_time().start(), 1000);
+                assert_eq!(t.valid_time().end(), 2000);
+                assert_eq!(t.transaction_time().start(), 3000);
+                assert!(t.transaction_time().is_current());
+            }
+            _ => panic!("Expected CreateNode operation"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_create_edge_full_roundtrip() -> Result<()> {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::temporal::TimeRange;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: false,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+
+        let properties = PropertyMapBuilder::new()
+            .insert("since", 2020i64)
+            .insert("weight", 0.85f64)
+            .build();
+
+        let temporal =
+            BiTemporalInterval::new(TimeRange::new(5000, 6000), TimeRange::new(7000, 8000));
+
+        let operation = WalOperation::CreateEdge {
+            edge_id: EdgeId::new(99),
+            source: NodeId::new(1),
+            target: NodeId::new(2),
+            label: "FRIENDS_WITH".to_string(),
+            properties: properties.clone(),
+            temporal,
+        };
+
+        wal.append(operation)?;
+        wal.flush()?;
+
+        let entries = wal.read_from(LSN::initial())?;
+        assert_eq!(entries.len(), 1);
+
+        match &entries[0].operation {
+            WalOperation::CreateEdge {
+                edge_id,
+                source,
+                target,
+                label,
+                properties: p,
+                temporal: t,
+            } => {
+                assert_eq!(edge_id.as_u64(), 99);
+                assert_eq!(source.as_u64(), 1);
+                assert_eq!(target.as_u64(), 2);
+                assert_eq!(label, "FRIENDS_WITH");
+
+                assert_eq!(p.get("since").and_then(|v| v.as_int()), Some(2020));
+
+                assert_eq!(t.valid_time().start(), 5000);
+                assert_eq!(t.valid_time().end(), 6000);
+                assert_eq!(t.transaction_time().start(), 7000);
+                assert_eq!(t.transaction_time().end(), 8000);
+            }
+            _ => panic!("Expected CreateEdge operation"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_update_node_full_roundtrip() -> Result<()> {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::temporal::TimeRange;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: false,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+
+        let properties = PropertyMapBuilder::new()
+            .insert("age", 31i64) // Updated age
+            .build();
+
+        let temporal =
+            BiTemporalInterval::new(TimeRange::new(10000, 20000), TimeRange::from(15000));
+
+        let operation = WalOperation::UpdateNode {
+            node_id: NodeId::new(42),
+            version_id: VersionId::new(2),
+            label: "Person".to_string(),
+            properties: properties.clone(),
+            temporal,
+        };
+
+        wal.append(operation)?;
+        wal.flush()?;
+
+        let entries = wal.read_from(LSN::initial())?;
+        assert_eq!(entries.len(), 1);
+
+        match &entries[0].operation {
+            WalOperation::UpdateNode {
+                node_id,
+                version_id,
+                label,
+                properties: p,
+                temporal: t,
+            } => {
+                assert_eq!(node_id.as_u64(), 42);
+                assert_eq!(version_id.as_u64(), 2);
+                assert_eq!(label, "Person");
+                assert_eq!(p.get("age").and_then(|v| v.as_int()), Some(31));
+                assert_eq!(t.valid_time().start(), 10000);
+            }
+            _ => panic!("Expected UpdateNode operation"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_delete_with_temporal() -> Result<()> {
+        use crate::core::temporal::TimeRange;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: false,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+
+        let temporal = BiTemporalInterval::new(TimeRange::new(100, 200), TimeRange::new(300, 400));
+
+        wal.append(WalOperation::DeleteNode {
+            node_id: NodeId::new(5),
+            temporal,
+        })?;
+
+        wal.append(WalOperation::DeleteEdge {
+            edge_id: EdgeId::new(10),
+            temporal,
+        })?;
+
+        wal.flush()?;
+
+        let entries = wal.read_from(LSN::initial())?;
+        assert_eq!(entries.len(), 2);
+
+        // Verify DeleteNode temporal is preserved
+        match &entries[0].operation {
+            WalOperation::DeleteNode {
+                node_id,
+                temporal: t,
+            } => {
+                assert_eq!(node_id.as_u64(), 5);
+                assert_eq!(t.valid_time().start(), 100);
+                assert_eq!(t.valid_time().end(), 200);
+                assert_eq!(t.transaction_time().start(), 300);
+                assert_eq!(t.transaction_time().end(), 400);
+            }
+            _ => panic!("Expected DeleteNode"),
+        }
+
+        // Verify DeleteEdge temporal is preserved
+        match &entries[1].operation {
+            WalOperation::DeleteEdge {
+                edge_id,
+                temporal: t,
+            } => {
+                assert_eq!(edge_id.as_u64(), 10);
+                assert_eq!(t.valid_time().start(), 100);
+                assert_eq!(t.transaction_time().end(), 400);
+            }
+            _ => panic!("Expected DeleteEdge"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_segment_header() -> Result<()> {
+        use std::io::Read;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: true,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+
+        // Append an entry to create a segment
+        wal.append(WalOperation::CreateNode {
+            node_id: NodeId::new(1),
+            label: "Test".to_string(),
+            properties: PropertyMap::new(),
+            temporal: BiTemporalInterval::current(time::now()),
+        })?;
+        wal.flush()?;
+
+        // Read the segment file directly to verify header
+        let segment_path = temp_dir.path().join("000001.log");
+        let mut file = std::fs::File::open(&segment_path).unwrap();
+        let mut header = [0u8; 5];
+        file.read_exact(&mut header).unwrap();
+
+        // Verify magic bytes "GWAL"
+        assert_eq!(&header[0..4], b"GWAL");
+        // Verify version
+        assert_eq!(header[4], 2); // WAL_VERSION
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_recovery_preserves_all_data() -> Result<()> {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::core::temporal::TimeRange;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().to_path_buf();
+
+        // Create data in WAL and simulate crash by dropping
+        let original_properties;
+        let original_temporal;
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                sync_on_write: true,
+                ..Default::default()
+            };
+            let mut wal = WriteAheadLog::new(config)?;
+
+            original_properties = PropertyMapBuilder::new()
+                .insert("key", "value")
+                .insert("count", 42i64)
+                .build();
+            original_temporal =
+                BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::new(3000, 4000));
+
+            wal.append(WalOperation::CreateNode {
+                node_id: NodeId::new(100),
+                label: "TestNode".to_string(),
+                properties: original_properties.clone(),
+                temporal: original_temporal,
+            })?;
+            wal.flush()?;
+            // WAL dropped here
+        }
+
+        // Recover from WAL
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                ..Default::default()
+            };
+            let wal = WriteAheadLog::new(config)?;
+
+            let entries = wal.read_from(LSN::initial())?;
+            assert_eq!(entries.len(), 1);
+
+            match &entries[0].operation {
+                WalOperation::CreateNode {
+                    node_id,
+                    label,
+                    properties,
+                    temporal,
+                } => {
+                    assert_eq!(node_id.as_u64(), 100);
+                    assert_eq!(label, "TestNode");
+
+                    // Verify properties preserved
+                    assert_eq!(
+                        properties.get("key").and_then(|v| v.as_str()),
+                        Some("value")
+                    );
+                    assert_eq!(properties.get("count").and_then(|v| v.as_int()), Some(42));
+
+                    // Verify temporal preserved
+                    assert_eq!(temporal.valid_time().start(), 1000);
+                    assert_eq!(temporal.valid_time().end(), 2000);
+                    assert_eq!(temporal.transaction_time().start(), 3000);
+                    assert_eq!(temporal.transaction_time().end(), 4000);
+                }
+                _ => panic!("Expected CreateNode"),
+            }
+        }
 
         Ok(())
     }

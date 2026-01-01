@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+use crate::utils::error::StorageError;
+
 /// Timestamp represented as microseconds since Unix epoch (1970-01-01 00:00:00 UTC).
 ///
 /// Using i64 microseconds gives us:
@@ -143,6 +145,44 @@ impl TimeRange {
         } else {
             Some(self.end - self.start)
         }
+    }
+
+    /// Serialize this TimeRange to bytes.
+    ///
+    /// # Binary Format
+    /// ```text
+    /// [start:8][end:8]
+    /// ```
+    /// Total: 16 bytes, little-endian i64 values.
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::with_capacity(16);
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    /// Serialize into an existing buffer.
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        buffer.extend_from_slice(&self.start.to_le_bytes());
+        buffer.extend_from_slice(&self.end.to_le_bytes());
+    }
+
+    /// Deserialize a TimeRange from bytes.
+    ///
+    /// Returns the TimeRange and number of bytes consumed (always 16).
+    pub fn deserialize(bytes: &[u8]) -> Result<(Self, usize), StorageError> {
+        if bytes.len() < 16 {
+            return Err(StorageError::CorruptedData(format!(
+                "Buffer too short for TimeRange: {} bytes (need 16)",
+                bytes.len()
+            )));
+        }
+        let start = i64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        let end = i64::from_le_bytes([
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]);
+        Ok((TimeRange { start, end }, 16))
     }
 }
 
@@ -285,6 +325,46 @@ impl BiTemporalInterval {
             valid_time: self.valid_time.close_at(valid_end),
             transaction_time: self.transaction_time.close_at(tx_end),
         }
+    }
+
+    /// Serialize this BiTemporalInterval to bytes.
+    ///
+    /// # Binary Format
+    /// ```text
+    /// [valid_time.start:8][valid_time.end:8][transaction_time.start:8][transaction_time.end:8]
+    /// ```
+    /// Total: 32 bytes
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::with_capacity(32);
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    /// Serialize into an existing buffer.
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.valid_time.serialize_into(buffer);
+        self.transaction_time.serialize_into(buffer);
+    }
+
+    /// Deserialize a BiTemporalInterval from bytes.
+    ///
+    /// Returns the BiTemporalInterval and number of bytes consumed (always 32).
+    pub fn deserialize(bytes: &[u8]) -> Result<(Self, usize), StorageError> {
+        if bytes.len() < 32 {
+            return Err(StorageError::CorruptedData(format!(
+                "Buffer too short for BiTemporalInterval: {} bytes (need 32)",
+                bytes.len()
+            )));
+        }
+        let (valid_time, _) = TimeRange::deserialize(&bytes[0..16])?;
+        let (transaction_time, _) = TimeRange::deserialize(&bytes[16..32])?;
+        Ok((
+            BiTemporalInterval {
+                valid_time,
+                transaction_time,
+            },
+            32,
+        ))
     }
 }
 
@@ -507,5 +587,86 @@ mod tests {
     fn test_time_range_invalid_in_debug() {
         // This should panic in debug mode when start > end
         TimeRange::new(200, 100);
+    }
+
+    // Serialization tests
+
+    #[test]
+    fn test_timerange_serialize_roundtrip() {
+        let ranges = [
+            TimeRange::new(100, 200),
+            TimeRange::from(1000),
+            TimeRange::at(500),
+            TimeRange::new(i64::MIN, i64::MAX),
+            TimeRange::new(0, 0),
+        ];
+        for range in ranges {
+            let bytes = range.serialize();
+            assert_eq!(bytes.len(), 16);
+            let (deserialized, consumed) = TimeRange::deserialize(&bytes).unwrap();
+            assert_eq!(deserialized, range);
+            assert_eq!(consumed, 16);
+        }
+    }
+
+    #[test]
+    fn test_timerange_serialize_into() {
+        let range = TimeRange::new(100, 200);
+        let mut buffer = Vec::new();
+        range.serialize_into(&mut buffer);
+        assert_eq!(buffer.len(), 16);
+        let (deserialized, _) = TimeRange::deserialize(&buffer).unwrap();
+        assert_eq!(deserialized, range);
+    }
+
+    #[test]
+    fn test_timerange_deserialize_truncated() {
+        let result = TimeRange::deserialize(&[0; 15]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bitemporal_serialize_roundtrip() {
+        let intervals = [
+            BiTemporalInterval::current(1000),
+            BiTemporalInterval::now(500, 600),
+            BiTemporalInterval::new(TimeRange::new(100, 200), TimeRange::new(300, 400)),
+            BiTemporalInterval::new(TimeRange::from(0), TimeRange::from(0)),
+        ];
+        for interval in intervals {
+            let bytes = interval.serialize();
+            assert_eq!(bytes.len(), 32);
+            let (deserialized, consumed) = BiTemporalInterval::deserialize(&bytes).unwrap();
+            assert_eq!(deserialized, interval);
+            assert_eq!(consumed, 32);
+        }
+    }
+
+    #[test]
+    fn test_bitemporal_serialize_into() {
+        let interval = BiTemporalInterval::new(TimeRange::new(100, 200), TimeRange::new(300, 400));
+        let mut buffer = Vec::new();
+        interval.serialize_into(&mut buffer);
+        assert_eq!(buffer.len(), 32);
+        let (deserialized, _) = BiTemporalInterval::deserialize(&buffer).unwrap();
+        assert_eq!(deserialized, interval);
+    }
+
+    #[test]
+    fn test_bitemporal_deserialize_truncated() {
+        let result = BiTemporalInterval::deserialize(&[0; 31]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serialization_endianness() {
+        // Verify little-endian format
+        let range = TimeRange::new(0x0102030405060708i64, 0x1112131415161718i64);
+        let bytes = range.serialize();
+        // Little-endian: least significant byte first
+        assert_eq!(bytes[0], 0x08);
+        assert_eq!(bytes[7], 0x01);
+        assert_eq!(bytes[8], 0x18);
+        assert_eq!(bytes[15], 0x11);
     }
 }
