@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn test_vector_constructor() {
         let data = [1.0f32, 2.0, 3.0, 4.0];
-        let vec_prop = PropertyValue::vector(&data);
+        let vec_prop = PropertyValue::vector(data);
 
         assert_eq!(vec_prop.as_vector(), Some(&data[..]));
         assert_eq!(vec_prop.type_name(), "vector");
@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(PropertyValue::Null.as_vector(), None);
         assert_eq!(PropertyValue::Bool(true).as_vector(), None);
         assert_eq!(PropertyValue::Int(42).as_vector(), None);
-        assert_eq!(PropertyValue::Float(3.14).as_vector(), None);
+        assert_eq!(PropertyValue::Float(1.5).as_vector(), None);
         assert_eq!(PropertyValue::string("hello").as_vector(), None);
         assert_eq!(PropertyValue::bytes([1, 2, 3]).as_vector(), None);
         assert_eq!(
