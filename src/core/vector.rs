@@ -351,6 +351,9 @@ mod simd {
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn squared_diff_sum_avx2(a: &[f32], b: &[f32]) -> f32 {
+        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
+        // All unsafe operations within this unsafe fn must still be in an unsafe block.
+        // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
             let len = a.len();
             let chunks = len / 8;
@@ -396,6 +399,9 @@ mod simd {
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn squared_diff_sum_sse2(a: &[f32], b: &[f32]) -> f32 {
+        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
+        // All unsafe operations within this unsafe fn must still be in an unsafe block.
+        // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
             let len = a.len();
             let chunks = len / 4;
@@ -519,37 +525,22 @@ fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
 /// - Scalar implementation on other platforms
 #[inline]
 fn squared_diff_sum(a: &[f32], b: &[f32]) -> f32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        // Use runtime detection for best available instruction set
+        // Use runtime detection for best available instruction set.
+        // The order of checks is from most to least performant.
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            // SAFETY: We just verified AVX2 and FMA are available
+            // SAFETY: We just verified AVX2 and FMA are available.
             return unsafe { simd::squared_diff_sum_avx2(a, b) };
         }
-
-        // SAFETY: SSE2 is always available on x86_64 (baseline requirement)
-        unsafe { simd::squared_diff_sum_sse2(a, b) }
-    }
-
-    #[cfg(target_arch = "x86")]
-    {
-        // Use runtime detection for best available instruction set
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            // SAFETY: We just verified AVX2 and FMA are available
-            return unsafe { simd::squared_diff_sum_avx2(a, b) };
-        }
-
         if is_x86_feature_detected!("sse2") {
-            // SAFETY: We just verified SSE2 is available
+            // SAFETY: We just verified SSE2 is available. SSE2 is a baseline
+            // requirement for x86_64, so this check is mainly for 32-bit x86.
             return unsafe { simd::squared_diff_sum_sse2(a, b) };
         }
-
-        // Fall through to scalar on ancient x86 without SSE2
-        return squared_diff_sum_scalar(a, b);
     }
 
-    // Fallback for non-x86 platforms
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    // Fallback for non-x86 platforms or x86 CPUs without SSE2.
     squared_diff_sum_scalar(a, b)
 }
 

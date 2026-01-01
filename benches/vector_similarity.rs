@@ -165,10 +165,12 @@ fn bench_cosine_similarity_batch(c: &mut Criterion) {
             &batch_size,
             |bencher, _| {
                 bencher.iter(|| {
-                    vectors
-                        .iter()
-                        .map(|v| cosine_similarity(black_box(&query), black_box(v)).unwrap())
-                        .fold(f32::NEG_INFINITY, f32::max)
+                    black_box(
+                        vectors
+                            .iter()
+                            .map(|v| cosine_similarity(black_box(&query), black_box(v)).unwrap())
+                            .fold(f32::NEG_INFINITY, f32::max),
+                    )
                 });
             },
         );
@@ -296,12 +298,14 @@ fn bench_euclidean_distance_batch(c: &mut Criterion) {
             &batch_size,
             |bencher, _| {
                 bencher.iter(|| {
-                    vectors
-                        .iter()
-                        .map(|v| {
-                            squared_euclidean_distance(black_box(&query), black_box(v)).unwrap()
-                        })
-                        .fold(f32::INFINITY, f32::min)
+                    black_box(
+                        vectors
+                            .iter()
+                            .map(|v| {
+                                squared_euclidean_distance(black_box(&query), black_box(v)).unwrap()
+                            })
+                            .fold(f32::INFINITY, f32::min),
+                    )
                 });
             },
         );
@@ -312,10 +316,12 @@ fn bench_euclidean_distance_batch(c: &mut Criterion) {
             &batch_size,
             |bencher, _| {
                 bencher.iter(|| {
-                    vectors
-                        .iter()
-                        .map(|v| euclidean_distance(black_box(&query), black_box(v)).unwrap())
-                        .fold(f32::INFINITY, f32::min)
+                    black_box(
+                        vectors
+                            .iter()
+                            .map(|v| euclidean_distance(black_box(&query), black_box(v)).unwrap())
+                            .fold(f32::INFINITY, f32::min),
+                    )
                 });
             },
         );
