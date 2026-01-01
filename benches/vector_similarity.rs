@@ -10,7 +10,7 @@
 //! - 1536: OpenAI text-embedding-3-small
 //! - 3072: OpenAI text-embedding-3-large
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::core::vector::{cosine_similarity, cosine_similarity_normalized};
 
 /// Generate a test vector with deterministic values.
@@ -23,10 +23,12 @@ fn generate_vector(dim: usize, seed: usize) -> Vec<f32> {
 /// Single-pass scalar implementation (same algorithm, no SIMD).
 /// This measures pure SIMD benefit without algorithmic differences.
 fn cosine_similarity_scalar_1pass(a: &[f32], b: &[f32]) -> f32 {
-    let (dot, mag_a_sq, mag_b_sq) = a.iter().zip(b.iter()).fold(
-        (0.0f32, 0.0f32, 0.0f32),
-        |(d, ma, mb), (&ai, &bi)| (d + ai * bi, ma + ai * ai, mb + bi * bi),
-    );
+    let (dot, mag_a_sq, mag_b_sq) = a
+        .iter()
+        .zip(b.iter())
+        .fold((0.0f32, 0.0f32, 0.0f32), |(d, ma, mb), (&ai, &bi)| {
+            (d + ai * bi, ma + ai * ai, mb + bi * bi)
+        });
 
     let magnitude = (mag_a_sq * mag_b_sq).sqrt();
     if magnitude == 0.0 {

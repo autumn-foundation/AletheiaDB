@@ -350,18 +350,13 @@ mod simd {
 /// Used on non-x86 platforms or ancient x86 CPUs without SSE2.
 #[inline]
 #[cfg_attr(
-    all(
-        any(target_arch = "x86", target_arch = "x86_64"),
-        not(miri)
-    ),
+    all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
 fn dot_and_magnitudes_scalar(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     a.iter().zip(b.iter()).fold(
         (0.0f32, 0.0f32, 0.0f32),
-        |(dot, mag_a, mag_b), (&ai, &bi)| {
-            (dot + ai * bi, mag_a + ai * ai, mag_b + bi * bi)
-        },
+        |(dot, mag_a, mag_b), (&ai, &bi)| (dot + ai * bi, mag_a + ai * ai, mag_b + bi * bi),
     )
 }
 
@@ -498,14 +493,12 @@ fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
 /// inaccuracies that could produce values slightly outside this range.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     if a.len() != b.len() {
-        return Err(Error::Query(crate::utils::error::QueryError::InvalidParameter {
-            parameter: "vectors".to_string(),
-            reason: format!(
-                "dimension mismatch: {} vs {}",
-                a.len(),
-                b.len()
-            ),
-        }));
+        return Err(Error::Query(
+            crate::utils::error::QueryError::InvalidParameter {
+                parameter: "vectors".to_string(),
+                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
+            },
+        ));
     }
 
     // Handle empty vectors
@@ -611,14 +604,12 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
 #[inline]
 pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
     if a.len() != b.len() {
-        return Err(Error::Query(crate::utils::error::QueryError::InvalidParameter {
-            parameter: "vectors".to_string(),
-            reason: format!(
-                "dimension mismatch: {} vs {}",
-                a.len(),
-                b.len()
-            ),
-        }));
+        return Err(Error::Query(
+            crate::utils::error::QueryError::InvalidParameter {
+                parameter: "vectors".to_string(),
+                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
+            },
+        ));
     }
 
     // Handle empty vectors
@@ -765,7 +756,10 @@ mod tests {
         let a = vec![1.0, 2.0, 3.0];
         let b = vec![1.0, 2.0, 3.0];
         let sim = cosine_similarity(&a, &b).unwrap();
-        assert!((sim - 1.0).abs() < 1e-6, "Identical vectors should have similarity 1.0");
+        assert!(
+            (sim - 1.0).abs() < 1e-6,
+            "Identical vectors should have similarity 1.0"
+        );
     }
 
     #[test]
@@ -773,7 +767,10 @@ mod tests {
         let a = vec![1.0, 2.0, 3.0];
         let b = vec![-1.0, -2.0, -3.0];
         let sim = cosine_similarity(&a, &b).unwrap();
-        assert!((sim + 1.0).abs() < 1e-6, "Opposite vectors should have similarity -1.0");
+        assert!(
+            (sim + 1.0).abs() < 1e-6,
+            "Opposite vectors should have similarity -1.0"
+        );
     }
 
     #[test]
@@ -781,7 +778,10 @@ mod tests {
         let a = vec![1.0, 0.0];
         let b = vec![0.0, 1.0];
         let sim = cosine_similarity(&a, &b).unwrap();
-        assert!(sim.abs() < 1e-6, "Orthogonal vectors should have similarity 0.0");
+        assert!(
+            sim.abs() < 1e-6,
+            "Orthogonal vectors should have similarity 0.0"
+        );
     }
 
     #[test]
@@ -871,11 +871,17 @@ mod tests {
         let a = vec![5.0];
         let b = vec![3.0];
         let sim = cosine_similarity(&a, &b).unwrap();
-        assert!((sim - 1.0).abs() < 1e-6, "Parallel 1D vectors should have similarity 1.0");
+        assert!(
+            (sim - 1.0).abs() < 1e-6,
+            "Parallel 1D vectors should have similarity 1.0"
+        );
 
         let c = vec![-3.0];
         let sim_neg = cosine_similarity(&a, &c).unwrap();
-        assert!((sim_neg + 1.0).abs() < 1e-6, "Anti-parallel 1D vectors should have similarity -1.0");
+        assert!(
+            (sim_neg + 1.0).abs() < 1e-6,
+            "Anti-parallel 1D vectors should have similarity -1.0"
+        );
     }
 
     #[test]
@@ -884,7 +890,10 @@ mod tests {
         let b = vec![4.0, 3.0, 2.0, 1.0];
         let sim_ab = cosine_similarity(&a, &b).unwrap();
         let sim_ba = cosine_similarity(&b, &a).unwrap();
-        assert!((sim_ab - sim_ba).abs() < 1e-6, "Cosine similarity should be symmetric");
+        assert!(
+            (sim_ab - sim_ba).abs() < 1e-6,
+            "Cosine similarity should be symmetric"
+        );
     }
 
     #[test]
@@ -903,7 +912,9 @@ mod tests {
             assert!(
                 (-1.0..=1.0).contains(&sim),
                 "Similarity {} is out of range [-1, 1] for vectors {:?} and {:?}",
-                sim, a, b
+                sim,
+                a,
+                b
             );
         }
     }
@@ -924,7 +935,8 @@ mod tests {
         assert!(
             sim.abs() < 0.1,
             "Expected near-orthogonal vectors at dim={}, got sim={}",
-            dim, sim
+            dim,
+            sim
         );
     }
 
@@ -940,7 +952,8 @@ mod tests {
         assert!(
             (sim - 1.0).abs() < 1e-5,
             "Expected self-similarity of 1.0 at dim={}, got {}",
-            dim, sim
+            dim,
+            sim
         );
     }
 
@@ -955,7 +968,8 @@ mod tests {
         assert!(
             (sim + 1.0).abs() < 1e-5,
             "Expected opposite similarity of -1.0 at dim={}, got {}",
-            dim, sim
+            dim,
+            sim
         );
     }
 
@@ -976,7 +990,10 @@ mod tests {
         let a = vec![1.0, 1.0];
         let b = vec![1.0, f32::NAN];
         let sim = cosine_similarity(&a, &b).unwrap();
-        assert!(sim.is_nan(), "NaN in second vector should propagate to output");
+        assert!(
+            sim.is_nan(),
+            "NaN in second vector should propagate to output"
+        );
     }
 
     #[test]
@@ -1040,15 +1057,21 @@ mod tests {
         let a = normalize(&[1.0, 0.0]);
         let b = normalize(&[-1.0, 0.0]);
         let sim = cosine_similarity_normalized(&a, &b).unwrap();
-        assert!((sim + 1.0).abs() < 1e-6, "Opposite vectors should have similarity -1.0");
+        assert!(
+            (sim + 1.0).abs() < 1e-6,
+            "Opposite vectors should have similarity -1.0"
+        );
     }
 
     #[test]
     fn test_cosine_similarity_normalized_orthogonal() {
-        let a = vec![1.0, 0.0, 0.0];  // Already unit
-        let b = vec![0.0, 1.0, 0.0];  // Already unit
+        let a = vec![1.0, 0.0, 0.0]; // Already unit
+        let b = vec![0.0, 1.0, 0.0]; // Already unit
         let sim = cosine_similarity_normalized(&a, &b).unwrap();
-        assert!(sim.abs() < 1e-6, "Orthogonal unit vectors should have similarity 0.0");
+        assert!(
+            sim.abs() < 1e-6,
+            "Orthogonal unit vectors should have similarity 0.0"
+        );
     }
 
     #[test]
@@ -1058,7 +1081,12 @@ mod tests {
         let b = normalize(&[1.0, 1.0]);
         let sim = cosine_similarity_normalized(&a, &b).unwrap();
         let expected = 1.0 / 2.0_f32.sqrt();
-        assert!((sim - expected).abs() < 1e-5, "Expected {}, got {}", expected, sim);
+        assert!(
+            (sim - expected).abs() < 1e-5,
+            "Expected {}, got {}",
+            expected,
+            sim
+        );
     }
 
     #[test]
@@ -1077,7 +1105,8 @@ mod tests {
         assert!(
             (sim_general - sim_normalized).abs() < 1e-5,
             "General ({}) and normalized ({}) should match",
-            sim_general, sim_normalized
+            sim_general,
+            sim_normalized
         );
     }
 
@@ -1100,7 +1129,7 @@ mod tests {
     #[test]
     fn test_cosine_similarity_normalized_high_dimension() {
         // Test with a higher dimension to exercise SIMD paths
-        let dim = 384;  // Sentence Transformers dimension
+        let dim = 384; // Sentence Transformers dimension
         let a: Vec<f32> = (0..dim).map(|i| (i as f32) / dim as f32).collect();
         let b: Vec<f32> = (0..dim).map(|i| ((dim - i) as f32) / dim as f32).collect();
 
@@ -1113,7 +1142,8 @@ mod tests {
         assert!(
             (sim - sim_general).abs() < 1e-4,
             "High-dim: general ({}) vs normalized ({})",
-            sim_general, sim
+            sim_general,
+            sim
         );
     }
 }
