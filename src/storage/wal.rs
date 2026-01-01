@@ -30,6 +30,10 @@ const WAL_MAGIC: [u8; 4] = *b"GWAL";
 /// Version 2: Full serialization of properties and temporal intervals.
 const WAL_VERSION: u8 = 2;
 
+/// Legacy WAL version (no header, no properties/temporal serialization).
+/// Used for backward compatibility when reading old WAL segments.
+const WAL_VERSION_LEGACY: u8 = 1;
+
 /// Size of the WAL segment header (magic + version).
 const WAL_HEADER_SIZE: usize = 5;
 
@@ -502,31 +506,25 @@ impl WriteAheadLog {
             .read_to_end(&mut buffer)
             .map_err(|e| StorageError::IoError(format!("Failed to read WAL segment: {}", e)))?;
 
-        // Validate WAL header
-        if buffer.len() < WAL_HEADER_SIZE {
-            return Ok(Vec::new()); // Empty or invalid segment
-        }
-
-        // Check magic bytes
-        if buffer[0..4] != WAL_MAGIC {
-            return Err(StorageError::CorruptedData(
-                "Invalid WAL segment: missing magic bytes".to_string(),
-            )
-            .into());
-        }
-
-        // Check version
-        let version = buffer[4];
-        if version != WAL_VERSION {
-            return Err(StorageError::CorruptedData(format!(
-                "Unsupported WAL version: {} (expected {})",
-                version, WAL_VERSION
-            ))
-            .into());
-        }
-
-        // Skip header
-        let mut offset = WAL_HEADER_SIZE;
+        // Detect WAL format version
+        let (version, mut offset) = if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC
+        {
+            // V2+ format: has magic header
+            let ver = buffer[4];
+            if ver > WAL_VERSION {
+                return Err(StorageError::CorruptedData(format!(
+                    "Unsupported WAL version: {} (max supported: {})",
+                    ver, WAL_VERSION
+                ))
+                .into());
+            }
+            (ver, WAL_HEADER_SIZE)
+        } else if !buffer.is_empty() {
+            // Legacy V1 format: no header, starts directly with entry data
+            (WAL_VERSION_LEGACY, 0)
+        } else {
+            return Ok(Vec::new()); // Empty segment
+        };
         while offset < buffer.len() {
             // Need at least 20 bytes for LSN (8) + timestamp (8) + checksum (4)
             if offset + 20 > buffer.len() {
@@ -575,8 +573,8 @@ impl WriteAheadLog {
             let op_type = buffer[offset];
             offset += 1;
 
-            // Parse operation data based on type
-            let (operation, _bytes_read) = match op_type {
+            // Parse operation data based on type and version
+            let operation = match op_type {
                 1 => {
                     // CreateNode
                     if offset + 12 > buffer.len() {
@@ -609,24 +607,24 @@ impl WriteAheadLog {
                         String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
                     offset += label_len;
 
-                    // Deserialize properties
-                    let (properties, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
-                    offset += props_len;
+                    // V2+: deserialize properties and temporal
+                    // V1: use placeholders (data was not serialized)
+                    let (properties, temporal) = if version >= WAL_VERSION {
+                        let (props, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                        offset += props_len;
+                        let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                        offset += temp_len;
+                        (props, temp)
+                    } else {
+                        (PropertyMap::new(), BiTemporalInterval::current(timestamp))
+                    };
 
-                    // Deserialize temporal
-                    let (temporal, temporal_len) =
-                        BiTemporalInterval::deserialize(&buffer[offset..])?;
-                    offset += temporal_len;
-
-                    (
-                        WalOperation::CreateNode {
-                            node_id,
-                            label,
-                            properties,
-                            temporal,
-                        },
-                        0, // bytes_read not used
-                    )
+                    WalOperation::CreateNode {
+                        node_id,
+                        label,
+                        properties,
+                        temporal,
+                    }
                 }
                 2 => {
                     // CreateEdge
@@ -684,30 +682,30 @@ impl WriteAheadLog {
                         String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
                     offset += label_len;
 
-                    // Deserialize properties
-                    let (properties, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
-                    offset += props_len;
+                    let (properties, temporal) = if version >= WAL_VERSION {
+                        let (props, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                        offset += props_len;
+                        let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                        offset += temp_len;
+                        (props, temp)
+                    } else {
+                        (PropertyMap::new(), BiTemporalInterval::current(timestamp))
+                    };
 
-                    // Deserialize temporal
-                    let (temporal, temporal_len) =
-                        BiTemporalInterval::deserialize(&buffer[offset..])?;
-                    offset += temporal_len;
-
-                    (
-                        WalOperation::CreateEdge {
-                            edge_id,
-                            source,
-                            target,
-                            label,
-                            properties,
-                            temporal,
-                        },
-                        0, // bytes_read not used
-                    )
+                    WalOperation::CreateEdge {
+                        edge_id,
+                        source,
+                        target,
+                        label,
+                        properties,
+                        temporal,
+                    }
                 }
                 3 => {
                     // UpdateNode
-                    if offset + 20 > buffer.len() {
+                    // V1: only node_id + version_id (16 bytes)
+                    // V2: + label + properties + temporal
+                    if offset + 16 > buffer.len() {
                         break;
                     }
                     let node_id = NodeId::new(u64::from_le_bytes([
@@ -734,44 +732,48 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
-                    let label_len = u32::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                    ]) as usize;
-                    offset += 4;
+                    let (label, properties, temporal) = if version >= WAL_VERSION {
+                        let label_len = u32::from_le_bytes([
+                            buffer[offset],
+                            buffer[offset + 1],
+                            buffer[offset + 2],
+                            buffer[offset + 3],
+                        ]) as usize;
+                        offset += 4;
 
-                    if offset + label_len > buffer.len() {
-                        break;
+                        if offset + label_len > buffer.len() {
+                            break;
+                        }
+                        let lbl = String::from_utf8_lossy(&buffer[offset..offset + label_len])
+                            .to_string();
+                        offset += label_len;
+
+                        let (props, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                        offset += props_len;
+                        let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                        offset += temp_len;
+                        (lbl, props, temp)
+                    } else {
+                        (
+                            String::new(),
+                            PropertyMap::new(),
+                            BiTemporalInterval::current(timestamp),
+                        )
+                    };
+
+                    WalOperation::UpdateNode {
+                        node_id,
+                        version_id,
+                        label,
+                        properties,
+                        temporal,
                     }
-                    let label =
-                        String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
-                    offset += label_len;
-
-                    // Deserialize properties
-                    let (properties, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
-                    offset += props_len;
-
-                    // Deserialize temporal
-                    let (temporal, temporal_len) =
-                        BiTemporalInterval::deserialize(&buffer[offset..])?;
-                    offset += temporal_len;
-
-                    (
-                        WalOperation::UpdateNode {
-                            node_id,
-                            version_id,
-                            label,
-                            properties,
-                            temporal,
-                        },
-                        0, // bytes_read not used
-                    )
                 }
                 4 => {
                     // UpdateEdge
-                    if offset + 20 > buffer.len() {
+                    // V1: only edge_id + version_id (16 bytes)
+                    // V2: + label + properties + temporal
+                    if offset + 16 > buffer.len() {
                         break;
                     }
                     let edge_id = EdgeId::new(u64::from_le_bytes([
@@ -798,43 +800,45 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
-                    let label_len = u32::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                    ]) as usize;
-                    offset += 4;
+                    let (label, properties, temporal) = if version >= WAL_VERSION {
+                        let label_len = u32::from_le_bytes([
+                            buffer[offset],
+                            buffer[offset + 1],
+                            buffer[offset + 2],
+                            buffer[offset + 3],
+                        ]) as usize;
+                        offset += 4;
 
-                    if offset + label_len > buffer.len() {
-                        break;
+                        if offset + label_len > buffer.len() {
+                            break;
+                        }
+                        let lbl = String::from_utf8_lossy(&buffer[offset..offset + label_len])
+                            .to_string();
+                        offset += label_len;
+
+                        let (props, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                        offset += props_len;
+                        let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                        offset += temp_len;
+                        (lbl, props, temp)
+                    } else {
+                        (
+                            String::new(),
+                            PropertyMap::new(),
+                            BiTemporalInterval::current(timestamp),
+                        )
+                    };
+
+                    WalOperation::UpdateEdge {
+                        edge_id,
+                        version_id,
+                        label,
+                        properties,
+                        temporal,
                     }
-                    let label =
-                        String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
-                    offset += label_len;
-
-                    // Deserialize properties
-                    let (properties, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
-                    offset += props_len;
-
-                    // Deserialize temporal
-                    let (temporal, temporal_len) =
-                        BiTemporalInterval::deserialize(&buffer[offset..])?;
-                    offset += temporal_len;
-
-                    (
-                        WalOperation::UpdateEdge {
-                            edge_id,
-                            version_id,
-                            label,
-                            properties,
-                            temporal,
-                        },
-                        0, // bytes_read not used
-                    )
                 }
                 5 => {
-                    // Checkpoint
+                    // Checkpoint (same format in all versions)
                     if offset + 16 > buffer.len() {
                         break;
                     }
@@ -862,13 +866,10 @@ impl WriteAheadLog {
                     ]);
                     offset += 8;
 
-                    (
-                        WalOperation::Checkpoint {
-                            lsn: cp_lsn,
-                            timestamp: cp_timestamp,
-                        },
-                        16,
-                    )
+                    WalOperation::Checkpoint {
+                        lsn: cp_lsn,
+                        timestamp: cp_timestamp,
+                    }
                 }
                 6 => {
                     // DeleteNode
@@ -887,15 +888,15 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
-                    // Deserialize temporal
-                    let (temporal, temporal_len) =
-                        BiTemporalInterval::deserialize(&buffer[offset..])?;
-                    offset += temporal_len;
+                    let temporal = if version >= WAL_VERSION {
+                        let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                        offset += temp_len;
+                        temp
+                    } else {
+                        BiTemporalInterval::current(timestamp)
+                    };
 
-                    (
-                        WalOperation::DeleteNode { node_id, temporal },
-                        0, // bytes_read not used
-                    )
+                    WalOperation::DeleteNode { node_id, temporal }
                 }
                 7 => {
                     // DeleteEdge
@@ -914,18 +915,18 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
-                    // Deserialize temporal
-                    let (temporal, temporal_len) =
-                        BiTemporalInterval::deserialize(&buffer[offset..])?;
-                    offset += temporal_len;
+                    let temporal = if version >= WAL_VERSION {
+                        let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                        offset += temp_len;
+                        temp
+                    } else {
+                        BiTemporalInterval::current(timestamp)
+                    };
 
-                    (
-                        WalOperation::DeleteEdge { edge_id, temporal },
-                        0, // bytes_read not used
-                    )
+                    WalOperation::DeleteEdge { edge_id, temporal }
                 }
                 _ => {
-                    // Unknown operation type, skip this entry
+                    // Unknown operation type
                     return Err(StorageError::CorruptedData(format!(
                         "Unknown WAL operation type: {}",
                         op_type
@@ -974,6 +975,611 @@ impl WriteAheadLog {
     pub fn current_lsn(&self) -> LSN {
         self.current_lsn
     }
+}
+
+// ============================================================================
+// WAL Migration Tool
+// ============================================================================
+
+/// Information about a WAL segment's format version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalSegmentInfo {
+    /// The detected version (1 = legacy without header, 2+ = with header)
+    pub version: u8,
+    /// Whether the segment needs migration to the current format
+    pub needs_migration: bool,
+    /// Size of the segment file in bytes
+    pub size: u64,
+}
+
+/// Detect the version of a WAL segment file.
+///
+/// Returns information about the segment including its version and whether
+/// it needs migration.
+pub fn detect_wal_version(path: &Path) -> Result<WalSegmentInfo> {
+    use std::io::Read;
+
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| StorageError::IoError(format!("Failed to read WAL metadata: {}", e)))?;
+
+    let size = metadata.len();
+    if size == 0 {
+        return Ok(WalSegmentInfo {
+            version: WAL_VERSION,
+            needs_migration: false,
+            size: 0,
+        });
+    }
+
+    let mut file = File::open(path)
+        .map_err(|e| StorageError::IoError(format!("Failed to open WAL segment: {}", e)))?;
+
+    let mut header = [0u8; WAL_HEADER_SIZE];
+    let bytes_read = file
+        .read(&mut header)
+        .map_err(|e| StorageError::IoError(format!("Failed to read WAL header: {}", e)))?;
+
+    if bytes_read >= WAL_HEADER_SIZE && header[0..4] == WAL_MAGIC {
+        // V2+ format with magic header
+        let version = header[4];
+        Ok(WalSegmentInfo {
+            version,
+            needs_migration: version < WAL_VERSION,
+            size,
+        })
+    } else {
+        // Legacy V1 format (no header)
+        Ok(WalSegmentInfo {
+            version: WAL_VERSION_LEGACY,
+            needs_migration: true,
+            size,
+        })
+    }
+}
+
+/// Migrate a WAL segment from an older version to the current format.
+///
+/// This reads all entries from the old format and rewrites them in the
+/// current format. The original file is backed up with a `.bak` extension.
+///
+/// # Arguments
+/// * `path` - Path to the WAL segment file to migrate
+///
+/// # Returns
+/// * `Ok(usize)` - Number of entries migrated
+/// * `Err` - If migration fails
+///
+/// # Note
+/// Migration of v1 segments will result in data loss for properties and
+/// temporal intervals since v1 did not serialize this data. The migrated
+/// entries will have empty properties and timestamp-based temporal intervals.
+pub fn migrate_wal_segment(path: &Path) -> Result<usize> {
+    use std::io::Read;
+
+    let info = detect_wal_version(path)?;
+    if !info.needs_migration {
+        return Ok(0); // Already current version
+    }
+
+    // Read the entire file
+    let mut file = File::open(path)
+        .map_err(|e| StorageError::IoError(format!("Failed to open WAL segment: {}", e)))?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)
+        .map_err(|e| StorageError::IoError(format!("Failed to read WAL segment: {}", e)))?;
+    drop(file);
+
+    // Parse entries using version-aware reading
+    let entries = parse_wal_entries_versioned(&buffer, info.version, LSN::initial())?;
+    let entry_count = entries.len();
+
+    if entry_count == 0 {
+        return Ok(0);
+    }
+
+    // Backup original file
+    let backup_path = path.with_extension("log.bak");
+    std::fs::rename(path, &backup_path)
+        .map_err(|e| StorageError::IoError(format!("Failed to backup WAL segment: {}", e)))?;
+
+    // Write entries in new format
+    let mut new_file = File::create(path)
+        .map_err(|e| StorageError::IoError(format!("Failed to create new WAL segment: {}", e)))?;
+
+    // Write header
+    new_file
+        .write_all(&WAL_MAGIC)
+        .map_err(|e| StorageError::IoError(format!("Failed to write WAL magic: {}", e)))?;
+    new_file
+        .write_all(&[WAL_VERSION])
+        .map_err(|e| StorageError::IoError(format!("Failed to write WAL version: {}", e)))?;
+
+    // Create a temporary WAL for serialization
+    let temp_dir = std::env::temp_dir();
+    let temp_config = WalConfig {
+        wal_dir: temp_dir,
+        ..Default::default()
+    };
+    let temp_wal = WriteAheadLog::new(temp_config)?;
+
+    // Write each entry
+    for entry in &entries {
+        let serialized = temp_wal.serialize_entry(entry)?;
+        new_file
+            .write_all(&serialized)
+            .map_err(|e| StorageError::IoError(format!("Failed to write WAL entry: {}", e)))?;
+    }
+
+    new_file
+        .sync_all()
+        .map_err(|e| StorageError::IoError(format!("Failed to sync migrated WAL: {}", e)))?;
+
+    Ok(entry_count)
+}
+
+/// Migrate all WAL segments in a directory.
+///
+/// # Arguments
+/// * `wal_dir` - Directory containing WAL segments
+///
+/// # Returns
+/// * `Ok(Vec<(PathBuf, usize)>)` - List of migrated files and entry counts
+pub fn migrate_wal_directory(wal_dir: &Path) -> Result<Vec<(PathBuf, usize)>> {
+    let mut migrated = Vec::new();
+
+    let entries = std::fs::read_dir(wal_dir)
+        .map_err(|e| StorageError::IoError(format!("Failed to read WAL directory: {}", e)))?;
+
+    for entry in entries {
+        let entry = entry
+            .map_err(|e| StorageError::IoError(format!("Failed to read directory entry: {}", e)))?;
+        let path = entry.path();
+
+        if path.extension().is_some_and(|ext| ext == "log") {
+            let info = detect_wal_version(&path)?;
+            if info.needs_migration {
+                let count = migrate_wal_segment(&path)?;
+                if count > 0 {
+                    migrated.push((path, count));
+                }
+            }
+        }
+    }
+
+    Ok(migrated)
+}
+
+/// Parse WAL entries with explicit version handling.
+/// This is an internal helper for migration.
+fn parse_wal_entries_versioned(
+    buffer: &[u8],
+    version: u8,
+    start_lsn: LSN,
+) -> Result<Vec<WalEntry>> {
+    let mut entries = Vec::new();
+
+    // Determine starting offset based on version
+    let mut offset = if version >= WAL_VERSION && buffer.len() >= WAL_HEADER_SIZE {
+        WAL_HEADER_SIZE
+    } else {
+        0
+    };
+
+    while offset < buffer.len() {
+        // Need at least 20 bytes for LSN (8) + timestamp (8) + checksum (4)
+        if offset + 20 > buffer.len() {
+            break;
+        }
+
+        // Read LSN (8 bytes)
+        let lsn = LSN(u64::from_le_bytes([
+            buffer[offset],
+            buffer[offset + 1],
+            buffer[offset + 2],
+            buffer[offset + 3],
+            buffer[offset + 4],
+            buffer[offset + 5],
+            buffer[offset + 6],
+            buffer[offset + 7],
+        ]));
+        offset += 8;
+
+        // Read timestamp (8 bytes)
+        let timestamp = i64::from_le_bytes([
+            buffer[offset],
+            buffer[offset + 1],
+            buffer[offset + 2],
+            buffer[offset + 3],
+            buffer[offset + 4],
+            buffer[offset + 5],
+            buffer[offset + 6],
+            buffer[offset + 7],
+        ]);
+        offset += 8;
+
+        // Read checksum (4 bytes)
+        let checksum = u32::from_le_bytes([
+            buffer[offset],
+            buffer[offset + 1],
+            buffer[offset + 2],
+            buffer[offset + 3],
+        ]);
+        offset += 4;
+
+        // Read operation type
+        if offset >= buffer.len() {
+            break;
+        }
+        let op_type = buffer[offset];
+        offset += 1;
+
+        // Parse operation with version-aware logic
+        let operation = match op_type {
+            1 => {
+                // CreateNode
+                if offset + 12 > buffer.len() {
+                    break;
+                }
+                let node_id = NodeId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let label_len = u32::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                ]) as usize;
+                offset += 4;
+
+                if offset + label_len > buffer.len() {
+                    break;
+                }
+                let label =
+                    String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
+                offset += label_len;
+
+                let (properties, temporal) = if version >= WAL_VERSION {
+                    let (props, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                    offset += props_len;
+                    let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temp_len;
+                    (props, temp)
+                } else {
+                    (PropertyMap::new(), BiTemporalInterval::current(timestamp))
+                };
+
+                WalOperation::CreateNode {
+                    node_id,
+                    label,
+                    properties,
+                    temporal,
+                }
+            }
+            2 => {
+                // CreateEdge
+                if offset + 28 > buffer.len() {
+                    break;
+                }
+                let edge_id = EdgeId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let source = NodeId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let target = NodeId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let label_len = u32::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                ]) as usize;
+                offset += 4;
+
+                if offset + label_len > buffer.len() {
+                    break;
+                }
+                let label =
+                    String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
+                offset += label_len;
+
+                let (properties, temporal) = if version >= WAL_VERSION {
+                    let (props, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                    offset += props_len;
+                    let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temp_len;
+                    (props, temp)
+                } else {
+                    (PropertyMap::new(), BiTemporalInterval::current(timestamp))
+                };
+
+                WalOperation::CreateEdge {
+                    edge_id,
+                    source,
+                    target,
+                    label,
+                    properties,
+                    temporal,
+                }
+            }
+            3 => {
+                // UpdateNode
+                if offset + 16 > buffer.len() {
+                    break;
+                }
+                let node_id = NodeId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let version_id = VersionId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let (label, properties, temporal) = if version >= WAL_VERSION {
+                    let label_len = u32::from_le_bytes([
+                        buffer[offset],
+                        buffer[offset + 1],
+                        buffer[offset + 2],
+                        buffer[offset + 3],
+                    ]) as usize;
+                    offset += 4;
+
+                    if offset + label_len > buffer.len() {
+                        break;
+                    }
+                    let lbl =
+                        String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
+                    offset += label_len;
+
+                    let (props, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                    offset += props_len;
+                    let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temp_len;
+                    (lbl, props, temp)
+                } else {
+                    (
+                        String::new(),
+                        PropertyMap::new(),
+                        BiTemporalInterval::current(timestamp),
+                    )
+                };
+
+                WalOperation::UpdateNode {
+                    node_id,
+                    version_id,
+                    label,
+                    properties,
+                    temporal,
+                }
+            }
+            4 => {
+                // UpdateEdge
+                if offset + 16 > buffer.len() {
+                    break;
+                }
+                let edge_id = EdgeId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let version_id = VersionId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let (label, properties, temporal) = if version >= WAL_VERSION {
+                    let label_len = u32::from_le_bytes([
+                        buffer[offset],
+                        buffer[offset + 1],
+                        buffer[offset + 2],
+                        buffer[offset + 3],
+                    ]) as usize;
+                    offset += 4;
+
+                    if offset + label_len > buffer.len() {
+                        break;
+                    }
+                    let lbl =
+                        String::from_utf8_lossy(&buffer[offset..offset + label_len]).to_string();
+                    offset += label_len;
+
+                    let (props, props_len) = PropertyMap::deserialize(&buffer[offset..])?;
+                    offset += props_len;
+                    let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temp_len;
+                    (lbl, props, temp)
+                } else {
+                    (
+                        String::new(),
+                        PropertyMap::new(),
+                        BiTemporalInterval::current(timestamp),
+                    )
+                };
+
+                WalOperation::UpdateEdge {
+                    edge_id,
+                    version_id,
+                    label,
+                    properties,
+                    temporal,
+                }
+            }
+            5 => {
+                // Checkpoint
+                if offset + 16 > buffer.len() {
+                    break;
+                }
+                let cp_lsn = LSN(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let cp_timestamp = i64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]);
+                offset += 8;
+
+                WalOperation::Checkpoint {
+                    lsn: cp_lsn,
+                    timestamp: cp_timestamp,
+                }
+            }
+            6 => {
+                // DeleteNode
+                if offset + 8 > buffer.len() {
+                    break;
+                }
+                let node_id = NodeId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let temporal = if version >= WAL_VERSION {
+                    let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temp_len;
+                    temp
+                } else {
+                    BiTemporalInterval::current(timestamp)
+                };
+
+                WalOperation::DeleteNode { node_id, temporal }
+            }
+            7 => {
+                // DeleteEdge
+                if offset + 8 > buffer.len() {
+                    break;
+                }
+                let edge_id = EdgeId::new(u64::from_le_bytes([
+                    buffer[offset],
+                    buffer[offset + 1],
+                    buffer[offset + 2],
+                    buffer[offset + 3],
+                    buffer[offset + 4],
+                    buffer[offset + 5],
+                    buffer[offset + 6],
+                    buffer[offset + 7],
+                ]));
+                offset += 8;
+
+                let temporal = if version >= WAL_VERSION {
+                    let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[offset..])?;
+                    offset += temp_len;
+                    temp
+                } else {
+                    BiTemporalInterval::current(timestamp)
+                };
+
+                WalOperation::DeleteEdge { edge_id, temporal }
+            }
+            _ => {
+                // Unknown operation type
+                return Err(StorageError::CorruptedData(format!(
+                    "Unknown WAL operation type: {}",
+                    op_type
+                ))
+                .into());
+            }
+        };
+
+        if lsn >= start_lsn {
+            entries.push(WalEntry {
+                lsn,
+                timestamp,
+                operation,
+                checksum,
+            });
+        }
+    }
+
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -1597,6 +2203,76 @@ mod tests {
                 _ => panic!("Expected CreateNode"),
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_detect_wal_version_v2() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: true,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+        wal.append(WalOperation::CreateNode {
+            node_id: NodeId::new(1),
+            label: "Test".to_string(),
+            properties: PropertyMap::new(),
+            temporal: BiTemporalInterval::current(time::now()),
+        })?;
+        wal.flush()?;
+
+        let segment_path = temp_dir.path().join("000001.log");
+        let info = detect_wal_version(&segment_path)?;
+
+        assert_eq!(info.version, 2);
+        assert!(!info.needs_migration);
+        assert!(info.size > 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_detect_empty_segment() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let segment_path = temp_dir.path().join("empty.log");
+        std::fs::File::create(&segment_path).unwrap();
+
+        let info = detect_wal_version(&segment_path)?;
+
+        assert_eq!(info.version, 2); // Empty segments default to current version
+        assert!(!info.needs_migration);
+        assert_eq!(info.size, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_migration_not_needed_for_v2() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: true,
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+        wal.append(WalOperation::CreateNode {
+            node_id: NodeId::new(1),
+            label: "Test".to_string(),
+            properties: PropertyMap::new(),
+            temporal: BiTemporalInterval::current(time::now()),
+        })?;
+        wal.flush()?;
+
+        let segment_path = temp_dir.path().join("000001.log");
+        let count = migrate_wal_segment(&segment_path)?;
+
+        // No migration needed for v2 segments
+        assert_eq!(count, 0);
 
         Ok(())
     }
