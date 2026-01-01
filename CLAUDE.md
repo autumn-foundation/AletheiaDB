@@ -535,6 +535,37 @@ pub struct Metadata {
 
 ## Development Workflow
 
+### IMPORTANT: Worktree-First Development
+
+**When starting ANY implementation task, Claude instances MUST:**
+
+1. **Create a worktree first** before making any code changes:
+   ```bash
+   just worktree-new feature/descriptive-name   # For new features
+   just worktree-new fix/descriptive-name       # For bug fixes
+   ```
+
+2. **Navigate to the worktree** and work there:
+   ```bash
+   cd agents/feature-descriptive-name
+   ```
+
+3. **After completing work**, commit, create PR, and clean up:
+   ```bash
+   git add . && git commit -m "feat: description"
+   just worktree-pr "PR Title" "Description"
+   # After merge: just worktree-remove feature/descriptive-name
+   ```
+
+This enables multiple Claude instances to work in parallel without conflicts. Each instance gets an isolated copy of the codebase.
+
+**Skip worktree creation only if:**
+- You're already in a worktree (check with `git worktree list`)
+- The task is read-only (exploration, answering questions)
+- The user explicitly asks you to work in the main repo
+
+See `WORKTREE_WORKFLOW.md` for complete documentation.
+
 ### Feature Development
 
 1. **Design First**: Document design in issue/PR description

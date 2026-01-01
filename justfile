@@ -143,3 +143,45 @@ outdated:
 # Audit dependencies for security issues
 audit:
     cargo audit
+
+# === Git Worktree Commands ===
+# These commands enable parallel development with multiple Claude instances
+
+# Create new worktree with feature/fix branch
+# Usage: just worktree-new feature/my-feature
+worktree-new NAME:
+    #!/usr/bin/env bash
+    if command -v pwsh &> /dev/null; then
+        pwsh -File scripts/worktree-new.ps1 {{NAME}}
+    else
+        bash scripts/worktree-new.sh {{NAME}}
+    fi
+
+# List all worktrees with status
+worktree-list:
+    #!/usr/bin/env bash
+    if command -v pwsh &> /dev/null; then
+        pwsh -File scripts/worktree-list.ps1
+    else
+        bash scripts/worktree-list.sh
+    fi
+
+# Remove worktree and clean up branches
+# Usage: just worktree-remove feature/my-feature
+worktree-remove NAME:
+    #!/usr/bin/env bash
+    if command -v pwsh &> /dev/null; then
+        pwsh -File scripts/worktree-remove.ps1 {{NAME}}
+    else
+        bash scripts/worktree-remove.sh {{NAME}}
+    fi
+
+# Push current branch and create PR to trunk
+# Usage: just worktree-pr "PR Title" "Optional description"
+worktree-pr TITLE BODY="":
+    #!/usr/bin/env bash
+    if command -v pwsh &> /dev/null; then
+        pwsh -File scripts/worktree-pr.ps1 "{{TITLE}}" "{{BODY}}"
+    else
+        bash scripts/worktree-pr.sh "{{TITLE}}" "{{BODY}}"
+    fi
