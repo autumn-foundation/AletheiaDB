@@ -1,7 +1,8 @@
-//! Benchmarks for vector similarity operations.
+//! Benchmarks for vector similarity and distance operations.
 //!
-//! These benchmarks test the performance of cosine similarity calculations
-//! at various vector dimensions commonly used in embedding models.
+//! These benchmarks test the performance of cosine similarity and Euclidean
+//! distance calculations at various vector dimensions commonly used in
+//! embedding models.
 //!
 //! Common embedding dimensions:
 //! - 384: Sentence Transformers (all-MiniLM)
@@ -11,7 +12,9 @@
 //! - 3072: OpenAI text-embedding-3-large
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use gallifreydb::core::vector::{cosine_similarity, cosine_similarity_normalized};
+use gallifreydb::core::vector::{
+    cosine_similarity, cosine_similarity_normalized, euclidean_distance, squared_euclidean_distance,
+};
 
 /// Generate a test vector with deterministic values.
 fn generate_vector(dim: usize, seed: usize) -> Vec<f32> {
@@ -174,12 +177,163 @@ fn bench_cosine_similarity_batch(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Euclidean Distance Benchmarks
+// ============================================================================
+
+/// Scalar fallback for computing sum of squared differences.
+/// Used as a baseline for SIMD comparison.
+fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(&ai, &bi)| {
+            let diff = ai - bi;
+            diff * diff
+        })
+        .sum()
+}
+
+/// Benchmark Euclidean distance at various embedding dimensions.
+///
+/// Compares three implementations:
+/// - `optimized`: SIMD implementation (our implementation)
+/// - `squared_optimized`: Squared distance (avoids sqrt)
+/// - `scalar`: Scalar fallback for comparison
+fn bench_euclidean_distance_dimensions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("euclidean_distance");
+
+    // Common embedding dimensions
+    let dimensions = [384, 768, 1024, 1536, 3072];
+
+    for dim in dimensions {
+        let a = generate_vector(dim, 0);
+        let b = generate_vector(dim, 42);
+
+        group.throughput(Throughput::Elements(dim as u64));
+
+        // Our optimized SIMD implementation
+        group.bench_with_input(BenchmarkId::new("optimized", dim), &dim, |bencher, _| {
+            bencher.iter(|| euclidean_distance(black_box(&a), black_box(&b)).unwrap());
+        });
+
+        // Squared distance (avoids sqrt overhead)
+        group.bench_with_input(
+            BenchmarkId::new("squared_optimized", dim),
+            &dim,
+            |bencher, _| {
+                bencher.iter(|| squared_euclidean_distance(black_box(&a), black_box(&b)).unwrap());
+            },
+        );
+
+        // Scalar fallback for comparison
+        group.bench_with_input(BenchmarkId::new("scalar", dim), &dim, |bencher, _| {
+            bencher.iter(|| squared_diff_sum_scalar(black_box(&a), black_box(&b)).sqrt());
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark the specific case of OpenAI embeddings (1536 dimensions).
+fn bench_euclidean_distance_openai(c: &mut Criterion) {
+    // OpenAI text-embedding-3-small dimension
+    let dim = 1536;
+    let a = generate_vector(dim, 0);
+    let b = generate_vector(dim, 42);
+
+    c.bench_function("euclidean_distance_openai_1536d", |bencher| {
+        bencher.iter(|| euclidean_distance(black_box(&a), black_box(&b)).unwrap());
+    });
+}
+
+/// Benchmark squared vs non-squared distance.
+/// This demonstrates the benefit of using squared distance for comparisons.
+fn bench_squared_vs_euclidean(c: &mut Criterion) {
+    let mut group = c.benchmark_group("squared_vs_euclidean");
+
+    let dimensions = [384, 1536];
+
+    for dim in dimensions {
+        let a = generate_vector(dim, 0);
+        let b = generate_vector(dim, 42);
+
+        group.throughput(Throughput::Elements(dim as u64));
+
+        // Full Euclidean distance (includes sqrt)
+        group.bench_with_input(BenchmarkId::new("euclidean", dim), &dim, |bencher, _| {
+            bencher.iter(|| euclidean_distance(black_box(&a), black_box(&b)).unwrap());
+        });
+
+        // Squared distance (skips sqrt - faster for comparisons)
+        group.bench_with_input(BenchmarkId::new("squared", dim), &dim, |bencher, _| {
+            bencher.iter(|| squared_euclidean_distance(black_box(&a), black_box(&b)).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark batch distance computations.
+/// Simulates finding the nearest neighbor in a collection.
+fn bench_euclidean_distance_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("euclidean_distance_batch");
+
+    let dim = 384; // Sentence Transformers dimension
+    let batch_sizes = [10, 100, 1000];
+
+    let query = generate_vector(dim, 0);
+
+    for batch_size in batch_sizes {
+        let vectors: Vec<Vec<f32>> = (0..batch_size)
+            .map(|i| generate_vector(dim, i + 1))
+            .collect();
+
+        group.throughput(Throughput::Elements((batch_size * dim) as u64));
+
+        // Using squared distance for comparisons (more efficient)
+        group.bench_with_input(
+            BenchmarkId::new("find_nearest_squared", batch_size),
+            &batch_size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    vectors
+                        .iter()
+                        .map(|v| {
+                            squared_euclidean_distance(black_box(&query), black_box(v)).unwrap()
+                        })
+                        .fold(f32::INFINITY, f32::min)
+                });
+            },
+        );
+
+        // Using full distance
+        group.bench_with_input(
+            BenchmarkId::new("find_nearest_full", batch_size),
+            &batch_size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    vectors
+                        .iter()
+                        .map(|v| euclidean_distance(black_box(&query), black_box(v)).unwrap())
+                        .fold(f32::INFINITY, f32::min)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_cosine_similarity_dimensions,
     bench_cosine_similarity_openai,
     bench_cosine_similarity_normalized,
     bench_cosine_similarity_batch,
+    bench_euclidean_distance_dimensions,
+    bench_euclidean_distance_openai,
+    bench_squared_vs_euclidean,
+    bench_euclidean_distance_batch,
 );
 
 criterion_main!(benches);

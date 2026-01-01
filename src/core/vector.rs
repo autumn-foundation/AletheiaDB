@@ -343,6 +343,96 @@ mod simd {
         let sum2 = _mm_add_ps(sum1, shuf2);
         _mm_cvtss_f32(sum2)
     }
+
+    /// Computes sum of squared differences using AVX2.
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    #[target_feature(enable = "avx2", enable = "fma")]
+    #[inline]
+    pub unsafe fn squared_diff_sum_avx2(a: &[f32], b: &[f32]) -> f32 {
+        unsafe {
+            let len = a.len();
+            let chunks = len / 8;
+            let remainder = len % 8;
+
+            // Accumulator for 8 floats at a time
+            let mut acc = _mm256_setzero_ps();
+
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
+            // Process 8 floats at a time
+            for i in 0..chunks {
+                let offset = i * 8;
+                let va = _mm256_loadu_ps(a_ptr.add(offset));
+                let vb = _mm256_loadu_ps(b_ptr.add(offset));
+
+                // Compute difference
+                let diff = _mm256_sub_ps(va, vb);
+
+                // Square and accumulate using FMA: acc = diff * diff + acc
+                acc = _mm256_fmadd_ps(diff, diff, acc);
+            }
+
+            // Horizontal sum of 256-bit vector
+            let mut sum = horizontal_sum_avx(acc);
+
+            // Handle remainder with scalar operations
+            let start = chunks * 8;
+            for i in 0..remainder {
+                let diff = a[start + i] - b[start + i];
+                sum += diff * diff;
+            }
+
+            sum
+        }
+    }
+
+    /// Computes sum of squared differences using SSE2.
+    ///
+    /// # Safety
+    /// Caller must ensure SSE2 is available (always true on x86_64).
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn squared_diff_sum_sse2(a: &[f32], b: &[f32]) -> f32 {
+        unsafe {
+            let len = a.len();
+            let chunks = len / 4;
+            let remainder = len % 4;
+
+            // Accumulator for 4 floats at a time
+            let mut acc = _mm_setzero_ps();
+
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
+            // Process 4 floats at a time
+            for i in 0..chunks {
+                let offset = i * 4;
+                let va = _mm_loadu_ps(a_ptr.add(offset));
+                let vb = _mm_loadu_ps(b_ptr.add(offset));
+
+                // Compute difference
+                let diff = _mm_sub_ps(va, vb);
+
+                // Square and accumulate
+                acc = _mm_add_ps(acc, _mm_mul_ps(diff, diff));
+            }
+
+            // Horizontal sum of 128-bit vector
+            let mut sum = horizontal_sum_sse(acc);
+
+            // Handle remainder with scalar operations
+            let start = chunks * 4;
+            for i in 0..remainder {
+                let diff = a[start + i] - b[start + i];
+                sum += diff * diff;
+            }
+
+            sum
+        }
+    }
 }
 
 /// Scalar fallback for computing dot product and magnitudes.
@@ -358,6 +448,24 @@ fn dot_and_magnitudes_scalar(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
         (0.0f32, 0.0f32, 0.0f32),
         |(dot, mag_a, mag_b), (&ai, &bi)| (dot + ai * bi, mag_a + ai * ai, mag_b + bi * bi),
     )
+}
+
+/// Scalar fallback for computing sum of squared differences.
+///
+/// Used on non-x86 platforms or ancient x86 CPUs without SSE2.
+#[inline]
+#[cfg_attr(
+    all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
+    allow(dead_code)
+)]
+fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(&ai, &bi)| {
+            let diff = ai - bi;
+            diff * diff
+        })
+        .sum()
 }
 
 /// Computes dot product and both squared magnitudes using the best available
@@ -401,6 +509,48 @@ fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     // Fallback for non-x86 platforms
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     dot_and_magnitudes_scalar(a, b)
+}
+
+/// Computes sum of squared differences using the best available SIMD instructions.
+///
+/// Uses runtime feature detection to select:
+/// - AVX2 with FMA on x86/x86_64 when available
+/// - SSE2 on x86/x86_64 as fallback (baseline for x86_64)
+/// - Scalar implementation on other platforms
+#[inline]
+fn squared_diff_sum(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Use runtime detection for best available instruction set
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: We just verified AVX2 and FMA are available
+            return unsafe { simd::squared_diff_sum_avx2(a, b) };
+        }
+
+        // SAFETY: SSE2 is always available on x86_64 (baseline requirement)
+        unsafe { simd::squared_diff_sum_sse2(a, b) }
+    }
+
+    #[cfg(target_arch = "x86")]
+    {
+        // Use runtime detection for best available instruction set
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: We just verified AVX2 and FMA are available
+            return unsafe { simd::squared_diff_sum_avx2(a, b) };
+        }
+
+        if is_x86_feature_detected!("sse2") {
+            // SAFETY: We just verified SSE2 is available
+            return unsafe { simd::squared_diff_sum_sse2(a, b) };
+        }
+
+        // Fall through to scalar on ancient x86 without SSE2
+        return squared_diff_sum_scalar(a, b);
+    }
+
+    // Fallback for non-x86 platforms
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    squared_diff_sum_scalar(a, b)
 }
 
 // ============================================================================
@@ -643,6 +793,146 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
 
     // Clamp to handle floating-point inaccuracies
     Ok(dot.clamp(-1.0, 1.0))
+}
+
+// ============================================================================
+// Distance Functions
+// ============================================================================
+
+/// Computes the squared Euclidean distance between two vectors.
+///
+/// The squared Euclidean distance is the sum of squared differences between
+/// corresponding elements. This is often preferred over [`euclidean_distance`]
+/// for comparisons because it avoids the expensive square root operation while
+/// preserving ordering (if `d²(a,b) < d²(a,c)` then `d(a,b) < d(a,c)`).
+///
+/// # Formula
+///
+/// ```text
+/// squared_euclidean_distance(a, b) = Σ(aᵢ - bᵢ)²
+/// ```
+///
+/// # Arguments
+///
+/// * `a` - First vector
+/// * `b` - Second vector (must have the same length as `a`)
+///
+/// # Returns
+///
+/// * `Ok(f32)` - The squared Euclidean distance (always non-negative)
+/// * `Err` - If vectors have different dimensions
+///
+/// # When to Use
+///
+/// Use squared distance instead of regular distance when:
+/// - Comparing distances (finding nearest neighbors)
+/// - Performance is critical
+/// - The actual distance value is not needed
+///
+/// Use [`euclidean_distance`] when:
+/// - You need the actual distance value
+/// - Combining with other non-squared metrics
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::squared_euclidean_distance;
+///
+/// // Distance from origin
+/// let a = vec![3.0, 4.0];
+/// let b = vec![0.0, 0.0];
+/// let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+/// assert!((dist_sq - 25.0).abs() < 1e-6); // 3² + 4² = 25
+///
+/// // Use for comparison without sqrt overhead
+/// let c = vec![1.0, 1.0];
+/// let dist_bc_sq = squared_euclidean_distance(&b, &c).unwrap();
+/// // dist_bc < dist_ab because dist_bc_sq < dist_ab_sq
+/// assert!(dist_bc_sq < dist_sq);
+/// ```
+///
+/// # Performance
+///
+/// This implementation uses SIMD acceleration when available:
+/// - **AVX2 + FMA**: Processes 8 floats at a time with fused multiply-add
+/// - **SSE2**: Processes 4 floats at a time (baseline for x86_64)
+/// - **Scalar**: Fallback for other platforms
+#[inline]
+pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
+    if a.len() != b.len() {
+        return Err(Error::Query(
+            crate::utils::error::QueryError::InvalidParameter {
+                parameter: "vectors".to_string(),
+                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
+            },
+        ));
+    }
+
+    // Handle empty vectors
+    if a.is_empty() {
+        return Ok(0.0);
+    }
+
+    // Use SIMD-accelerated computation when available
+    Ok(squared_diff_sum(a, b))
+}
+
+/// Computes the Euclidean distance between two vectors.
+///
+/// The Euclidean distance (also known as L2 distance) measures the "straight-line"
+/// distance between two points in Euclidean space. It is the most common distance
+/// metric used in machine learning and data science.
+///
+/// # Formula
+///
+/// ```text
+/// euclidean_distance(a, b) = √(Σ(aᵢ - bᵢ)²)
+/// ```
+///
+/// # Arguments
+///
+/// * `a` - First vector
+/// * `b` - Second vector (must have the same length as `a`)
+///
+/// # Returns
+///
+/// * `Ok(f32)` - The Euclidean distance (always non-negative)
+/// * `Err` - If vectors have different dimensions
+///
+/// # Performance Note
+///
+/// If you only need to compare distances (e.g., finding the k nearest neighbors),
+/// consider using [`squared_euclidean_distance`] instead, as it avoids the square
+/// root operation while preserving distance ordering.
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::euclidean_distance;
+///
+/// // Classic 3-4-5 right triangle
+/// let a = vec![0.0, 0.0];
+/// let b = vec![3.0, 4.0];
+/// let dist = euclidean_distance(&a, &b).unwrap();
+/// assert!((dist - 5.0).abs() < 1e-6);
+///
+/// // Same point has distance 0
+/// let c = vec![1.0, 2.0, 3.0];
+/// let dist_same = euclidean_distance(&c, &c).unwrap();
+/// assert!(dist_same.abs() < 1e-6);
+/// ```
+///
+/// # Performance
+///
+/// This implementation uses SIMD acceleration when available:
+/// - **AVX2 + FMA**: Processes 8 floats at a time with fused multiply-add
+/// - **SSE2**: Processes 4 floats at a time (baseline for x86_64)
+/// - **Scalar**: Fallback for other platforms
+///
+/// The square root is computed after the SIMD-accelerated sum.
+#[inline]
+pub fn euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
+    squared_euclidean_distance(a, b).map(|sq| sq.sqrt())
 }
 
 // ============================================================================
@@ -1146,6 +1436,234 @@ mod tests {
             sim
         );
     }
+
+    // ========================================================================
+    // Euclidean Distance Tests
+    // ========================================================================
+
+    #[test]
+    fn test_euclidean_distance_3_4_5_triangle() {
+        // Classic 3-4-5 right triangle
+        let a = vec![0.0, 0.0];
+        let b = vec![3.0, 4.0];
+        let dist = euclidean_distance(&a, &b).unwrap();
+        assert!(
+            (dist - 5.0).abs() < 1e-6,
+            "3-4-5 triangle distance should be 5.0, got {}",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_squared_euclidean_distance_3_4_5_triangle() {
+        let a = vec![0.0, 0.0];
+        let b = vec![3.0, 4.0];
+        let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+        assert!(
+            (dist_sq - 25.0).abs() < 1e-6,
+            "3² + 4² should be 25, got {}",
+            dist_sq
+        );
+    }
+
+    #[test]
+    fn test_euclidean_distance_same_point() {
+        let a = vec![1.0, 2.0, 3.0];
+        let dist = euclidean_distance(&a, &a).unwrap();
+        assert!(
+            dist.abs() < 1e-6,
+            "Distance to self should be 0, got {}",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_squared_euclidean_distance_same_point() {
+        let a = vec![1.0, 2.0, 3.0];
+        let dist_sq = squared_euclidean_distance(&a, &a).unwrap();
+        assert!(
+            dist_sq.abs() < 1e-6,
+            "Squared distance to self should be 0, got {}",
+            dist_sq
+        );
+    }
+
+    #[test]
+    fn test_euclidean_distance_dimension_mismatch() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        let result = euclidean_distance(&a, &b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_squared_euclidean_distance_dimension_mismatch() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        let result = squared_euclidean_distance(&a, &b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_euclidean_distance_empty_vectors() {
+        let a: Vec<f32> = vec![];
+        let b: Vec<f32> = vec![];
+        let dist = euclidean_distance(&a, &b).unwrap();
+        assert_eq!(dist, 0.0);
+    }
+
+    #[test]
+    fn test_squared_euclidean_distance_empty_vectors() {
+        let a: Vec<f32> = vec![];
+        let b: Vec<f32> = vec![];
+        let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+        assert_eq!(dist_sq, 0.0);
+    }
+
+    #[test]
+    fn test_euclidean_distance_symmetry() {
+        let a = vec![1.0, 2.0, 3.0, 4.0];
+        let b = vec![4.0, 3.0, 2.0, 1.0];
+        let dist_ab = euclidean_distance(&a, &b).unwrap();
+        let dist_ba = euclidean_distance(&b, &a).unwrap();
+        assert!(
+            (dist_ab - dist_ba).abs() < 1e-6,
+            "Euclidean distance should be symmetric"
+        );
+    }
+
+    #[test]
+    fn test_squared_euclidean_distance_symmetry() {
+        let a = vec![1.0, 2.0, 3.0, 4.0];
+        let b = vec![4.0, 3.0, 2.0, 1.0];
+        let dist_sq_ab = squared_euclidean_distance(&a, &b).unwrap();
+        let dist_sq_ba = squared_euclidean_distance(&b, &a).unwrap();
+        assert!(
+            (dist_sq_ab - dist_sq_ba).abs() < 1e-6,
+            "Squared Euclidean distance should be symmetric"
+        );
+    }
+
+    #[test]
+    fn test_euclidean_distance_single_dimension() {
+        let a = vec![5.0];
+        let b = vec![2.0];
+        let dist = euclidean_distance(&a, &b).unwrap();
+        assert!(
+            (dist - 3.0).abs() < 1e-6,
+            "1D distance should be |5 - 2| = 3, got {}",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_euclidean_distance_negative_values() {
+        let a = vec![-1.0, -2.0];
+        let b = vec![2.0, 2.0];
+        let dist = euclidean_distance(&a, &b).unwrap();
+        // sqrt((2 - -1)² + (2 - -2)²) = sqrt(9 + 16) = 5
+        assert!(
+            (dist - 5.0).abs() < 1e-6,
+            "Distance with negative values should be 5.0, got {}",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_euclidean_distance_3d() {
+        // Distance from (0,0,0) to (1,2,2)
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 2.0, 2.0];
+        let dist = euclidean_distance(&a, &b).unwrap();
+        // sqrt(1 + 4 + 4) = sqrt(9) = 3
+        assert!(
+            (dist - 3.0).abs() < 1e-6,
+            "3D distance should be 3.0, got {}",
+            dist
+        );
+    }
+
+    #[test]
+    fn test_euclidean_vs_squared_relationship() {
+        let a = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let b = vec![5.0, 4.0, 3.0, 2.0, 1.0];
+        let dist = euclidean_distance(&a, &b).unwrap();
+        let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+        assert!(
+            (dist * dist - dist_sq).abs() < 1e-5,
+            "euclidean² should equal squared_euclidean: {}² vs {}",
+            dist,
+            dist_sq
+        );
+    }
+
+    #[test]
+    fn test_euclidean_distance_large_dimension_384() {
+        // Sentence Transformers dimension
+        let dim = 384;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32).sin()).collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i as f32).cos()).collect();
+
+        let dist = euclidean_distance(&a, &b).unwrap();
+        let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+
+        assert!(dist >= 0.0, "Distance should be non-negative");
+        assert!(dist_sq >= 0.0, "Squared distance should be non-negative");
+        assert!(
+            (dist * dist - dist_sq).abs() < 1e-4,
+            "Relationship should hold at high dimension"
+        );
+    }
+
+    #[test]
+    fn test_euclidean_distance_large_dimension_1536() {
+        // OpenAI text-embedding-3-small dimension
+        let dim = 1536;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.01).sin()).collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.01).cos()).collect();
+
+        let dist = euclidean_distance(&a, &b).unwrap();
+        let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+
+        assert!(dist >= 0.0, "Distance should be non-negative");
+        assert!(
+            (dist * dist - dist_sq).abs() < 1e-3,
+            "Relationship should hold at dim={}: {}² vs {}",
+            dim,
+            dist,
+            dist_sq
+        );
+    }
+
+    #[test]
+    fn test_squared_euclidean_distance_preserves_ordering() {
+        // Squared distance should preserve distance ordering for comparisons
+        let query = vec![0.0, 0.0];
+        let near = vec![1.0, 1.0];
+        let far = vec![3.0, 4.0];
+
+        let dist_near = euclidean_distance(&query, &near).unwrap();
+        let dist_far = euclidean_distance(&query, &far).unwrap();
+        let dist_sq_near = squared_euclidean_distance(&query, &near).unwrap();
+        let dist_sq_far = squared_euclidean_distance(&query, &far).unwrap();
+
+        // If near < far in distance, should also be true for squared distance
+        assert!(dist_near < dist_far);
+        assert!(dist_sq_near < dist_sq_far);
+    }
+
+    #[test]
+    fn test_euclidean_distance_unit_axis() {
+        // Distance along unit axes
+        let origin = vec![0.0, 0.0, 0.0];
+        let x_axis = vec![1.0, 0.0, 0.0];
+        let y_axis = vec![0.0, 1.0, 0.0];
+        let z_axis = vec![0.0, 0.0, 1.0];
+
+        assert!((euclidean_distance(&origin, &x_axis).unwrap() - 1.0).abs() < 1e-6);
+        assert!((euclidean_distance(&origin, &y_axis).unwrap() - 1.0).abs() < 1e-6);
+        assert!((euclidean_distance(&origin, &z_axis).unwrap() - 1.0).abs() < 1e-6);
+    }
 }
 
 // ============================================================================
@@ -1277,6 +1795,98 @@ mod proptests {
                     prop_assert!((sim1 - sim2).abs() < PROPTEST_TOLERANCE * 10.0,
                         "Scale invariance failed: {} vs {} for scale {}", sim1, sim2, scale);
                 }
+            }
+        }
+
+        // ====================================================================
+        // Euclidean Distance Property Tests
+        // ====================================================================
+
+        #[test]
+        fn prop_euclidean_distance_is_non_negative(
+            (a, b) in same_length_vectors(100)
+        ) {
+            let dist = euclidean_distance(&a, &b).unwrap();
+            prop_assert!(dist >= 0.0, "Distance should be non-negative, got {}", dist);
+        }
+
+        #[test]
+        fn prop_squared_euclidean_distance_is_non_negative(
+            (a, b) in same_length_vectors(100)
+        ) {
+            let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+            prop_assert!(dist_sq >= 0.0, "Squared distance should be non-negative, got {}", dist_sq);
+        }
+
+        #[test]
+        fn prop_euclidean_distance_is_symmetric(
+            (a, b) in same_length_vectors(100)
+        ) {
+            let dist_ab = euclidean_distance(&a, &b).unwrap();
+            let dist_ba = euclidean_distance(&b, &a).unwrap();
+            prop_assert!((dist_ab - dist_ba).abs() < PROPTEST_TOLERANCE,
+                "Euclidean distance should be symmetric: {} vs {}", dist_ab, dist_ba);
+        }
+
+        #[test]
+        fn prop_squared_euclidean_distance_is_symmetric(
+            (a, b) in same_length_vectors(100)
+        ) {
+            let dist_sq_ab = squared_euclidean_distance(&a, &b).unwrap();
+            let dist_sq_ba = squared_euclidean_distance(&b, &a).unwrap();
+            prop_assert!((dist_sq_ab - dist_sq_ba).abs() < PROPTEST_TOLERANCE,
+                "Squared Euclidean distance should be symmetric: {} vs {}", dist_sq_ab, dist_sq_ba);
+        }
+
+        #[test]
+        fn prop_euclidean_distance_self_is_zero(
+            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+        ) {
+            let dist = euclidean_distance(&a, &a).unwrap();
+            prop_assert!(dist.abs() < PROPTEST_TOLERANCE,
+                "Distance to self should be 0, got {} for {:?}", dist, a);
+        }
+
+        #[test]
+        fn prop_squared_euclidean_distance_self_is_zero(
+            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+        ) {
+            let dist_sq = squared_euclidean_distance(&a, &a).unwrap();
+            prop_assert!(dist_sq.abs() < PROPTEST_TOLERANCE,
+                "Squared distance to self should be 0, got {} for {:?}", dist_sq, a);
+        }
+
+        #[test]
+        fn prop_euclidean_squared_relationship(
+            (a, b) in same_length_vectors(100)
+        ) {
+            let dist = euclidean_distance(&a, &b).unwrap();
+            let dist_sq = squared_euclidean_distance(&a, &b).unwrap();
+            // dist² should equal dist_sq
+            // Use relative tolerance for larger values
+            let tolerance = PROPTEST_TOLERANCE * 100.0 + dist_sq * 1e-5;
+            prop_assert!((dist * dist - dist_sq).abs() < tolerance,
+                "euclidean² ({}) should equal squared_euclidean ({})", dist * dist, dist_sq);
+        }
+
+        #[test]
+        fn prop_euclidean_distance_triangle_inequality(
+            a in prop::collection::vec(-50.0f32..50.0f32, 1..50usize),
+            b in prop::collection::vec(-50.0f32..50.0f32, 1..50usize),
+            c in prop::collection::vec(-50.0f32..50.0f32, 1..50usize)
+        ) {
+            // Triangle inequality: d(a,c) <= d(a,b) + d(b,c)
+            // Only test if all vectors have same length
+            if a.len() == b.len() && b.len() == c.len() {
+                let d_ab = euclidean_distance(&a, &b).unwrap();
+                let d_bc = euclidean_distance(&b, &c).unwrap();
+                let d_ac = euclidean_distance(&a, &c).unwrap();
+
+                // Allow small tolerance for floating-point errors
+                let tolerance = PROPTEST_TOLERANCE * 100.0;
+                prop_assert!(d_ac <= d_ab + d_bc + tolerance,
+                    "Triangle inequality violated: d(a,c)={} > d(a,b)={} + d(b,c)={}",
+                    d_ac, d_ab, d_bc);
             }
         }
     }
