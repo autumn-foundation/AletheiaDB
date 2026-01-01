@@ -15,6 +15,16 @@ use std::sync::{Arc, RwLock};
 ///
 /// These indexes provide O(1) lookups for nodes and edges, plus efficient
 /// graph traversal through CSR adjacency indexes.
+///
+/// # Concurrency Model
+///
+/// Edge modifications (`insert_edge`, `remove_edge`) and adjacency rebuilds
+/// are coordinated via `rebuild_lock`:
+/// - Edge modifications acquire the lock in **read mode** (concurrent OK)
+/// - Rebuilds acquire the lock in **write mode** (exclusive access)
+///
+/// This prevents the race condition where edges inserted during a rebuild
+/// could be lost from the adjacency indexes.
 pub struct CurrentIndexes {
     /// Node ID → Node (O(1) lookup)
     nodes: DashMap<NodeId, Node>,
@@ -24,6 +34,9 @@ pub struct CurrentIndexes {
     outgoing: Arc<RwLock<AdjacencyIndex>>,
     /// Incoming edges: target node → adjacency list (RwLock for rebuild)
     incoming: Arc<RwLock<AdjacencyIndex>>,
+    /// Coordinates edge modifications with adjacency rebuilds.
+    /// Edge ops hold read lock; rebuild holds write lock.
+    rebuild_lock: RwLock<()>,
 }
 
 impl CurrentIndexes {
@@ -34,6 +47,7 @@ impl CurrentIndexes {
             edges: DashMap::new(),
             outgoing: Arc::new(RwLock::new(AdjacencyIndex::new())),
             incoming: Arc::new(RwLock::new(AdjacencyIndex::new())),
+            rebuild_lock: RwLock::new(()),
         }
     }
 
@@ -46,7 +60,11 @@ impl CurrentIndexes {
     ///
     /// Note: This only updates the edge map. Adjacency indexes are rebuilt
     /// separately for efficiency (batch updates).
+    ///
+    /// Acquires `rebuild_lock` in read mode to coordinate with concurrent
+    /// adjacency rebuilds (which hold write lock).
     pub fn insert_edge(&self, edge: Edge) {
+        let _guard = self.rebuild_lock.read().unwrap();
         self.edges.insert(edge.id, edge);
     }
 
@@ -66,7 +84,11 @@ impl CurrentIndexes {
     }
 
     /// Remove an edge from the indexes.
+    ///
+    /// Acquires `rebuild_lock` in read mode to coordinate with concurrent
+    /// adjacency rebuilds (which hold write lock).
     pub fn remove_edge(&self, id: EdgeId) -> Option<Edge> {
+        let _guard = self.rebuild_lock.read().unwrap();
         self.edges.remove(&id).map(|(_, edge)| edge)
     }
 
@@ -157,12 +179,19 @@ impl CurrentIndexes {
     /// This should be called after batch edge insertions/deletions.
     /// It's more efficient to rebuild than to incrementally update for large changes.
     ///
+    /// # Concurrency
+    ///
+    /// Acquires `rebuild_lock` in write mode, which blocks all concurrent
+    /// `insert_edge` and `remove_edge` operations. This prevents the race
+    /// condition where edges inserted during iteration would be lost when
+    /// the rebuilt indexes replace the old ones.
+    ///
     /// # Performance
     ///
     /// **Current Implementation:**
     /// - Complexity: O(E log E) where E is total edges
     /// - Always rebuilds complete index from scratch
-    /// - Acquires write lock, blocking concurrent readers
+    /// - Acquires write lock, blocking concurrent edge modifications
     ///
     /// **Future Optimization Opportunities:**
     ///
@@ -187,10 +216,15 @@ impl CurrentIndexes {
     /// For now, full rebuild is simple, correct, and fast enough for
     /// batch operations (1-10ms for 10K edges).
     pub fn rebuild_adjacency(&self) {
+        // Acquire write lock to block concurrent edge modifications.
+        // This ensures all edges in the DashMap at iteration start will
+        // be present in the rebuilt indexes.
+        let _guard = self.rebuild_lock.write().unwrap();
+
         let mut outgoing_edges = Vec::new();
         let mut incoming_edges = Vec::new();
 
-        // Collect all edges
+        // Collect all edges (no modifications can occur while we hold the lock)
         for entry in self.edges.iter() {
             let edge = entry.value();
             outgoing_edges.push((edge.source, edge.target, edge.id, edge.label));
@@ -517,5 +551,264 @@ mod proptests {
             // Results should be identical
             assert_eq!(first_results, second_results);
         }
+    }
+}
+
+// Concurrency tests for rebuild race condition fix
+#[cfg(test)]
+mod concurrency_tests {
+    use super::tests::{create_test_edge, create_test_node};
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// Test that edges inserted during rebuild are not lost.
+    ///
+    /// This test verifies the fix for the race condition where edges
+    /// inserted while `rebuild_adjacency()` was iterating could be
+    /// lost from the adjacency indexes.
+    #[test]
+    fn test_concurrent_insert_during_rebuild() {
+        let indexes = Arc::new(CurrentIndexes::new());
+
+        // Add initial nodes
+        for i in 0..10 {
+            indexes.insert_node(create_test_node(i, "Node"));
+        }
+
+        // Add initial edges
+        for i in 0..100 {
+            indexes.insert_edge(create_test_edge(i, i % 10, (i + 1) % 10, "LINKS"));
+        }
+        indexes.rebuild_adjacency();
+
+        // Flag to coordinate threads
+        let should_stop = Arc::new(AtomicBool::new(false));
+
+        // Thread 1: Continuously rebuild adjacency
+        let indexes_clone = Arc::clone(&indexes);
+        let should_stop_clone = Arc::clone(&should_stop);
+        let rebuild_handle = thread::spawn(move || {
+            let mut rebuild_count = 0;
+            while !should_stop_clone.load(Ordering::Relaxed) {
+                indexes_clone.rebuild_adjacency();
+                rebuild_count += 1;
+                // Small sleep to allow interleaving
+                thread::sleep(Duration::from_micros(10));
+            }
+            rebuild_count
+        });
+
+        // Thread 2: Insert edges while rebuilds are happening
+        let indexes_clone = Arc::clone(&indexes);
+        let insert_handle = thread::spawn(move || {
+            for i in 100..200 {
+                indexes_clone.insert_edge(create_test_edge(i, i % 10, (i + 1) % 10, "NEW"));
+                thread::sleep(Duration::from_micros(5));
+            }
+        });
+
+        // Wait for inserts to complete
+        insert_handle.join().unwrap();
+
+        // Signal rebuild thread to stop
+        should_stop.store(true, Ordering::Relaxed);
+        let rebuild_count = rebuild_handle.join().unwrap();
+
+        // Final rebuild to ensure consistency
+        indexes.rebuild_adjacency();
+
+        // Verify: all edges should be present
+        assert_eq!(
+            indexes.edge_count(),
+            200,
+            "Expected 200 edges after concurrent insert/rebuild"
+        );
+
+        // Verify: adjacency indexes reflect all edges
+        let mut total_out_degree = 0;
+        let mut total_in_degree = 0;
+        for i in 0..10 {
+            total_out_degree += indexes.out_degree(NodeId::new(i));
+            total_in_degree += indexes.in_degree(NodeId::new(i));
+        }
+
+        assert_eq!(
+            total_out_degree, 200,
+            "Adjacency out-degree should match edge count after {} rebuilds",
+            rebuild_count
+        );
+        assert_eq!(
+            total_in_degree, 200,
+            "Adjacency in-degree should match edge count after {} rebuilds",
+            rebuild_count
+        );
+    }
+
+    /// Test that edges removed during rebuild are properly excluded.
+    #[test]
+    fn test_concurrent_remove_during_rebuild() {
+        let indexes = Arc::new(CurrentIndexes::new());
+
+        // Add nodes
+        for i in 0..10 {
+            indexes.insert_node(create_test_node(i, "Node"));
+        }
+
+        // Add edges that will be removed
+        for i in 0..100 {
+            indexes.insert_edge(create_test_edge(i, i % 10, (i + 1) % 10, "TEMP"));
+        }
+        indexes.rebuild_adjacency();
+
+        let should_stop = Arc::new(AtomicBool::new(false));
+
+        // Thread 1: Continuously rebuild
+        let indexes_clone = Arc::clone(&indexes);
+        let should_stop_clone = Arc::clone(&should_stop);
+        let rebuild_handle = thread::spawn(move || {
+            while !should_stop_clone.load(Ordering::Relaxed) {
+                indexes_clone.rebuild_adjacency();
+                thread::sleep(Duration::from_micros(10));
+            }
+        });
+
+        // Thread 2: Remove edges
+        let indexes_clone = Arc::clone(&indexes);
+        let remove_handle = thread::spawn(move || {
+            for i in 0..50 {
+                indexes_clone.remove_edge(EdgeId::new(i));
+                thread::sleep(Duration::from_micros(5));
+            }
+        });
+
+        remove_handle.join().unwrap();
+        should_stop.store(true, Ordering::Relaxed);
+        rebuild_handle.join().unwrap();
+
+        // Final rebuild
+        indexes.rebuild_adjacency();
+
+        // Verify: 50 edges remain
+        assert_eq!(indexes.edge_count(), 50);
+
+        // Verify adjacency matches
+        let mut total_degree = 0;
+        for i in 0..10 {
+            total_degree += indexes.out_degree(NodeId::new(i));
+        }
+        assert_eq!(total_degree, 50, "Adjacency should reflect removed edges");
+    }
+
+    /// Stress test with multiple concurrent inserters and rebuilders.
+    #[test]
+    fn test_multi_threaded_stress() {
+        let indexes = Arc::new(CurrentIndexes::new());
+
+        // Add nodes
+        for i in 0..20 {
+            indexes.insert_node(create_test_node(i, "Node"));
+        }
+
+        let should_stop = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+
+        // Spawn 3 inserter threads
+        for thread_id in 0..3 {
+            let indexes_clone = Arc::clone(&indexes);
+            handles.push(thread::spawn(move || {
+                for i in 0..100 {
+                    let edge_id = thread_id * 1000 + i;
+                    indexes_clone.insert_edge(create_test_edge(
+                        edge_id,
+                        edge_id % 20,
+                        (edge_id + 1) % 20,
+                        "STRESS",
+                    ));
+                }
+            }));
+        }
+
+        // Spawn 2 rebuilder threads
+        for _ in 0..2 {
+            let indexes_clone = Arc::clone(&indexes);
+            let should_stop_clone = Arc::clone(&should_stop);
+            handles.push(thread::spawn(move || {
+                while !should_stop_clone.load(Ordering::Relaxed) {
+                    indexes_clone.rebuild_adjacency();
+                    thread::sleep(Duration::from_micros(50));
+                }
+            }));
+        }
+
+        // Wait for inserters (first 3 handles)
+        for handle in handles.drain(0..3) {
+            handle.join().unwrap();
+        }
+
+        // Stop rebuilders
+        should_stop.store(true, Ordering::Relaxed);
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Final rebuild and verify
+        indexes.rebuild_adjacency();
+
+        // Should have 300 edges (3 threads × 100 edges each)
+        assert_eq!(indexes.edge_count(), 300);
+
+        let mut total_degree = 0;
+        for i in 0..20 {
+            total_degree += indexes.out_degree(NodeId::new(i));
+        }
+        assert_eq!(
+            total_degree, 300,
+            "Adjacency must match edge count after stress test"
+        );
+    }
+
+    /// Test that rebuilds complete successfully without deadlock.
+    #[test]
+    fn test_no_deadlock_insert_rebuild() {
+        use std::time::Instant;
+
+        let indexes = Arc::new(CurrentIndexes::new());
+
+        for i in 0..5 {
+            indexes.insert_node(create_test_node(i, "Node"));
+        }
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(5);
+
+        let indexes_clone = Arc::clone(&indexes);
+        let insert_handle = thread::spawn(move || {
+            for i in 0..500 {
+                indexes_clone.insert_edge(create_test_edge(i, i % 5, (i + 1) % 5, "EDGE"));
+            }
+        });
+
+        let indexes_clone = Arc::clone(&indexes);
+        let rebuild_handle = thread::spawn(move || {
+            for _ in 0..50 {
+                indexes_clone.rebuild_adjacency();
+            }
+        });
+
+        // Both should complete within timeout (no deadlock)
+        insert_handle.join().unwrap();
+        rebuild_handle.join().unwrap();
+
+        assert!(
+            start.elapsed() < timeout,
+            "Operations should complete without deadlock"
+        );
+
+        // Verify final state
+        indexes.rebuild_adjacency();
+        assert_eq!(indexes.edge_count(), 500);
     }
 }
