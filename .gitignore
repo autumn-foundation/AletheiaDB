@@ -38,3 +38,6 @@ Cargo.lock
 
 settings.local.json
 nul
+
+# Git worktrees for parallel development
+agents/
