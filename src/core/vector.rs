@@ -531,8 +531,8 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     // by at most machine epsilon (~1e-7 for f32). Values exceeding by more than
     // 1e-5 may indicate a bug in the SIMD implementation or extreme input values.
     debug_assert!(
-        result.is_nan() || (result.abs() - 1.0) < 1e-5,
-        "Cosine similarity {} significantly out of range before clamping. \
+        result.is_nan() || result.abs() <= 1.0 + 1e-5,
+        "Cosine similarity {} out of valid range before clamping. \
          This may indicate numerical issues with the input vectors.",
         result
     );
@@ -906,6 +906,57 @@ mod tests {
                 sim, a, b
             );
         }
+    }
+
+    // ========================================================================
+    // Large Dimension Tests
+    // ========================================================================
+
+    #[test]
+    fn test_cosine_similarity_large_dimension_1536() {
+        // OpenAI text-embedding-3-small dimension
+        let dim = 1536;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32).sin()).collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i as f32).cos()).collect();
+
+        let sim = cosine_similarity(&a, &b).unwrap();
+        // Sine and cosine are approximately orthogonal over many periods
+        assert!(
+            sim.abs() < 0.1,
+            "Expected near-orthogonal vectors at dim={}, got sim={}",
+            dim, sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_large_dimension_3072() {
+        // OpenAI text-embedding-3-large dimension
+        let dim = 3072;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.1).sin()).collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.1).sin()).collect();
+
+        let sim = cosine_similarity(&a, &b).unwrap();
+        // Identical vectors should have similarity 1.0
+        assert!(
+            (sim - 1.0).abs() < 1e-5,
+            "Expected self-similarity of 1.0 at dim={}, got {}",
+            dim, sim
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_large_dimension_opposite() {
+        let dim = 1536;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.01).cos()).collect();
+        let b: Vec<f32> = a.iter().map(|x| -x).collect();
+
+        let sim = cosine_similarity(&a, &b).unwrap();
+        // Opposite vectors should have similarity -1.0
+        assert!(
+            (sim + 1.0).abs() < 1e-5,
+            "Expected opposite similarity of -1.0 at dim={}, got {}",
+            dim, sim
+        );
     }
 
     // ========================================================================

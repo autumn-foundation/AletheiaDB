@@ -20,10 +20,31 @@ fn generate_vector(dim: usize, seed: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Naive scalar implementation for comparison.
-fn cosine_similarity_naive(a: &[f32], b: &[f32]) -> f32 {
+/// Single-pass scalar implementation (same algorithm, no SIMD).
+/// This measures pure SIMD benefit without algorithmic differences.
+fn cosine_similarity_scalar_1pass(a: &[f32], b: &[f32]) -> f32 {
+    let (dot, mag_a_sq, mag_b_sq) = a.iter().zip(b.iter()).fold(
+        (0.0f32, 0.0f32, 0.0f32),
+        |(d, ma, mb), (&ai, &bi)| (d + ai * bi, ma + ai * ai, mb + bi * bi),
+    );
+
+    let magnitude = (mag_a_sq * mag_b_sq).sqrt();
+    if magnitude == 0.0 {
+        0.0
+    } else {
+        (dot / magnitude).clamp(-1.0, 1.0)
+    }
+}
+
+/// Truly naive 3-pass implementation for comparison.
+/// Makes 3 separate passes over the data (dot product, mag_a, mag_b).
+/// This shows the combined benefit of SIMD + single-pass algorithm.
+fn cosine_similarity_naive_3pass(a: &[f32], b: &[f32]) -> f32 {
+    // Pass 1: dot product
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    // Pass 2: magnitude of a
     let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    // Pass 3: magnitude of b
     let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     if mag_a == 0.0 || mag_b == 0.0 {
@@ -34,6 +55,11 @@ fn cosine_similarity_naive(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Benchmark cosine similarity at various embedding dimensions.
+///
+/// Compares three implementations:
+/// - `optimized`: SIMD + single-pass algorithm (our implementation)
+/// - `scalar_1pass`: Single-pass algorithm without SIMD (measures SIMD benefit)
+/// - `naive_3pass`: 3 separate passes (measures combined SIMD + algorithmic benefit)
 fn bench_cosine_similarity_dimensions(c: &mut Criterion) {
     let mut group = c.benchmark_group("cosine_similarity");
 
@@ -46,12 +72,19 @@ fn bench_cosine_similarity_dimensions(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(dim as u64));
 
+        // Our optimized SIMD implementation
         group.bench_with_input(BenchmarkId::new("optimized", dim), &dim, |bencher, _| {
             bencher.iter(|| cosine_similarity(black_box(&a), black_box(&b)).unwrap());
         });
 
-        group.bench_with_input(BenchmarkId::new("naive", dim), &dim, |bencher, _| {
-            bencher.iter(|| cosine_similarity_naive(black_box(&a), black_box(&b)));
+        // Single-pass scalar (same algorithm, no SIMD) - measures pure SIMD benefit
+        group.bench_with_input(BenchmarkId::new("scalar_1pass", dim), &dim, |bencher, _| {
+            bencher.iter(|| cosine_similarity_scalar_1pass(black_box(&a), black_box(&b)));
+        });
+
+        // Naive 3-pass scalar - measures combined SIMD + cache efficiency benefit
+        group.bench_with_input(BenchmarkId::new("naive_3pass", dim), &dim, |bencher, _| {
+            bencher.iter(|| cosine_similarity_naive_3pass(black_box(&a), black_box(&b)));
         });
     }
 
