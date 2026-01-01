@@ -35,6 +35,9 @@ pub enum PropertyValue {
     Bytes(Arc<[u8]>),
     /// Array of values (reference counted).
     Array(Arc<Vec<PropertyValue>>),
+    /// Dense vector for embeddings (reference counted).
+    /// Uses f32 for memory efficiency - standard for ML embeddings.
+    Vector(Arc<[f32]>),
 }
 
 impl PropertyValue {
@@ -51,6 +54,14 @@ impl PropertyValue {
     /// Create an array property value from a Vec.
     pub fn array(values: Vec<PropertyValue>) -> Self {
         PropertyValue::Array(Arc::new(values))
+    }
+
+    /// Create a vector property value from a slice.
+    ///
+    /// Dense vectors are used for embeddings in vector search.
+    /// The data is stored in an Arc for efficient cloning and sharing.
+    pub fn vector<V: AsRef<[f32]>>(v: V) -> Self {
+        PropertyValue::Vector(Arc::from(v.as_ref()))
     }
 
     /// Returns true if this value is null.
@@ -113,6 +124,15 @@ impl PropertyValue {
         }
     }
 
+    /// Try to get this value as a vector (dense embedding).
+    #[inline]
+    pub fn as_vector(&self) -> Option<&[f32]> {
+        match self {
+            PropertyValue::Vector(v) => Some(v.as_ref()),
+            _ => None,
+        }
+    }
+
     /// Get the type name of this value.
     pub const fn type_name(&self) -> &'static str {
         match self {
@@ -123,6 +143,7 @@ impl PropertyValue {
             PropertyValue::String(_) => "string",
             PropertyValue::Bytes(_) => "bytes",
             PropertyValue::Array(_) => "array",
+            PropertyValue::Vector(_) => "vector",
         }
     }
 }
@@ -146,6 +167,7 @@ impl fmt::Display for PropertyValue {
                 }
                 write!(f, "]")
             }
+            PropertyValue::Vector(v) => write!(f, "<vector[{}]>", v.len()),
         }
     }
 }
@@ -202,6 +224,18 @@ impl From<&[u8]> for PropertyValue {
 impl From<Vec<PropertyValue>> for PropertyValue {
     fn from(v: Vec<PropertyValue>) -> Self {
         PropertyValue::Array(Arc::new(v))
+    }
+}
+
+impl From<Vec<f32>> for PropertyValue {
+    fn from(v: Vec<f32>) -> Self {
+        PropertyValue::Vector(Arc::from(v.as_slice()))
+    }
+}
+
+impl From<&[f32]> for PropertyValue {
+    fn from(v: &[f32]) -> Self {
+        PropertyValue::Vector(Arc::from(v))
     }
 }
 
@@ -495,5 +529,116 @@ mod tests {
         if let (PropertyValue::String(s1), PropertyValue::String(s2)) = (&prop1, &prop2) {
             assert!(Arc::ptr_eq(s1, s2), "Arc should be shared");
         }
+    }
+
+    // ========== Vector tests ==========
+
+    #[test]
+    fn test_vector_constructor() {
+        let data = [1.0f32, 2.0, 3.0, 4.0];
+        let vec_prop = PropertyValue::vector(&data);
+
+        assert_eq!(vec_prop.as_vector(), Some(&data[..]));
+        assert_eq!(vec_prop.type_name(), "vector");
+    }
+
+    #[test]
+    fn test_vector_from_vec() {
+        let data: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let vec_prop: PropertyValue = data.clone().into();
+
+        assert_eq!(vec_prop.as_vector(), Some(&data[..]));
+    }
+
+    #[test]
+    fn test_vector_from_slice() {
+        let data = [1.5f32, 2.5, 3.5];
+        let vec_prop: PropertyValue = (&data[..]).into();
+
+        assert_eq!(vec_prop.as_vector(), Some(&data[..]));
+    }
+
+    #[test]
+    fn test_vector_display() {
+        let vec_prop = PropertyValue::vector([1.0f32, 2.0, 3.0]);
+        assert_eq!(format!("{}", vec_prop), "<vector[3]>");
+
+        // Test with common embedding dimensions
+        let embedding_384 = vec![0.0f32; 384];
+        let vec_prop = PropertyValue::vector(&embedding_384);
+        assert_eq!(format!("{}", vec_prop), "<vector[384]>");
+
+        let embedding_1536 = vec![0.0f32; 1536];
+        let vec_prop = PropertyValue::vector(&embedding_1536);
+        assert_eq!(format!("{}", vec_prop), "<vector[1536]>");
+    }
+
+    #[test]
+    fn test_vector_arc_sharing() {
+        // Create a large vector (typical embedding size)
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 * 0.001).collect();
+        let prop1 = PropertyValue::vector(&embedding);
+        let prop2 = prop1.clone();
+
+        // Both should point to the same Arc (cheap clone)
+        if let (PropertyValue::Vector(v1), PropertyValue::Vector(v2)) = (&prop1, &prop2) {
+            assert!(
+                Arc::ptr_eq(v1, v2),
+                "Vector Arc should be shared after clone"
+            );
+        }
+
+        // Values should be equal
+        assert_eq!(prop1, prop2);
+        assert_eq!(prop1.as_vector(), prop2.as_vector());
+    }
+
+    #[test]
+    fn test_vector_empty() {
+        let empty: Vec<f32> = vec![];
+        let vec_prop = PropertyValue::vector(&empty);
+
+        assert_eq!(vec_prop.as_vector(), Some(&[][..]));
+        assert_eq!(format!("{}", vec_prop), "<vector[0]>");
+    }
+
+    #[test]
+    fn test_vector_accessor_wrong_type() {
+        // as_vector should return None for non-vector types
+        assert_eq!(PropertyValue::Null.as_vector(), None);
+        assert_eq!(PropertyValue::Bool(true).as_vector(), None);
+        assert_eq!(PropertyValue::Int(42).as_vector(), None);
+        assert_eq!(PropertyValue::Float(3.14).as_vector(), None);
+        assert_eq!(PropertyValue::string("hello").as_vector(), None);
+        assert_eq!(PropertyValue::bytes([1, 2, 3]).as_vector(), None);
+        assert_eq!(
+            PropertyValue::array(vec![PropertyValue::Int(1)]).as_vector(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_vector_equality() {
+        let v1 = PropertyValue::vector([1.0f32, 2.0, 3.0]);
+        let v2 = PropertyValue::vector([1.0f32, 2.0, 3.0]);
+        let v3 = PropertyValue::vector([1.0f32, 2.0, 4.0]);
+
+        assert_eq!(v1, v2);
+        assert_ne!(v1, v3);
+    }
+
+    #[test]
+    fn test_vector_in_property_map() {
+        let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
+        let map = PropertyMapBuilder::new()
+            .insert("name", "test_node")
+            .insert("embedding", PropertyValue::vector(&embedding))
+            .build();
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
     }
 }
