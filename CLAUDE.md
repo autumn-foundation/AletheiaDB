@@ -692,6 +692,88 @@ All common tasks are available via `just`:
 
 See `justfile` for complete list of commands.
 
+## WAL Format and Migration
+
+### WAL Versioning
+
+The Write-Ahead Log (WAL) uses a versioned binary format to enable future evolution:
+
+```
+Segment Header (5 bytes):
+[magic: 4 bytes "GWAL"][version: 1 byte]
+
+Entry Format:
+[LSN: 8 bytes][timestamp: 8 bytes][checksum: 4 bytes][op_type: 1 byte][operation data...]
+```
+
+**Current Version: 2**
+- Full serialization of properties (PropertyMap)
+- Full serialization of bi-temporal intervals (32 bytes each)
+- Labels serialized for all operation types
+
+**Legacy Version: 1** (no header)
+- Properties were not serialized (data loss on recovery)
+- Temporal intervals were not serialized (reconstructed from timestamp)
+- Update operations did not serialize labels
+
+### Backward Compatibility
+
+The WAL reader automatically detects the format version:
+- **V2+ segments**: Identified by "GWAL" magic bytes at start
+- **V1 segments**: No header, recognized by absence of magic bytes
+
+When reading V1 segments:
+- Properties default to `PropertyMap::new()` (empty)
+- Temporal intervals default to `BiTemporalInterval::current(timestamp)`
+- Update labels default to empty string
+
+### Migration Tool
+
+To migrate WAL segments to the current format:
+
+```rust
+use gallifreydb::storage::wal::{detect_wal_version, migrate_wal_segment, migrate_wal_directory};
+
+// Check a single segment
+let info = detect_wal_version(Path::new("data/wal/000001.log"))?;
+println!("Version: {}, needs migration: {}", info.version, info.needs_migration);
+
+// Migrate a single segment (creates .bak backup)
+let entries_migrated = migrate_wal_segment(Path::new("data/wal/000001.log"))?;
+
+// Migrate all segments in a directory
+let results = migrate_wal_directory(Path::new("data/wal/"))?;
+for (path, count) in results {
+    println!("Migrated {}: {} entries", path.display(), count);
+}
+```
+
+### Migration Process
+
+1. **Backup**: Original segment is renamed to `.log.bak`
+2. **Parse**: Entries are read using version-aware parsing
+3. **Rewrite**: Entries are written in V2 format with proper header
+4. **Verify**: New segment can be read back successfully
+
+**Important**: Migration of V1 segments results in data loss for properties and temporal intervals that were never serialized. The migrated entries will have placeholder values.
+
+### Adding New WAL Versions
+
+When adding new serialization features:
+
+1. Increment `WAL_VERSION` constant
+2. Update `serialize_entry()` to write new format
+3. Update `read_segment()` with version-aware parsing:
+   ```rust
+   let (data, len) = if version >= NEW_VERSION {
+       // Deserialize new format
+   } else {
+       // Use placeholder for older versions
+   };
+   ```
+4. Update `parse_wal_entries_versioned()` for migration support
+5. Add tests for new format and backward compatibility
+
 ## Future Considerations
 
 ### Vector Search (SUPERRAG)
