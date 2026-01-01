@@ -176,6 +176,226 @@ impl From<VectorDimension> for usize {
 pub const MAX_DIMENSION: VectorDimension = VectorDimension(MAX_VECTOR_DIMENSIONS);
 
 // ============================================================================
+// SIMD Support
+// ============================================================================
+
+/// SIMD-accelerated vector operations for x86/x86_64 platforms.
+///
+/// Uses runtime feature detection to select the best available instruction set:
+/// - AVX2 (256-bit vectors, 8 floats at a time)
+/// - SSE2 (128-bit vectors, 4 floats at a time) - baseline for x86_64
+/// - Scalar fallback for other platforms
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod simd {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    /// Computes dot product, magnitude_a², and magnitude_b² using AVX2.
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    #[target_feature(enable = "avx2", enable = "fma")]
+    #[inline]
+    pub unsafe fn dot_and_magnitudes_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+        unsafe {
+            let len = a.len();
+            let chunks = len / 8;
+            let remainder = len % 8;
+
+            // Accumulators for 8 floats at a time
+            let mut dot_acc = _mm256_setzero_ps();
+            let mut mag_a_acc = _mm256_setzero_ps();
+            let mut mag_b_acc = _mm256_setzero_ps();
+
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
+            // Process 8 floats at a time
+            for i in 0..chunks {
+                let offset = i * 8;
+                let va = _mm256_loadu_ps(a_ptr.add(offset));
+                let vb = _mm256_loadu_ps(b_ptr.add(offset));
+
+                // Fused multiply-add for dot product and magnitudes
+                dot_acc = _mm256_fmadd_ps(va, vb, dot_acc);
+                mag_a_acc = _mm256_fmadd_ps(va, va, mag_a_acc);
+                mag_b_acc = _mm256_fmadd_ps(vb, vb, mag_b_acc);
+            }
+
+            // Horizontal sum of 256-bit vectors
+            let dot = horizontal_sum_avx(dot_acc);
+            let mag_a = horizontal_sum_avx(mag_a_acc);
+            let mag_b = horizontal_sum_avx(mag_b_acc);
+
+            // Handle remainder with scalar operations
+            let mut dot_rem = 0.0f32;
+            let mut mag_a_rem = 0.0f32;
+            let mut mag_b_rem = 0.0f32;
+
+            let start = chunks * 8;
+            for i in 0..remainder {
+                let ai = *a.get_unchecked(start + i);
+                let bi = *b.get_unchecked(start + i);
+                dot_rem += ai * bi;
+                mag_a_rem += ai * ai;
+                mag_b_rem += bi * bi;
+            }
+
+            (dot + dot_rem, mag_a + mag_a_rem, mag_b + mag_b_rem)
+        }
+    }
+
+    /// Horizontal sum of 8 floats in AVX register.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn horizontal_sum_avx(v: __m256) -> f32 {
+        unsafe {
+            // Add high 128 bits to low 128 bits
+            let high = _mm256_extractf128_ps(v, 1);
+            let low = _mm256_castps256_ps128(v);
+            let sum128 = _mm_add_ps(high, low);
+
+            // Continue with SSE horizontal add
+            horizontal_sum_sse(sum128)
+        }
+    }
+
+    /// Computes dot product, magnitude_a², and magnitude_b² using SSE2.
+    ///
+    /// # Safety
+    /// Caller must ensure SSE2 is available (always true on x86_64).
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn dot_and_magnitudes_sse2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+        unsafe {
+            let len = a.len();
+            let chunks = len / 4;
+            let remainder = len % 4;
+
+            // Accumulators for 4 floats at a time
+            let mut dot_acc = _mm_setzero_ps();
+            let mut mag_a_acc = _mm_setzero_ps();
+            let mut mag_b_acc = _mm_setzero_ps();
+
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
+            // Process 4 floats at a time
+            for i in 0..chunks {
+                let offset = i * 4;
+                let va = _mm_loadu_ps(a_ptr.add(offset));
+                let vb = _mm_loadu_ps(b_ptr.add(offset));
+
+                // Multiply and accumulate
+                dot_acc = _mm_add_ps(dot_acc, _mm_mul_ps(va, vb));
+                mag_a_acc = _mm_add_ps(mag_a_acc, _mm_mul_ps(va, va));
+                mag_b_acc = _mm_add_ps(mag_b_acc, _mm_mul_ps(vb, vb));
+            }
+
+            // Horizontal sum of 128-bit vectors
+            let dot = horizontal_sum_sse(dot_acc);
+            let mag_a = horizontal_sum_sse(mag_a_acc);
+            let mag_b = horizontal_sum_sse(mag_b_acc);
+
+            // Handle remainder with scalar operations
+            let mut dot_rem = 0.0f32;
+            let mut mag_a_rem = 0.0f32;
+            let mut mag_b_rem = 0.0f32;
+
+            let start = chunks * 4;
+            for i in 0..remainder {
+                let ai = *a.get_unchecked(start + i);
+                let bi = *b.get_unchecked(start + i);
+                dot_rem += ai * bi;
+                mag_a_rem += ai * ai;
+                mag_b_rem += bi * bi;
+            }
+
+            (dot + dot_rem, mag_a + mag_a_rem, mag_b + mag_b_rem)
+        }
+    }
+
+    /// Horizontal sum of 4 floats in SSE register.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    unsafe fn horizontal_sum_sse(v: __m128) -> f32 {
+        // Sum pairs: [a+c, b+d, a+c, b+d]
+        // SAFETY: We have #[target_feature(enable = "sse2")] so these intrinsics are safe
+        let shuf = _mm_shuffle_ps(v, v, 0b10_11_00_01);
+        let sum1 = _mm_add_ps(v, shuf);
+        // Sum final pair
+        let shuf2 = _mm_shuffle_ps(sum1, sum1, 0b00_00_11_10);
+        let sum2 = _mm_add_ps(sum1, shuf2);
+        _mm_cvtss_f32(sum2)
+    }
+}
+
+/// Scalar fallback for computing dot product and magnitudes.
+///
+/// Used on non-x86 platforms or ancient x86 CPUs without SSE2.
+#[inline]
+#[cfg_attr(
+    all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        not(miri)
+    ),
+    allow(dead_code)
+)]
+fn dot_and_magnitudes_scalar(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+    a.iter().zip(b.iter()).fold(
+        (0.0f32, 0.0f32, 0.0f32),
+        |(dot, mag_a, mag_b), (&ai, &bi)| {
+            (dot + ai * bi, mag_a + ai * ai, mag_b + bi * bi)
+        },
+    )
+}
+
+/// Computes dot product and both squared magnitudes using the best available
+/// SIMD instructions.
+///
+/// Uses runtime feature detection to select:
+/// - AVX2 with FMA on x86/x86_64 when available
+/// - SSE2 on x86/x86_64 as fallback (baseline for x86_64)
+/// - Scalar implementation on other platforms
+#[inline]
+fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Use runtime detection for best available instruction set
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: We just verified AVX2 and FMA are available
+            return unsafe { simd::dot_and_magnitudes_avx2(a, b) };
+        }
+
+        // SAFETY: SSE2 is always available on x86_64 (baseline requirement)
+        unsafe { simd::dot_and_magnitudes_sse2(a, b) }
+    }
+
+    #[cfg(target_arch = "x86")]
+    {
+        // Use runtime detection for best available instruction set
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: We just verified AVX2 and FMA are available
+            return unsafe { simd::dot_and_magnitudes_avx2(a, b) };
+        }
+
+        if is_x86_feature_detected!("sse2") {
+            // SAFETY: We just verified SSE2 is available
+            return unsafe { simd::dot_and_magnitudes_sse2(a, b) };
+        }
+
+        // Fall through to scalar on ancient x86 without SSE2
+        return dot_and_magnitudes_scalar(a, b);
+    }
+
+    // Fallback for non-x86 platforms
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    dot_and_magnitudes_scalar(a, b)
+}
+
+// ============================================================================
 // Similarity Functions
 // ============================================================================
 
@@ -236,7 +456,12 @@ pub const MAX_DIMENSION: VectorDimension = VectorDimension(MAX_VECTOR_DIMENSIONS
 ///
 /// # Performance
 ///
-/// This implementation uses a single-pass algorithm that computes the dot product
+/// This implementation uses SIMD acceleration when available:
+/// - **AVX2 + FMA**: Processes 8 floats at a time with fused multiply-add
+/// - **SSE2**: Processes 4 floats at a time (baseline for x86_64)
+/// - **Scalar**: Fallback for other platforms
+///
+/// All variants use a single-pass algorithm that computes the dot product
 /// and both magnitudes simultaneously for better cache efficiency.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
     if a.len() != b.len() {
@@ -255,13 +480,8 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
         return Ok(0.0);
     }
 
-    // Single-pass computation of dot product and magnitudes
-    let (dot, mag_a_sq, mag_b_sq) = a.iter().zip(b.iter()).fold(
-        (0.0f32, 0.0f32, 0.0f32),
-        |(dot, mag_a, mag_b), (&ai, &bi)| {
-            (dot + ai * bi, mag_a + ai * ai, mag_b + bi * bi)
-        },
-    );
+    // Use SIMD-accelerated computation when available
+    let (dot, mag_a_sq, mag_b_sq) = dot_and_magnitudes(a, b);
 
     let magnitude = (mag_a_sq * mag_b_sq).sqrt();
 
@@ -270,7 +490,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
         return Ok(0.0);
     }
 
-    Ok(dot / magnitude)
+    // Clamp to handle floating-point inaccuracies that could produce
+    // values slightly outside [-1.0, 1.0]
+    Ok((dot / magnitude).clamp(-1.0, 1.0))
 }
 
 // ============================================================================
@@ -598,23 +820,17 @@ mod proptests {
 
         #[test]
         fn prop_cosine_similarity_scale_invariant(
-            a in prop::collection::vec(-100.0f32..100.0f32, 1..50usize),
-            b in prop::collection::vec(-100.0f32..100.0f32, 1..50usize),
+            (a, b) in same_length_vectors(50),
             scale in 0.1f32..10.0f32
         ) {
-            // Ensure vectors have same length
-            let len = a.len().min(b.len());
-            let a = &a[..len];
-            let b = &b[..len];
-
             // Skip if either vector is near-zero
             let mag_a: f32 = a.iter().map(|x| x * x).sum();
             let mag_b: f32 = b.iter().map(|x| x * x).sum();
             if mag_a > 1e-10 && mag_b > 1e-10 {
-                let sim1 = cosine_similarity(a, b).unwrap();
+                let sim1 = cosine_similarity(&a, &b).unwrap();
 
                 let scaled_a: Vec<f32> = a.iter().map(|x| x * scale).collect();
-                let sim2 = cosine_similarity(&scaled_a, b).unwrap();
+                let sim2 = cosine_similarity(&scaled_a, &b).unwrap();
 
                 // Cosine similarity should be scale-invariant
                 if !sim1.is_nan() && !sim2.is_nan() {
