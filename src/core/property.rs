@@ -35,6 +35,19 @@ pub const TAG_ARRAY: u8 = 6;
 /// Type tag for Vector (dense f32 array) value.
 pub const TAG_VECTOR: u8 = 7;
 
+// ============================================================================
+// Serialization Limits
+// ============================================================================
+// These limits prevent DoS attacks via memory exhaustion from malicious input.
+
+/// Maximum number of elements allowed in a deserialized array.
+/// Set to 1 million elements - enough for any practical use case.
+pub const MAX_ARRAY_ELEMENTS: usize = 1_000_000;
+
+/// Maximum number of dimensions allowed in a deserialized vector.
+/// Set to 100,000 - far exceeds typical embedding sizes (384-4096 dimensions).
+pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
+
 /// Property key type.
 ///
 /// TODO: Replace with InternedString once string interning is implemented.
@@ -286,9 +299,8 @@ impl PropertyValue {
                     )
                     .into());
                 }
-                let value = i64::from_le_bytes([
-                    bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
-                ]);
+                // SAFETY: Length check above guarantees slice has 8 bytes
+                let value = i64::from_le_bytes(bytes[1..9].try_into().unwrap());
                 Ok((PropertyValue::Int(value), 9))
             }
 
@@ -299,9 +311,8 @@ impl PropertyValue {
                     )
                     .into());
                 }
-                let value = f64::from_le_bytes([
-                    bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
-                ]);
+                // SAFETY: Length check above guarantees slice has 8 bytes
+                let value = f64::from_le_bytes(bytes[1..9].try_into().unwrap());
                 Ok((PropertyValue::Float(value), 9))
             }
 
@@ -312,7 +323,7 @@ impl PropertyValue {
                     )
                     .into());
                 }
-                let len = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+                let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
                 offset = 5;
 
                 if bytes.len() < offset + len {
@@ -338,7 +349,7 @@ impl PropertyValue {
                     )
                     .into());
                 }
-                let len = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+                let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
                 offset = 5;
 
                 if bytes.len() < offset + len {
@@ -361,8 +372,17 @@ impl PropertyValue {
                     )
                     .into());
                 }
-                let count = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+                let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
                 offset = 5;
+
+                // Prevent DoS via memory exhaustion from malicious input
+                if count > MAX_ARRAY_ELEMENTS {
+                    return Err(StorageError::CorruptedData(format!(
+                        "Array count {} exceeds maximum allowed {}",
+                        count, MAX_ARRAY_ELEMENTS
+                    ))
+                    .into());
+                }
 
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -479,11 +499,27 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         .into());
     }
 
-    let dimension = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
-    let data_start = 5;
-    let data_len = dimension * 4;
-    let total_len = data_start + data_len;
+    let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
 
+    // Prevent DoS via memory exhaustion from malicious input
+    if dimension > MAX_VECTOR_DIMENSIONS {
+        return Err(StorageError::CorruptedData(format!(
+            "Vector dimension {} exceeds maximum allowed {}",
+            dimension, MAX_VECTOR_DIMENSIONS
+        ))
+        .into());
+    }
+
+    // Calculate total length with overflow check
+    let data_start: usize = 5;
+    let data_len = dimension
+        .checked_mul(4)
+        .ok_or_else(|| StorageError::CorruptedData("Vector dimension overflow".to_string()))?;
+    let total_len = data_start
+        .checked_add(data_len)
+        .ok_or_else(|| StorageError::CorruptedData("Vector size overflow".to_string()))?;
+
+    // Validate buffer size before allocating
     if bytes.len() < total_len {
         return Err(StorageError::CorruptedData(format!(
             "Buffer too short for vector data: need {} bytes, have {}",
@@ -493,18 +529,12 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         .into());
     }
 
-    // Deserialize f32 values
+    // Deserialize f32 values using chunks_exact for safety and clarity
+    let data_slice = &bytes[data_start..total_len];
     let mut values = Vec::with_capacity(dimension);
-    let mut offset = data_start;
-    for _ in 0..dimension {
-        let value = f32::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ]);
-        values.push(value);
-        offset += 4;
+    for chunk in data_slice.chunks_exact(4) {
+        // SAFETY: chunks_exact guarantees exactly 4 bytes per chunk
+        values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
     }
 
     Ok((Arc::from(values.into_boxed_slice()), total_len))
@@ -724,7 +754,7 @@ impl PropertyMap {
             .into());
         }
 
-        let count = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
         let mut offset = 4;
         let mut map = HashMap::with_capacity(count);
 
@@ -736,12 +766,9 @@ impl PropertyMap {
                 )
                 .into());
             }
-            let key_len = u32::from_le_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ]) as usize;
+            // SAFETY: Length check above guarantees 4 bytes available
+            let key_len =
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
 
             // Read key
@@ -1156,7 +1183,7 @@ mod tests {
 
     #[test]
     fn test_serialize_float() {
-        let test_values = [0.0f64, 1.0, -1.0, f64::MAX, f64::MIN, 3.14159, -2.71828];
+        let test_values = [0.0f64, 1.0, -1.0, f64::MAX, f64::MIN, 1.5, -2.5];
         for &v in &test_values {
             let value = PropertyValue::Float(v);
             let bytes = value.serialize();
@@ -1234,7 +1261,7 @@ mod tests {
             PropertyValue::Int(42),
             PropertyValue::string("hello"),
             PropertyValue::Bool(true),
-            PropertyValue::Float(3.14),
+            PropertyValue::Float(1.5),
         ]);
         let bytes = value.serialize();
         let (deserialized, _) = PropertyValue::deserialize(&bytes).unwrap();
@@ -1508,11 +1535,11 @@ mod tests {
             );
 
             // Special handling for NaN values
-            if let PropertyValue::Float(f) = &value {
-                if f.is_nan() {
-                    assert!(deserialized.as_float().unwrap().is_nan());
-                    continue;
-                }
+            if let PropertyValue::Float(f) = &value
+                && f.is_nan()
+            {
+                assert!(deserialized.as_float().unwrap().is_nan());
+                continue;
             }
             assert_eq!(
                 deserialized,
