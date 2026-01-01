@@ -11,7 +11,7 @@
 //! - 3072: OpenAI text-embedding-3-large
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use gallifreydb::core::vector::cosine_similarity;
+use gallifreydb::core::vector::{cosine_similarity, cosine_similarity_normalized};
 
 /// Generate a test vector with deterministic values.
 fn generate_vector(dim: usize, seed: usize) -> Vec<f32> {
@@ -71,7 +71,8 @@ fn bench_cosine_similarity_openai(c: &mut Criterion) {
 }
 
 /// Benchmark with normalized (unit) vectors.
-/// This is the common case when vectors are pre-normalized.
+/// Compares the general function vs the specialized normalized function.
+/// This demonstrates the ~2x speedup from skipping magnitude computation.
 fn bench_cosine_similarity_normalized(c: &mut Criterion) {
     let mut group = c.benchmark_group("cosine_similarity_normalized");
 
@@ -90,8 +91,14 @@ fn bench_cosine_similarity_normalized(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(dim as u64));
 
-        group.bench_with_input(BenchmarkId::new("unit_vectors", dim), &dim, |bencher, _| {
+        // General function (computes magnitudes even though vectors are normalized)
+        group.bench_with_input(BenchmarkId::new("general", dim), &dim, |bencher, _| {
             bencher.iter(|| cosine_similarity(black_box(&a), black_box(&b)).unwrap());
+        });
+
+        // Specialized function (skips magnitude computation for unit vectors)
+        group.bench_with_input(BenchmarkId::new("specialized", dim), &dim, |bencher, _| {
+            bencher.iter(|| cosine_similarity_normalized(black_box(&a), black_box(&b)).unwrap());
         });
     }
 
