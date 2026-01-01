@@ -37,6 +37,14 @@ pub enum PropertyValue {
     Array(Arc<Vec<PropertyValue>>),
     /// Dense vector for embeddings (reference counted).
     /// Uses f32 for memory efficiency - standard for ML embeddings.
+    ///
+    /// # Floating-Point Equality Note
+    /// This variant uses derived PartialEq which compares f32 values bitwise.
+    /// Be aware that NaN != NaN (IEEE 754) and floating-point precision may
+    /// cause semantically equal vectors to compare unequal. For similarity
+    /// comparisons, use dedicated vector utility functions (e.g., cosine similarity)
+    /// rather than equality. This limitation will be revisited in Phase 3 when
+    /// vectors are used in temporal storage for deduplication.
     Vector(Arc<[f32]>),
 }
 
@@ -229,7 +237,8 @@ impl From<Vec<PropertyValue>> for PropertyValue {
 
 impl From<Vec<f32>> for PropertyValue {
     fn from(v: Vec<f32>) -> Self {
-        PropertyValue::Vector(Arc::from(v.as_slice()))
+        // Use v.into() to reuse the Vec's buffer, avoiding allocation and copy
+        PropertyValue::Vector(v.into())
     }
 }
 
