@@ -13,7 +13,8 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::core::vector::{
-    cosine_similarity, cosine_similarity_normalized, euclidean_distance, squared_euclidean_distance,
+    cosine_similarity, cosine_similarity_normalized, dot_product, euclidean_distance,
+    squared_euclidean_distance,
 };
 
 /// Generate a test vector with deterministic values.
@@ -330,6 +331,114 @@ fn bench_euclidean_distance_batch(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Dot Product Benchmarks
+// ============================================================================
+
+/// Scalar implementation of dot product for comparison.
+fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi).sum()
+}
+
+/// Benchmark dot product at various embedding dimensions.
+///
+/// Compares two implementations:
+/// - `optimized`: SIMD implementation (our implementation)
+/// - `scalar`: Scalar fallback for comparison
+fn bench_dot_product_dimensions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dot_product");
+
+    // Common embedding dimensions
+    let dimensions = [384, 768, 1024, 1536, 3072];
+
+    for dim in dimensions {
+        let a = generate_vector(dim, 0);
+        let b = generate_vector(dim, 42);
+
+        group.throughput(Throughput::Elements(dim as u64));
+
+        // Our optimized SIMD implementation
+        group.bench_with_input(BenchmarkId::new("optimized", dim), &dim, |bencher, _| {
+            bencher.iter(|| dot_product(black_box(&a), black_box(&b)).unwrap());
+        });
+
+        // Scalar fallback for comparison
+        group.bench_with_input(BenchmarkId::new("scalar", dim), &dim, |bencher, _| {
+            bencher.iter(|| dot_product_scalar(black_box(&a), black_box(&b)));
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark the specific case of OpenAI embeddings (1536 dimensions).
+fn bench_dot_product_openai(c: &mut Criterion) {
+    // OpenAI text-embedding-3-small dimension
+    let dim = 1536;
+    let a = generate_vector(dim, 0);
+    let b = generate_vector(dim, 42);
+
+    c.bench_function("dot_product_openai_1536d", |bencher| {
+        bencher.iter(|| dot_product(black_box(&a), black_box(&b)).unwrap());
+    });
+}
+
+/// Benchmark self dot product (equivalent to squared magnitude).
+/// This is useful for normalization operations.
+fn bench_dot_product_self(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dot_product_self");
+
+    let dimensions = [384, 1536];
+
+    for dim in dimensions {
+        let a = generate_vector(dim, 0);
+
+        group.throughput(Throughput::Elements(dim as u64));
+
+        group.bench_with_input(BenchmarkId::new("self_dot", dim), &dim, |bencher, _| {
+            bencher.iter(|| dot_product(black_box(&a), black_box(&a)).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark batch dot product computations.
+/// Simulates computing dot products against a collection (e.g., for ranking).
+fn bench_dot_product_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dot_product_batch");
+
+    let dim = 384; // Sentence Transformers dimension
+    let batch_sizes = [10, 100, 1000];
+
+    let query = generate_vector(dim, 0);
+
+    for batch_size in batch_sizes {
+        let vectors: Vec<Vec<f32>> = (0..batch_size)
+            .map(|i| generate_vector(dim, i + 1))
+            .collect();
+
+        group.throughput(Throughput::Elements((batch_size * dim) as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("batch_max", batch_size),
+            &batch_size,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(
+                        vectors
+                            .iter()
+                            .map(|v| dot_product(black_box(&query), black_box(v)).unwrap())
+                            .fold(f32::NEG_INFINITY, f32::max),
+                    )
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_cosine_similarity_dimensions,
@@ -340,6 +449,10 @@ criterion_group!(
     bench_euclidean_distance_openai,
     bench_squared_vs_euclidean,
     bench_euclidean_distance_batch,
+    bench_dot_product_dimensions,
+    bench_dot_product_openai,
+    bench_dot_product_self,
+    bench_dot_product_batch,
 );
 
 criterion_main!(benches);
