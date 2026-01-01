@@ -10,8 +10,10 @@
 //! to work with those vectors effectively:
 //!
 //! - **Type definitions**: [`VectorDimension`] for expressing vector sizes
-//! - **Similarity functions**: [`cosine_similarity`] for measuring vector similarity
-//! - **Normalization**: (future) L2 normalization for cosine similarity
+//! - **Similarity functions**: [`cosine_similarity`], [`cosine_similarity_normalized`]
+//! - **Distance functions**: [`euclidean_distance`], [`squared_euclidean_distance`]
+//! - **Inner product**: [`dot_product`] for pre-normalized vectors or projections
+//! - **Normalization**: (future) L2 normalization utilities
 //! - **Validation**: (future) Dimension checking and NaN/Inf detection
 //!
 //! # Usage
@@ -49,12 +51,22 @@
 //! This provides stronger type safety by preventing accidental interchange with
 //! other `usize` values (e.g., byte counts, array indices).
 //!
+//! # Implemented Functions
+//!
+//! - **[`cosine_similarity`]**: Measures angle between vectors, range `[-1, 1]`
+//! - **[`cosine_similarity_normalized`]**: Optimized for pre-normalized (unit) vectors
+//! - **[`euclidean_distance`]**: L2 distance between vectors
+//! - **[`squared_euclidean_distance`]**: Squared L2 distance (faster for comparisons)
+//! - **[`dot_product`]**: Inner product, useful for pre-normalized vectors
+//!
+//! All functions use SIMD acceleration (AVX2/SSE2) when available.
+//!
 //! # Future Additions
 //!
 //! This module will be expanded to include:
 //!
-//! - Similarity functions (cosine, euclidean, dot product)
 //! - L2 normalization utilities
+//! - Manhattan distance
 //! - Dimension validation helpers
 //! - Sparse vector support
 //!
@@ -357,21 +369,18 @@ mod simd {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
-            let len = a.len();
-            let chunks = len / 8;
-            let remainder = len % 8;
+            let a_chunks = a.chunks_exact(8);
+            let b_chunks = b.chunks_exact(8);
+            let a_rem = a_chunks.remainder();
+            let b_rem = b_chunks.remainder();
 
             // Accumulator for 8 floats at a time
             let mut acc = _mm256_setzero_ps();
 
-            let a_ptr = a.as_ptr();
-            let b_ptr = b.as_ptr();
-
             // Process 8 floats at a time
-            for i in 0..chunks {
-                let offset = i * 8;
-                let va = _mm256_loadu_ps(a_ptr.add(offset));
-                let vb = _mm256_loadu_ps(b_ptr.add(offset));
+            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
+                let va = _mm256_loadu_ps(va_chunk.as_ptr());
+                let vb = _mm256_loadu_ps(vb_chunk.as_ptr());
 
                 // Fused multiply-add: acc = va * vb + acc
                 acc = _mm256_fmadd_ps(va, vb, acc);
@@ -381,9 +390,8 @@ mod simd {
             let mut sum = horizontal_sum_avx(acc);
 
             // Handle remainder with scalar operations
-            let start = chunks * 8;
-            for i in 0..remainder {
-                sum += a[start + i] * b[start + i];
+            for (&va, &vb) in a_rem.iter().zip(b_rem) {
+                sum += va * vb;
             }
 
             sum
@@ -403,21 +411,18 @@ mod simd {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
-            let len = a.len();
-            let chunks = len / 4;
-            let remainder = len % 4;
+            let a_chunks = a.chunks_exact(4);
+            let b_chunks = b.chunks_exact(4);
+            let a_rem = a_chunks.remainder();
+            let b_rem = b_chunks.remainder();
 
             // Accumulator for 4 floats at a time
             let mut acc = _mm_setzero_ps();
 
-            let a_ptr = a.as_ptr();
-            let b_ptr = b.as_ptr();
-
             // Process 4 floats at a time
-            for i in 0..chunks {
-                let offset = i * 4;
-                let va = _mm_loadu_ps(a_ptr.add(offset));
-                let vb = _mm_loadu_ps(b_ptr.add(offset));
+            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
+                let va = _mm_loadu_ps(va_chunk.as_ptr());
+                let vb = _mm_loadu_ps(vb_chunk.as_ptr());
 
                 // Multiply and accumulate
                 acc = _mm_add_ps(acc, _mm_mul_ps(va, vb));
@@ -427,9 +432,8 @@ mod simd {
             let mut sum = horizontal_sum_sse(acc);
 
             // Handle remainder with scalar operations
-            let start = chunks * 4;
-            for i in 0..remainder {
-                sum += a[start + i] * b[start + i];
+            for (&va, &vb) in a_rem.iter().zip(b_rem) {
+                sum += va * vb;
             }
 
             sum
