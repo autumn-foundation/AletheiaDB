@@ -634,6 +634,19 @@ mod tests {
     // ============================================================
     // Vector Property Tests (VS-012)
     // ============================================================
+    //
+    // Note on floating-point equality:
+    // These tests use exact equality (assert_eq!) which works because vectors
+    // are hardcoded values without computation. PropertyValue::Vector uses
+    // derived PartialEq (bitwise comparison). For tests involving computed
+    // vectors (normalization, etc.), use approximate equality instead:
+    //
+    //   fn vectors_approx_equal(a: &[f32], b: &[f32], epsilon: f32) -> bool {
+    //       a.len() == b.len() &&
+    //       a.iter().zip(b).all(|(x, y)| (x - y).abs() < epsilon)
+    //   }
+    //
+    // See PropertyValue::Vector documentation at src/core/property.rs for details.
 
     #[test]
     fn test_create_node_version_with_vector_property() {
@@ -1006,7 +1019,10 @@ mod tests {
         let label = GLOBAL_INTERNER.intern("Embedding");
 
         // High-dimensional embedding (like OpenAI's 1536-dim)
-        let embedding: Vec<f32> = (0..1536).map(|i| (i as f32) / 1536.0).collect();
+        const DIMENSIONS: usize = 1536;
+        let embedding: Vec<f32> = (0..DIMENSIONS)
+            .map(|i| (i as f32) / DIMENSIONS as f32)
+            .collect();
 
         let v1 = VersionId::new(1);
         storage
@@ -1028,7 +1044,7 @@ mod tests {
             .and_then(|v| v.as_vector())
             .expect("Should have embedding");
 
-        assert_eq!(retrieved.len(), 1536);
+        assert_eq!(retrieved.len(), DIMENSIONS);
         assert_eq!(retrieved, &embedding[..]);
     }
 
@@ -1084,5 +1100,160 @@ mod tests {
                 Some(&expected_emb[..])
             );
         }
+    }
+
+    // ============================================================
+    // Edge Case Tests
+    // ============================================================
+
+    #[test]
+    fn test_empty_vector_versioning() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("EmptyEmbedding");
+
+        // Empty vector should work with delta compression
+        let empty_vec: Vec<f32> = vec![];
+
+        // Version 1: empty vector
+        let v1 = VersionId::new(1);
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("name", "empty")
+                    .insert_vector("embedding", &empty_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Version 2: still empty (should be excluded from delta as unchanged)
+        let v2 = VersionId::new(2);
+        storage
+            .add_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("name", "updated")
+                    .insert_vector("embedding", &empty_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Both versions should have empty embedding
+        let props_v1 = storage.reconstruct_node_properties(v1).unwrap();
+        let props_v2 = storage.reconstruct_node_properties(v2).unwrap();
+
+        assert_eq!(
+            props_v1.get("embedding").and_then(|v| v.as_vector()),
+            Some(&empty_vec[..])
+        );
+        assert_eq!(
+            props_v2.get("embedding").and_then(|v| v.as_vector()),
+            Some(&empty_vec[..])
+        );
+    }
+
+    #[test]
+    fn test_vector_with_special_float_values() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("SpecialFloats");
+
+        // Note: NaN and Infinity are allowed in storage (validation is optional).
+        // However, NaN != NaN per IEEE 754, so delta computation treats NaN
+        // as always changed. This test documents that behavior.
+
+        let special_vec = vec![f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0];
+
+        let v1 = VersionId::new(1);
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &special_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Verify special values round-trip correctly
+        let props = storage.reconstruct_node_properties(v1).unwrap();
+        let retrieved = props
+            .get("embedding")
+            .and_then(|v| v.as_vector())
+            .expect("Should have embedding");
+
+        assert!(retrieved[0].is_infinite() && retrieved[0].is_sign_positive());
+        assert!(retrieved[1].is_infinite() && retrieved[1].is_sign_negative());
+        assert_eq!(retrieved[2], 0.0);
+        assert_eq!(retrieved[3], -0.0);
+    }
+
+    #[test]
+    fn test_nan_in_vector_delta_behavior() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("NaNTest");
+
+        // NaN != NaN per IEEE 754, so same NaN values will be detected as
+        // "changed" in delta computation. This is documented behavior.
+        let nan_vec = vec![f32::NAN, 1.0];
+
+        let v1 = VersionId::new(1);
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &nan_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Same NaN values - will be treated as changed due to NaN != NaN
+        let v2 = VersionId::new(2);
+        storage
+            .add_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &nan_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Both should reconstruct with NaN values
+        let props_v1 = storage.reconstruct_node_properties(v1).unwrap();
+        let props_v2 = storage.reconstruct_node_properties(v2).unwrap();
+
+        let vec1 = props_v1
+            .get("embedding")
+            .and_then(|v| v.as_vector())
+            .unwrap();
+        let vec2 = props_v2
+            .get("embedding")
+            .and_then(|v| v.as_vector())
+            .unwrap();
+
+        // Both should have NaN at index 0
+        assert!(vec1[0].is_nan());
+        assert!(vec2[0].is_nan());
+        assert_eq!(vec1[1], 1.0);
+        assert_eq!(vec2[1], 1.0);
     }
 }
