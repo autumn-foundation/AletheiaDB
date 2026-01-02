@@ -1153,6 +1153,202 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> Result<f32> {
 }
 
 // ============================================================================
+// Normalization
+// ============================================================================
+
+/// Computes the magnitude (L2 norm) of a vector.
+///
+/// The magnitude is the square root of the sum of squared elements:
+/// `||v|| = sqrt(v₀² + v₁² + ... + vₙ²)`
+///
+/// # Arguments
+///
+/// * `v` - The vector to compute the magnitude of
+///
+/// # Returns
+///
+/// The magnitude as a non-negative f32. Returns 0.0 for empty vectors.
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::magnitude;
+///
+/// // Classic 3-4-5 right triangle
+/// let v = vec![3.0, 4.0];
+/// let mag = magnitude(&v);
+/// assert!((mag - 5.0).abs() < 1e-6);
+///
+/// // Unit vector has magnitude 1
+/// let unit = vec![1.0, 0.0, 0.0];
+/// assert!((magnitude(&unit) - 1.0).abs() < 1e-6);
+/// ```
+///
+/// # Performance
+///
+/// This function uses SIMD-accelerated dot product internally:
+/// `magnitude(v) = sqrt(dot_product(v, v))`
+#[inline]
+pub fn magnitude(v: &[f32]) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    dot_product_sum(v, v).sqrt()
+}
+
+/// Computes the squared magnitude of a vector.
+///
+/// This is equivalent to `magnitude(v).powi(2)` but avoids the square root,
+/// making it faster for comparisons where the actual magnitude isn't needed.
+///
+/// # Arguments
+///
+/// * `v` - The vector to compute the squared magnitude of
+///
+/// # Returns
+///
+/// The squared magnitude as a non-negative f32. Returns 0.0 for empty vectors.
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::squared_magnitude;
+///
+/// let v = vec![3.0, 4.0];
+/// let sq_mag = squared_magnitude(&v);
+/// assert!((sq_mag - 25.0).abs() < 1e-6); // 3² + 4² = 25
+/// ```
+#[inline]
+pub fn squared_magnitude(v: &[f32]) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    dot_product_sum(v, v)
+}
+
+/// Normalizes a vector to unit length (L2 normalization).
+///
+/// Creates a new vector with the same direction but magnitude 1.0.
+/// For zero vectors (magnitude = 0), returns a zero vector of the same length.
+///
+/// # Arguments
+///
+/// * `v` - The vector to normalize
+///
+/// # Returns
+///
+/// A new `Vec<f32>` with unit length, or a zero vector if the input is zero.
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::{normalize, magnitude};
+///
+/// let v = vec![3.0, 4.0];
+/// let unit = normalize(&v);
+///
+/// // Normalized vector has magnitude 1
+/// assert!((magnitude(&unit) - 1.0).abs() < 1e-6);
+///
+/// // Direction is preserved: [3, 4] -> [0.6, 0.8]
+/// assert!((unit[0] - 0.6).abs() < 1e-6);
+/// assert!((unit[1] - 0.8).abs() < 1e-6);
+///
+/// // Zero vector stays zero
+/// let zero = vec![0.0, 0.0];
+/// let normalized_zero = normalize(&zero);
+/// assert_eq!(normalized_zero, vec![0.0, 0.0]);
+/// ```
+///
+/// # Performance
+///
+/// This function allocates a new vector. For in-place normalization without
+/// allocation, use [`normalize_in_place`].
+#[inline]
+pub fn normalize(v: &[f32]) -> Vec<f32> {
+    let mag = magnitude(v);
+    if mag == 0.0 {
+        // Return zero vector of same length
+        return vec![0.0; v.len()];
+    }
+    let inv_mag = 1.0 / mag;
+    v.iter().map(|&x| x * inv_mag).collect()
+}
+
+/// Normalizes a vector to unit length in place.
+///
+/// Modifies the vector in place to have magnitude 1.0.
+/// For zero vectors (magnitude = 0), leaves the vector unchanged.
+///
+/// # Arguments
+///
+/// * `v` - The vector to normalize (modified in place)
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::{normalize_in_place, magnitude};
+///
+/// let mut v = vec![3.0, 4.0];
+/// normalize_in_place(&mut v);
+///
+/// // Now has magnitude 1
+/// assert!((magnitude(&v) - 1.0).abs() < 1e-6);
+///
+/// // Direction is preserved: [3, 4] -> [0.6, 0.8]
+/// assert!((v[0] - 0.6).abs() < 1e-6);
+/// assert!((v[1] - 0.8).abs() < 1e-6);
+/// ```
+///
+/// # Performance
+///
+/// This function modifies the vector in place without allocation, making it
+/// more efficient than [`normalize`] when a new vector isn't needed.
+#[inline]
+pub fn normalize_in_place(v: &mut [f32]) {
+    let mag = magnitude(v);
+    if mag == 0.0 {
+        // Leave zero vector unchanged
+        return;
+    }
+    let inv_mag = 1.0 / mag;
+    for x in v.iter_mut() {
+        *x *= inv_mag;
+    }
+}
+
+/// Checks if a vector is normalized (has magnitude approximately 1.0).
+///
+/// This is useful for validating that vectors are properly normalized before
+/// using optimized functions like [`cosine_similarity_normalized`].
+///
+/// # Arguments
+///
+/// * `v` - The vector to check
+/// * `tolerance` - Maximum allowed deviation from 1.0 (e.g., 1e-6)
+///
+/// # Returns
+///
+/// `true` if the magnitude is within `tolerance` of 1.0, `false` otherwise.
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::{is_normalized, normalize};
+///
+/// let v = vec![3.0, 4.0];
+/// assert!(!is_normalized(&v, 1e-6));
+///
+/// let unit = normalize(&v);
+/// assert!(is_normalized(&unit, 1e-6));
+/// ```
+#[inline]
+pub fn is_normalized(v: &[f32], tolerance: f32) -> bool {
+    let mag = magnitude(v);
+    (mag - 1.0).abs() <= tolerance
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1541,16 +1737,8 @@ mod tests {
     // ========================================================================
     // Normalized Cosine Similarity Tests
     // ========================================================================
-
-    /// Helper to normalize a vector to unit length.
-    fn normalize(v: &[f32]) -> Vec<f32> {
-        let mag = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if mag == 0.0 {
-            v.to_vec()
-        } else {
-            v.iter().map(|x| x / mag).collect()
-        }
-    }
+    //
+    // Note: These tests use the public `normalize` function imported via super::*
 
     #[test]
     fn test_cosine_similarity_normalized_identical() {
@@ -2146,6 +2334,284 @@ mod tests {
             );
         }
     }
+
+    // ========================================================================
+    // Magnitude Tests
+    // ========================================================================
+
+    #[test]
+    fn test_magnitude_3_4_triangle() {
+        // Classic 3-4-5 right triangle
+        let v = vec![3.0, 4.0];
+        let mag = magnitude(&v);
+        assert!(
+            (mag - 5.0).abs() < 1e-6,
+            "Magnitude of [3, 4] should be 5, got {}",
+            mag
+        );
+    }
+
+    #[test]
+    fn test_magnitude_unit_vectors() {
+        let unit_x = vec![1.0, 0.0, 0.0];
+        let unit_y = vec![0.0, 1.0, 0.0];
+        let unit_z = vec![0.0, 0.0, 1.0];
+
+        assert!((magnitude(&unit_x) - 1.0).abs() < 1e-6);
+        assert!((magnitude(&unit_y) - 1.0).abs() < 1e-6);
+        assert!((magnitude(&unit_z) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_magnitude_zero_vector() {
+        let v = vec![0.0, 0.0, 0.0];
+        assert_eq!(magnitude(&v), 0.0);
+    }
+
+    #[test]
+    fn test_magnitude_empty_vector() {
+        let v: Vec<f32> = vec![];
+        assert_eq!(magnitude(&v), 0.0);
+    }
+
+    #[test]
+    fn test_magnitude_single_element() {
+        assert!((magnitude(&[5.0]) - 5.0).abs() < 1e-6);
+        assert!((magnitude(&[-5.0]) - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_magnitude_negative_components() {
+        let v = vec![-3.0, -4.0];
+        assert!(
+            (magnitude(&v) - 5.0).abs() < 1e-6,
+            "Magnitude should be positive regardless of component signs"
+        );
+    }
+
+    #[test]
+    fn test_magnitude_large_dimension() {
+        // Vector of all 1s with dimension n has magnitude sqrt(n)
+        let n = 1536;
+        let v: Vec<f32> = vec![1.0; n];
+        let expected = (n as f32).sqrt();
+        assert!(
+            (magnitude(&v) - expected).abs() < 1e-4,
+            "Magnitude of {} 1s should be sqrt({}), got {}",
+            n,
+            n,
+            magnitude(&v)
+        );
+    }
+
+    // ========================================================================
+    // Squared Magnitude Tests
+    // ========================================================================
+
+    #[test]
+    fn test_squared_magnitude_3_4_triangle() {
+        let v = vec![3.0, 4.0];
+        let sq_mag = squared_magnitude(&v);
+        assert!(
+            (sq_mag - 25.0).abs() < 1e-6,
+            "Squared magnitude of [3, 4] should be 25, got {}",
+            sq_mag
+        );
+    }
+
+    #[test]
+    fn test_squared_magnitude_zero_vector() {
+        let v = vec![0.0, 0.0, 0.0];
+        assert_eq!(squared_magnitude(&v), 0.0);
+    }
+
+    #[test]
+    fn test_squared_magnitude_empty_vector() {
+        let v: Vec<f32> = vec![];
+        assert_eq!(squared_magnitude(&v), 0.0);
+    }
+
+    #[test]
+    fn test_squared_magnitude_vs_magnitude() {
+        let v = vec![1.0, 2.0, 3.0, 4.0];
+        let mag = magnitude(&v);
+        let sq_mag = squared_magnitude(&v);
+        let diff = (mag * mag - sq_mag).abs();
+        assert!(
+            diff < 1e-5,
+            "squared_magnitude should equal magnitude²: mag²={}, sq_mag={}, diff={}",
+            mag * mag,
+            sq_mag,
+            diff
+        );
+    }
+
+    // ========================================================================
+    // Normalize Tests
+    // ========================================================================
+
+    #[test]
+    fn test_normalize_3_4_triangle() {
+        let v = vec![3.0, 4.0];
+        let unit = normalize(&v);
+        assert!((unit[0] - 0.6).abs() < 1e-6);
+        assert!((unit[1] - 0.8).abs() < 1e-6);
+        assert!((magnitude(&unit) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_already_unit() {
+        let v = vec![1.0, 0.0, 0.0];
+        let unit = normalize(&v);
+        assert!((unit[0] - 1.0).abs() < 1e-6);
+        assert!(unit[1].abs() < 1e-6);
+        assert!(unit[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_zero_vector() {
+        let v = vec![0.0, 0.0, 0.0];
+        let unit = normalize(&v);
+        // Zero vector should return zero vector
+        assert_eq!(unit, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_normalize_empty_vector() {
+        let v: Vec<f32> = vec![];
+        let unit = normalize(&v);
+        assert!(unit.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_negative_components() {
+        let v = vec![-3.0, -4.0];
+        let unit = normalize(&v);
+        assert!((unit[0] - (-0.6)).abs() < 1e-6);
+        assert!((unit[1] - (-0.8)).abs() < 1e-6);
+        assert!((magnitude(&unit) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_preserves_direction() {
+        let v = vec![2.0, 4.0, 6.0];
+        let unit = normalize(&v);
+        // Ratios should be preserved: 1:2:3
+        let ratio_1_2 = unit[0] / unit[1];
+        let ratio_1_3 = unit[0] / unit[2];
+        assert!((ratio_1_2 - 0.5).abs() < 1e-6);
+        assert!((ratio_1_3 - (1.0 / 3.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_large_dimension() {
+        let n = 1536;
+        let v: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1).sin()).collect();
+        let unit = normalize(&v);
+        assert!(
+            (magnitude(&unit) - 1.0).abs() < 1e-5,
+            "Normalized vector should have magnitude 1.0, got {}",
+            magnitude(&unit)
+        );
+    }
+
+    // ========================================================================
+    // Normalize In-Place Tests
+    // ========================================================================
+
+    #[test]
+    fn test_normalize_in_place_3_4_triangle() {
+        let mut v = vec![3.0, 4.0];
+        normalize_in_place(&mut v);
+        assert!((v[0] - 0.6).abs() < 1e-6);
+        assert!((v[1] - 0.8).abs() < 1e-6);
+        assert!((magnitude(&v) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_normalize_in_place_zero_vector() {
+        let mut v = vec![0.0, 0.0, 0.0];
+        normalize_in_place(&mut v);
+        // Zero vector should remain unchanged
+        assert_eq!(v, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_normalize_in_place_empty_vector() {
+        let mut v: Vec<f32> = vec![];
+        normalize_in_place(&mut v);
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_in_place_matches_normalize() {
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let expected = normalize(&v);
+
+        let mut v_copy = v.clone();
+        normalize_in_place(&mut v_copy);
+
+        for (a, b) in v_copy.iter().zip(expected.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_normalize_in_place_large_dimension() {
+        let n = 1536;
+        let mut v: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1).cos()).collect();
+        normalize_in_place(&mut v);
+        assert!(
+            (magnitude(&v) - 1.0).abs() < 1e-5,
+            "In-place normalized vector should have magnitude 1.0, got {}",
+            magnitude(&v)
+        );
+    }
+
+    // ========================================================================
+    // Is Normalized Tests
+    // ========================================================================
+
+    #[test]
+    fn test_is_normalized_unit_vectors() {
+        assert!(is_normalized(&[1.0, 0.0, 0.0], 1e-6));
+        assert!(is_normalized(&[0.0, 1.0, 0.0], 1e-6));
+        assert!(is_normalized(&[0.0, 0.0, 1.0], 1e-6));
+    }
+
+    #[test]
+    fn test_is_normalized_normalized_vector() {
+        let v = normalize(&[3.0, 4.0]);
+        assert!(is_normalized(&v, 1e-6));
+    }
+
+    #[test]
+    fn test_is_normalized_non_unit_vector() {
+        assert!(!is_normalized(&[3.0, 4.0], 1e-6)); // magnitude = 5
+        assert!(!is_normalized(&[2.0, 0.0, 0.0], 1e-6)); // magnitude = 2
+    }
+
+    #[test]
+    fn test_is_normalized_zero_vector() {
+        // Zero vector has magnitude 0, which is not 1
+        assert!(!is_normalized(&[0.0, 0.0, 0.0], 1e-6));
+    }
+
+    #[test]
+    fn test_is_normalized_tolerance() {
+        // Vector with magnitude 1.0001 should pass with 1e-3 tolerance
+        let v = vec![1.0001, 0.0, 0.0];
+        assert!(!is_normalized(&v, 1e-6));
+        assert!(is_normalized(&v, 1e-3));
+    }
+
+    #[test]
+    fn test_is_normalized_diagonal() {
+        // Unit diagonal in 3D: each component = 1/sqrt(3)
+        let c = 1.0 / 3.0_f32.sqrt();
+        let v = vec![c, c, c];
+        assert!(is_normalized(&v, 1e-6));
+    }
 }
 
 // ============================================================================
@@ -2435,6 +2901,112 @@ mod proptests {
             prop_assert!((dot_scaled - expected).abs() < tolerance,
                 "Scalar bilinearity failed: dot({}*a, b)={} vs {}*dot(a,b)={}",
                 scale, dot_scaled, scale, expected);
+        }
+
+        // ====================================================================
+        // Normalization Property Tests
+        // ====================================================================
+
+        #[test]
+        fn prop_normalized_vector_has_unit_magnitude(
+            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+        ) {
+            // Skip zero vectors
+            let sq_mag: f32 = v.iter().map(|x| x * x).sum();
+            if sq_mag > 1e-10 {
+                let unit = normalize(&v);
+                let mag = magnitude(&unit);
+                prop_assert!((mag - 1.0).abs() < PROPTEST_TOLERANCE,
+                    "Normalized vector should have magnitude 1.0, got {} for {:?}", mag, v);
+            }
+        }
+
+        #[test]
+        fn prop_normalize_in_place_has_unit_magnitude(
+            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+        ) {
+            // Skip zero vectors
+            let sq_mag: f32 = v.iter().map(|x| x * x).sum();
+            if sq_mag > 1e-10 {
+                let mut v_copy = v.clone();
+                normalize_in_place(&mut v_copy);
+                let mag = magnitude(&v_copy);
+                prop_assert!((mag - 1.0).abs() < PROPTEST_TOLERANCE,
+                    "In-place normalized vector should have magnitude 1.0, got {}", mag);
+            }
+        }
+
+        #[test]
+        fn prop_normalize_matches_normalize_in_place(
+            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+        ) {
+            let unit = normalize(&v);
+            let mut v_copy = v.clone();
+            normalize_in_place(&mut v_copy);
+
+            for (a, b) in unit.iter().zip(v_copy.iter()) {
+                prop_assert!((a - b).abs() < PROPTEST_TOLERANCE,
+                    "normalize and normalize_in_place should produce same result");
+            }
+        }
+
+        #[test]
+        fn prop_magnitude_is_non_negative(
+            v in prop::collection::vec(-100.0f32..100.0f32, 0..100usize)
+        ) {
+            let mag = magnitude(&v);
+            prop_assert!(mag >= 0.0, "Magnitude should be non-negative, got {}", mag);
+        }
+
+        #[test]
+        fn prop_squared_magnitude_is_non_negative(
+            v in prop::collection::vec(-100.0f32..100.0f32, 0..100usize)
+        ) {
+            let sq_mag = squared_magnitude(&v);
+            prop_assert!(sq_mag >= 0.0, "Squared magnitude should be non-negative, got {}", sq_mag);
+        }
+
+        #[test]
+        fn prop_magnitude_squared_relationship(
+            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+        ) {
+            let mag = magnitude(&v);
+            let sq_mag = squared_magnitude(&v);
+            // magnitude² should equal squared_magnitude
+            let tolerance = PROPTEST_TOLERANCE * 100.0 + sq_mag * 1e-5;
+            prop_assert!((mag * mag - sq_mag).abs() < tolerance,
+                "magnitude² ({}) should equal squared_magnitude ({})", mag * mag, sq_mag);
+        }
+
+        #[test]
+        fn prop_normalize_preserves_direction(
+            v in prop::collection::vec(-100.0f32..100.0f32, 2..50usize)
+        ) {
+            // Skip zero or near-zero vectors
+            let sq_mag: f32 = v.iter().map(|x| x * x).sum();
+            if sq_mag > 1e-6 {
+                let unit = normalize(&v);
+                // Cosine similarity between original and normalized should be 1.0
+                let sim = cosine_similarity(&v, &unit).unwrap();
+                if !sim.is_nan() {
+                    prop_assert!((sim - 1.0).abs() < PROPTEST_TOLERANCE * 10.0,
+                        "Normalized vector should have same direction: sim = {}", sim);
+                }
+            }
+        }
+
+        #[test]
+        fn prop_is_normalized_after_normalize(
+            v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+        ) {
+            // Skip zero vectors
+            let sq_mag: f32 = v.iter().map(|x| x * x).sum();
+            if sq_mag > 1e-10 {
+                let unit = normalize(&v);
+                // Use 1e-5 tolerance matching PROPTEST_TOLERANCE
+                prop_assert!(is_normalized(&unit, PROPTEST_TOLERANCE),
+                    "Normalized vector should pass is_normalized check");
+            }
         }
     }
 }

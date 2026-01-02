@@ -18,5 +18,6 @@ pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 pub use vector::{
     VectorDimension, cosine_similarity, cosine_similarity_normalized, dot_product,
-    euclidean_distance, squared_euclidean_distance,
+    euclidean_distance, is_normalized, magnitude, normalize, normalize_in_place,
+    squared_euclidean_distance, squared_magnitude,
 };
