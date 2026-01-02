@@ -14,7 +14,7 @@
 //! - **Distance functions**: [`euclidean_distance`], [`squared_euclidean_distance`]
 //! - **Inner product**: [`dot_product`] for pre-normalized vectors or projections
 //! - **Normalization**: [`magnitude`], [`squared_magnitude`], [`normalize`], [`normalize_in_place`], [`is_normalized`]
-//! - **Validation**: (future) Dimension checking and NaN/Inf detection
+//! - **Validation**: [`validate_vector`], [`check_dimensions_match`] for NaN/Inf detection and dimension checking
 //!
 //! # Usage
 //!
@@ -77,7 +77,7 @@
 //! See `docs/VECTOR_SEARCH_DESIGN.md` for the complete design.
 
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
-use crate::utils::error::{Error, Result};
+use crate::utils::error::{Error, Result, VectorError};
 use std::fmt;
 
 // ============================================================================
@@ -908,14 +908,7 @@ fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
 /// The result is always clamped to `[-1.0, 1.0]` to handle minor floating-point
 /// inaccuracies that could produce values slightly outside this range.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
-    if a.len() != b.len() {
-        return Err(Error::Query(
-            crate::utils::error::QueryError::InvalidParameter {
-                parameter: "vectors".to_string(),
-                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
-            },
-        ));
-    }
+    check_dimensions_match(a, b)?;
 
     // Handle empty vectors
     if a.is_empty() {
@@ -1019,14 +1012,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
 /// - Correctness is more important than performance
 #[inline]
 pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
-    if a.len() != b.len() {
-        return Err(Error::Query(
-            crate::utils::error::QueryError::InvalidParameter {
-                parameter: "vectors".to_string(),
-                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
-            },
-        ));
-    }
+    check_dimensions_match(a, b)?;
 
     // Handle empty vectors
     if a.is_empty() {
@@ -1125,14 +1111,7 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
 /// - **Scalar**: Fallback for other platforms
 #[inline]
 pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
-    if a.len() != b.len() {
-        return Err(Error::Query(
-            crate::utils::error::QueryError::InvalidParameter {
-                parameter: "vectors".to_string(),
-                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
-            },
-        ));
-    }
+    check_dimensions_match(a, b)?;
 
     // Handle empty vectors
     if a.is_empty() {
@@ -1274,14 +1253,7 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
 /// magnitudes (e.g., when working with pre-normalized vectors).
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> Result<f32> {
-    if a.len() != b.len() {
-        return Err(Error::Query(
-            crate::utils::error::QueryError::InvalidParameter {
-                parameter: "vectors".to_string(),
-                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
-            },
-        ));
-    }
+    check_dimensions_match(a, b)?;
 
     // Handle empty vectors
     if a.is_empty() {
@@ -1533,6 +1505,175 @@ pub fn is_normalized(v: &[f32], tolerance: f32) -> bool {
 #[inline]
 pub fn is_normalized_default(v: &[f32]) -> bool {
     is_normalized(v, NORMALIZATION_TOLERANCE)
+}
+
+// ============================================================================
+// Vector Validation
+// ============================================================================
+
+/// Validates that a vector contains no NaN or Infinity values.
+///
+/// This function scans all elements of the vector and returns an error if any
+/// invalid floating-point values are found. NaN and Infinity values would cause
+/// incorrect results in distance/similarity calculations and should be caught early.
+///
+/// # Arguments
+///
+/// * `v` - The vector slice to validate
+///
+/// # Returns
+///
+/// * `Ok(())` if all elements are valid finite numbers
+/// * `Err(VectorError::ContainsNaN)` if any NaN values are found
+/// * `Err(VectorError::ContainsInfinity)` if any Infinity values are found (checked after NaN)
+///
+/// # Note
+///
+/// NaN is checked first, so if a vector contains both NaN and Infinity values,
+/// the NaN error will be returned. This is because NaN values are generally more
+/// problematic (NaN != NaN, propagates through calculations).
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::validate_vector;
+///
+/// // Valid vector
+/// let v = vec![1.0, 2.0, 3.0];
+/// assert!(validate_vector(&v).is_ok());
+///
+/// // Vector with NaN
+/// let v_nan = vec![1.0, f32::NAN, 3.0];
+/// assert!(validate_vector(&v_nan).is_err());
+///
+/// // Vector with Infinity
+/// let v_inf = vec![1.0, f32::INFINITY, 3.0];
+/// assert!(validate_vector(&v_inf).is_err());
+///
+/// // Empty vector is valid
+/// let empty: Vec<f32> = vec![];
+/// assert!(validate_vector(&empty).is_ok());
+/// ```
+#[inline]
+pub fn validate_vector(v: &[f32]) -> Result<()> {
+    // Use a single pass to count both NaN and Infinity values for efficiency.
+    // This is more efficient than iterating twice, especially for large vectors.
+    let (nan_count, inf_count) = v.iter().fold((0usize, 0usize), |(nan, inf), &val| {
+        if val.is_nan() {
+            (nan + 1, inf)
+        } else if val.is_infinite() {
+            (nan, inf + 1)
+        } else {
+            (nan, inf)
+        }
+    });
+
+    // Per the function's contract, NaN is checked first.
+    if nan_count > 0 {
+        return Err(Error::Vector(VectorError::ContainsNaN { count: nan_count }));
+    }
+
+    if inf_count > 0 {
+        return Err(Error::Vector(VectorError::ContainsInfinity {
+            count: inf_count,
+        }));
+    }
+
+    Ok(())
+}
+
+/// Checks that two vectors have matching dimensions.
+///
+/// Many vector operations require vectors of equal length. This function provides
+/// a convenient way to validate dimension compatibility before performing operations.
+///
+/// # Arguments
+///
+/// * `a` - The first vector (its length is considered the "expected" dimension)
+/// * `b` - The second vector (its length is compared against `a`)
+///
+/// # Returns
+///
+/// * `Ok(())` if both vectors have the same length
+/// * `Err(VectorError::DimensionMismatch)` if lengths differ
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::check_dimensions_match;
+///
+/// let v1 = vec![1.0, 2.0, 3.0];
+/// let v2 = vec![4.0, 5.0, 6.0];
+/// let v3 = vec![1.0, 2.0];
+///
+/// // Same dimensions - OK
+/// assert!(check_dimensions_match(&v1, &v2).is_ok());
+///
+/// // Different dimensions - Error
+/// assert!(check_dimensions_match(&v1, &v3).is_err());
+///
+/// // Empty vectors match
+/// let empty1: Vec<f32> = vec![];
+/// let empty2: Vec<f32> = vec![];
+/// assert!(check_dimensions_match(&empty1, &empty2).is_ok());
+/// ```
+#[inline]
+pub fn check_dimensions_match(a: &[f32], b: &[f32]) -> Result<()> {
+    if a.len() != b.len() {
+        return Err(Error::Vector(VectorError::DimensionMismatch {
+            expected: a.len(),
+            actual: b.len(),
+        }));
+    }
+    Ok(())
+}
+
+/// Validates a vector and checks that its dimension is within bounds.
+///
+/// This is a convenience function that combines validation (NaN/Infinity checking)
+/// with dimension bounds checking. Useful when processing user-provided vectors
+/// that need both validation and size constraints.
+///
+/// # Arguments
+///
+/// * `v` - The vector slice to validate
+/// * `max_dimension` - The maximum allowed dimension (length)
+///
+/// # Returns
+///
+/// * `Ok(())` if the vector is valid and within dimension bounds
+/// * `Err(VectorError::ContainsNaN)` if any NaN values are found
+/// * `Err(VectorError::ContainsInfinity)` if any Infinity values are found
+/// * `Err(VectorError::DimensionTooLarge)` if the vector exceeds max_dimension
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::validate_vector_with_bounds;
+///
+/// // Valid vector within bounds
+/// let v = vec![1.0, 2.0, 3.0];
+/// assert!(validate_vector_with_bounds(&v, 10).is_ok());
+///
+/// // Vector too large
+/// assert!(validate_vector_with_bounds(&v, 2).is_err());
+///
+/// // Vector with invalid values
+/// let v_nan = vec![1.0, f32::NAN];
+/// assert!(validate_vector_with_bounds(&v_nan, 10).is_err());
+/// ```
+#[inline]
+pub fn validate_vector_with_bounds(v: &[f32], max_dimension: usize) -> Result<()> {
+    // Check dimension first (fast check)
+    if v.len() > max_dimension {
+        return Err(Error::Vector(VectorError::DimensionTooLarge {
+            dimension: v.len(),
+            max_allowed: max_dimension,
+        }));
+    }
+
+    // Then validate contents
+    validate_vector(v)
 }
 
 // ============================================================================
@@ -3329,6 +3470,261 @@ mod tests {
             dot_closer,
             dot_farther
         );
+    }
+
+    // ========================================================================
+    // Vector Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_vector_valid() {
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!(validate_vector(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_empty() {
+        let v: Vec<f32> = vec![];
+        assert!(validate_vector(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_single_element() {
+        let v = vec![42.0];
+        assert!(validate_vector(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_negative_and_zero() {
+        let v = vec![-1.0, 0.0, 1.0, -0.0];
+        assert!(validate_vector(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_nan_single() {
+        let v = vec![1.0, f32::NAN, 3.0];
+        let result = validate_vector(&v);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::ContainsNaN { count })) => {
+                assert_eq!(count, 1);
+            }
+            _ => panic!("Expected ContainsNaN error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_vector_nan_multiple() {
+        let v = vec![f32::NAN, 1.0, f32::NAN, 2.0, f32::NAN];
+        let result = validate_vector(&v);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::ContainsNaN { count })) => {
+                assert_eq!(count, 3);
+            }
+            _ => panic!("Expected ContainsNaN error with count 3"),
+        }
+    }
+
+    #[test]
+    fn test_validate_vector_infinity_positive() {
+        let v = vec![1.0, f32::INFINITY, 3.0];
+        let result = validate_vector(&v);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::ContainsInfinity { count })) => {
+                assert_eq!(count, 1);
+            }
+            _ => panic!("Expected ContainsInfinity error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_vector_infinity_negative() {
+        let v = vec![1.0, f32::NEG_INFINITY, 3.0];
+        let result = validate_vector(&v);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::ContainsInfinity { count })) => {
+                assert_eq!(count, 1);
+            }
+            _ => panic!("Expected ContainsInfinity error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_vector_infinity_multiple() {
+        let v = vec![f32::INFINITY, 1.0, f32::NEG_INFINITY];
+        let result = validate_vector(&v);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::ContainsInfinity { count })) => {
+                assert_eq!(count, 2);
+            }
+            _ => panic!("Expected ContainsInfinity error with count 2"),
+        }
+    }
+
+    #[test]
+    fn test_validate_vector_nan_takes_precedence() {
+        // When both NaN and Infinity are present, NaN error should be returned first
+        let v = vec![f32::NAN, f32::INFINITY];
+        let result = validate_vector(&v);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::ContainsNaN { count })) => {
+                assert_eq!(count, 1);
+            }
+            _ => panic!("Expected ContainsNaN error (NaN takes precedence over Infinity)"),
+        }
+    }
+
+    #[test]
+    fn test_validate_vector_subnormal() {
+        // Subnormal (denormalized) numbers should be valid
+        let v = vec![f32::MIN_POSITIVE / 2.0, 1.0];
+        assert!(validate_vector(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_max_min_values() {
+        // Extreme but finite values should be valid
+        let v = vec![f32::MAX, f32::MIN, 1.0];
+        assert!(validate_vector(&v).is_ok());
+    }
+
+    // ========================================================================
+    // Dimension Match Tests
+    // ========================================================================
+
+    #[test]
+    fn test_check_dimensions_match_equal() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+        assert!(check_dimensions_match(&a, &b).is_ok());
+    }
+
+    #[test]
+    fn test_check_dimensions_match_empty() {
+        let a: Vec<f32> = vec![];
+        let b: Vec<f32> = vec![];
+        assert!(check_dimensions_match(&a, &b).is_ok());
+    }
+
+    #[test]
+    fn test_check_dimensions_match_single() {
+        let a = vec![1.0];
+        let b = vec![2.0];
+        assert!(check_dimensions_match(&a, &b).is_ok());
+    }
+
+    #[test]
+    fn test_check_dimensions_match_unequal() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        let result = check_dimensions_match(&a, &b);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::DimensionMismatch { expected, actual })) => {
+                assert_eq!(expected, 3);
+                assert_eq!(actual, 2);
+            }
+            _ => panic!("Expected DimensionMismatch error"),
+        }
+    }
+
+    #[test]
+    fn test_check_dimensions_match_unequal_reversed() {
+        let a = vec![1.0, 2.0];
+        let b = vec![1.0, 2.0, 3.0];
+        let result = check_dimensions_match(&a, &b);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::DimensionMismatch { expected, actual })) => {
+                assert_eq!(expected, 2);
+                assert_eq!(actual, 3);
+            }
+            _ => panic!("Expected DimensionMismatch error"),
+        }
+    }
+
+    #[test]
+    fn test_check_dimensions_match_empty_vs_nonempty() {
+        let a: Vec<f32> = vec![];
+        let b = vec![1.0];
+        let result = check_dimensions_match(&a, &b);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::DimensionMismatch { expected, actual })) => {
+                assert_eq!(expected, 0);
+                assert_eq!(actual, 1);
+            }
+            _ => panic!("Expected DimensionMismatch error"),
+        }
+    }
+
+    // ========================================================================
+    // Validate Vector with Bounds Tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_vector_with_bounds_valid() {
+        let v = vec![1.0, 2.0, 3.0];
+        assert!(validate_vector_with_bounds(&v, 10).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_with_bounds_exact() {
+        let v = vec![1.0, 2.0, 3.0];
+        assert!(validate_vector_with_bounds(&v, 3).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_with_bounds_too_large() {
+        let v = vec![1.0, 2.0, 3.0];
+        let result = validate_vector_with_bounds(&v, 2);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::DimensionTooLarge {
+                dimension,
+                max_allowed,
+            })) => {
+                assert_eq!(dimension, 3);
+                assert_eq!(max_allowed, 2);
+            }
+            _ => panic!("Expected DimensionTooLarge error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_vector_with_bounds_empty() {
+        let v: Vec<f32> = vec![];
+        assert!(validate_vector_with_bounds(&v, 0).is_ok());
+    }
+
+    #[test]
+    fn test_validate_vector_with_bounds_nan() {
+        // NaN should be detected even if dimension is within bounds
+        let v = vec![f32::NAN, 2.0];
+        let result = validate_vector_with_bounds(&v, 10);
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::ContainsNaN { .. }))
+        ));
+    }
+
+    #[test]
+    fn test_validate_vector_with_bounds_dimension_checked_first() {
+        // If dimension exceeds bounds, that error should be returned
+        // even if the vector also contains NaN
+        let v = vec![f32::NAN, 2.0, 3.0, 4.0];
+        let result = validate_vector_with_bounds(&v, 2);
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::DimensionTooLarge { .. }))
+        ));
     }
 }
 
