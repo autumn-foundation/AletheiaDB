@@ -462,6 +462,23 @@ pub enum VectorError {
         /// The maximum allowed dimension
         max_allowed: usize,
     },
+    /// Index is out of bounds for the vector or index structure.
+    IndexOutOfBounds {
+        /// The index that was accessed
+        index: usize,
+        /// The valid range (0..len)
+        len: usize,
+    },
+    /// Vector not found in storage or index.
+    NotFound {
+        /// Identifier or description of the vector that was not found
+        id: String,
+    },
+    /// Vector is invalid for the requested operation.
+    InvalidVector {
+        /// Description of why the vector is invalid
+        reason: String,
+    },
 }
 
 impl fmt::Display for VectorError {
@@ -489,6 +506,15 @@ impl fmt::Display for VectorError {
                     "Vector dimension {} exceeds maximum allowed {}",
                     dimension, max_allowed
                 )
+            }
+            VectorError::IndexOutOfBounds { index, len } => {
+                write!(f, "Vector index {} out of bounds for length {}", index, len)
+            }
+            VectorError::NotFound { id } => {
+                write!(f, "Vector not found: {}", id)
+            }
+            VectorError::InvalidVector { reason } => {
+                write!(f, "Invalid vector: {}", reason)
             }
         }
     }
@@ -797,6 +823,25 @@ mod tests {
         };
         assert!(format!("{}", err).contains("200000"));
         assert!(format!("{}", err).contains("100000"));
+
+        let err = VectorError::IndexOutOfBounds { index: 10, len: 5 };
+        assert_eq!(
+            format!("{}", err),
+            "Vector index 10 out of bounds for length 5"
+        );
+
+        let err = VectorError::NotFound {
+            id: "vec_12345".to_string(),
+        };
+        assert_eq!(format!("{}", err), "Vector not found: vec_12345");
+
+        let err = VectorError::InvalidVector {
+            reason: "empty vector not allowed".to_string(),
+        };
+        assert_eq!(
+            format!("{}", err),
+            "Invalid vector: empty vector not allowed"
+        );
     }
 
     #[test]
