@@ -15,7 +15,15 @@ fn generate_embedding(dim: usize, seed: f32) -> Vec<f32> {
     (0..dim).map(|i| (i as f32 + seed) / dim as f32).collect()
 }
 
-/// Sleep briefly to ensure timestamps differ.
+/// Sleep briefly to ensure timestamps differ between operations.
+///
+/// GallifreyDB uses `time::now()` for transaction timestamps. Operations
+/// executed within the same millisecond may receive identical timestamps,
+/// which can affect version ordering. This helper ensures sufficient time
+/// passes between operations for distinct timestamps.
+///
+/// Note: 10ms is chosen as a balance between test speed and reliability.
+/// On heavily loaded CI systems, consider increasing if tests become flaky.
 fn advance_time() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
@@ -24,6 +32,12 @@ fn advance_time() {
 // Node Vector Tests
 // ============================================================
 
+/// Test creating a node with a vector property and retrieving it.
+///
+/// Note on floating-point comparison: We use exact equality (`==`) because these tests
+/// verify storage/retrieval without arithmetic operations. The values are bit-identical
+/// copies, not computed results. For tests involving vector math (e.g., cosine similarity),
+/// use approximate equality with an epsilon tolerance.
 #[test]
 fn test_create_node_with_vector_and_retrieve() {
     let db = GallifreyDB::new();
@@ -37,7 +51,7 @@ fn test_create_node_with_vector_and_retrieve() {
 
     let node_id = db.create_node("Document", props).unwrap();
 
-    // Retrieve and verify
+    // Retrieve and verify - exact equality is safe here (no arithmetic, just storage/retrieval)
     let node = db.get_node(node_id).unwrap();
     assert_eq!(
         node.get_property("title").and_then(|v| v.as_str()),
@@ -160,9 +174,9 @@ fn test_multiple_nodes_with_vectors_isolation() {
     );
 
     // Update one node's embedding, verify others unchanged
+    let new_embedding = vec![0.5f32, 0.5, 0.5];
     {
         let mut tx = db.write_transaction().unwrap();
-        let new_embedding = vec![0.5f32, 0.5, 0.5];
         tx.update_node(
             node_a,
             PropertyMapBuilder::new()
@@ -175,13 +189,12 @@ fn test_multiple_nodes_with_vectors_isolation() {
     }
 
     // Node A updated
-    let new_a_embedding: [f32; 3] = [0.5f32, 0.5, 0.5];
     assert_eq!(
         db.get_node(node_a)
             .unwrap()
             .get_property("embedding")
             .and_then(|v| v.as_vector()),
-        Some(new_a_embedding.as_slice())
+        Some(&new_embedding[..])
     );
 
     // Nodes B and C unchanged
@@ -373,117 +386,72 @@ fn test_very_large_vector_4096_dimensions() {
 // Common Embedding Dimension Tests
 // ============================================================
 
-#[test]
-fn test_common_embedding_dimensions_384() {
-    // MiniLM / all-MiniLM-L6-v2 (384 dimensions)
-    let db = GallifreyDB::new();
+/// Macro to generate tests for common embedding dimensions.
+/// This reduces duplication while maintaining clear test names.
+macro_rules! test_embedding_dimension {
+    ($test_name:ident, $dim:expr, $model:expr, $label:expr) => {
+        #[test]
+        fn $test_name() {
+            let db = GallifreyDB::new();
+            const DIMENSIONS: usize = $dim;
+            let embedding = generate_embedding(DIMENSIONS, 0.0);
 
-    const DIMENSIONS: usize = 384;
-    let embedding = generate_embedding(DIMENSIONS, 0.0);
+            let node_id = db
+                .create_node(
+                    $label,
+                    PropertyMapBuilder::new()
+                        .insert("model", $model)
+                        .insert_vector("embedding", &embedding)
+                        .build(),
+                )
+                .unwrap();
 
-    let node_id = db
-        .create_node(
-            "MiniLMDoc",
-            PropertyMapBuilder::new()
-                .insert("model", "all-MiniLM-L6-v2")
-                .insert_vector("embedding", &embedding)
-                .build(),
-        )
-        .unwrap();
+            let node = db.get_node(node_id).unwrap();
+            let retrieved = node
+                .get_property("embedding")
+                .and_then(|v| v.as_vector())
+                .expect("Should have embedding");
 
-    let node = db.get_node(node_id).unwrap();
-    let retrieved = node
-        .get_property("embedding")
-        .and_then(|v| v.as_vector())
-        .expect("Should have embedding");
-
-    assert_eq!(retrieved.len(), DIMENSIONS);
-    assert_eq!(
-        node.get_property("model").and_then(|v| v.as_str()),
-        Some("all-MiniLM-L6-v2")
-    );
+            assert_eq!(retrieved.len(), DIMENSIONS);
+            assert_eq!(
+                node.get_property("model").and_then(|v| v.as_str()),
+                Some($model)
+            );
+        }
+    };
 }
 
-#[test]
-fn test_common_embedding_dimensions_768() {
-    // BERT / all-mpnet-base-v2 (768 dimensions)
-    let db = GallifreyDB::new();
+// MiniLM / all-MiniLM-L6-v2 (384 dimensions)
+test_embedding_dimension!(
+    test_common_embedding_dimensions_384,
+    384,
+    "all-MiniLM-L6-v2",
+    "MiniLMDoc"
+);
 
-    const DIMENSIONS: usize = 768;
-    let embedding = generate_embedding(DIMENSIONS, 0.0);
+// BERT / all-mpnet-base-v2 (768 dimensions)
+test_embedding_dimension!(
+    test_common_embedding_dimensions_768,
+    768,
+    "all-mpnet-base-v2",
+    "BertDoc"
+);
 
-    let node_id = db
-        .create_node(
-            "BertDoc",
-            PropertyMapBuilder::new()
-                .insert("model", "all-mpnet-base-v2")
-                .insert_vector("embedding", &embedding)
-                .build(),
-        )
-        .unwrap();
+// OpenAI text-embedding-ada-002 (1536 dimensions)
+test_embedding_dimension!(
+    test_common_embedding_dimensions_1536,
+    1536,
+    "text-embedding-ada-002",
+    "OpenAIDoc"
+);
 
-    let node = db.get_node(node_id).unwrap();
-    let retrieved = node
-        .get_property("embedding")
-        .and_then(|v| v.as_vector())
-        .expect("Should have embedding");
-
-    assert_eq!(retrieved.len(), DIMENSIONS);
-}
-
-#[test]
-fn test_common_embedding_dimensions_1536() {
-    // OpenAI text-embedding-ada-002 (1536 dimensions)
-    let db = GallifreyDB::new();
-
-    const DIMENSIONS: usize = 1536;
-    let embedding = generate_embedding(DIMENSIONS, 0.0);
-
-    let node_id = db
-        .create_node(
-            "OpenAIDoc",
-            PropertyMapBuilder::new()
-                .insert("model", "text-embedding-ada-002")
-                .insert_vector("embedding", &embedding)
-                .build(),
-        )
-        .unwrap();
-
-    let node = db.get_node(node_id).unwrap();
-    let retrieved = node
-        .get_property("embedding")
-        .and_then(|v| v.as_vector())
-        .expect("Should have embedding");
-
-    assert_eq!(retrieved.len(), DIMENSIONS);
-}
-
-#[test]
-fn test_common_embedding_dimensions_3072() {
-    // OpenAI text-embedding-3-large (3072 dimensions)
-    let db = GallifreyDB::new();
-
-    const DIMENSIONS: usize = 3072;
-    let embedding = generate_embedding(DIMENSIONS, 0.0);
-
-    let node_id = db
-        .create_node(
-            "OpenAI3LargeDoc",
-            PropertyMapBuilder::new()
-                .insert("model", "text-embedding-3-large")
-                .insert_vector("embedding", &embedding)
-                .build(),
-        )
-        .unwrap();
-
-    let node = db.get_node(node_id).unwrap();
-    let retrieved = node
-        .get_property("embedding")
-        .and_then(|v| v.as_vector())
-        .expect("Should have embedding");
-
-    assert_eq!(retrieved.len(), DIMENSIONS);
-}
+// OpenAI text-embedding-3-large (3072 dimensions)
+test_embedding_dimension!(
+    test_common_embedding_dimensions_3072,
+    3072,
+    "text-embedding-3-large",
+    "OpenAI3LargeDoc"
+);
 
 // ============================================================
 // Version History Tests
@@ -584,13 +552,22 @@ fn test_historical_stats_with_vectors() {
     }
 
     // Check historical stats
+    // 1 create + 4 updates = 5 total versions
     let stats = db.historical_stats().unwrap();
-    assert!(stats.total_node_versions > 0);
+    assert_eq!(
+        stats.total_node_versions, 5,
+        "Expected 1 create + 4 updates = 5 versions"
+    );
     assert_eq!(stats.unique_nodes, 1);
 
-    // Should have mix of anchors and deltas
+    // Anchors + deltas should equal total versions
     let total = stats.node_anchor_count + stats.node_delta_count;
-    assert!(total > 0);
+    assert_eq!(total, 5, "Anchor + delta count should equal total versions");
+    // Should have at least one anchor (the first version)
+    assert!(
+        stats.node_anchor_count > 0,
+        "Should have at least one anchor version"
+    );
 }
 
 // ============================================================
