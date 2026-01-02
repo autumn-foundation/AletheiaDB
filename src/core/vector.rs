@@ -3087,18 +3087,26 @@ mod proptests {
             let scaled_a: Vec<f32> = a.iter().map(|x| x * scale).collect();
             let dot_scaled = dot_product(&scaled_a, &b).unwrap();
 
-            // Use relative tolerance for larger values.
+            // Use tolerance based on intermediate value magnitudes.
             //
-            // Why 1e-4 relative tolerance? Bilinearity test involves:
-            // 1. Scaling: n multiplications (each ~1e-7 relative error)
-            // 2. Two dot products with different values (different rounding)
-            // 3. Values in [-100, 100] scaled by up to 10x = [-1000, 1000]
-            // 4. SIMD vs scalar may have different operation ordering
+            // Key insight: when vectors have mixed +/- values, catastrophic
+            // cancellation occurs. Large intermediate values (e.g., 9000) can
+            // cancel to give small results (e.g., 16). The floating-point error
+            // is bounded by the intermediate magnitudes, not the final result.
             //
-            // Combined error can reach ~1e-5 to 2e-5 relative, so 1e-4 (0.01%)
-            // provides headroom while still catching genuine bugs.
+            // Example: sum of products might be [+9000, -8500, +500, -984, ...]
+            // giving final result of ~16, but error is proportional to ~9000.
+            //
+            // Solution: base tolerance on sum of absolute products, which
+            // represents the "scale" of computation regardless of cancellation.
             let expected = scale * dot_ab;
-            let tolerance = PROPTEST_TOLERANCE * 100.0 + expected.abs() * 1e-4;
+            let sum_abs_products: f32 = a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x * y).abs())
+                .sum();
+            // Error is proportional to intermediate magnitudes * scale * f32 epsilon
+            // Use 1e-5 relative to intermediate values (conservative for f32)
+            let tolerance = PROPTEST_TOLERANCE * 100.0 + sum_abs_products * scale * 1e-5;
             prop_assert!((dot_scaled - expected).abs() < tolerance,
                 "Scalar bilinearity failed: dot({}*a, b)={} vs {}*dot(a,b)={}",
                 scale, dot_scaled, scale, expected);
