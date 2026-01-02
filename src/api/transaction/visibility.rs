@@ -6,6 +6,7 @@
 
 use crate::api::transaction::types::TxId;
 use crate::core::temporal::Timestamp;
+use crate::utils::lock::MutexExt;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 
@@ -62,6 +63,16 @@ impl TransactionSnapshot {
 /// - Transactions don't see uncommitted changes from other transactions
 /// - Transactions don't see changes committed after their snapshot time
 /// - Write-write conflicts are detected at commit time
+///
+/// # Lock Recovery Safety
+///
+/// This struct uses `lock_or_recover()` for all lock acquisitions. This is safe
+/// because the protected data structures (`HashSet<TxId>` and `BTreeMap<TxId, Timestamp>`)
+/// have no complex invariants that could be violated by a mid-operation panic:
+///
+/// - **Worst case**: A transaction ID may be missing from the active/committed sets
+/// - **Behavior**: This fails safe by being conservative (treating as uncommitted/not visible)
+/// - **No corruption**: Standard library collections remain valid after partial operations
 pub struct TxVisibilityManager {
     /// Currently active transactions
     active: Mutex<HashSet<TxId>>,
@@ -85,8 +96,13 @@ impl TxVisibilityManager {
     ///
     /// # Arguments
     /// * `tx_id` - The ID of the transaction being started
+    ///
+    /// # Note
+    ///
+    /// Uses lock recovery to prevent cascade panics if the lock was poisoned
+    /// by a panicking thread. The transaction set can safely be used after recovery.
     pub fn register_active(&self, tx_id: TxId) {
-        let mut active = self.active.lock().unwrap();
+        let mut active = self.active.lock_or_recover();
         active.insert(tx_id);
     }
 
@@ -102,7 +118,7 @@ impl TxVisibilityManager {
     /// # Returns
     /// A `TransactionSnapshot` capturing the current visibility state
     pub fn capture_snapshot(&self, snapshot_timestamp: Timestamp) -> TransactionSnapshot {
-        let active = self.active.lock().unwrap();
+        let active = self.active.lock_or_recover();
         TransactionSnapshot {
             snapshot_timestamp,
             active_transactions: active.clone(),
@@ -119,10 +135,10 @@ impl TxVisibilityManager {
     /// * `tx_id` - The ID of the committing transaction
     /// * `commit_timestamp` - When the transaction committed
     pub fn register_commit(&self, tx_id: TxId, commit_timestamp: Timestamp) {
-        let mut active = self.active.lock().unwrap();
+        let mut active = self.active.lock_or_recover();
         active.remove(&tx_id);
 
-        let mut committed = self.committed.lock().unwrap();
+        let mut committed = self.committed.lock_or_recover();
         committed.insert(tx_id, commit_timestamp);
     }
 
@@ -134,7 +150,7 @@ impl TxVisibilityManager {
     /// # Arguments
     /// * `tx_id` - The ID of the aborting transaction
     pub fn register_abort(&self, tx_id: TxId) {
-        let mut active = self.active.lock().unwrap();
+        let mut active = self.active.lock_or_recover();
         active.remove(&tx_id);
     }
 
@@ -157,7 +173,7 @@ impl TxVisibilityManager {
         }
 
         // Check if transaction committed
-        let committed = self.committed.lock().unwrap();
+        let committed = self.committed.lock_or_recover();
 
         match committed.get(&created_by_tx) {
             None => false, // Not committed - not visible
@@ -173,7 +189,7 @@ impl TxVisibilityManager {
     /// This is primarily useful for testing and monitoring.
     #[allow(dead_code)]
     pub fn active_count(&self) -> usize {
-        let active = self.active.lock().unwrap();
+        let active = self.active.lock_or_recover();
         active.len()
     }
 
@@ -182,7 +198,7 @@ impl TxVisibilityManager {
     /// This is primarily useful for testing and monitoring.
     #[allow(dead_code)]
     pub fn committed_count(&self) -> usize {
-        let committed = self.committed.lock().unwrap();
+        let committed = self.committed.lock_or_recover();
         committed.len()
     }
 }

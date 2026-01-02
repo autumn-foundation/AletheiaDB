@@ -8,6 +8,7 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
+use crate::utils::lock::RwLockExt;
 use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
 
@@ -25,6 +26,16 @@ use std::sync::{Arc, RwLock};
 ///
 /// This prevents the race condition where edges inserted during a rebuild
 /// could be lost from the adjacency indexes.
+///
+/// # Lock Recovery Safety
+///
+/// This struct uses `read_or_recover()`/`write_or_recover()` for adjacency index
+/// access. This is safe because:
+///
+/// - **AdjacencyIndex**: Contains `Vec<AdjacencyEntry>` with no complex invariants
+/// - **Worst case**: An adjacency list may be incomplete after a panic
+/// - **Recovery**: `rebuild_adjacency()` can always reconstruct correct state from edges
+/// - **Hot path**: Recovery avoids cascade panics on the performance-critical traversal path
 pub struct CurrentIndexes {
     /// Node ID → Node (O(1) lookup)
     nodes: DashMap<NodeId, Node>,
@@ -64,7 +75,7 @@ impl CurrentIndexes {
     /// Acquires `rebuild_lock` in read mode to coordinate with concurrent
     /// adjacency rebuilds (which hold write lock).
     pub fn insert_edge(&self, edge: Edge) {
-        let _guard = self.rebuild_lock.read().unwrap();
+        let _guard = self.rebuild_lock.read_or_recover();
         self.edges.insert(edge.id, edge);
     }
 
@@ -88,7 +99,7 @@ impl CurrentIndexes {
     /// Acquires `rebuild_lock` in read mode to coordinate with concurrent
     /// adjacency rebuilds (which hold write lock).
     pub fn remove_edge(&self, id: EdgeId) -> Option<Edge> {
-        let _guard = self.rebuild_lock.read().unwrap();
+        let _guard = self.rebuild_lock.read_or_recover();
         self.edges.remove(&id).map(|(_, edge)| edge)
     }
 
@@ -121,7 +132,7 @@ impl CurrentIndexes {
     /// Returns a copy of the adjacency list for traversal.
     #[inline]
     pub fn get_outgoing(&self, source: NodeId) -> Vec<AdjacencyEntry> {
-        let outgoing = self.outgoing.read().unwrap();
+        let outgoing = self.outgoing.read_or_recover();
         outgoing.get_adjacency(source).to_vec()
     }
 
@@ -130,7 +141,7 @@ impl CurrentIndexes {
     /// Returns a copy of the adjacency list for reverse traversal.
     #[inline]
     pub fn get_incoming(&self, target: NodeId) -> Vec<AdjacencyEntry> {
-        let incoming = self.incoming.read().unwrap();
+        let incoming = self.incoming.read_or_recover();
         incoming.get_adjacency(target).to_vec()
     }
 
@@ -140,7 +151,7 @@ impl CurrentIndexes {
         source: NodeId,
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
-        let outgoing = self.outgoing.read().unwrap();
+        let outgoing = self.outgoing.read_or_recover();
         outgoing
             .get_adjacency_with_label(source, label)
             .copied()
@@ -153,7 +164,7 @@ impl CurrentIndexes {
         target: NodeId,
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
-        let incoming = self.incoming.read().unwrap();
+        let incoming = self.incoming.read_or_recover();
         incoming
             .get_adjacency_with_label(target, label)
             .copied()
@@ -163,14 +174,14 @@ impl CurrentIndexes {
     /// Get the out-degree of a node (number of outgoing edges).
     #[inline]
     pub fn out_degree(&self, node: NodeId) -> usize {
-        let outgoing = self.outgoing.read().unwrap();
+        let outgoing = self.outgoing.read_or_recover();
         outgoing.degree(node)
     }
 
     /// Get the in-degree of a node (number of incoming edges).
     #[inline]
     pub fn in_degree(&self, node: NodeId) -> usize {
-        let incoming = self.incoming.read().unwrap();
+        let incoming = self.incoming.read_or_recover();
         incoming.degree(node)
     }
 
@@ -219,7 +230,7 @@ impl CurrentIndexes {
         // Acquire write lock to block concurrent edge modifications.
         // This ensures all edges in the DashMap at iteration start will
         // be present in the rebuilt indexes.
-        let _guard = self.rebuild_lock.write().unwrap();
+        let _guard = self.rebuild_lock.write_or_recover();
 
         let mut outgoing_edges = Vec::new();
         let mut incoming_edges = Vec::new();
@@ -232,8 +243,8 @@ impl CurrentIndexes {
         }
 
         // Rebuild indexes with write locks
-        *self.outgoing.write().unwrap() = AdjacencyIndex::build(outgoing_edges);
-        *self.incoming.write().unwrap() = AdjacencyIndex::build(incoming_edges);
+        *self.outgoing.write_or_recover() = AdjacencyIndex::build(outgoing_edges);
+        *self.incoming.write_or_recover() = AdjacencyIndex::build(incoming_edges);
     }
 
     /// Iterate over all nodes.

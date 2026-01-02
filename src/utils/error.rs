@@ -139,6 +139,15 @@ pub enum StorageError {
     IoError(String),
     /// Corrupted data detected.
     CorruptedData(String),
+    /// A lock was poisoned by a panicking thread.
+    ///
+    /// This occurs when a thread panics while holding a lock, causing subsequent
+    /// lock acquisitions to fail. This prevents cascade panics by returning an
+    /// error instead of panicking.
+    LockPoisoned {
+        /// The type of lock that was poisoned (e.g., "Mutex", "RwLock")
+        lock_type: &'static str,
+    },
 }
 
 impl fmt::Display for StorageError {
@@ -164,6 +173,13 @@ impl fmt::Display for StorageError {
             }
             StorageError::IoError(msg) => write!(f, "I/O error: {}", msg),
             StorageError::CorruptedData(msg) => write!(f, "Corrupted data: {}", msg),
+            StorageError::LockPoisoned { lock_type } => {
+                write!(
+                    f,
+                    "{} lock poisoned: a thread panicked while holding this lock",
+                    lock_type
+                )
+            }
         }
     }
 }
@@ -614,6 +630,12 @@ mod tests {
         let err = StorageError::CorruptedData("bad checksum".to_string());
         assert!(format!("{}", err).contains("Corrupted data"));
         assert!(format!("{}", err).contains("bad checksum"));
+
+        // Test LockPoisoned
+        let err = StorageError::LockPoisoned { lock_type: "Mutex" };
+        assert!(format!("{}", err).contains("Mutex"));
+        assert!(format!("{}", err).contains("lock poisoned"));
+        assert!(format!("{}", err).contains("panicked"));
     }
 
     #[test]

@@ -24,6 +24,7 @@ use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::{WalOperation, WriteAheadLog};
 use crate::utils::error::{Result, StorageError, TransactionError};
+use crate::utils::lock::MutexExt;
 use std::sync::{Arc, Mutex};
 
 /// Write transaction with full ACID guarantees.
@@ -520,7 +521,7 @@ impl WriteTransaction {
                     self.current.insert_node_direct(node)?;
 
                     // Store in historical storage
-                    self.historical.lock().unwrap().add_node_version(
+                    self.historical.lock_or_err()?.add_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -529,7 +530,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock().unwrap().insert_node_version(
+                    self.temporal_indexes.lock_or_err()?.insert_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -558,7 +559,7 @@ impl WriteTransaction {
                     self.current.insert_edge_direct(edge)?;
 
                     // Store in historical storage
-                    self.historical.lock().unwrap().add_edge_version(
+                    self.historical.lock_or_err()?.add_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -569,7 +570,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock().unwrap().insert_edge_version(
+                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -594,7 +595,7 @@ impl WriteTransaction {
                     self.current.update_node_direct(node)?;
 
                     // Add new version to historical storage
-                    self.historical.lock().unwrap().add_node_version(
+                    self.historical.lock_or_err()?.add_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -603,7 +604,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock().unwrap().insert_node_version(
+                    self.temporal_indexes.lock_or_err()?.insert_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -632,7 +633,7 @@ impl WriteTransaction {
                     self.current.update_edge_direct(edge)?;
 
                     // Add new version to historical storage
-                    self.historical.lock().unwrap().add_edge_version(
+                    self.historical.lock_or_err()?.add_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -643,7 +644,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock().unwrap().insert_edge_version(
+                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -655,14 +656,14 @@ impl WriteTransaction {
 
                     // Generate version ID for tombstone
                     let tombstone_version_id =
-                        VersionId::new(self.version_id_gen.lock().unwrap().next());
+                        VersionId::new(self.version_id_gen.lock_or_err()?.next());
 
                     // Create closed temporal interval marking deletion time
                     let tombstone_temporal = BiTemporalInterval::current(commit_timestamp)
                         .close_transaction_time(commit_timestamp);
 
                     // Add tombstone version to historical storage
-                    self.historical.lock().unwrap().add_node_version(
+                    self.historical.lock_or_err()?.add_node_version(
                         *node_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -671,7 +672,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index the tombstone version
-                    self.temporal_indexes.lock().unwrap().insert_node_version(
+                    self.temporal_indexes.lock_or_err()?.insert_node_version(
                         *node_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -686,14 +687,14 @@ impl WriteTransaction {
 
                     // Generate version ID for tombstone
                     let tombstone_version_id =
-                        VersionId::new(self.version_id_gen.lock().unwrap().next());
+                        VersionId::new(self.version_id_gen.lock_or_err()?.next());
 
                     // Create closed temporal interval marking deletion time
                     let tombstone_temporal = BiTemporalInterval::current(commit_timestamp)
                         .close_transaction_time(commit_timestamp);
 
                     // Add tombstone version to historical storage
-                    self.historical.lock().unwrap().add_edge_version(
+                    self.historical.lock_or_err()?.add_edge_version(
                         *edge_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -704,7 +705,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index the tombstone version
-                    self.temporal_indexes.lock().unwrap().insert_edge_version(
+                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
                         *edge_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -896,8 +897,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let node_id = NodeId::new(self.node_id_gen.lock().unwrap().next());
-        let version_id = VersionId::new(self.version_id_gen.lock().unwrap().next());
+        let node_id = NodeId::new(self.node_id_gen.lock_or_err()?.next());
+        let version_id = VersionId::new(self.version_id_gen.lock_or_err()?.next());
         let label_interned = GLOBAL_INTERNER.intern(label);
 
         // Get timestamp for temporal interval
@@ -933,8 +934,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let edge_id = EdgeId::new(self.edge_id_gen.lock().unwrap().next());
-        let version_id = VersionId::new(self.version_id_gen.lock().unwrap().next());
+        let edge_id = EdgeId::new(self.edge_id_gen.lock_or_err()?.next());
+        let version_id = VersionId::new(self.version_id_gen.lock_or_err()?.next());
         let label_interned = GLOBAL_INTERNER.intern(label);
 
         // Get timestamp for temporal interval
@@ -967,7 +968,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current node to preserve label
         let node = self.current.get_node(node_id)?;
-        let version_id = VersionId::new(self.version_id_gen.lock().unwrap().next());
+        let version_id = VersionId::new(self.version_id_gen.lock_or_err()?.next());
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;
@@ -997,7 +998,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current edge to preserve source, target, label
         let edge = self.current.get_edge(edge_id)?;
-        let version_id = VersionId::new(self.version_id_gen.lock().unwrap().next());
+        let version_id = VersionId::new(self.version_id_gen.lock_or_err()?.next());
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;
