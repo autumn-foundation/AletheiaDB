@@ -104,8 +104,38 @@ impl PropertyValue {
 
     /// Create a vector property value from a slice.
     ///
-    /// Dense vectors are used for embeddings in vector search.
-    /// The data is stored in an Arc for efficient cloning and sharing.
+    /// Dense vectors are used for storing embeddings in nodes and edges,
+    /// enabling semantic search and similarity computations. The data is
+    /// stored in an `Arc<[f32]>` for efficient cloning and sharing across
+    /// versions.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::PropertyValue;
+    ///
+    /// // From a Vec
+    /// let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
+    /// let prop = PropertyValue::vector(&embedding);
+    ///
+    /// // From a slice
+    /// let prop2 = PropertyValue::vector(&[0.5f32, 0.6, 0.7]);
+    ///
+    /// // Retrieve the vector
+    /// assert_eq!(prop.as_vector(), Some(&embedding[..]));
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// - Cloning a `PropertyValue::Vector` is O(1) (just increments Arc refcount)
+    /// - Unchanged vectors across versions share the same allocation
+    /// - Typical embedding sizes (384-4096 dims) use ~1.5-16KB per vector
+    ///
+    /// # See Also
+    ///
+    /// - [`PropertyMapBuilder::insert_vector`] for a builder-pattern alternative
+    /// - [`as_vector`](Self::as_vector) for retrieving the vector data
+    /// - [`gallifreydb::core::vector`](crate::core::vector) for similarity functions
     pub fn vector<V: AsRef<[f32]>>(v: V) -> Self {
         PropertyValue::Vector(Arc::from(v.as_ref()))
     }
@@ -171,6 +201,31 @@ impl PropertyValue {
     }
 
     /// Try to get this value as a vector (dense embedding).
+    ///
+    /// Returns `Some(&[f32])` if this is a `Vector` variant, `None` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::PropertyValue;
+    ///
+    /// let embedding = vec![0.1f32, 0.2, 0.3];
+    /// let prop = PropertyValue::vector(&embedding);
+    ///
+    /// if let Some(vec) = prop.as_vector() {
+    ///     assert_eq!(vec.len(), 3);
+    ///     assert!((vec[0] - 0.1).abs() < f32::EPSILON);
+    /// }
+    ///
+    /// // Returns None for non-vector types
+    /// let int_prop = PropertyValue::Int(42);
+    /// assert!(int_prop.as_vector().is_none());
+    /// ```
+    ///
+    /// # See Also
+    ///
+    /// - [`vector`](Self::vector) for creating vector properties
+    /// - [`gallifreydb::core::vector`](crate::core::vector) for similarity functions
     #[inline]
     pub fn as_vector(&self) -> Option<&[f32]> {
         match self {

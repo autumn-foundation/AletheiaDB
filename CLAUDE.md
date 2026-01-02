@@ -774,13 +774,222 @@ When adding new serialization features:
 4. Update `parse_wal_entries_versioned()` for migration support
 5. Add tests for new format and backward compatibility
 
+## Vector Storage (Phase 1)
+
+GallifreyDB supports storing dense vector embeddings as first-class property values. This enables semantic search, similarity matching, and RAG (Retrieval-Augmented Generation) workflows while preserving full bi-temporal versioning.
+
+### Storing Vector Properties
+
+Use `PropertyMapBuilder::insert_vector()` to attach embeddings to nodes and edges:
+
+```rust
+use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+
+let db = GallifreyDB::new();
+
+// Store an embedding on a node
+let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
+let node_id = db.create_node(
+    "Document",
+    PropertyMapBuilder::new()
+        .insert("title", "Introduction to Rust")
+        .insert_vector("embedding", &embedding)
+        .build(),
+)?;
+
+// Store embeddings on edges (relationship semantics)
+let edge_id = db.create_edge(
+    source_id,
+    target_id,
+    "SIMILAR_TO",
+    PropertyMapBuilder::new()
+        .insert_vector("relationship_embedding", &rel_embedding)
+        .build(),
+)?;
+```
+
+### Retrieving Vector Properties
+
+```rust
+let node = db.get_node(node_id)?;
+
+// Get vector as slice
+if let Some(embedding) = node.get_property("embedding").and_then(|v| v.as_vector()) {
+    println!("Embedding dimensions: {}", embedding.len());
+}
+
+// Check property type
+if let Some(prop) = node.get_property("embedding") {
+    match prop.type_name() {
+        "vector" => println!("It's a vector!"),
+        _ => println!("Not a vector"),
+    }
+}
+```
+
+### Similarity Functions
+
+The `gallifreydb::core::vector` module provides optimized similarity functions:
+
+```rust
+use gallifreydb::core::vector::{
+    cosine_similarity,
+    cosine_similarity_normalized,
+    euclidean_distance,
+    squared_euclidean_distance,
+    dot_product,
+};
+
+let a = vec![1.0f32, 0.0, 0.0];
+let b = vec![0.0f32, 1.0, 0.0];
+
+// Cosine similarity: measures angle between vectors (-1 to 1)
+// Best for: semantic similarity, document matching
+let cos_sim = cosine_similarity(&a, &b)?;  // Returns 0.0 (orthogonal)
+
+// Use normalized variant when vectors are pre-normalized (faster)
+let cos_sim_fast = cosine_similarity_normalized(&a, &b)?;
+
+// Euclidean distance: measures straight-line distance
+// Best for: spatial data, clustering
+let distance = euclidean_distance(&a, &b)?;
+
+// Squared Euclidean (avoids sqrt, faster for comparisons)
+let sq_distance = squared_euclidean_distance(&a, &b)?;
+
+// Dot product: raw inner product
+// Best for: when magnitude matters, MaxSim operations
+let dot = dot_product(&a, &b)?;
+```
+
+**Choosing the Right Metric:**
+| Metric | Use Case | Range | Notes |
+|--------|----------|-------|-------|
+| `cosine_similarity` | Semantic similarity | [-1, 1] | Ignores magnitude |
+| `euclidean_distance` | Spatial clustering | [0, ∞) | Sensitive to magnitude |
+| `dot_product` | MaxSim, ColBERT | (-∞, ∞) | Preserves magnitude |
+
+### Normalization Functions
+
+```rust
+use gallifreydb::core::vector::{
+    normalize,
+    normalize_in_place,
+    magnitude,
+    is_normalized,
+};
+
+let v = vec![3.0f32, 4.0];
+
+// Get magnitude (L2 norm)
+let mag = magnitude(&v);  // Returns 5.0
+
+// Create normalized copy (unit vector)
+let unit = normalize(&v);  // Returns [0.6, 0.8]
+
+// Normalize in place (mutates vector)
+let mut v_mut = v.clone();
+normalize_in_place(&mut v_mut);
+
+// Check if already normalized
+assert!(is_normalized(&unit, 1e-6));
+```
+
+### Validation Functions
+
+```rust
+use gallifreydb::core::vector::{
+    validate_vector,
+    check_dimensions_match,
+    validate_vector_with_bounds,
+};
+
+// Validate vector contains no NaN/Infinity
+validate_vector(&embedding)?;
+
+// Check two vectors have same dimensions
+check_dimensions_match(&a, &b)?;
+
+// Validate with custom dimension limit
+validate_vector_with_bounds(&embedding, 4096)?;
+```
+
+### Common Embedding Dimensions
+
+GallifreyDB supports any dimension up to 100,000. Common sizes:
+
+| Model | Dimensions |
+|-------|------------|
+| all-MiniLM-L6-v2 | 384 |
+| all-mpnet-base-v2 | 768 |
+| text-embedding-ada-002 | 1536 |
+| text-embedding-3-large | 3072 |
+
+### Temporal Vector Versioning
+
+Vector properties are fully versioned like any other property:
+
+```rust
+// Create node with initial embedding
+let node_id = db.create_node(
+    "Document",
+    PropertyMapBuilder::new()
+        .insert_vector("embedding", &v1_embedding)
+        .build(),
+)?;
+
+// Update embedding (creates new version)
+let mut tx = db.write_transaction()?;
+tx.update_node(
+    node_id,
+    PropertyMapBuilder::new()
+        .insert_vector("embedding", &v2_embedding)
+        .build(),
+)?;
+tx.commit()?;
+
+// Query historical embeddings via time-travel (Phase 2+)
+// let old_node = db.as_of(timestamp).get_node(node_id)?;
+```
+
+### Performance Considerations
+
+- **Storage**: Vectors are stored as contiguous `Arc<[f32]>` with efficient cloning
+- **Serialization**: Binary format with 4-byte dimension prefix + raw f32 data
+- **Memory**: ~4 bytes per dimension + small overhead
+- **Similarity ops**: O(n) where n = dimensions; consider pre-normalization for cosine
+
+### Error Handling
+
+Vector operations return `Result<T, Error>` with specific error types:
+
+```rust
+use gallifreydb::utils::VectorError;
+
+match cosine_similarity(&a, &b) {
+    Ok(sim) => println!("Similarity: {}", sim),
+    Err(Error::Vector(VectorError::DimensionMismatch { expected, actual })) => {
+        eprintln!("Dimension mismatch: expected {}, got {}", expected, actual);
+    }
+    Err(Error::Vector(VectorError::InvalidVector(reason))) => {
+        eprintln!("Invalid vector: {}", reason);
+    }
+    Err(e) => eprintln!("Other error: {}", e),
+}
+```
+
 ## Future Considerations
 
 ### Vector Search (SUPERRAG)
 
-**Status**: Designed, not yet implemented
+**Status**: Phase 1 complete (storage + similarity), Phases 2-5 pending
 
-Adding vector search enables **Graph + Vector + Bi-temporal** queries - combining semantic similarity with relationship traversal and time-travel.
+Phase 1 provides the foundation for vector storage and similarity computation. Future phases will add:
+
+- **Phase 2**: HNSW index integration for k-NN search
+- **Phase 3**: Temporal vector queries (semantic time-travel)
+- **Phase 4**: Hybrid graph+vector queries
+- **Phase 5**: Advanced features (streaming, incremental updates)
 
 See **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** for the complete design including:
 - Architecture integration with existing storage
@@ -789,7 +998,7 @@ See **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** for the com
 - HNSW index integration (usearch recommended)
 - Hybrid query patterns
 
-**Key query patterns this enables:**
+**Key query patterns this enables (Phase 2+):**
 ```rust
 // Semantic time-travel
 db.as_of(timestamp_2023).find_similar(embedding, k)
