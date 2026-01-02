@@ -18,6 +18,7 @@ pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 pub use vector::{
     // Types and constants
+    DistanceMetric,
     NORMALIZATION_TOLERANCE,
     VectorDimension,
     // Similarity functions
