@@ -482,4 +482,231 @@ mod tests {
         assert_eq!(storage.edge_count(), 0);
         assert_eq!(storage.out_degree(n0), 0);
     }
+
+    // ========================================================================
+    // Vector Property Tests (VS-011)
+    // ========================================================================
+
+    #[test]
+    fn test_create_node_with_vector_property() {
+        let storage = CurrentStorage::new();
+
+        // Create a node with an embedding vector
+        let embedding = vec![0.1f32, 0.2, 0.3, 0.4, 0.5];
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Document")
+            .insert_vector("embedding", &embedding)
+            .build();
+
+        let node_id = storage.create_node("Document", props).unwrap();
+
+        // Retrieve and verify
+        let node = storage.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Document")
+        );
+
+        assert_eq!(
+            node.get_property("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
+    }
+
+    #[test]
+    fn test_create_node_with_high_dimensional_vector() {
+        let storage = CurrentStorage::new();
+
+        // Create a 384-dimensional vector (common embedding size)
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        let props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &embedding)
+            .build();
+
+        let node_id = storage.create_node("Embedding", props).unwrap();
+
+        let node = storage.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
+    }
+
+    #[test]
+    fn test_create_edge_with_vector_property() {
+        let storage = CurrentStorage::new();
+
+        // Create nodes
+        let n1 = storage
+            .create_node("Entity", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = storage
+            .create_node("Entity", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create edge with a relationship embedding
+        let edge_embedding = vec![0.5f32, -0.3, 0.8];
+        let props = PropertyMapBuilder::new()
+            .insert("weight", 0.95f64)
+            .insert_vector("embedding", &edge_embedding)
+            .build();
+
+        let edge_id = storage.create_edge(n1, n2, "RELATES_TO", props).unwrap();
+
+        // Retrieve and verify
+        let edge = storage.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_float()),
+            Some(0.95)
+        );
+
+        assert_eq!(
+            edge.get_property("embedding").and_then(|v| v.as_vector()),
+            Some(&edge_embedding[..])
+        );
+    }
+
+    #[test]
+    fn test_update_node_vector_property() {
+        let storage = CurrentStorage::new();
+
+        // Create node with initial embedding
+        let initial_embedding = vec![0.1f32, 0.2, 0.3];
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Document")
+            .insert_vector("embedding", &initial_embedding)
+            .build();
+
+        let node_id = storage.create_node("Document", props).unwrap();
+
+        // Get node, update embedding, and save
+        let mut node = storage.get_node(node_id).unwrap();
+
+        // Update with new embedding
+        let updated_embedding = vec![0.9f32, 0.8, 0.7];
+        let new_props = PropertyMapBuilder::new()
+            .insert("name", "Document")
+            .insert_vector("embedding", &updated_embedding)
+            .build();
+        node.properties = new_props;
+
+        storage.update_node_direct(node).unwrap();
+
+        // Verify update
+        let updated_node = storage.get_node(node_id).unwrap();
+        assert_eq!(
+            updated_node
+                .get_property("embedding")
+                .and_then(|v| v.as_vector()),
+            Some(&updated_embedding[..])
+        );
+    }
+
+    #[test]
+    fn test_update_edge_vector_property() {
+        let storage = CurrentStorage::new();
+
+        let n1 = storage
+            .create_node("Entity", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = storage
+            .create_node("Entity", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create edge with initial embedding
+        let initial_embedding = vec![1.0f32, 0.0];
+        let props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &initial_embedding)
+            .build();
+
+        let edge_id = storage.create_edge(n1, n2, "RELATES_TO", props).unwrap();
+
+        // Update edge embedding
+        let mut edge = storage.get_edge(edge_id).unwrap();
+        let updated_embedding = vec![0.0f32, 1.0];
+        edge.properties = PropertyMapBuilder::new()
+            .insert_vector("embedding", &updated_embedding)
+            .build();
+
+        storage.update_edge_direct(edge).unwrap();
+
+        // Verify
+        let updated_edge = storage.get_edge(edge_id).unwrap();
+        assert_eq!(
+            updated_edge
+                .get_property("embedding")
+                .and_then(|v| v.as_vector()),
+            Some(&updated_embedding[..])
+        );
+    }
+
+    #[test]
+    fn test_create_node_with_multiple_vector_properties() {
+        let storage = CurrentStorage::new();
+
+        // Node with multiple embeddings (e.g., different model embeddings)
+        let text_embedding = vec![0.1f32, 0.2, 0.3, 0.4];
+        let image_embedding = vec![0.5f32, 0.6, 0.7, 0.8];
+        let props = PropertyMapBuilder::new()
+            .insert("content", "multimodal content")
+            .insert_vector("text_embedding", &text_embedding)
+            .insert_vector("image_embedding", &image_embedding)
+            .build();
+
+        let node_id = storage.create_node("MultimodalDoc", props).unwrap();
+
+        let node = storage.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("text_embedding")
+                .and_then(|v| v.as_vector()),
+            Some(&text_embedding[..])
+        );
+        assert_eq!(
+            node.get_property("image_embedding")
+                .and_then(|v| v.as_vector()),
+            Some(&image_embedding[..])
+        );
+    }
+
+    #[test]
+    fn test_create_node_with_empty_vector() {
+        let storage = CurrentStorage::new();
+
+        // Empty vector should be allowed
+        let empty_embedding: Vec<f32> = vec![];
+        let props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &empty_embedding)
+            .build();
+
+        let node_id = storage.create_node("EmptyVec", props).unwrap();
+
+        let node = storage.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("embedding").and_then(|v| v.as_vector()),
+            Some(&empty_embedding[..])
+        );
+    }
+
+    #[test]
+    fn test_create_node_with_normalized_vector() {
+        let storage = CurrentStorage::new();
+
+        // Vector with normalized values (common for embeddings)
+        let normalized_embedding = vec![0.5773503f32, 0.5773503, 0.5773503]; // unit vector
+        let props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &normalized_embedding)
+            .build();
+
+        let node_id = storage.create_node("NormalizedDoc", props).unwrap();
+
+        let node = storage.get_node(node_id).unwrap();
+        let retrieved = node
+            .get_property("embedding")
+            .and_then(|v| v.as_vector())
+            .expect("Embedding property should exist and be a vector");
+
+        // Verify magnitude is approximately 1.0
+        let magnitude: f32 = retrieved.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((magnitude - 1.0).abs() < 1e-5);
+    }
 }
