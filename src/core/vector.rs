@@ -2420,9 +2420,18 @@ mod proptests {
             let scaled_a: Vec<f32> = a.iter().map(|x| x * scale).collect();
             let dot_scaled = dot_product(&scaled_a, &b).unwrap();
 
-            // Use relative tolerance for larger values
+            // Use relative tolerance for larger values.
+            //
+            // Why 1e-4 relative tolerance? Bilinearity test involves:
+            // 1. Scaling: n multiplications (each ~1e-7 relative error)
+            // 2. Two dot products with different values (different rounding)
+            // 3. Values in [-100, 100] scaled by up to 10x = [-1000, 1000]
+            // 4. SIMD vs scalar may have different operation ordering
+            //
+            // Combined error can reach ~1e-5 to 2e-5 relative, so 1e-4 (0.01%)
+            // provides headroom while still catching genuine bugs.
             let expected = scale * dot_ab;
-            let tolerance = PROPTEST_TOLERANCE * 100.0 + expected.abs() * 1e-5;
+            let tolerance = PROPTEST_TOLERANCE * 100.0 + expected.abs() * 1e-4;
             prop_assert!((dot_scaled - expected).abs() < tolerance,
                 "Scalar bilinearity failed: dot({}*a, b)={} vs {}*dot(a,b)={}",
                 scale, dot_scaled, scale, expected);
