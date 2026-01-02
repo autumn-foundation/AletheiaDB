@@ -232,7 +232,12 @@ pub trait VectorIndex: Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    fn search_with_filter<F>(&self, query: &[f32], k: usize, predicate: F) -> Result<Vec<(NodeId, f32)>>
+    fn search_with_filter<F>(
+        &self,
+        query: &[f32],
+        k: usize,
+        predicate: F,
+    ) -> Result<Vec<(NodeId, f32)>>
     where
         F: Fn(&NodeId) -> bool;
 
