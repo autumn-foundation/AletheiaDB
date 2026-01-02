@@ -1578,6 +1578,13 @@ pub fn is_normalized_default(v: &[f32]) -> bool {
 /// 1. Pre-normalize vectors with [`normalize`] or [`normalize_in_place`]
 /// 2. Use [`DotProduct`](DistanceMetric::DotProduct) metric (single SIMD operation)
 /// 3. Store normalized vectors to avoid repeated normalization
+///
+/// # Future Enhancements
+///
+/// - **Serialization**: When serde is added as a dependency, this enum will
+///   support `#[serde(rename_all = "snake_case")]` for JSON/config serialization
+/// - **Batch operations**: `compute_distances_batch()` for SIMD-optimized
+///   multi-vector distance computation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DistanceMetric {
     /// Cosine similarity/distance.
