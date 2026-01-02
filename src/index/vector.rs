@@ -284,8 +284,6 @@ pub trait VectorIndex: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Placeholder test to verify module structure
     #[test]
     fn test_vector_index_trait_exists() {
