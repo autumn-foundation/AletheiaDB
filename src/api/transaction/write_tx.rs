@@ -138,12 +138,27 @@ impl WriteTransaction {
         // Detect write-write conflicts (Snapshot Isolation)
         self.detect_conflicts()?;
 
-        // Acquire commit timestamp
+        // Acquire commit timestamp.
+        //
+        // Timestamp management for Snapshot Isolation:
+        //
+        // 1. Increment BEFORE using: ensures commit_ts > snapshot_ts for any
+        //    transaction that started before this commit. This enables write-write
+        //    conflict detection via the check (commit_ts > snapshot_ts).
+        //
+        // 2. Increment AFTER using: ensures future snapshots will have a timestamp
+        //    greater than this commit, so visibility check (commit_ts < snapshot_ts)
+        //    will correctly include this commit in future reads.
+        //
+        // This double-increment ensures proper ordering for both:
+        // - Conflict detection (commits after my snapshot must fail)
+        // - Visibility (commits before my snapshot must be visible)
         let commit_timestamp = {
             let mut ts = self.current_timestamp.lock().unwrap();
-            let current = *ts;
-            *ts += 1;
-            current
+            *ts += 1; // Pre-increment for conflict detection
+            let commit = *ts;
+            *ts += 1; // Post-increment for visibility of this commit
+            commit
         };
 
         // Log operations to WAL (Durability)
@@ -242,39 +257,63 @@ impl WriteTransaction {
     fn detect_conflicts(&self) -> Result<()> {
         for write in self.buffer.operations() {
             match write {
-                // UpdateNode: check if node was modified after our snapshot
+                // UpdateNode: check if node was modified or deleted after our snapshot
                 super::BufferedWrite::UpdateNode { node_id, .. } => {
-                    // Get current version from storage
-                    if let Ok(current_node) = self.current.get_node(*node_id)
-                        && let Some(commit_ts) = current_node.metadata.commit_timestamp
-                        && commit_ts > self.snapshot.snapshot_timestamp
-                    {
-                        return Err(TransactionError::SerializationFailure {
-                            entity: format!("{:?}", node_id),
-                            reason: format!(
-                                "Version committed at {} after snapshot at {}",
-                                commit_ts, self.snapshot.snapshot_timestamp
-                            ),
+                    match self.current.get_node(*node_id) {
+                        Ok(current_node) => {
+                            // Node exists - check if it was modified after our snapshot
+                            if let Some(commit_ts) = current_node.metadata.commit_timestamp
+                                && commit_ts > self.snapshot.snapshot_timestamp
+                            {
+                                return Err(TransactionError::SerializationFailure {
+                                    entity: format!("{:?}", node_id),
+                                    reason: format!(
+                                        "Version committed at {} after snapshot at {}",
+                                        commit_ts, self.snapshot.snapshot_timestamp
+                                    ),
+                                }
+                                .into());
+                            }
                         }
-                        .into());
+                        Err(_) => {
+                            // Node doesn't exist in current storage. Since we successfully
+                            // called update_node() earlier (which reads from current storage),
+                            // the node must have been deleted by another transaction.
+                            return Err(TransactionError::SerializationFailure {
+                                entity: format!("{:?}", node_id),
+                                reason: "Node was deleted by another transaction".to_string(),
+                            }
+                            .into());
+                        }
                     }
                 }
 
-                // UpdateEdge: check if edge was modified after our snapshot
+                // UpdateEdge: check if edge was modified or deleted after our snapshot
                 super::BufferedWrite::UpdateEdge { edge_id, .. } => {
-                    // Get current version from storage
-                    if let Ok(current_edge) = self.current.get_edge(*edge_id)
-                        && let Some(commit_ts) = current_edge.metadata.commit_timestamp
-                        && commit_ts > self.snapshot.snapshot_timestamp
-                    {
-                        return Err(TransactionError::SerializationFailure {
-                            entity: format!("{:?}", edge_id),
-                            reason: format!(
-                                "Version committed at {} after snapshot at {}",
-                                commit_ts, self.snapshot.snapshot_timestamp
-                            ),
+                    match self.current.get_edge(*edge_id) {
+                        Ok(current_edge) => {
+                            // Edge exists - check if it was modified after our snapshot
+                            if let Some(commit_ts) = current_edge.metadata.commit_timestamp
+                                && commit_ts > self.snapshot.snapshot_timestamp
+                            {
+                                return Err(TransactionError::SerializationFailure {
+                                    entity: format!("{:?}", edge_id),
+                                    reason: format!(
+                                        "Version committed at {} after snapshot at {}",
+                                        commit_ts, self.snapshot.snapshot_timestamp
+                                    ),
+                                }
+                                .into());
+                            }
                         }
-                        .into());
+                        Err(_) => {
+                            // Edge doesn't exist - it was deleted by another transaction
+                            return Err(TransactionError::SerializationFailure {
+                                entity: format!("{:?}", edge_id),
+                                reason: "Edge was deleted by another transaction".to_string(),
+                            }
+                            .into());
+                        }
                     }
                 }
 
@@ -1658,5 +1697,755 @@ mod tests {
             assert_eq!(current.out_degree(nodes[i]), 1);
             assert_eq!(current.in_degree(nodes[i + 1]), 1);
         }
+    }
+}
+
+/// Tests for write-write conflict detection (Issue #8).
+///
+/// These tests verify that concurrent transactions updating the same entity
+/// will properly detect conflicts and fail with SerializationFailure.
+#[cfg(test)]
+mod conflict_detection_tests {
+    use super::*;
+    use crate::api::transaction::TxIdGenerator;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::storage::wal::{WalConfig, WriteAheadLog};
+    use tempfile::TempDir;
+
+    /// Helper to create shared infrastructure for multiple transactions.
+    fn create_shared_infrastructure() -> (
+        Arc<CurrentStorage>,
+        Arc<Mutex<HistoricalStorage>>,
+        Arc<Mutex<TemporalIndexes>>,
+        Arc<Mutex<WriteAheadLog>>,
+        Arc<Mutex<Timestamp>>,
+        Arc<TxVisibilityManager>,
+        Arc<Mutex<IdGenerator>>,
+        Arc<Mutex<IdGenerator>>,
+        Arc<Mutex<IdGenerator>>,
+        TxIdGenerator,
+        TempDir,
+    ) {
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            sync_on_write: false,
+            ..Default::default()
+        };
+        let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
+
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let tx_id_gen = TxIdGenerator::new();
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+
+        (
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            tx_id_gen,
+            temp_dir,
+        )
+    }
+
+    /// Create a write transaction using the shared infrastructure.
+    #[allow(clippy::too_many_arguments)]
+    fn create_write_tx(
+        current: Arc<CurrentStorage>,
+        historical: Arc<Mutex<HistoricalStorage>>,
+        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        wal: Arc<Mutex<WriteAheadLog>>,
+        current_timestamp: Arc<Mutex<Timestamp>>,
+        visibility_manager: Arc<TxVisibilityManager>,
+        node_id_gen: Arc<Mutex<IdGenerator>>,
+        edge_id_gen: Arc<Mutex<IdGenerator>>,
+        version_id_gen: Arc<Mutex<IdGenerator>>,
+        tx_id_gen: &TxIdGenerator,
+    ) -> WriteTransaction {
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: *current_timestamp.lock().unwrap(),
+            active_transactions: std::collections::HashSet::new(),
+        };
+
+        WriteTransaction::new(
+            tx_id_gen.next(),
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+        )
+    }
+
+    /// Test: First-committer-wins for node updates.
+    ///
+    /// Scenario from Issue #8:
+    /// ```text
+    /// Time    Transaction 1                    Transaction 2
+    /// ----    -------------                    -------------
+    /// T1      tx1 = write_transaction()
+    /// T2      tx1.update_node(A, {age: 31})
+    /// T3                                       tx2 = write_transaction()
+    /// T4                                       tx2.update_node(A, {age: 32})
+    /// T5                                       tx2.commit()  // Succeeds
+    /// T6      tx1.commit()                     // Should FAIL!
+    /// ```
+    #[test]
+    fn test_first_committer_wins_node_update() {
+        let (
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            tx_id_gen,
+            _temp_dir,
+        ) = create_shared_infrastructure();
+
+        // Create initial node via transaction (so it has proper metadata)
+        let node_id = {
+            let mut tx = create_write_tx(
+                current.clone(),
+                historical.clone(),
+                temporal_indexes.clone(),
+                wal.clone(),
+                current_timestamp.clone(),
+                visibility_manager.clone(),
+                node_id_gen.clone(),
+                edge_id_gen.clone(),
+                version_id_gen.clone(),
+                &tx_id_gen,
+            );
+            let id = tx
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 30i64).build(),
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // T1: tx1 starts
+        let mut tx1 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+
+        // T2: tx1 updates node
+        tx1.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 31i64).build(),
+        )
+        .unwrap();
+
+        // T3: tx2 starts
+        let mut tx2 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+
+        // T4: tx2 updates node
+        tx2.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 32i64).build(),
+        )
+        .unwrap();
+
+        // T5: tx2 commits first - should succeed
+        tx2.commit().unwrap();
+
+        // Verify tx2's update was applied
+        let node_after_tx2 = current.get_node(node_id).unwrap();
+        assert_eq!(
+            node_after_tx2.get_property("age").and_then(|v| v.as_int()),
+            Some(32),
+            "tx2's update should have been applied"
+        );
+
+        // T6: tx1 tries to commit - should FAIL with SerializationFailure
+        let result = tx1.commit();
+        assert!(
+            result.is_err(),
+            "tx1.commit() should fail due to write-write conflict"
+        );
+
+        // Verify it's a SerializationFailure error
+        let err = result.unwrap_err();
+        let err_str = format!("{:?}", err);
+        assert!(
+            err_str.contains("SerializationFailure"),
+            "Expected SerializationFailure, got: {}",
+            err_str
+        );
+
+        // Verify the final value is still tx2's value (first committer wins)
+        let final_node = current.get_node(node_id).unwrap();
+        assert_eq!(
+            final_node.get_property("age").and_then(|v| v.as_int()),
+            Some(32),
+            "Final value should be tx2's value (first committer wins)"
+        );
+    }
+
+    /// Test: First-committer-wins for edge updates.
+    #[test]
+    fn test_first_committer_wins_edge_update() {
+        let (
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            tx_id_gen,
+            _temp_dir,
+        ) = create_shared_infrastructure();
+
+        // Create initial nodes and edge
+        let (node1, node2, edge_id) = {
+            let mut tx = create_write_tx(
+                current.clone(),
+                historical.clone(),
+                temporal_indexes.clone(),
+                wal.clone(),
+                current_timestamp.clone(),
+                visibility_manager.clone(),
+                node_id_gen.clone(),
+                edge_id_gen.clone(),
+                version_id_gen.clone(),
+                &tx_id_gen,
+            );
+            let n1 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let n2 = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            let e = tx
+                .create_edge(
+                    n1,
+                    n2,
+                    "KNOWS",
+                    PropertyMapBuilder::new().insert("weight", 5i64).build(),
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            (n1, n2, e)
+        };
+
+        // tx1 starts
+        let mut tx1 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx1.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("weight", 10i64).build(),
+        )
+        .unwrap();
+
+        // tx2 starts and commits first
+        let mut tx2 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx2.update_edge(
+            edge_id,
+            PropertyMapBuilder::new().insert("weight", 20i64).build(),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        // tx1 tries to commit - should fail
+        let result = tx1.commit();
+        assert!(
+            result.is_err(),
+            "tx1.commit() should fail due to edge update conflict"
+        );
+
+        // Verify final value is tx2's
+        let final_edge = current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            final_edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(20)
+        );
+
+        // Suppress unused variable warnings
+        let _ = (node1, node2);
+    }
+
+    /// Test: First-committer-wins for node deletion.
+    #[test]
+    fn test_first_committer_wins_node_delete() {
+        let (
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            tx_id_gen,
+            _temp_dir,
+        ) = create_shared_infrastructure();
+
+        // Create initial node
+        let node_id = {
+            let mut tx = create_write_tx(
+                current.clone(),
+                historical.clone(),
+                temporal_indexes.clone(),
+                wal.clone(),
+                current_timestamp.clone(),
+                visibility_manager.clone(),
+                node_id_gen.clone(),
+                edge_id_gen.clone(),
+                version_id_gen.clone(),
+                &tx_id_gen,
+            );
+            let id = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // tx1 starts and wants to update
+        let mut tx1 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx1.update_node(
+            node_id,
+            PropertyMapBuilder::new().insert("age", 31i64).build(),
+        )
+        .unwrap();
+
+        // tx2 starts and deletes the node, then commits
+        let mut tx2 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx2.delete_node(node_id).unwrap();
+        tx2.commit().unwrap();
+
+        // Node should be deleted now
+        assert!(current.get_node(node_id).is_err());
+
+        // tx1 tries to commit its update - should fail
+        let result = tx1.commit();
+        assert!(
+            result.is_err(),
+            "tx1.commit() should fail - node was modified (deleted) by tx2"
+        );
+    }
+
+    /// Test: Delete vs Delete conflict.
+    #[test]
+    fn test_delete_delete_conflict() {
+        let (
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            tx_id_gen,
+            _temp_dir,
+        ) = create_shared_infrastructure();
+
+        // Create initial node
+        let node_id = {
+            let mut tx = create_write_tx(
+                current.clone(),
+                historical.clone(),
+                temporal_indexes.clone(),
+                wal.clone(),
+                current_timestamp.clone(),
+                visibility_manager.clone(),
+                node_id_gen.clone(),
+                edge_id_gen.clone(),
+                version_id_gen.clone(),
+                &tx_id_gen,
+            );
+            let id = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // tx1 wants to delete
+        let mut tx1 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx1.delete_node(node_id).unwrap();
+
+        // tx2 also wants to delete and commits first
+        let mut tx2 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx2.delete_node(node_id).unwrap();
+        tx2.commit().unwrap();
+
+        // tx1 tries to commit - should fail
+        let result = tx1.commit();
+        assert!(
+            result.is_err(),
+            "tx1.commit() should fail - node was already deleted by tx2"
+        );
+    }
+
+    /// Test: No conflict when transactions modify different entities.
+    #[test]
+    fn test_no_conflict_different_entities() {
+        let (
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            tx_id_gen,
+            _temp_dir,
+        ) = create_shared_infrastructure();
+
+        // Create two nodes
+        let (node1, node2) = {
+            let mut tx = create_write_tx(
+                current.clone(),
+                historical.clone(),
+                temporal_indexes.clone(),
+                wal.clone(),
+                current_timestamp.clone(),
+                visibility_manager.clone(),
+                node_id_gen.clone(),
+                edge_id_gen.clone(),
+                version_id_gen.clone(),
+                &tx_id_gen,
+            );
+            let n1 = tx
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                )
+                .unwrap();
+            let n2 = tx
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Bob").build(),
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            (n1, n2)
+        };
+
+        // tx1 updates node1
+        let mut tx1 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx1.update_node(
+            node1,
+            PropertyMapBuilder::new().insert("age", 30i64).build(),
+        )
+        .unwrap();
+
+        // tx2 updates node2 and commits first
+        let mut tx2 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx2.update_node(
+            node2,
+            PropertyMapBuilder::new().insert("age", 25i64).build(),
+        )
+        .unwrap();
+        tx2.commit().unwrap();
+
+        // tx1 should also succeed - no conflict on different entities
+        tx1.commit().unwrap();
+
+        // Verify both updates were applied
+        assert_eq!(
+            current
+                .get_node(node1)
+                .unwrap()
+                .get_property("age")
+                .and_then(|v| v.as_int()),
+            Some(30)
+        );
+        assert_eq!(
+            current
+                .get_node(node2)
+                .unwrap()
+                .get_property("age")
+                .and_then(|v| v.as_int()),
+            Some(25)
+        );
+    }
+
+    /// Test: No conflict for create operations (new entities).
+    #[test]
+    fn test_no_conflict_for_creates() {
+        let (
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            tx_id_gen,
+            _temp_dir,
+        ) = create_shared_infrastructure();
+
+        // tx1 creates a node
+        let mut tx1 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        let node1 = tx1
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // tx2 creates a different node and commits first
+        let mut tx2 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        let node2 = tx2
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        tx2.commit().unwrap();
+
+        // tx1 should also succeed - creates don't conflict
+        tx1.commit().unwrap();
+
+        // Both nodes should exist
+        assert!(current.get_node(node1).is_ok());
+        assert!(current.get_node(node2).is_ok());
+    }
+
+    /// Test: Conflict error message contains useful information.
+    #[test]
+    fn test_conflict_error_message() {
+        let (
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            tx_id_gen,
+            _temp_dir,
+        ) = create_shared_infrastructure();
+
+        // Create initial node
+        let node_id = {
+            let mut tx = create_write_tx(
+                current.clone(),
+                historical.clone(),
+                temporal_indexes.clone(),
+                wal.clone(),
+                current_timestamp.clone(),
+                visibility_manager.clone(),
+                node_id_gen.clone(),
+                edge_id_gen.clone(),
+                version_id_gen.clone(),
+                &tx_id_gen,
+            );
+            let id = tx
+                .create_node("Person", PropertyMapBuilder::new().build())
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // tx1 updates
+        let mut tx1 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx1.update_node(node_id, PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // tx2 commits first
+        let mut tx2 = create_write_tx(
+            current.clone(),
+            historical.clone(),
+            temporal_indexes.clone(),
+            wal.clone(),
+            current_timestamp.clone(),
+            visibility_manager.clone(),
+            node_id_gen.clone(),
+            edge_id_gen.clone(),
+            version_id_gen.clone(),
+            &tx_id_gen,
+        );
+        tx2.update_node(node_id, PropertyMapBuilder::new().build())
+            .unwrap();
+        tx2.commit().unwrap();
+
+        // tx1 fails
+        let result = tx1.commit();
+        let err = result.unwrap_err();
+        let err_str = format!("{:?}", err);
+
+        // Verify error contains node ID info
+        assert!(
+            err_str.contains("NodeId"),
+            "Error should mention the entity: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("committed") || err_str.contains("snapshot"),
+            "Error should explain the conflict: {}",
+            err_str
+        );
     }
 }
