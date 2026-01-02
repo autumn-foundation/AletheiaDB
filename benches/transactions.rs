@@ -11,7 +11,7 @@ fn bench_read_transaction_creation(c: &mut Criterion) {
 
     c.bench_function("read_transaction_creation", |b| {
         b.iter(|| {
-            let _tx = db.read_transaction();
+            let _tx = db.read_transaction().unwrap();
         });
     });
 }
@@ -21,7 +21,7 @@ fn bench_write_transaction_creation(c: &mut Criterion) {
 
     c.bench_function("write_transaction_creation", |b| {
         b.iter(|| {
-            let _tx = db.write_transaction();
+            let _tx = db.write_transaction().unwrap();
         });
     });
 }
@@ -91,7 +91,7 @@ fn bench_explicit_transaction_commit(c: &mut Criterion) {
 
     c.bench_function("explicit_transaction_commit", |b| {
         b.iter(|| {
-            let mut tx = db.write_transaction();
+            let mut tx = db.write_transaction().unwrap();
             tx.create_node(
                 "Person",
                 PropertyMapBuilder::new().insert("name", "Test").build(),
@@ -119,7 +119,7 @@ fn bench_implicit_vs_explicit(c: &mut Criterion) {
 
     group.bench_function("explicit_create_node", |b| {
         b.iter(|| {
-            let mut tx = db.write_transaction();
+            let mut tx = db.write_transaction().unwrap();
             tx.create_node(
                 "Person",
                 PropertyMapBuilder::new().insert("name", "Test").build(),

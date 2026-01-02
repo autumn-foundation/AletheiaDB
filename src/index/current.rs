@@ -26,6 +26,16 @@ use std::sync::{Arc, RwLock};
 ///
 /// This prevents the race condition where edges inserted during a rebuild
 /// could be lost from the adjacency indexes.
+///
+/// # Lock Recovery Safety
+///
+/// This struct uses `read_or_recover()`/`write_or_recover()` for adjacency index
+/// access. This is safe because:
+///
+/// - **AdjacencyIndex**: Contains `Vec<AdjacencyEntry>` with no complex invariants
+/// - **Worst case**: An adjacency list may be incomplete after a panic
+/// - **Recovery**: `rebuild_adjacency()` can always reconstruct correct state from edges
+/// - **Hot path**: Recovery avoids cascade panics on the performance-critical traversal path
 pub struct CurrentIndexes {
     /// Node ID → Node (O(1) lookup)
     nodes: DashMap<NodeId, Node>,

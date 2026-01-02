@@ -63,6 +63,16 @@ impl TransactionSnapshot {
 /// - Transactions don't see uncommitted changes from other transactions
 /// - Transactions don't see changes committed after their snapshot time
 /// - Write-write conflicts are detected at commit time
+///
+/// # Lock Recovery Safety
+///
+/// This struct uses `lock_or_recover()` for all lock acquisitions. This is safe
+/// because the protected data structures (`HashSet<TxId>` and `BTreeMap<TxId, Timestamp>`)
+/// have no complex invariants that could be violated by a mid-operation panic:
+///
+/// - **Worst case**: A transaction ID may be missing from the active/committed sets
+/// - **Behavior**: This fails safe by being conservative (treating as uncommitted/not visible)
+/// - **No corruption**: Standard library collections remain valid after partial operations
 pub struct TxVisibilityManager {
     /// Currently active transactions
     active: Mutex<HashSet<TxId>>,
