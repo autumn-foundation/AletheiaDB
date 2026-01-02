@@ -453,8 +453,15 @@ gallifreydb/
 
 ## Related Documentation
 
+### Core Architecture
 - [Storage Layer](storage-layer.md) - Detailed storage architecture
 - [Transaction System](transaction-system.md) - MVCC and isolation
 - [Index Layer](index-layer.md) - Index structures and algorithms
 - [Data Model](data-model.md) - Core types and temporal model
+
+### Performance & Scalability
+- [Durability Modes](durability-modes.md) - Configurable WAL sync strategies (Sync/Batched/Async)
+- [Scalability](scalability.md) - Tiered storage and horizontal sharding
+
+### Decision Records
 - [ADRs](../adr/README.md) - Architecture Decision Records
