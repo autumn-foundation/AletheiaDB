@@ -434,6 +434,57 @@ mod tests {
     }
 
     #[test]
+    fn test_time_travel_after_deletion() {
+        let db = GallifreyDB::new();
+
+        // Create a node
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+        let node_id = db.create_node("Person", props).unwrap();
+
+        // Record timestamp after creation
+        let t_after_create = *db.current_timestamp.lock().unwrap();
+
+        // Delete the node
+        db.write(|tx| {
+            tx.delete_node(node_id)?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Record timestamp after deletion
+        let t_after_delete = *db.current_timestamp.lock().unwrap();
+
+        // Query BEFORE creation - should fail (node didn't exist)
+        // Note: We can't easily test this without more control over timestamps
+
+        // Query AFTER deletion - should fail (node was deleted)
+        // This is the critical test: time-travel query after deletion should NOT
+        // return the deleted node's data
+        let result = db.get_node_at_time(node_id, t_after_delete, t_after_delete);
+        assert!(
+            result.is_err(),
+            "Expected NodeNotFound after deletion, but got: {:?}",
+            result
+        );
+
+        // Query BEFORE deletion - should succeed (node existed)
+        let result = db.get_node_at_time(node_id, t_after_create, t_after_create);
+        assert!(
+            result.is_ok(),
+            "Expected to find node before deletion, but got: {:?}",
+            result
+        );
+        let node = result.unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+    }
+
+    #[test]
     fn test_graph_traversal() {
         let db = GallifreyDB::new();
 

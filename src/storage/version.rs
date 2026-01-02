@@ -15,6 +15,28 @@ use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
 
+/// Trait for version types that have a bi-temporal interval.
+///
+/// This trait provides a common interface for accessing and modifying the
+/// temporal interval of node and edge versions, reducing code duplication
+/// in operations that need to modify temporal properties.
+pub trait TemporalVersion {
+    /// Get a reference to the version's bi-temporal interval.
+    fn temporal(&self) -> &BiTemporalInterval;
+
+    /// Get a mutable reference to the version's bi-temporal interval.
+    fn temporal_mut(&mut self) -> &mut BiTemporalInterval;
+
+    /// Close the transaction time of this version.
+    ///
+    /// This marks the version as no longer being the "current knowledge" after
+    /// the specified timestamp. Used when a version is superseded or deleted.
+    fn close_transaction_time(&mut self, end_timestamp: Timestamp) {
+        let temporal = self.temporal_mut();
+        *temporal = temporal.close_transaction_time(end_timestamp);
+    }
+}
+
 /// Metadata about version creation for Snapshot Isolation.
 ///
 /// This tracks which transaction created a version and when it was committed,
@@ -270,6 +292,16 @@ impl NodeVersion {
     }
 }
 
+impl TemporalVersion for NodeVersion {
+    fn temporal(&self) -> &BiTemporalInterval {
+        &self.temporal
+    }
+
+    fn temporal_mut(&mut self) -> &mut BiTemporalInterval {
+        &mut self.temporal
+    }
+}
+
 /// A version of an edge at a specific point in time.
 #[derive(Debug, Clone)]
 pub struct EdgeVersion {
@@ -353,6 +385,16 @@ impl EdgeVersion {
     #[inline]
     pub fn is_delta(&self) -> bool {
         self.data.is_delta()
+    }
+}
+
+impl TemporalVersion for EdgeVersion {
+    fn temporal(&self) -> &BiTemporalInterval {
+        &self.temporal
+    }
+
+    fn temporal_mut(&mut self) -> &mut BiTemporalInterval {
+        &mut self.temporal
     }
 }
 

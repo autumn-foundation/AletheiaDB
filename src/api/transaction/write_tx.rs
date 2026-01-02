@@ -651,25 +651,41 @@ impl WriteTransaction {
                     );
                 }
                 super::BufferedWrite::DeleteNode { node_id } => {
-                    // Get the node before deleting to create tombstone
+                    // Get the node before deleting
                     let node = self.current.get_node(*node_id)?;
+
+                    // Close the current version's transaction_time in historical storage
+                    // This marks the end of this version's visibility
+                    let mut historical = self.historical.lock_or_err()?;
+                    if let Some(current_version_id) = historical.get_current_node_version(*node_id)
+                    {
+                        historical.close_node_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
 
                     // Generate version ID for tombstone
                     let tombstone_version_id =
                         VersionId::new(self.version_id_gen.lock_or_err()?.next());
 
-                    // Create closed temporal interval marking deletion time
+                    // Create tombstone temporal interval
+                    // The tombstone marks when the deletion occurred. Its transaction_time
+                    // starts at commit_timestamp and remains open (we know about the deletion
+                    // from now on). Its valid_time is closed immediately since the entity
+                    // no longer exists.
                     let tombstone_temporal = BiTemporalInterval::current(commit_timestamp)
-                        .close_transaction_time(commit_timestamp);
+                        .close_valid_time(commit_timestamp);
 
                     // Add tombstone version to historical storage
-                    self.historical.lock_or_err()?.add_node_version(
+                    historical.add_node_version(
                         *node_id,
                         tombstone_version_id,
                         tombstone_temporal,
                         node.label,
                         node.properties.clone(),
                     )?;
+                    drop(historical); // Release lock before acquiring temporal_indexes lock
 
                     // Index the tombstone version
                     self.temporal_indexes.lock_or_err()?.insert_node_version(
@@ -682,19 +698,34 @@ impl WriteTransaction {
                     self.current.delete_node_direct(*node_id)?;
                 }
                 super::BufferedWrite::DeleteEdge { edge_id } => {
-                    // Get the edge before deleting to create tombstone
+                    // Get the edge before deleting
                     let edge = self.current.get_edge(*edge_id)?;
+
+                    // Close the current version's transaction_time in historical storage
+                    // This marks the end of this version's visibility
+                    let mut historical = self.historical.lock_or_err()?;
+                    if let Some(current_version_id) = historical.get_current_edge_version(*edge_id)
+                    {
+                        historical.close_edge_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
 
                     // Generate version ID for tombstone
                     let tombstone_version_id =
                         VersionId::new(self.version_id_gen.lock_or_err()?.next());
 
-                    // Create closed temporal interval marking deletion time
+                    // Create tombstone temporal interval
+                    // The tombstone marks when the deletion occurred. Its transaction_time
+                    // starts at commit_timestamp and remains open (we know about the deletion
+                    // from now on). Its valid_time is closed immediately since the entity
+                    // no longer exists.
                     let tombstone_temporal = BiTemporalInterval::current(commit_timestamp)
-                        .close_transaction_time(commit_timestamp);
+                        .close_valid_time(commit_timestamp);
 
                     // Add tombstone version to historical storage
-                    self.historical.lock_or_err()?.add_edge_version(
+                    historical.add_edge_version(
                         *edge_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -703,6 +734,7 @@ impl WriteTransaction {
                         edge.target,
                         edge.properties.clone(),
                     )?;
+                    drop(historical); // Release lock before acquiring temporal_indexes lock
 
                     // Index the tombstone version
                     self.temporal_indexes.lock_or_err()?.insert_edge_version(
