@@ -68,6 +68,9 @@ What other options were evaluated?
 | ID | Title | Date | Categories |
 |----|-------|------|------------|
 | [ADR-0011](0011-vector-search-integration.md) | Vector Search Integration (SUPERRAG) | 2024-12-31 | index, vector, future |
+| [ADR-0012](0012-configurable-durability-modes.md) | Configurable Durability Modes | 2026-01-01 | storage, durability, performance |
+| [ADR-0013](0013-tiered-storage-architecture.md) | Tiered Storage Architecture | 2026-01-01 | storage, scalability, performance |
+| [ADR-0014](0014-graph-sharding-strategy.md) | Graph Sharding Strategy | 2026-01-01 | storage, scalability, distributed |
 
 ## Creating a New ADR
 
@@ -101,4 +104,6 @@ Proposed → Accepted → [Deprecated | Superseded]
 - `memory` - Memory management
 - `type-safety` - Type system decisions
 - `vector` - Vector search features
+- `scalability` - Horizontal and vertical scaling
+- `distributed` - Distributed systems features
 - `future` - Planned future work
