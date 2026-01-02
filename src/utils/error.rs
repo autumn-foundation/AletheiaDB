@@ -137,7 +137,7 @@ pub enum StorageError {
     /// error instead of panicking.
     LockPoisoned {
         /// The type of lock that was poisoned (e.g., "Mutex", "RwLock")
-        lock_type: String,
+        lock_type: &'static str,
     },
 }
 
@@ -562,9 +562,7 @@ mod tests {
         assert!(format!("{}", err).contains("bad checksum"));
 
         // Test LockPoisoned
-        let err = StorageError::LockPoisoned {
-            lock_type: "Mutex".to_string(),
-        };
+        let err = StorageError::LockPoisoned { lock_type: "Mutex" };
         assert!(format!("{}", err).contains("Mutex"));
         assert!(format!("{}", err).contains("lock poisoned"));
         assert!(format!("{}", err).contains("panicked"));

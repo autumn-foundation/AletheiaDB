@@ -57,10 +57,7 @@ pub trait MutexExt<T> {
 impl<T> MutexExt<T> for Mutex<T> {
     fn lock_or_err(&self) -> Result<MutexGuard<'_, T>, Error> {
         self.lock().map_err(|_| {
-            StorageError::LockPoisoned {
-                lock_type: "Mutex".to_string(),
-            }
-            .into()
+            StorageError::LockPoisoned { lock_type: "Mutex" }.into()
         })
     }
 
@@ -107,19 +104,13 @@ pub trait RwLockExt<T> {
 impl<T> RwLockExt<T> for RwLock<T> {
     fn read_or_err(&self) -> Result<RwLockReadGuard<'_, T>, Error> {
         self.read().map_err(|_| {
-            StorageError::LockPoisoned {
-                lock_type: "RwLock".to_string(),
-            }
-            .into()
+            StorageError::LockPoisoned { lock_type: "RwLock" }.into()
         })
     }
 
     fn write_or_err(&self) -> Result<RwLockWriteGuard<'_, T>, Error> {
         self.write().map_err(|_| {
-            StorageError::LockPoisoned {
-                lock_type: "RwLock".to_string(),
-            }
-            .into()
+            StorageError::LockPoisoned { lock_type: "RwLock" }.into()
         })
     }
 
