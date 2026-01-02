@@ -87,8 +87,11 @@ use crate::utils::Result;
 ///
 /// # Thread Safety
 ///
-/// Implementations should be thread-safe for concurrent reads. Write operations
-/// (add/remove) may require exclusive access depending on the underlying index.
+/// Implementations must be thread-safe for both concurrent reads and writes.
+/// The trait methods take `&self` (not `&mut self`) to enable concurrent operations.
+/// Implementations should use interior mutability (e.g., internal locks, atomics) to
+/// coordinate concurrent access. For example, usearch supports concurrent insertions
+/// through internal locking while maintaining `&self` semantics.
 ///
 /// # Performance Expectations
 ///
@@ -119,14 +122,14 @@ pub trait VectorIndex: Send + Sync {
     /// ```no_run
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
-    /// # fn example(index: &mut impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
     /// let node_id = NodeId::new(123);
     /// let embedding = vec![0.1, 0.2, 0.3, 0.4];
     /// index.add(node_id, &embedding)?;
     /// # Ok(())
     /// # }
     /// ```
-    fn add(&mut self, id: NodeId, vector: &[f32]) -> Result<()>;
+    fn add(&self, id: NodeId, vector: &[f32]) -> Result<()>;
 
     /// Removes a vector from the index by node ID.
     ///
@@ -146,13 +149,13 @@ pub trait VectorIndex: Send + Sync {
     /// ```no_run
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
-    /// # fn example(index: &mut impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
     /// let node_id = NodeId::new(123);
     /// index.remove(node_id)?;
     /// # Ok(())
     /// # }
     /// ```
-    fn remove(&mut self, id: NodeId) -> Result<()>;
+    fn remove(&self, id: NodeId) -> Result<()>;
 
     /// Searches for the k-nearest neighbors of the query vector.
     ///
@@ -239,7 +242,7 @@ pub trait VectorIndex: Send + Sync {
         predicate: F,
     ) -> Result<Vec<(NodeId, f32)>>
     where
-        F: Fn(&NodeId) -> bool;
+        F: Fn(&NodeId) -> bool + Send + Sync;
 
     /// Returns the number of vectors currently in the index.
     ///
