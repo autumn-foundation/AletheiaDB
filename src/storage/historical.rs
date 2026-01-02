@@ -243,6 +243,49 @@ impl HistoricalStorage {
         self.edge_version_heads.get(&edge_id).copied()
     }
 
+    /// Close the transaction time of a node version.
+    ///
+    /// This marks the version as no longer being the "current knowledge" after
+    /// the specified timestamp. Used when a node is deleted or superseded.
+    ///
+    /// # Arguments
+    /// * `version_id` - The version to close
+    /// * `end_timestamp` - The timestamp at which this version is no longer valid
+    ///
+    /// # Returns
+    /// `Ok(())` if successful, `Err` if version not found
+    pub fn close_node_version_transaction_time(
+        &mut self,
+        version_id: VersionId,
+        end_timestamp: Timestamp,
+    ) -> Result<()> {
+        let version = self
+            .node_versions
+            .get_mut(&version_id)
+            .ok_or(StorageError::VersionNotFound(version_id))?;
+
+        version.temporal = version.temporal.close_transaction_time(end_timestamp);
+        Ok(())
+    }
+
+    /// Close the transaction time of an edge version.
+    ///
+    /// This marks the version as no longer being the "current knowledge" after
+    /// the specified timestamp. Used when an edge is deleted or superseded.
+    pub fn close_edge_version_transaction_time(
+        &mut self,
+        version_id: VersionId,
+        end_timestamp: Timestamp,
+    ) -> Result<()> {
+        let version = self
+            .edge_versions
+            .get_mut(&version_id)
+            .ok_or(StorageError::VersionNotFound(version_id))?;
+
+        version.temporal = version.temporal.close_transaction_time(end_timestamp);
+        Ok(())
+    }
+
     /// Find a node version valid at a specific point in time.
     ///
     /// This searches the version chain for a version whose temporal interval
