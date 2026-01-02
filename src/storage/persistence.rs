@@ -380,9 +380,24 @@ impl PersistenceManager {
         let wal_entries = wal.read_from(start_lsn)?;
 
         for _entry in wal_entries {
-            // Apply WAL operation to storage
-            // In production, would have apply_operation methods
-            // For now, operations are already in storage
+            // TODO: Implement WAL operation replay
+            //
+            // IMPORTANT: When implementing replay for DeleteNode/DeleteEdge operations,
+            // you MUST close the previous version's transaction_time BEFORE creating
+            // the tombstone. This is critical for correct bi-temporal semantics.
+            //
+            // The tombstone's temporal.transaction_time().start() contains the
+            // commit_timestamp that should be used to close the previous version.
+            //
+            // Example for DeleteNode:
+            //   let commit_timestamp = temporal.transaction_time().start();
+            //   if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
+            //       historical.close_node_version_transaction_time(prev_version_id, commit_timestamp)?;
+            //   }
+            //   // Then create the tombstone...
+            //
+            // See: write_tx.rs apply_changes() for the reference implementation.
+            // Related: Issue #12 - Time-travel queries returning deleted entities.
         }
 
         let final_lsn = wal.current_lsn();
