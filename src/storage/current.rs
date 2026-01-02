@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_with_multiple_vector_properties() {
+    fn test_create_node_with_multiple_vector_properties() {
         let storage = CurrentStorage::new();
 
         // Node with multiple embeddings (e.g., different model embeddings)
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_with_empty_vector() {
+    fn test_create_node_with_empty_vector() {
         let storage = CurrentStorage::new();
 
         // Empty vector should be allowed
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_vector_with_special_values() {
+    fn test_create_node_with_normalized_vector() {
         let storage = CurrentStorage::new();
 
         // Vector with normalized values (common for embeddings)
