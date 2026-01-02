@@ -630,4 +630,630 @@ mod tests {
         // Compression ratio should be 2/3 ≈ 0.67
         assert!((stats.compression_ratio() - 0.6666).abs() < 0.01);
     }
+
+    // ============================================================
+    // Vector Property Tests (VS-012)
+    // ============================================================
+    //
+    // Note on floating-point equality:
+    // These tests use exact equality (assert_eq!) which works because vectors
+    // are hardcoded values without computation. PropertyValue::Vector uses
+    // derived PartialEq (bitwise comparison). For tests involving computed
+    // vectors (normalization, etc.), use approximate equality instead:
+    //
+    //   fn vectors_approx_equal(a: &[f32], b: &[f32], epsilon: f32) -> bool {
+    //       a.len() == b.len() &&
+    //       a.iter().zip(b).all(|(x, y)| (x - y).abs() < epsilon)
+    //   }
+    //
+    // See PropertyValue::Vector documentation at src/core/property.rs for details.
+
+    #[test]
+    fn test_create_node_version_with_vector_property() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let version_id = VersionId::new(100);
+        let label = GLOBAL_INTERNER.intern("Document");
+        let temporal = BiTemporalInterval::current(1000);
+
+        // Create node with vector embedding
+        let embedding = vec![0.1f32, 0.2, 0.3, 0.4, 0.5];
+        let props = PropertyMapBuilder::new()
+            .insert("title", "Test Document")
+            .insert_vector("embedding", &embedding)
+            .build();
+
+        storage
+            .add_node_version(node_id, version_id, temporal, label, props)
+            .unwrap();
+
+        // First version should be an anchor
+        let version = storage.get_node_version(version_id).unwrap();
+        assert!(version.is_anchor());
+
+        // Verify vector can be reconstructed
+        let reconstructed = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(
+            reconstructed.get("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
+    }
+
+    #[test]
+    fn test_delta_computation_with_vector_change() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("Document");
+
+        // Version 1: Initial embedding
+        let v1 = VersionId::new(1);
+        let embedding_v1 = vec![0.1f32, 0.2, 0.3];
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("title", "Doc")
+                    .insert_vector("embedding", &embedding_v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Version 2: Updated embedding (should create delta)
+        let v2 = VersionId::new(2);
+        let embedding_v2 = vec![0.4f32, 0.5, 0.6];
+        storage
+            .add_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("title", "Doc")
+                    .insert_vector("embedding", &embedding_v2)
+                    .build(),
+            )
+            .unwrap();
+
+        // V2 should be a delta since we're within anchor interval
+        let version = storage.get_node_version(v2).unwrap();
+        assert!(version.is_delta());
+
+        // Verify both versions reconstruct correctly
+        let props_v1 = storage.reconstruct_node_properties(v1).unwrap();
+        assert_eq!(
+            props_v1.get("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding_v1[..])
+        );
+
+        let props_v2 = storage.reconstruct_node_properties(v2).unwrap();
+        assert_eq!(
+            props_v2.get("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding_v2[..])
+        );
+    }
+
+    #[test]
+    fn test_delta_only_vector_changes() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("Document");
+
+        // Version 1: title + embedding
+        let v1 = VersionId::new(1);
+        let embedding_v1 = vec![0.1f32, 0.2];
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("title", "Same Title")
+                    .insert_vector("embedding", &embedding_v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Version 2: Only embedding changes
+        let v2 = VersionId::new(2);
+        let embedding_v2 = vec![0.9f32, 0.8];
+        storage
+            .add_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("title", "Same Title") // Unchanged
+                    .insert_vector("embedding", &embedding_v2) // Changed
+                    .build(),
+            )
+            .unwrap();
+
+        // Verify delta captures only the vector change
+        let version = storage.get_node_version(v2).unwrap();
+        assert!(version.is_delta());
+
+        // Reconstruct and verify
+        let props = storage.reconstruct_node_properties(v2).unwrap();
+        assert_eq!(
+            props.get("title").and_then(|v| v.as_str()),
+            Some("Same Title")
+        );
+        assert_eq!(
+            props.get("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding_v2[..])
+        );
+    }
+
+    #[test]
+    fn test_vector_unchanged_between_versions() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("Document");
+
+        // Same embedding for both versions
+        let embedding = vec![0.5f32, 0.5, 0.5];
+
+        // Version 1
+        let v1 = VersionId::new(1);
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("title", "V1 Title")
+                    .insert_vector("embedding", &embedding)
+                    .build(),
+            )
+            .unwrap();
+
+        // Version 2: Same embedding, different title
+        let v2 = VersionId::new(2);
+        storage
+            .add_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("title", "V2 Title")
+                    .insert_vector("embedding", &embedding) // Unchanged
+                    .build(),
+            )
+            .unwrap();
+
+        // Both should have correct embeddings
+        let props_v1 = storage.reconstruct_node_properties(v1).unwrap();
+        let props_v2 = storage.reconstruct_node_properties(v2).unwrap();
+
+        assert_eq!(
+            props_v1.get("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
+        assert_eq!(
+            props_v2.get("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
+
+        // Titles should differ
+        assert_eq!(
+            props_v1.get("title").and_then(|v| v.as_str()),
+            Some("V1 Title")
+        );
+        assert_eq!(
+            props_v2.get("title").and_then(|v| v.as_str()),
+            Some("V2 Title")
+        );
+    }
+
+    #[test]
+    fn test_anchor_creation_with_vector() {
+        // Configure anchor interval of 2 to force anchor creation
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 2,
+            max_delta_chain: 10,
+        });
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("Document");
+
+        // Create 3 versions with different embeddings
+        let embeddings = [vec![0.1f32, 0.2], vec![0.3f32, 0.4], vec![0.5f32, 0.6]];
+
+        for (i, emb) in embeddings.iter().enumerate() {
+            storage
+                .add_node_version(
+                    node_id,
+                    VersionId::new(i as u64),
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", emb)
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        // V0: anchor (first), V1: delta, V2: anchor (interval=2)
+        assert!(
+            storage
+                .get_node_version(VersionId::new(0))
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(
+            storage
+                .get_node_version(VersionId::new(1))
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_node_version(VersionId::new(2))
+                .unwrap()
+                .is_anchor()
+        );
+
+        // Verify each version reconstructs correctly
+        for (i, emb) in embeddings.iter().enumerate() {
+            let props = storage
+                .reconstruct_node_properties(VersionId::new(i as u64))
+                .unwrap();
+            assert_eq!(
+                props.get("embedding").and_then(|v| v.as_vector()),
+                Some(&emb[..])
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_version_with_vector() {
+        let mut storage = HistoricalStorage::new();
+
+        let edge_id = EdgeId::new(1);
+        let version_id = VersionId::new(100);
+        let label = GLOBAL_INTERNER.intern("SIMILAR_TO");
+        let temporal = BiTemporalInterval::current(1000);
+        let source = NodeId::new(10);
+        let target = NodeId::new(20);
+
+        // Edge with relationship embedding
+        let embedding = vec![0.8f32, 0.1, 0.1];
+        let props = PropertyMapBuilder::new()
+            .insert("weight", 0.95f64)
+            .insert_vector("embedding", &embedding)
+            .build();
+
+        storage
+            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .unwrap();
+
+        // Verify edge version
+        let version = storage.get_edge_version(version_id).unwrap();
+        assert!(version.is_anchor());
+
+        // Verify properties
+        let reconstructed = storage.reconstruct_edge_properties(version_id).unwrap();
+        assert_eq!(
+            reconstructed.get("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
+        assert_eq!(
+            reconstructed.get("weight").and_then(|v| v.as_float()),
+            Some(0.95)
+        );
+    }
+
+    #[test]
+    fn test_edge_delta_with_vector_change() {
+        let mut storage = HistoricalStorage::new();
+
+        let edge_id = EdgeId::new(1);
+        let label = GLOBAL_INTERNER.intern("SIMILAR_TO");
+        let source = NodeId::new(10);
+        let target = NodeId::new(20);
+
+        // Version 1: Initial edge
+        let v1 = VersionId::new(1);
+        let embedding_v1 = vec![0.5f32, 0.5];
+        storage
+            .add_edge_version(
+                edge_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new()
+                    .insert("weight", 0.5f64)
+                    .insert_vector("embedding", &embedding_v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Version 2: Updated embedding and weight
+        let v2 = VersionId::new(2);
+        let embedding_v2 = vec![0.9f32, 0.1];
+        storage
+            .add_edge_version(
+                edge_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new()
+                    .insert("weight", 0.9f64)
+                    .insert_vector("embedding", &embedding_v2)
+                    .build(),
+            )
+            .unwrap();
+
+        // V2 should be delta
+        assert!(storage.get_edge_version(v2).unwrap().is_delta());
+
+        // Verify reconstruction
+        let props_v2 = storage.reconstruct_edge_properties(v2).unwrap();
+        assert_eq!(
+            props_v2.get("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding_v2[..])
+        );
+        assert_eq!(props_v2.get("weight").and_then(|v| v.as_float()), Some(0.9));
+    }
+
+    #[test]
+    fn test_high_dimensional_vector_versioning() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("Embedding");
+
+        // High-dimensional embedding (like OpenAI's 1536-dim)
+        const DIMENSIONS: usize = 1536;
+        let embedding: Vec<f32> = (0..DIMENSIONS)
+            .map(|i| (i as f32) / DIMENSIONS as f32)
+            .collect();
+
+        let v1 = VersionId::new(1);
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &embedding)
+                    .build(),
+            )
+            .unwrap();
+
+        // Verify reconstruction preserves all dimensions
+        let props = storage.reconstruct_node_properties(v1).unwrap();
+        let retrieved = props
+            .get("embedding")
+            .and_then(|v| v.as_vector())
+            .expect("Should have embedding");
+
+        assert_eq!(retrieved.len(), DIMENSIONS);
+        assert_eq!(retrieved, &embedding[..]);
+    }
+
+    #[test]
+    fn test_version_time_travel_with_vectors() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("Document");
+
+        // Create versions at different times with different embeddings
+        let embeddings = [
+            (0, 500, vec![0.1f32, 0.0]),               // valid 0-500
+            (500, 1000, vec![0.2f32, 0.0]),            // valid 500-1000
+            (1000, Timestamp::MAX, vec![0.3f32, 0.0]), // valid 1000+
+        ];
+
+        for (i, (start, end, emb)) in embeddings.iter().enumerate() {
+            storage
+                .add_node_version(
+                    node_id,
+                    VersionId::new(i as u64),
+                    BiTemporalInterval::new(
+                        TimeRange::new(*start, *end),
+                        TimeRange::new(0, Timestamp::MAX),
+                    ),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", emb)
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        // Query at different times
+        let v_at_250 = storage.find_node_version_at_time(node_id, 250, 0);
+        let v_at_750 = storage.find_node_version_at_time(node_id, 750, 0);
+        let v_at_1500 = storage.find_node_version_at_time(node_id, 1500, 0);
+
+        assert_eq!(v_at_250, Some(VersionId::new(0)));
+        assert_eq!(v_at_750, Some(VersionId::new(1)));
+        assert_eq!(v_at_1500, Some(VersionId::new(2)));
+
+        // Verify each has correct embedding
+        for (vid, expected_emb) in [
+            (v_at_250.unwrap(), &embeddings[0].2),
+            (v_at_750.unwrap(), &embeddings[1].2),
+            (v_at_1500.unwrap(), &embeddings[2].2),
+        ] {
+            let props = storage.reconstruct_node_properties(vid).unwrap();
+            assert_eq!(
+                props.get("embedding").and_then(|v| v.as_vector()),
+                Some(&expected_emb[..])
+            );
+        }
+    }
+
+    // ============================================================
+    // Edge Case Tests
+    // ============================================================
+
+    #[test]
+    fn test_empty_vector_versioning() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("EmptyEmbedding");
+
+        // Empty vector should work with delta compression
+        let empty_vec: Vec<f32> = vec![];
+
+        // Version 1: empty vector
+        let v1 = VersionId::new(1);
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("name", "empty")
+                    .insert_vector("embedding", &empty_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Version 2: still empty (should be excluded from delta as unchanged)
+        let v2 = VersionId::new(2);
+        storage
+            .add_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("name", "updated")
+                    .insert_vector("embedding", &empty_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Both versions should have empty embedding
+        let props_v1 = storage.reconstruct_node_properties(v1).unwrap();
+        let props_v2 = storage.reconstruct_node_properties(v2).unwrap();
+
+        assert_eq!(
+            props_v1.get("embedding").and_then(|v| v.as_vector()),
+            Some(&empty_vec[..])
+        );
+        assert_eq!(
+            props_v2.get("embedding").and_then(|v| v.as_vector()),
+            Some(&empty_vec[..])
+        );
+    }
+
+    #[test]
+    fn test_vector_with_special_float_values() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("SpecialFloats");
+
+        // Note: NaN and Infinity are allowed in storage (validation is optional).
+        // However, NaN != NaN per IEEE 754, so delta computation treats NaN
+        // as always changed. This test documents that behavior.
+
+        let special_vec = vec![f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0];
+
+        let v1 = VersionId::new(1);
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &special_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Verify special values round-trip correctly
+        let props = storage.reconstruct_node_properties(v1).unwrap();
+        let retrieved = props
+            .get("embedding")
+            .and_then(|v| v.as_vector())
+            .expect("Should have embedding");
+
+        assert!(retrieved[0].is_infinite() && retrieved[0].is_sign_positive());
+        assert!(retrieved[1].is_infinite() && retrieved[1].is_sign_negative());
+        assert_eq!(retrieved[2], 0.0);
+        assert_eq!(retrieved[3], -0.0);
+    }
+
+    #[test]
+    fn test_nan_in_vector_delta_behavior() {
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1);
+        let label = GLOBAL_INTERNER.intern("NaNTest");
+
+        // NaN != NaN per IEEE 754, so same NaN values will be detected as
+        // "changed" in delta computation. This is documented behavior.
+        let nan_vec = vec![f32::NAN, 1.0];
+
+        let v1 = VersionId::new(1);
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &nan_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Same NaN values - will be treated as changed due to NaN != NaN
+        let v2 = VersionId::new(2);
+        storage
+            .add_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &nan_vec)
+                    .build(),
+            )
+            .unwrap();
+
+        // Both should reconstruct with NaN values
+        let props_v1 = storage.reconstruct_node_properties(v1).unwrap();
+        let props_v2 = storage.reconstruct_node_properties(v2).unwrap();
+
+        let vec1 = props_v1
+            .get("embedding")
+            .and_then(|v| v.as_vector())
+            .unwrap();
+        let vec2 = props_v2
+            .get("embedding")
+            .and_then(|v| v.as_vector())
+            .unwrap();
+
+        // Both should have NaN at index 0
+        assert!(vec1[0].is_nan());
+        assert!(vec2[0].is_nan());
+        assert_eq!(vec1[1], 1.0);
+        assert_eq!(vec2[1], 1.0);
+    }
 }
