@@ -60,6 +60,7 @@ Partition by node label/type:
 ```rust
 pub struct ShardConfig {
     pub shards: Vec<ShardDefinition>,
+    pub default_shard: ShardId,  // Fallback for unlabeled nodes
 }
 
 pub struct ShardDefinition {
@@ -164,34 +165,64 @@ Coordinator                 Shard A                 Shard B
 ```rust
 impl ShardCoordinator {
     pub async fn distributed_write(&self, ops: Vec<Operation>) -> Result<()> {
+        let tx_id = self.next_tx_id();
+
         // Group operations by shard
         let by_shard = self.group_by_shard(ops);
+        let shard_ids: Vec<_> = by_shard.keys().cloned().collect();
 
         // Phase 1: Prepare
         let prepare_results = futures::join_all(
             by_shard.iter().map(|(shard, ops)| {
-                self.shards[*shard].prepare(ops)
+                self.shards[*shard].prepare(tx_id, ops)
             })
         ).await;
 
         // Check all prepared successfully
         if prepare_results.iter().any(|r| r.is_err()) {
-            // Abort all
-            self.abort_all(&by_shard).await;
+            // Abort all prepared shards
+            self.abort_all(tx_id, &shard_ids).await;
             return Err(StorageError::DistributedTransactionFailed);
         }
 
-        // Phase 2: Commit
-        futures::join_all(
-            by_shard.keys().map(|shard| {
-                self.shards[*shard].commit()
-            })
-        ).await;
+        // CRITICAL: Log commit decision BEFORE sending commits
+        // This enables recovery if coordinator crashes during Phase 2
+        self.log_commit_decision(tx_id, &shard_ids).await?;
+
+        // Phase 2: Commit with retry for failures
+        for shard_id in &shard_ids {
+            loop {
+                match self.shards[*shard_id].commit(tx_id).await {
+                    Ok(_) => break,
+                    Err(e) if e.is_retryable() => {
+                        // Shard temporarily unavailable, retry
+                        tokio::time::sleep(RETRY_DELAY).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        // Non-retryable error - log for manual intervention
+                        // The commit decision is logged, so recovery will retry
+                        self.log_commit_failure(tx_id, *shard_id, &e).await;
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+
+        // Clean up commit log after all shards confirmed
+        self.clear_commit_decision(tx_id).await;
 
         Ok(())
     }
 }
 ```
+
+**Recovery Notes:**
+
+On coordinator startup, scan the commit decision log:
+- For each logged `COMMIT` decision, retry sending commit to any shards that haven't acknowledged
+- For each logged `PREPARE` without a decision, send abort to all participants
+- This ensures eventual consistency even if coordinator crashes mid-transaction
 
 ### Rebalancing
 
@@ -231,8 +262,9 @@ pub struct RebalanceConfig {
 - **Operational complexity**: Multiple nodes to manage
 - **Network latency**: Cross-shard queries add ~1ms per hop
 - **2PC overhead**: Distributed writes slower than local
-- **Edge storage overhead**: 2x for cross-shard edges
+- **Edge storage overhead**: 2x for cross-shard edges (can be higher in power-law graphs where hub nodes have many cross-shard connections)
 - **Rebalancing disruption**: Some impact during migrations
+- **Temporal ordering complexity**: Transaction time must remain monotonic across shards (requires coordinator-assigned timestamps or hybrid logical clocks)
 
 ### Neutral
 

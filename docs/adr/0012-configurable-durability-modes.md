@@ -214,21 +214,35 @@ impl AsyncWalWriter {
     }
 }
 
-// Background sync thread
-fn sync_loop(receiver: Receiver<WalEntry>, wal: &mut Wal) {
+// Background sync thread - uses blocking receive to avoid busy-wait
+fn sync_loop(receiver: Receiver<WalEntry>, wal: &mut Wal, sync_interval: Duration) {
     loop {
-        let mut batch = Vec::new();
-        // Drain available entries
-        while let Ok(entry) = receiver.try_recv() {
-            batch.push(entry);
-        }
-        if !batch.is_empty() {
-            for entry in batch {
-                wal.append_no_sync(entry);
+        match receiver.recv_timeout(sync_interval) {
+            Ok(first_entry) => {
+                let mut batch = vec![first_entry];
+                // Drain any other pending entries non-blockingly
+                while let Ok(entry) = receiver.try_recv() {
+                    batch.push(entry);
+                }
+
+                for entry in batch {
+                    wal.append_no_sync(entry);
+                }
+                wal.sync();
             }
-            wal.sync();
+            Err(RecvTimeoutError::Timeout) => {
+                // Periodic sync for any buffered data
+                wal.sync_if_dirty();
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                // Sender dropped - drain remaining and exit
+                while let Ok(entry) = receiver.try_recv() {
+                    wal.append_no_sync(entry);
+                }
+                wal.sync();
+                break;
+            }
         }
-        thread::sleep(Duration::from_micros(100));
     }
 }
 ```
@@ -238,13 +252,32 @@ fn sync_loop(receiver: Receiver<WalEntry>, wal: &mut Wal) {
 All modes must flush pending writes on shutdown:
 
 ```rust
+// Synchronous and Batched modes
 impl Drop for WriteAheadLog {
     fn drop(&mut self) {
         // Ensure all buffered entries are synced
         let _ = self.sync();
     }
 }
+
+// Async mode requires separate handling - the background thread
+// owns the WAL, so AsyncWalWriter must coordinate shutdown
+impl Drop for AsyncWalWriter {
+    fn drop(&mut self) {
+        // Signal background thread to stop accepting new entries
+        drop(self.sender.take());
+
+        // Wait for background thread to drain buffer and sync
+        if let Some(handle) = self.sync_thread.take() {
+            let _ = handle.join();  // Blocks until all entries synced
+        }
+    }
+}
 ```
+
+**Note:** The async mode's `Drop` is critical - without it, entries in the channel
+would be lost on shutdown. The background thread handles the final drain in its
+`Disconnected` case (see `sync_loop` above).
 
 ## References
 

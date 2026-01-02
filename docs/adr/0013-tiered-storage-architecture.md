@@ -93,16 +93,17 @@ impl HistoricalStorage {
     pub fn get_version(&self, id: VersionId) -> Result<NodeVersion> {
         // 1. Check hot tier (fast path)
         if let Some(v) = self.hot.get(&id) {
-            return Ok(v);
+            return Ok(v.clone());
         }
 
         // 2. Check warm cache
         if let Some(v) = self.cache.get(&id) {
-            return Ok(v);
+            return Ok(v.clone());
         }
 
-        // 3. Fetch from cold tier
-        let v = self.cold.get(id)?;
+        // 3. Fetch from cold tier, handling not found case
+        let v = self.cold.get(id)?
+            .ok_or_else(|| StorageError::VersionNotFound(id))?;
 
         // 4. Populate cache for future access
         self.cache.insert(id, v.clone());
