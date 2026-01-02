@@ -98,7 +98,11 @@ pub const NORMALIZATION_TOLERANCE: f32 = 1e-6;
 /// Vectors with squared magnitude below this threshold are treated as zero vectors
 /// in normalization operations. This prevents numerical instability from denormal
 /// numbers and avoids division by very small values that could cause overflow.
-const SQUARED_MAGNITUDE_THRESHOLD: f32 = 1e-20;
+///
+/// Value: 1e-14 corresponds to magnitude ≈ 1e-7, providing safety margin for f32
+/// precision (which has ~7 significant digits). This is more conservative than
+/// 1e-20 (magnitude ≈ 1e-10) which is too close to f32's precision limits.
+const SQUARED_MAGNITUDE_THRESHOLD: f32 = 1e-14;
 
 // ============================================================================
 // Type Definitions
@@ -567,8 +571,14 @@ mod simd {
     #[target_feature(enable = "avx2")]
     #[inline]
     pub unsafe fn scale_in_place_avx2(v: &mut [f32], scalar: f32) {
-        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
-        // The caller guarantees AVX2 is available via runtime feature detection.
+        // SAFETY: This unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
+        // - The caller guarantees AVX2 is available via runtime feature detection.
+        // - Pointer operations are safe because:
+        //   1. chunks_exact_mut(8) guarantees each chunk has exactly 8 f32 elements
+        //   2. chunk.as_ptr() returns a valid pointer to the chunk's contiguous memory
+        //   3. chunk.as_mut_ptr() returns a valid mutable pointer to the same memory
+        //   4. _mm256_loadu_ps/_mm256_storeu_ps handle unaligned access safely
+        //   5. The slice owns the memory, so no aliasing occurs
         unsafe {
             let scalar_vec = _mm256_set1_ps(scalar);
             let mut chunks = v.chunks_exact_mut(8);
@@ -594,8 +604,14 @@ mod simd {
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn scale_in_place_sse2(v: &mut [f32], scalar: f32) {
-        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
-        // The caller guarantees SSE2 is available via runtime feature detection.
+        // SAFETY: This unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
+        // - The caller guarantees SSE2 is available via runtime feature detection.
+        // - Pointer operations are safe because:
+        //   1. chunks_exact_mut(4) guarantees each chunk has exactly 4 f32 elements
+        //   2. chunk.as_ptr() returns a valid pointer to the chunk's contiguous memory
+        //   3. chunk.as_mut_ptr() returns a valid mutable pointer to the same memory
+        //   4. _mm_loadu_ps/_mm_storeu_ps handle unaligned access safely
+        //   5. The slice owns the memory, so no aliasing occurs
         unsafe {
             let scalar_vec = _mm_set1_ps(scalar);
             let mut chunks = v.chunks_exact_mut(4);
@@ -680,7 +696,7 @@ fn scale_in_place_scalar(v: &mut [f32], scalar: f32) {
 /// - AVX2 on x86/x86_64 when available
 /// - SSE2 on x86/x86_64 as fallback (baseline for x86_64)
 /// - Scalar implementation on other platforms
-#[inline]
+#[inline(always)]
 fn scale_in_place(v: &mut [f32], scalar: f32) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -1389,6 +1405,14 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 /// This function allocates a new vector. For in-place normalization without
 /// allocation, use [`normalize_in_place`].
 /// Uses SIMD-accelerated scalar multiplication (AVX2/SSE2) for optimal performance.
+///
+/// # Note on Dimension Validation
+///
+/// Unlike two-vector functions like [`cosine_similarity`], normalization functions
+/// do not validate against `MAX_VECTOR_DIMENSIONS`. This is intentional because:
+/// - Single-vector operations don't have dimension mismatch issues
+/// - Dimension limits are enforced at storage time (see [`PropertyValue::vector`])
+/// - Additional checks would add overhead without safety benefit
 #[inline]
 pub fn normalize(v: &[f32]) -> Vec<f32> {
     let sq_mag = squared_magnitude(v);
@@ -1399,9 +1423,9 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
         return vec![0.0; v.len()];
     }
     // Copy then scale in place using SIMD
+    // Compute 1/sqrt(sq_mag) directly to avoid intermediate variable
     let mut result: Vec<f32> = v.to_vec();
-    let mag = sq_mag.sqrt();
-    let inv_mag = 1.0 / mag;
+    let inv_mag = 1.0 / sq_mag.sqrt();
     scale_in_place(&mut result, inv_mag);
     result
 }
@@ -1445,8 +1469,8 @@ pub fn normalize_in_place(v: &mut [f32]) {
         // Leave zero/near-zero vector unchanged
         return;
     }
-    let mag = sq_mag.sqrt();
-    let inv_mag = 1.0 / mag;
+    // Compute 1/sqrt(sq_mag) directly to avoid intermediate variable
+    let inv_mag = 1.0 / sq_mag.sqrt();
     scale_in_place(v, inv_mag);
 }
 
@@ -1488,6 +1512,27 @@ pub fn is_normalized(v: &[f32], tolerance: f32) -> bool {
     let lower = (1.0 - tolerance).max(0.0).powi(2);
     let upper = (1.0 + tolerance).powi(2);
     sq_mag >= lower && sq_mag <= upper
+}
+
+/// Checks if a vector is normalized using the default tolerance.
+///
+/// This is a convenience wrapper around [`is_normalized`] that uses
+/// [`NORMALIZATION_TOLERANCE`] (1e-6) as the tolerance value.
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::{is_normalized_default, normalize};
+///
+/// let v = vec![3.0, 4.0];
+/// assert!(!is_normalized_default(&v));
+///
+/// let unit = normalize(&v);
+/// assert!(is_normalized_default(&unit));
+/// ```
+#[inline]
+pub fn is_normalized_default(v: &[f32]) -> bool {
+    is_normalized(v, NORMALIZATION_TOLERANCE)
 }
 
 // ============================================================================
@@ -2635,6 +2680,20 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_mixed_sign_components() {
+        // Test mixed positive and negative components: [3, -4] has magnitude 5
+        let v = vec![3.0, -4.0];
+        let unit = normalize(&v);
+        assert!((unit[0] - 0.6).abs() < 1e-6);
+        assert!((unit[1] - (-0.8)).abs() < 1e-6);
+        assert!((magnitude(&unit) - 1.0).abs() < 1e-6);
+
+        // Verify sign is preserved
+        assert!(unit[0] > 0.0, "First component should remain positive");
+        assert!(unit[1] < 0.0, "Second component should remain negative");
+    }
+
+    #[test]
     fn test_normalize_preserves_direction() {
         let v = vec![2.0, 4.0, 6.0];
         let unit = normalize(&v);
@@ -3115,9 +3174,13 @@ mod proptests {
             let mag = magnitude(&v);
             let sq_mag = squared_magnitude(&v);
             // magnitude² should equal squared_magnitude
-            let tolerance = PROPTEST_TOLERANCE * 100.0 + sq_mag * 1e-5;
-            prop_assert!((mag * mag - sq_mag).abs() < tolerance,
-                "magnitude² ({}) should equal squared_magnitude ({})", mag * mag, sq_mag);
+            // Use relative tolerance to avoid scale-dependent thresholds
+            let diff = (mag * mag - sq_mag).abs();
+            let relative_tolerance = 1e-5; // 0.001% relative error
+            let threshold = sq_mag.max(1.0) * relative_tolerance;
+            prop_assert!(diff < threshold,
+                "magnitude² ({}) should equal squared_magnitude ({}), diff={}, threshold={}",
+                mag * mag, sq_mag, diff, threshold);
         }
 
         #[test]

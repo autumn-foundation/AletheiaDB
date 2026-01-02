@@ -29,6 +29,7 @@ pub use vector::{
     euclidean_distance,
     // Normalization functions
     is_normalized,
+    is_normalized_default,
     magnitude,
     normalize,
     normalize_in_place,
