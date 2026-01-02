@@ -8,7 +8,10 @@
 //!
 //! Run with: cargo run --example doctor_who_demo
 
-use gallifreydb::{GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp, WriteOps, GLOBAL_INTERNER};
+use gallifreydb::{
+    GLOBAL_INTERNER, GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
+    WriteOps,
+};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -119,7 +122,13 @@ impl DemoData {
     }
 
     /// Record a regeneration event
-    fn record_regeneration(&mut self, actor: String, incarnation: String, regen_number: i64, era: String) {
+    fn record_regeneration(
+        &mut self,
+        actor: String,
+        incarnation: String,
+        regen_number: i64,
+        era: String,
+    ) {
         self.regenerations.push(RegenerationEvent {
             timestamp: now_timestamp(),
             actor,
@@ -140,13 +149,13 @@ const DOCTOR_INCARNATIONS: &[(&str, &str, i64, &str)] = &[
     ("Colin Baker", "Sixth Doctor", 6, "1984-1986"),
     ("Sylvester McCoy", "Seventh Doctor", 7, "1987-1989"),
     ("Paul McGann", "Eighth Doctor", 8, "1996, 2013"),
-    ("John Hurt", "War Doctor", 9, "2013 (50th)"),    // The forgotten incarnation
+    ("John Hurt", "War Doctor", 9, "2013 (50th)"), // The forgotten incarnation
     ("Christopher Eccleston", "Ninth Doctor", 10, "2005"),
     ("David Tennant", "Tenth Doctor", 11, "2005-2010"),
     ("Matt Smith", "Eleventh Doctor", 12, "2010-2013"),
     ("Peter Capaldi", "Twelfth Doctor", 13, "2014-2017"),
     ("Jodie Whittaker", "Thirteenth Doctor", 14, "2018-2022"),
-    ("David Tennant", "Fourteenth Doctor", 15, "2023"),  // Bi-generation!
+    ("David Tennant", "Fourteenth Doctor", 15, "2023"), // Bi-generation!
     ("Ncuti Gatwa", "Fifteenth Doctor", 16, "2023-"),
 ];
 
@@ -339,7 +348,8 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
             "threat_level" => 8i64,
         },
     )?;
-    demo.nodes.insert("weeping_angels".to_string(), weeping_angels);
+    demo.nodes
+        .insert("weeping_angels".to_string(), weeping_angels);
 
     let silence = demo.db.create_node(
         "Species",
@@ -454,7 +464,12 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     }
 
     // Amy and Rory are married
-    demo.db.create_edge(amy, rory, "MARRIED_TO", props! { "wedding" => "Big Bang 2" })?;
+    demo.db.create_edge(
+        amy,
+        rory,
+        "MARRIED_TO",
+        props! { "wedding" => "Big Bang 2" },
+    )?;
 
     // Enemies and Doctor
     demo.db.create_edge(
@@ -486,7 +501,12 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     )?;
 
     // Davros created Daleks
-    demo.db.create_edge(davros, daleks, "CREATED", props! { "purpose" => "survival" })?;
+    demo.db.create_edge(
+        davros,
+        daleks,
+        "CREATED",
+        props! { "purpose" => "survival" },
+    )?;
 
     // Daleks from Skaro
     demo.db.create_edge(daleks, skaro, "FROM", props! {})?;
@@ -495,10 +515,18 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     demo.db.create_edge(master, gallifrey, "FROM", props! {})?;
 
     // Romana traveled with Doctor
-    demo.db.create_edge(doctor, romana, "TRAVELS_WITH", props! { "era" => "Fourth Doctor" })?;
+    demo.db.create_edge(
+        doctor,
+        romana,
+        "TRAVELS_WITH",
+        props! { "era" => "Fourth Doctor" },
+    )?;
 
-    println!("\n>>> Database populated with {} nodes and {} edges!",
-             demo.db.node_count(), demo.db.edge_count());
+    println!(
+        "\n>>> Database populated with {} nodes and {} edges!",
+        demo.db.node_count(),
+        demo.db.edge_count()
+    );
 
     // Now perform all the Doctor's regenerations to create temporal history!
     println!("\n  Regenerating through all of the Doctor's incarnations...");
@@ -533,7 +561,10 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_micros(100));
     }
 
-    println!("  Created {} temporal versions of The Doctor!", DOCTOR_INCARNATIONS.len());
+    println!(
+        "  Created {} temporal versions of The Doctor!",
+        DOCTOR_INCARNATIONS.len()
+    );
 
     Ok(())
 }
@@ -602,10 +633,7 @@ fn list_all_nodes(demo: &DemoData) {
     for (name, &id) in &demo.nodes {
         if let Ok(node) = demo.db.get_node(id) {
             let label = label_str(node.label);
-            by_label
-                .entry(label)
-                .or_default()
-                .push((name.clone(), id));
+            by_label.entry(label).or_default().push((name.clone(), id));
         }
     }
 
@@ -713,7 +741,11 @@ fn ordinal_name(n: i64) -> String {
     }
 }
 
-fn update_doctor_incarnation(demo: &mut DemoData, new_actor: &str, incarnation: &str) -> Result<()> {
+fn update_doctor_incarnation(
+    demo: &mut DemoData,
+    new_actor: &str,
+    incarnation: &str,
+) -> Result<()> {
     if let Some(doctor_id) = demo.get("doctor") {
         // Get current regeneration count
         let current = demo.db.get_node(doctor_id)?;
@@ -768,15 +800,19 @@ fn update_doctor_incarnation(demo: &mut DemoData, new_actor: &str, incarnation: 
             new_actor.to_string(),
             incarnation_final.clone(),
             regen_count + 1,
-            "Future".to_string(),  // User-added Doctors are from the future!
+            "Future".to_string(), // User-added Doctors are from the future!
         );
 
         println!("\n>>> REGENERATION EVENT!");
-        println!(">>> {} ({}) --> {} ({})",
-            prev_actor, prev_incarnation, new_actor, incarnation_final);
+        println!(
+            ">>> {} ({}) --> {} ({})",
+            prev_actor, prev_incarnation, new_actor, incarnation_final
+        );
         println!(">>> Regeneration #{}", regen_count + 1);
         println!("\n>>> A new temporal version was created!");
-        println!(">>> Use 'timeline' to see all incarnations, or 'timewarp <n>' to query past states.");
+        println!(
+            ">>> Use 'timeline' to see all incarnations, or 'timewarp <n>' to query past states."
+        );
     }
     Ok(())
 }
@@ -796,7 +832,10 @@ fn show_stats(demo: &DemoData) -> Result<()> {
     println!("  Edge deltas: {}", stats.edge_delta_count);
 
     if stats.node_delta_count > 0 {
-        println!("\n  Compression ratio: {:.1}%", stats.compression_ratio() * 100.0);
+        println!(
+            "\n  Compression ratio: {:.1}%",
+            stats.compression_ratio() * 100.0
+        );
     }
     Ok(())
 }
@@ -814,17 +853,13 @@ fn show_timeline(demo: &DemoData) {
 
     for (i, event) in demo.regenerations.iter().enumerate() {
         let marker = if i == demo.regenerations.len() - 1 {
-            ">>>"  // Current incarnation
+            ">>>" // Current incarnation
         } else {
             "   "
         };
         println!(
             "{} {:2}  | {:20} | {:21} | {}",
-            marker,
-            event.regen_number,
-            event.actor,
-            event.incarnation,
-            event.era
+            marker, event.regen_number, event.actor, event.incarnation, event.era
         );
     }
 
@@ -839,7 +874,10 @@ fn timewarp_query(demo: &DemoData, index: usize) -> Result<()> {
     }
 
     if index == 0 || index > demo.regenerations.len() {
-        println!("Invalid incarnation number. Valid range: 1-{}", demo.regenerations.len());
+        println!(
+            "Invalid incarnation number. Valid range: 1-{}",
+            demo.regenerations.len()
+        );
         println!("Use 'timeline' to see all available incarnations.");
         return Ok(());
     }
@@ -847,7 +885,10 @@ fn timewarp_query(demo: &DemoData, index: usize) -> Result<()> {
     let target_event = &demo.regenerations[index - 1];
     let is_current = index == demo.regenerations.len();
 
-    println!("\n=== TIME WARP: Incarnation #{} ===", target_event.regen_number);
+    println!(
+        "\n=== TIME WARP: Incarnation #{} ===",
+        target_event.regen_number
+    );
     println!("=================================\n");
 
     if is_current {
@@ -862,7 +903,10 @@ fn timewarp_query(demo: &DemoData, index: usize) -> Result<()> {
     println!("  │  Actor:        {:24} │", target_event.actor);
     println!("  │  Incarnation:  {:24} │", target_event.incarnation);
     println!("  │  Era:          {:24} │", target_event.era);
-    println!("  │  Regeneration: {:24} │", format!("#{}", target_event.regen_number));
+    println!(
+        "  │  Regeneration: {:24} │",
+        format!("#{}", target_event.regen_number)
+    );
     println!("  └────────────────────────────────────────┘");
 
     // Show temporal context
@@ -890,8 +934,14 @@ fn timewarp_query(demo: &DemoData, index: usize) -> Result<()> {
     if demo.get("doctor").is_some() {
         let stats = demo.db.historical_stats()?;
         println!("\n  Database Proof:");
-        println!("    Total Doctor versions stored: {}", demo.regenerations.len());
-        println!("    Anchors: {}, Deltas: {}", stats.node_anchor_count, stats.node_delta_count);
+        println!(
+            "    Total Doctor versions stored: {}",
+            demo.regenerations.len()
+        );
+        println!(
+            "    Anchors: {}, Deltas: {}",
+            stats.node_anchor_count, stats.node_delta_count
+        );
         println!("    (The database preserves ALL historical states!)");
     }
 
@@ -1034,7 +1084,10 @@ fn main() -> Result<()> {
                 }
             }
             _ => {
-                println!("Unknown command: {}. Type 'help' for available commands.", command);
+                println!(
+                    "Unknown command: {}. Type 'help' for available commands.",
+                    command
+                );
             }
         }
     }
