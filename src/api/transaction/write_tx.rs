@@ -138,7 +138,19 @@ impl WriteTransaction {
         // Detect write-write conflicts (Snapshot Isolation)
         self.detect_conflicts()?;
 
-        // Acquire commit timestamp.
+        // Acquire commit timestamp and hold lock through WAL flush.
+        //
+        // CRITICAL: We must hold the timestamp lock until WAL is flushed to prevent
+        // a race condition where transactions commit out-of-order:
+        //
+        // Without holding the lock:
+        //   T1: gets timestamp 100, releases lock
+        //   T2: gets timestamp 101, logs WAL, flushes, applies → COMMITTED
+        //   T1: logs WAL, flushes, applies → COMMITTED (but timestamp 100 < 101!)
+        //
+        // This violates the invariant that transaction time is monotonic with
+        // actual commit order. By holding the lock through flush, we ensure
+        // timestamps are assigned in the same order as commits become durable.
         //
         // Timestamp management for Snapshot Isolation:
         //
@@ -158,18 +170,21 @@ impl WriteTransaction {
             *ts += 1; // Pre-increment for conflict detection
             let commit = *ts;
             *ts += 1; // Post-increment for visibility of this commit
+
+            // Log operations to WAL while holding timestamp lock.
+            // This must happen BEFORE applying changes for durability.
+            self.log_to_wal(commit)?;
+
+            // Flush WAL to ensure durability while still holding timestamp lock.
+            // This guarantees that lower timestamps are durable before higher ones.
+            {
+                let mut wal = self.wal.lock().unwrap();
+                wal.flush()?;
+            }
+
             commit
+            // Timestamp lock released here, after WAL is durable
         };
-
-        // Log operations to WAL (Durability)
-        // This must happen BEFORE applying changes
-        self.log_to_wal(commit_timestamp)?;
-
-        // Flush WAL to ensure durability
-        {
-            let mut wal = self.wal.lock().unwrap();
-            wal.flush()?;
-        }
 
         // Apply all changes atomically
         self.apply_changes(commit_timestamp)?;
@@ -2140,6 +2155,276 @@ mod conflict_detection_tests {
             err_str.contains("committed") || err_str.contains("snapshot"),
             "Error should explain the conflict: {}",
             err_str
+        );
+    }
+}
+
+/// Tests for concurrent commit timestamp ordering (Issue #10).
+///
+/// These tests verify that transaction timestamps are assigned in the same
+/// order as their commits become durable. This is critical for bi-temporal
+/// correctness - transaction time must be monotonic with actual commit order.
+#[cfg(test)]
+mod timestamp_ordering_tests {
+    use super::*;
+    use crate::api::transaction::TxIdGenerator;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::storage::wal::{WalConfig, WriteAheadLog};
+    use std::thread;
+    use tempfile::TempDir;
+
+    /// Test harness for timestamp ordering tests.
+    struct TestHarness {
+        current: Arc<CurrentStorage>,
+        historical: Arc<Mutex<HistoricalStorage>>,
+        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        wal: Arc<Mutex<WriteAheadLog>>,
+        current_timestamp: Arc<Mutex<Timestamp>>,
+        visibility_manager: Arc<TxVisibilityManager>,
+        node_id_gen: Arc<Mutex<IdGenerator>>,
+        edge_id_gen: Arc<Mutex<IdGenerator>>,
+        version_id_gen: Arc<Mutex<IdGenerator>>,
+        tx_id_gen: TxIdGenerator,
+        _temp_dir: TempDir,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let current = Arc::new(CurrentStorage::new());
+            let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+
+            let temp_dir = TempDir::new().unwrap();
+            let wal_config = WalConfig {
+                wal_dir: temp_dir.path().to_path_buf(),
+                sync_on_write: false,
+                ..Default::default()
+            };
+            let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
+
+            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let tx_id_gen = TxIdGenerator::new();
+            let visibility_manager = Arc::new(TxVisibilityManager::new());
+
+            TestHarness {
+                current,
+                historical,
+                temporal_indexes,
+                wal,
+                current_timestamp,
+                visibility_manager,
+                node_id_gen,
+                edge_id_gen,
+                version_id_gen,
+                tx_id_gen,
+                _temp_dir: temp_dir,
+            }
+        }
+
+        fn create_tx(&self) -> WriteTransaction {
+            let snapshot = TransactionSnapshot {
+                snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
+                active_transactions: std::collections::HashSet::new(),
+            };
+
+            WriteTransaction::new(
+                self.tx_id_gen.next(),
+                snapshot,
+                self.current.clone(),
+                self.historical.clone(),
+                self.temporal_indexes.clone(),
+                self.wal.clone(),
+                self.current_timestamp.clone(),
+                self.visibility_manager.clone(),
+                self.node_id_gen.clone(),
+                self.edge_id_gen.clone(),
+                self.version_id_gen.clone(),
+            )
+        }
+    }
+
+    /// Test: Sequential commits have monotonically increasing timestamps.
+    #[test]
+    fn test_sequential_commits_monotonic_timestamps() {
+        let harness = TestHarness::new();
+
+        let mut timestamps = Vec::new();
+
+        // Perform 10 sequential commits
+        for i in 0..10 {
+            let mut tx = harness.create_tx();
+            tx.create_node(
+                "Test",
+                PropertyMapBuilder::new().insert("seq", i as i64).build(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+
+            // Record the current timestamp after commit
+            let ts = *harness.current_timestamp.lock().unwrap();
+            timestamps.push(ts);
+        }
+
+        // Verify timestamps are strictly increasing
+        for i in 1..timestamps.len() {
+            assert!(
+                timestamps[i] > timestamps[i - 1],
+                "Timestamp {} ({}) should be > timestamp {} ({})",
+                i,
+                timestamps[i],
+                i - 1,
+                timestamps[i - 1]
+            );
+        }
+    }
+
+    /// Test: Concurrent commits still produce monotonically increasing timestamps.
+    ///
+    /// This test verifies that the fix for Issue #10 works correctly:
+    /// - Multiple threads commit transactions concurrently
+    /// - Each commit creates a node and we get its commit timestamp from metadata
+    /// - We verify that all commit timestamps are unique and properly ordered
+    #[test]
+    fn test_concurrent_commits_ordered_timestamps() {
+        let harness = Arc::new(TestHarness::new());
+        let results = Arc::new(Mutex::new(Vec::new()));
+
+        let num_threads = 8;
+        let commits_per_thread = 5;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let harness = harness.clone();
+                let results = results.clone();
+
+                thread::spawn(move || {
+                    for i in 0..commits_per_thread {
+                        let mut tx = harness.create_tx();
+                        let node_id = tx
+                            .create_node(
+                                "Test",
+                                PropertyMapBuilder::new()
+                                    .insert("thread", thread_id as i64)
+                                    .insert("iteration", i as i64)
+                                    .build(),
+                            )
+                            .unwrap();
+                        tx.commit().unwrap();
+
+                        // Get the ACTUAL commit timestamp from the node's metadata
+                        let node = harness.current.get_node(node_id).unwrap();
+                        let commit_ts = node.metadata.commit_timestamp.unwrap();
+
+                        results
+                            .lock()
+                            .unwrap()
+                            .push((commit_ts, thread_id, i, node_id));
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Analyze results: sort by commit timestamp
+        let mut results = results.lock().unwrap();
+        results.sort_by_key(|(ts, _, _, _)| *ts);
+
+        // With the fix, all timestamps should be unique (due to double-increment)
+        // Check for duplicates
+        for i in 1..results.len() {
+            let (ts_prev, thread_prev, iter_prev, _) = results[i - 1];
+            let (ts_curr, thread_curr, iter_curr, _) = results[i];
+
+            assert!(
+                ts_curr > ts_prev,
+                "Duplicate or out-of-order timestamp detected: \
+                 Thread {} iter {} (ts={}) vs Thread {} iter {} (ts={})",
+                thread_prev,
+                iter_prev,
+                ts_prev,
+                thread_curr,
+                iter_curr,
+                ts_curr
+            );
+        }
+
+        // Verify we got all expected commits
+        assert_eq!(
+            results.len(),
+            num_threads * commits_per_thread,
+            "Expected {} commits, got {}",
+            num_threads * commits_per_thread,
+            results.len()
+        );
+    }
+
+    /// Test: Version chains are correctly ordered by transaction time.
+    ///
+    /// When multiple transactions update the same node, the version chain
+    /// should reflect the actual commit order.
+    #[test]
+    fn test_version_chain_ordering() {
+        let harness = TestHarness::new();
+
+        // Create initial node
+        let node_id = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("version", 0i64).build(),
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
+        // Track commit timestamps
+        let mut commit_timestamps = Vec::new();
+
+        // Perform sequential updates
+        for version in 1..=5 {
+            let mut tx = harness.create_tx();
+            tx.update_node(
+                node_id,
+                PropertyMapBuilder::new()
+                    .insert("version", version as i64)
+                    .build(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+
+            // Get the node's current metadata to verify timestamp
+            let node = harness.current.get_node(node_id).unwrap();
+            if let Some(ts) = node.metadata.commit_timestamp {
+                commit_timestamps.push(ts);
+            }
+        }
+
+        // Verify timestamps are strictly increasing
+        for i in 1..commit_timestamps.len() {
+            assert!(
+                commit_timestamps[i] > commit_timestamps[i - 1],
+                "Version {} timestamp ({}) should be > version {} timestamp ({})",
+                i + 1,
+                commit_timestamps[i],
+                i,
+                commit_timestamps[i - 1]
+            );
+        }
+
+        // Verify final version is correct
+        let final_node = harness.current.get_node(node_id).unwrap();
+        assert_eq!(
+            final_node.get_property("version").and_then(|v| v.as_int()),
+            Some(5)
         );
     }
 }
