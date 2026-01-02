@@ -10,8 +10,10 @@
 //! to work with those vectors effectively:
 //!
 //! - **Type definitions**: [`VectorDimension`] for expressing vector sizes
-//! - **Similarity functions**: [`cosine_similarity`] for measuring vector similarity
-//! - **Normalization**: (future) L2 normalization for cosine similarity
+//! - **Similarity functions**: [`cosine_similarity`], [`cosine_similarity_normalized`]
+//! - **Distance functions**: [`euclidean_distance`], [`squared_euclidean_distance`]
+//! - **Inner product**: [`dot_product`] for pre-normalized vectors or projections
+//! - **Normalization**: (future) L2 normalization utilities
 //! - **Validation**: (future) Dimension checking and NaN/Inf detection
 //!
 //! # Usage
@@ -49,12 +51,22 @@
 //! This provides stronger type safety by preventing accidental interchange with
 //! other `usize` values (e.g., byte counts, array indices).
 //!
+//! # Implemented Functions
+//!
+//! - **[`cosine_similarity`]**: Measures angle between vectors, range `[-1, 1]`
+//! - **[`cosine_similarity_normalized`]**: Optimized for pre-normalized (unit) vectors
+//! - **[`euclidean_distance`]**: L2 distance between vectors
+//! - **[`squared_euclidean_distance`]**: Squared L2 distance (faster for comparisons)
+//! - **[`dot_product`]**: Inner product, useful for pre-normalized vectors
+//!
+//! All functions use SIMD acceleration (AVX2/SSE2) when available.
+//!
 //! # Future Additions
 //!
 //! This module will be expanded to include:
 //!
-//! - Similarity functions (cosine, euclidean, dot product)
 //! - L2 normalization utilities
+//! - Manhattan distance
 //! - Dimension validation helpers
 //! - Sparse vector support
 //!
@@ -344,6 +356,90 @@ mod simd {
         _mm_cvtss_f32(sum2)
     }
 
+    /// Computes dot product using AVX2.
+    ///
+    /// This is a dedicated dot-product-only function, more efficient than
+    /// `dot_and_magnitudes_avx2` when magnitudes aren't needed.
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    #[target_feature(enable = "avx2", enable = "fma")]
+    #[inline]
+    pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
+        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
+        // The caller guarantees AVX2 and FMA are available via runtime feature detection.
+        unsafe {
+            let a_chunks = a.chunks_exact(8);
+            let b_chunks = b.chunks_exact(8);
+            let a_rem = a_chunks.remainder();
+            let b_rem = b_chunks.remainder();
+
+            // Accumulator for 8 floats at a time
+            let mut acc = _mm256_setzero_ps();
+
+            // Process 8 floats at a time
+            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
+                let va = _mm256_loadu_ps(va_chunk.as_ptr());
+                let vb = _mm256_loadu_ps(vb_chunk.as_ptr());
+
+                // Fused multiply-add: acc = va * vb + acc
+                acc = _mm256_fmadd_ps(va, vb, acc);
+            }
+
+            // Horizontal sum of 256-bit vector
+            let mut sum = horizontal_sum_avx(acc);
+
+            // Handle remainder with scalar operations
+            for (&va, &vb) in a_rem.iter().zip(b_rem) {
+                sum += va * vb;
+            }
+
+            sum
+        }
+    }
+
+    /// Computes dot product using SSE2.
+    ///
+    /// This is a dedicated dot-product-only function, more efficient than
+    /// `dot_and_magnitudes_sse2` when magnitudes aren't needed.
+    ///
+    /// # Safety
+    /// Caller must ensure SSE2 is available (always true on x86_64).
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn dot_product_sse2(a: &[f32], b: &[f32]) -> f32 {
+        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
+        // The caller guarantees SSE2 is available via runtime feature detection.
+        unsafe {
+            let a_chunks = a.chunks_exact(4);
+            let b_chunks = b.chunks_exact(4);
+            let a_rem = a_chunks.remainder();
+            let b_rem = b_chunks.remainder();
+
+            // Accumulator for 4 floats at a time
+            let mut acc = _mm_setzero_ps();
+
+            // Process 4 floats at a time
+            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
+                let va = _mm_loadu_ps(va_chunk.as_ptr());
+                let vb = _mm_loadu_ps(vb_chunk.as_ptr());
+
+                // Multiply and accumulate
+                acc = _mm_add_ps(acc, _mm_mul_ps(va, vb));
+            }
+
+            // Horizontal sum of 128-bit vector
+            let mut sum = horizontal_sum_sse(acc);
+
+            // Handle remainder with scalar operations
+            for (&va, &vb) in a_rem.iter().zip(b_rem) {
+                sum += va * vb;
+            }
+
+            sum
+        }
+    }
+
     /// Computes sum of squared differences using AVX2.
     ///
     /// # Safety
@@ -474,6 +570,18 @@ fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
         .sum()
 }
 
+/// Scalar fallback for computing dot product.
+///
+/// Used on non-x86 platforms or ancient x86 CPUs without SSE2.
+#[inline]
+#[cfg_attr(
+    all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
+    allow(dead_code)
+)]
+fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi).sum()
+}
+
 /// Computes dot product and both squared magnitudes using the best available
 /// SIMD instructions.
 ///
@@ -542,6 +650,33 @@ fn squared_diff_sum(a: &[f32], b: &[f32]) -> f32 {
 
     // Fallback for non-x86 platforms or x86 CPUs without SSE2.
     squared_diff_sum_scalar(a, b)
+}
+
+/// Computes dot product using the best available SIMD instructions.
+///
+/// Uses runtime feature detection to select:
+/// - AVX2 with FMA on x86/x86_64 when available
+/// - SSE2 on x86/x86_64 as fallback (baseline for x86_64)
+/// - Scalar implementation on other platforms
+#[inline]
+fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        // Use runtime detection for best available instruction set.
+        // The order of checks is from most to least performant.
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: We just verified AVX2 and FMA are available.
+            return unsafe { simd::dot_product_avx2(a, b) };
+        }
+        if is_x86_feature_detected!("sse2") {
+            // SAFETY: We just verified SSE2 is available. SSE2 is a baseline
+            // requirement for x86_64, so this check is mainly for 32-bit x86.
+            return unsafe { simd::dot_product_sse2(a, b) };
+        }
+    }
+
+    // Fallback for non-x86 platforms or x86 CPUs without SSE2.
+    dot_product_scalar(a, b)
 }
 
 // ============================================================================
@@ -924,6 +1059,97 @@ pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
 #[inline]
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
     squared_euclidean_distance(a, b).map(|sq| sq.sqrt())
+}
+
+// ============================================================================
+// Dot Product
+// ============================================================================
+
+/// Computes the dot product (inner product) of two vectors.
+///
+/// The dot product is the sum of element-wise products: `Σ(aᵢ × bᵢ)`.
+/// It is a fundamental operation used in:
+/// - Cosine similarity (when vectors are normalized)
+/// - Linear algebra operations
+/// - Neural network computations
+/// - Projection calculations
+///
+/// # Formula
+///
+/// ```text
+/// dot_product(a, b) = Σ(aᵢ × bᵢ) = a₀×b₀ + a₁×b₁ + ... + aₙ×bₙ
+/// ```
+///
+/// # Arguments
+///
+/// * `a` - First vector
+/// * `b` - Second vector (must have the same length as `a`)
+///
+/// # Returns
+///
+/// * `Ok(f32)` - The dot product (can be positive, negative, or zero)
+/// * `Err` - If vectors have different dimensions
+///
+/// # Properties
+///
+/// - **Commutativity**: `dot(a, b) = dot(b, a)`
+/// - **Self dot product**: `dot(a, a) = ||a||²` (squared magnitude)
+/// - **Orthogonal vectors**: `dot(a, b) = 0` when vectors are perpendicular
+/// - **Parallel vectors**: `dot(a, b) = ||a|| × ||b||` (same direction)
+///   or `-||a|| × ||b||` (opposite direction)
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::dot_product;
+///
+/// // Basic dot product
+/// let a = vec![1.0, 2.0, 3.0];
+/// let b = vec![4.0, 5.0, 6.0];
+/// let result = dot_product(&a, &b).unwrap();
+/// // 1×4 + 2×5 + 3×6 = 4 + 10 + 18 = 32
+/// assert!((result - 32.0).abs() < 1e-6);
+///
+/// // Self dot product equals squared magnitude
+/// let v = vec![3.0, 4.0];
+/// let self_dot = dot_product(&v, &v).unwrap();
+/// assert!((self_dot - 25.0).abs() < 1e-6); // 3² + 4² = 25
+///
+/// // Orthogonal vectors
+/// let x = vec![1.0, 0.0];
+/// let y = vec![0.0, 1.0];
+/// let ortho = dot_product(&x, &y).unwrap();
+/// assert!(ortho.abs() < 1e-6);
+/// ```
+///
+/// # Performance
+///
+/// This implementation uses SIMD acceleration when available:
+/// - **AVX2 + FMA**: Processes 8 floats at a time with fused multiply-add
+/// - **SSE2**: Processes 4 floats at a time (baseline for x86_64)
+/// - **Scalar**: Fallback for other platforms
+///
+/// This dedicated dot product function is more efficient than
+/// [`cosine_similarity`] when you only need the dot product and not the
+/// magnitudes (e.g., when working with pre-normalized vectors).
+#[inline]
+pub fn dot_product(a: &[f32], b: &[f32]) -> Result<f32> {
+    if a.len() != b.len() {
+        return Err(Error::Query(
+            crate::utils::error::QueryError::InvalidParameter {
+                parameter: "vectors".to_string(),
+                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
+            },
+        ));
+    }
+
+    // Handle empty vectors
+    if a.is_empty() {
+        return Ok(0.0);
+    }
+
+    // Use SIMD-accelerated computation when available
+    Ok(dot_product_sum(a, b))
 }
 
 // ============================================================================
@@ -1655,6 +1881,271 @@ mod tests {
         assert!((euclidean_distance(&origin, &y_axis).unwrap() - 1.0).abs() < 1e-6);
         assert!((euclidean_distance(&origin, &z_axis).unwrap() - 1.0).abs() < 1e-6);
     }
+
+    // ========================================================================
+    // Dot Product Tests
+    // ========================================================================
+
+    #[test]
+    fn test_dot_product_basic() {
+        // 1×4 + 2×5 + 3×6 = 4 + 10 + 18 = 32
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+        let result = dot_product(&a, &b).unwrap();
+        assert!(
+            (result - 32.0).abs() < 1e-6,
+            "Dot product should be 32, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_product_self_equals_squared_magnitude() {
+        // dot(a, a) = ||a||²
+        let a = vec![3.0, 4.0];
+        let self_dot = dot_product(&a, &a).unwrap();
+        // 3² + 4² = 9 + 16 = 25
+        assert!(
+            (self_dot - 25.0).abs() < 1e-6,
+            "Self dot product should be 25, got {}",
+            self_dot
+        );
+    }
+
+    #[test]
+    fn test_dot_product_orthogonal_vectors() {
+        // Orthogonal vectors have dot product 0
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 1.0];
+        let result = dot_product(&a, &b).unwrap();
+        assert!(
+            result.abs() < 1e-6,
+            "Orthogonal vectors should have dot product 0, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_product_orthogonal_3d() {
+        let x = vec![1.0, 0.0, 0.0];
+        let y = vec![0.0, 1.0, 0.0];
+        let z = vec![0.0, 0.0, 1.0];
+
+        assert!(dot_product(&x, &y).unwrap().abs() < 1e-6);
+        assert!(dot_product(&y, &z).unwrap().abs() < 1e-6);
+        assert!(dot_product(&x, &z).unwrap().abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dot_product_symmetry() {
+        let a = vec![1.0, 2.0, 3.0, 4.0];
+        let b = vec![4.0, 3.0, 2.0, 1.0];
+        let dot_ab = dot_product(&a, &b).unwrap();
+        let dot_ba = dot_product(&b, &a).unwrap();
+        assert!(
+            (dot_ab - dot_ba).abs() < 1e-6,
+            "Dot product should be symmetric: {} vs {}",
+            dot_ab,
+            dot_ba
+        );
+    }
+
+    #[test]
+    fn test_dot_product_dimension_mismatch() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![1.0, 2.0];
+        let result = dot_product(&a, &b);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dot_product_empty_vectors() {
+        let a: Vec<f32> = vec![];
+        let b: Vec<f32> = vec![];
+        let result = dot_product(&a, &b).unwrap();
+        assert_eq!(result, 0.0);
+    }
+
+    #[test]
+    fn test_dot_product_single_element() {
+        let a = vec![5.0];
+        let b = vec![3.0];
+        let result = dot_product(&a, &b).unwrap();
+        assert!(
+            (result - 15.0).abs() < 1e-6,
+            "Single element dot product should be 15, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_product_negative_values() {
+        let a = vec![-1.0, 2.0, -3.0];
+        let b = vec![4.0, -5.0, 6.0];
+        // -1×4 + 2×(-5) + (-3)×6 = -4 - 10 - 18 = -32
+        let result = dot_product(&a, &b).unwrap();
+        assert!(
+            (result + 32.0).abs() < 1e-6,
+            "Dot product should be -32, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_product_zero_vector() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 2.0, 3.0];
+        let result = dot_product(&a, &b).unwrap();
+        assert!(
+            result.abs() < 1e-6,
+            "Dot product with zero vector should be 0, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_product_parallel_same_direction() {
+        // Parallel vectors in same direction: dot = ||a|| × ||b||
+        let a = vec![3.0, 0.0];
+        let b = vec![4.0, 0.0];
+        let result = dot_product(&a, &b).unwrap();
+        // 3 × 4 = 12
+        assert!(
+            (result - 12.0).abs() < 1e-6,
+            "Parallel same direction dot product should be 12, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_product_parallel_opposite_direction() {
+        // Parallel vectors in opposite direction: dot = -||a|| × ||b||
+        let a = vec![3.0, 0.0];
+        let b = vec![-4.0, 0.0];
+        let result = dot_product(&a, &b).unwrap();
+        // 3 × (-4) = -12
+        assert!(
+            (result + 12.0).abs() < 1e-6,
+            "Parallel opposite direction dot product should be -12, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_product_large_dimension_384() {
+        // Sentence Transformers dimension
+        let dim = 384;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32).sin()).collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i as f32).cos()).collect();
+
+        let result = dot_product(&a, &b).unwrap();
+        // Just verify it runs and produces a finite result
+        assert!(result.is_finite(), "Dot product should be finite");
+    }
+
+    #[test]
+    fn test_dot_product_large_dimension_1536() {
+        // OpenAI text-embedding-3-small dimension
+        let dim = 1536;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.01).sin()).collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.01).cos()).collect();
+
+        let result = dot_product(&a, &b).unwrap();
+        assert!(
+            result.is_finite(),
+            "Large dimension dot product should be finite"
+        );
+    }
+
+    #[test]
+    fn test_dot_product_large_dimension_self() {
+        // Self dot product at large dimension
+        let dim = 1536;
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.01).sin()).collect();
+
+        let self_dot = dot_product(&a, &a).unwrap();
+        // Self dot should equal sum of squares
+        let expected: f32 = a.iter().map(|x| x * x).sum();
+        assert!(
+            (self_dot - expected).abs() < 1e-3,
+            "Self dot at dim={} should equal sum of squares: {} vs {}",
+            dim,
+            self_dot,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_dot_product_nan_propagation() {
+        let a = vec![f32::NAN, 1.0];
+        let b = vec![1.0, 1.0];
+        let result = dot_product(&a, &b).unwrap();
+        assert!(result.is_nan(), "NaN in input should propagate to output");
+    }
+
+    #[test]
+    fn test_dot_product_inf_propagation() {
+        let a = vec![f32::INFINITY, 1.0];
+        let b = vec![1.0, 1.0];
+        let result = dot_product(&a, &b).unwrap();
+        assert!(
+            result.is_infinite() && result > 0.0,
+            "Positive Inf should propagate, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_product_neg_inf_propagation() {
+        let a = vec![f32::NEG_INFINITY, 1.0];
+        let b = vec![1.0, 1.0];
+        let result = dot_product(&a, &b).unwrap();
+        assert!(
+            result.is_infinite() && result < 0.0,
+            "Negative Inf should propagate, got {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dot_product_matches_manual_calculation() {
+        // Verify against manual calculation for various sizes
+        for size in [1, 3, 7, 8, 15, 16, 17, 31, 32, 33, 100] {
+            let a: Vec<f32> = (0..size).map(|i| i as f32).collect();
+            let b: Vec<f32> = (0..size).map(|i| (size - i) as f32).collect();
+
+            let simd_result = dot_product(&a, &b).unwrap();
+            let manual_result: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+
+            assert!(
+                (simd_result - manual_result).abs() < 1e-4,
+                "SIMD and manual should match at size {}: {} vs {}",
+                size,
+                simd_result,
+                manual_result
+            );
+        }
+    }
+
+    #[test]
+    fn test_dot_product_simd_boundary_cases() {
+        // Test at SIMD boundaries (multiples of 4 and 8)
+        for size in [4, 8, 12, 16, 24, 32, 64, 128] {
+            let a: Vec<f32> = (0..size).map(|i| (i as f32 * 0.1).sin()).collect();
+            let b: Vec<f32> = (0..size).map(|i| (i as f32 * 0.1).cos()).collect();
+
+            let simd_result = dot_product(&a, &b).unwrap();
+            let expected: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+
+            assert!(
+                (simd_result - expected).abs() < 1e-5,
+                "SIMD boundary case failed at size {}: {} vs {}",
+                size,
+                simd_result,
+                expected
+            );
+        }
+    }
 }
 
 // ============================================================================
@@ -1879,6 +2370,71 @@ mod proptests {
                     "Triangle inequality violated: d(a,c)={} > d(a,b)={} + d(b,c)={}",
                     d_ac, d_ab, d_bc);
             }
+        }
+
+        // ====================================================================
+        // Dot Product Property Tests
+        // ====================================================================
+
+        #[test]
+        fn prop_dot_product_is_symmetric(
+            (a, b) in same_length_vectors(100)
+        ) {
+            let dot_ab = dot_product(&a, &b).unwrap();
+            let dot_ba = dot_product(&b, &a).unwrap();
+            prop_assert!((dot_ab - dot_ba).abs() < PROPTEST_TOLERANCE,
+                "Dot product should be symmetric: {} vs {}", dot_ab, dot_ba);
+        }
+
+        #[test]
+        fn prop_dot_product_self_equals_squared_magnitude(
+            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+        ) {
+            let self_dot = dot_product(&a, &a).unwrap();
+            // Self dot product should equal sum of squares (squared magnitude)
+            let expected: f32 = a.iter().map(|x| x * x).sum();
+
+            // Use relative tolerance for larger values
+            let tolerance = PROPTEST_TOLERANCE * 100.0 + expected * 1e-5;
+            prop_assert!((self_dot - expected).abs() < tolerance,
+                "Self dot product should equal squared magnitude: {} vs {}", self_dot, expected);
+        }
+
+        #[test]
+        fn prop_dot_product_with_zero_vector(
+            a in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
+        ) {
+            let zeros: Vec<f32> = vec![0.0; a.len()];
+            let result = dot_product(&a, &zeros).unwrap();
+            prop_assert!(result.abs() < PROPTEST_TOLERANCE,
+                "Dot product with zero vector should be 0, got {}", result);
+        }
+
+        #[test]
+        fn prop_dot_product_bilinearity_scalar(
+            (a, b) in same_length_vectors(50),
+            scale in 0.1f32..10.0f32
+        ) {
+            // Scalar multiplication: dot(c*a, b) = c * dot(a, b)
+            let dot_ab = dot_product(&a, &b).unwrap();
+            let scaled_a: Vec<f32> = a.iter().map(|x| x * scale).collect();
+            let dot_scaled = dot_product(&scaled_a, &b).unwrap();
+
+            // Use relative tolerance for larger values.
+            //
+            // Why 1e-4 relative tolerance? Bilinearity test involves:
+            // 1. Scaling: n multiplications (each ~1e-7 relative error)
+            // 2. Two dot products with different values (different rounding)
+            // 3. Values in [-100, 100] scaled by up to 10x = [-1000, 1000]
+            // 4. SIMD vs scalar may have different operation ordering
+            //
+            // Combined error can reach ~1e-5 to 2e-5 relative, so 1e-4 (0.01%)
+            // provides headroom while still catching genuine bugs.
+            let expected = scale * dot_ab;
+            let tolerance = PROPTEST_TOLERANCE * 100.0 + expected.abs() * 1e-4;
+            prop_assert!((dot_scaled - expected).abs() < tolerance,
+                "Scalar bilinearity failed: dot({}*a, b)={} vs {}*dot(a,b)={}",
+                scale, dot_scaled, scale, expected);
         }
     }
 }

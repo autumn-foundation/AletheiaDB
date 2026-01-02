@@ -17,6 +17,6 @@ pub use interning::{GLOBAL_INTERNER, InternedString, StringInterner};
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 pub use vector::{
-    VectorDimension, cosine_similarity, cosine_similarity_normalized, euclidean_distance,
-    squared_euclidean_distance,
+    VectorDimension, cosine_similarity, cosine_similarity_normalized, dot_product,
+    euclidean_distance, squared_euclidean_distance,
 };
