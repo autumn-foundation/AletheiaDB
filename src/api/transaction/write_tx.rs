@@ -152,6 +152,11 @@ impl WriteTransaction {
         // actual commit order. By holding the lock through flush, we ensure
         // timestamps are assigned in the same order as commits become durable.
         //
+        // PERFORMANCE NOTE: This serializes all commits since we hold both locks
+        // through WAL logging and flushing. For high-throughput workloads, consider
+        // implementing group commit (batching multiple transactions per WAL flush)
+        // while maintaining timestamp ordering.
+        //
         // Timestamp management for Snapshot Isolation:
         //
         // 1. Increment BEFORE using: ensures commit_ts > snapshot_ts for any
@@ -166,24 +171,31 @@ impl WriteTransaction {
         // - Conflict detection (commits after my snapshot must fail)
         // - Visibility (commits before my snapshot must be visible)
         let commit_timestamp = {
-            let mut ts = self.current_timestamp.lock().unwrap();
+            let mut ts = self
+                .current_timestamp
+                .lock()
+                .expect("timestamp lock poisoned - unrecoverable state");
             *ts += 1; // Pre-increment for conflict detection
             let commit = *ts;
             *ts += 1; // Post-increment for visibility of this commit
 
-            // Log operations to WAL while holding timestamp lock.
-            // This must happen BEFORE applying changes for durability.
-            self.log_to_wal(commit)?;
+            // Acquire WAL lock once and hold through both logging and flush.
+            // This prevents any race condition between operations.
+            let mut wal = self
+                .wal
+                .lock()
+                .expect("WAL lock poisoned - unrecoverable state");
 
-            // Flush WAL to ensure durability while still holding timestamp lock.
+            // Log operations to WAL while holding both locks.
+            // This must happen BEFORE applying changes for durability.
+            self.log_operations_to_wal(&mut wal, commit)?;
+
+            // Flush WAL to ensure durability while still holding both locks.
             // This guarantees that lower timestamps are durable before higher ones.
-            {
-                let mut wal = self.wal.lock().unwrap();
-                wal.flush()?;
-            }
+            wal.flush()?;
 
             commit
-            // Timestamp lock released here, after WAL is durable
+            // Both locks released here, after WAL is durable
         };
 
         // Apply all changes atomically
@@ -380,9 +392,13 @@ impl WriteTransaction {
     /// Log all buffered operations to WAL.
     ///
     /// This ensures durability - operations are logged before being applied.
-    fn log_to_wal(&self, commit_timestamp: Timestamp) -> Result<()> {
+    /// The caller must hold the WAL lock and pass it as a mutable reference.
+    fn log_operations_to_wal(
+        &self,
+        wal: &mut WriteAheadLog,
+        commit_timestamp: Timestamp,
+    ) -> Result<()> {
         let temporal = BiTemporalInterval::current(commit_timestamp);
-        let mut wal = self.wal.lock().unwrap();
 
         for write in self.buffer.operations() {
             let operation = match write {
