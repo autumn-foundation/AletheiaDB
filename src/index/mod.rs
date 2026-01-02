@@ -15,4 +15,4 @@ pub mod vector;
 pub use adjacency::{AdjacencyEntry, AdjacencyIndex};
 pub use current::CurrentIndexes;
 pub use temporal::TemporalIndexes;
-pub use vector::VectorIndex;
+pub use vector::{DistanceMetric, VectorIndex};
