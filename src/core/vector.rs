@@ -13,7 +13,7 @@
 //! - **Similarity functions**: [`cosine_similarity`], [`cosine_similarity_normalized`]
 //! - **Distance functions**: [`euclidean_distance`], [`squared_euclidean_distance`]
 //! - **Inner product**: [`dot_product`] for pre-normalized vectors or projections
-//! - **Normalization**: (future) L2 normalization utilities
+//! - **Normalization**: [`magnitude`], [`squared_magnitude`], [`normalize`], [`normalize_in_place`], [`is_normalized`]
 //! - **Validation**: (future) Dimension checking and NaN/Inf detection
 //!
 //! # Usage
@@ -58,6 +58,11 @@
 //! - **[`euclidean_distance`]**: L2 distance between vectors
 //! - **[`squared_euclidean_distance`]**: Squared L2 distance (faster for comparisons)
 //! - **[`dot_product`]**: Inner product, useful for pre-normalized vectors
+//! - **[`magnitude`]**: L2 norm of a vector
+//! - **[`squared_magnitude`]**: Squared L2 norm (faster for comparisons)
+//! - **[`normalize`]**: Returns new unit vector with magnitude 1.0
+//! - **[`normalize_in_place`]**: Normalizes vector in place
+//! - **[`is_normalized`]**: Checks if vector has unit magnitude
 //!
 //! All functions use SIMD acceleration (AVX2/SSE2) when available.
 //!
@@ -65,7 +70,6 @@
 //!
 //! This module will be expanded to include:
 //!
-//! - L2 normalization utilities
 //! - Manhattan distance
 //! - Dimension validation helpers
 //! - Sparse vector support
@@ -535,6 +539,60 @@ mod simd {
             sum
         }
     }
+
+    /// Scales a vector in place by a scalar using AVX2.
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 is available (checked via `is_x86_feature_detected!`).
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    pub unsafe fn scale_in_place_avx2(v: &mut [f32], scalar: f32) {
+        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
+        // The caller guarantees AVX2 is available via runtime feature detection.
+        unsafe {
+            let scalar_vec = _mm256_set1_ps(scalar);
+            let mut chunks = v.chunks_exact_mut(8);
+
+            // Process 8 floats at a time
+            for chunk in chunks.by_ref() {
+                let va = _mm256_loadu_ps(chunk.as_ptr());
+                let result = _mm256_mul_ps(va, scalar_vec);
+                _mm256_storeu_ps(chunk.as_mut_ptr(), result);
+            }
+
+            // Handle remainder with scalar operations
+            for x in chunks.into_remainder() {
+                *x *= scalar;
+            }
+        }
+    }
+
+    /// Scales a vector in place by a scalar using SSE2.
+    ///
+    /// # Safety
+    /// Caller must ensure SSE2 is available (always true on x86_64).
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn scale_in_place_sse2(v: &mut [f32], scalar: f32) {
+        // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
+        // The caller guarantees SSE2 is available via runtime feature detection.
+        unsafe {
+            let scalar_vec = _mm_set1_ps(scalar);
+            let mut chunks = v.chunks_exact_mut(4);
+
+            // Process 4 floats at a time
+            for chunk in chunks.by_ref() {
+                let va = _mm_loadu_ps(chunk.as_ptr());
+                let result = _mm_mul_ps(va, scalar_vec);
+                _mm_storeu_ps(chunk.as_mut_ptr(), result);
+            }
+
+            // Handle remainder with scalar operations
+            for x in chunks.into_remainder() {
+                *x *= scalar;
+            }
+        }
+    }
 }
 
 /// Scalar fallback for computing dot product and magnitudes.
@@ -580,6 +638,52 @@ fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
 )]
 fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi).sum()
+}
+
+/// Scalar fallback for scaling a vector in place.
+///
+/// Used on non-x86 platforms or ancient x86 CPUs without SSE2.
+#[inline]
+#[cfg_attr(
+    all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
+    allow(dead_code)
+)]
+fn scale_in_place_scalar(v: &mut [f32], scalar: f32) {
+    for x in v.iter_mut() {
+        *x *= scalar;
+    }
+}
+
+/// Scales a vector in place using the best available SIMD instructions.
+///
+/// Uses runtime feature detection to select:
+/// - AVX2 on x86/x86_64 when available
+/// - SSE2 on x86/x86_64 as fallback (baseline for x86_64)
+/// - Scalar implementation on other platforms
+#[inline]
+fn scale_in_place(v: &mut [f32], scalar: f32) {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        // Use runtime detection for best available instruction set.
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: We just verified AVX2 is available.
+            unsafe {
+                simd::scale_in_place_avx2(v, scalar);
+            }
+            return;
+        }
+        if is_x86_feature_detected!("sse2") {
+            // SAFETY: We just verified SSE2 is available. SSE2 is a baseline
+            // requirement for x86_64, so this check is mainly for 32-bit x86.
+            unsafe {
+                simd::scale_in_place_sse2(v, scalar);
+            }
+            return;
+        }
+    }
+
+    // Fallback for non-x86 platforms or x86 CPUs without SSE2.
+    scale_in_place_scalar(v, scalar);
 }
 
 /// Computes dot product and both squared magnitudes using the best available
@@ -1264,6 +1368,7 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 ///
 /// This function allocates a new vector. For in-place normalization without
 /// allocation, use [`normalize_in_place`].
+/// Uses SIMD-accelerated scalar multiplication (AVX2/SSE2) for optimal performance.
 #[inline]
 pub fn normalize(v: &[f32]) -> Vec<f32> {
     let mag = magnitude(v);
@@ -1271,8 +1376,11 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
         // Return zero vector of same length
         return vec![0.0; v.len()];
     }
+    // Copy then scale in place using SIMD
+    let mut result: Vec<f32> = v.to_vec();
     let inv_mag = 1.0 / mag;
-    v.iter().map(|&x| x * inv_mag).collect()
+    scale_in_place(&mut result, inv_mag);
+    result
 }
 
 /// Normalizes a vector to unit length in place.
@@ -1304,6 +1412,7 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
 ///
 /// This function modifies the vector in place without allocation, making it
 /// more efficient than [`normalize`] when a new vector isn't needed.
+/// Uses SIMD-accelerated scalar multiplication (AVX2/SSE2) for optimal performance.
 #[inline]
 pub fn normalize_in_place(v: &mut [f32]) {
     let mag = magnitude(v);
@@ -1312,9 +1421,7 @@ pub fn normalize_in_place(v: &mut [f32]) {
         return;
     }
     let inv_mag = 1.0 / mag;
-    for x in v.iter_mut() {
-        *x *= inv_mag;
-    }
+    scale_in_place(v, inv_mag);
 }
 
 /// Checks if a vector is normalized (has magnitude approximately 1.0).
@@ -1344,8 +1451,12 @@ pub fn normalize_in_place(v: &mut [f32]) {
 /// ```
 #[inline]
 pub fn is_normalized(v: &[f32], tolerance: f32) -> bool {
-    let mag = magnitude(v);
-    (mag - 1.0).abs() <= tolerance
+    // Use squared_magnitude to avoid sqrt for better numerical stability
+    // |magnitude - 1.0| <= tolerance  ⟺  (1-tolerance)² <= ||v||² <= (1+tolerance)²
+    let sq_mag = squared_magnitude(v);
+    let lower = (1.0 - tolerance).max(0.0).powi(2);
+    let upper = (1.0 + tolerance).powi(2);
+    sq_mag >= lower && sq_mag <= upper
 }
 
 // ============================================================================
@@ -2911,8 +3022,8 @@ mod proptests {
         fn prop_normalized_vector_has_unit_magnitude(
             v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
         ) {
-            // Skip zero vectors
-            let sq_mag: f32 = v.iter().map(|x| x * x).sum();
+            // Skip zero vectors using SIMD squared_magnitude
+            let sq_mag = squared_magnitude(&v);
             if sq_mag > 1e-10 {
                 let unit = normalize(&v);
                 let mag = magnitude(&unit);
@@ -2925,8 +3036,8 @@ mod proptests {
         fn prop_normalize_in_place_has_unit_magnitude(
             v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
         ) {
-            // Skip zero vectors
-            let sq_mag: f32 = v.iter().map(|x| x * x).sum();
+            // Skip zero vectors using SIMD squared_magnitude
+            let sq_mag = squared_magnitude(&v);
             if sq_mag > 1e-10 {
                 let mut v_copy = v.clone();
                 normalize_in_place(&mut v_copy);
@@ -2982,8 +3093,8 @@ mod proptests {
         fn prop_normalize_preserves_direction(
             v in prop::collection::vec(-100.0f32..100.0f32, 2..50usize)
         ) {
-            // Skip zero or near-zero vectors
-            let sq_mag: f32 = v.iter().map(|x| x * x).sum();
+            // Skip zero or near-zero vectors using SIMD squared_magnitude
+            let sq_mag = squared_magnitude(&v);
             if sq_mag > 1e-6 {
                 let unit = normalize(&v);
                 // Cosine similarity between original and normalized should be 1.0
@@ -2999,8 +3110,8 @@ mod proptests {
         fn prop_is_normalized_after_normalize(
             v in prop::collection::vec(-100.0f32..100.0f32, 1..100usize)
         ) {
-            // Skip zero vectors
-            let sq_mag: f32 = v.iter().map(|x| x * x).sum();
+            // Skip zero vectors using SIMD squared_magnitude
+            let sq_mag = squared_magnitude(&v);
             if sq_mag > 1e-10 {
                 let unit = normalize(&v);
                 // Use 1e-5 tolerance matching PROPTEST_TOLERANCE
