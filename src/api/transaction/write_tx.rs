@@ -657,8 +657,7 @@ impl WriteTransaction {
                     // Close the current version's transaction_time in historical storage
                     // This marks the end of this version's visibility
                     let mut historical = self.historical.lock_or_err()?;
-                    if let Some(current_version_id) =
-                        historical.get_current_node_version(*node_id)
+                    if let Some(current_version_id) = historical.get_current_node_version(*node_id)
                     {
                         historical.close_node_version_transaction_time(
                             current_version_id,
@@ -705,8 +704,7 @@ impl WriteTransaction {
                     // Close the current version's transaction_time in historical storage
                     // This marks the end of this version's visibility
                     let mut historical = self.historical.lock_or_err()?;
-                    if let Some(current_version_id) =
-                        historical.get_current_edge_version(*edge_id)
+                    if let Some(current_version_id) = historical.get_current_edge_version(*edge_id)
                     {
                         historical.close_edge_version_transaction_time(
                             current_version_id,

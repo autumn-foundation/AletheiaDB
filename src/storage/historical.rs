@@ -13,7 +13,9 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
-use crate::storage::version::{AnchorConfig, EdgeVersion, NodeVersion, VersionData};
+use crate::storage::version::{
+    AnchorConfig, EdgeVersion, NodeVersion, TemporalVersion, VersionData,
+};
 use crate::utils::error::{Result, StorageError, TemporalError};
 use std::collections::HashMap;
 
@@ -264,7 +266,8 @@ impl HistoricalStorage {
             .get_mut(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        version.temporal = version.temporal.close_transaction_time(end_timestamp);
+        // Use TemporalVersion trait method
+        version.close_transaction_time(end_timestamp);
         Ok(())
     }
 
@@ -282,7 +285,8 @@ impl HistoricalStorage {
             .get_mut(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        version.temporal = version.temporal.close_transaction_time(end_timestamp);
+        // Use TemporalVersion trait method
+        version.close_transaction_time(end_timestamp);
         Ok(())
     }
 

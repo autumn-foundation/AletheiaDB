@@ -471,14 +471,17 @@ mod tests {
         );
 
         // Query BEFORE deletion - should succeed (node existed)
-        let result = db.get_node_at_time(node_id, t_after_create - 1, t_after_create - 1);
+        let result = db.get_node_at_time(node_id, t_after_create, t_after_create);
         assert!(
             result.is_ok(),
             "Expected to find node before deletion, but got: {:?}",
             result
         );
         let node = result.unwrap();
-        assert_eq!(node.get_property("name").and_then(|v| v.as_str()), Some("Alice"));
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
     }
 
     #[test]
