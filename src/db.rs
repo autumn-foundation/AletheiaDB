@@ -16,6 +16,7 @@ use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
 use crate::storage::wal::{WalConfig, WriteAheadLog};
 use crate::utils::error::{Result, StorageError};
+use crate::utils::lock::MutexExt;
 use std::sync::{Arc, Mutex};
 
 /// Main GallifreyDB database.
@@ -77,16 +78,20 @@ impl GallifreyDB {
     /// - Snapshot-based reads for consistency
     /// - No commit overhead
     ///
+    /// # Errors
+    ///
+    /// Returns an error if the timestamp lock is poisoned.
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// let tx = db.read_transaction();
+    /// let tx = db.read_transaction()?;
     /// let node = tx.get_node(node_id)?;
     /// // No commit needed - transaction is read-only
     /// ```
-    pub fn read_transaction(&self) -> ReadTransaction {
+    pub fn read_transaction(&self) -> Result<ReadTransaction> {
         let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp = *self.current_timestamp.lock().unwrap();
+        let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
 
         // Register as active
         self.visibility_manager.register_active(tx_id);
@@ -94,12 +99,12 @@ impl GallifreyDB {
         // Capture snapshot
         let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
-        ReadTransaction::new(
+        Ok(ReadTransaction::new(
             tx_id,
             snapshot,
             Arc::clone(&self.current),
             Arc::clone(&self.visibility_manager),
-        )
+        ))
     }
 
     /// Execute a read-only operation in a transaction.
@@ -119,7 +124,7 @@ impl GallifreyDB {
     where
         F: FnOnce(&ReadTransaction) -> Result<T>,
     {
-        let tx = self.read_transaction();
+        let tx = self.read_transaction()?;
         f(&tx)
     }
 
@@ -131,17 +136,21 @@ impl GallifreyDB {
     /// - **Isolation**: Snapshot Isolation with write-write conflict detection
     /// - **Durability**: WAL with fsync for true durability
     ///
+    /// # Errors
+    ///
+    /// Returns an error if the timestamp lock is poisoned.
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// let mut tx = db.write_transaction();
+    /// let mut tx = db.write_transaction()?;
     /// let node_id = tx.create_node("Person", props)?;
     /// tx.create_edge(node_id, other, "KNOWS", edge_props)?;
     /// tx.commit()?;  // or tx.rollback()
     /// ```
-    pub fn write_transaction(&self) -> WriteTransaction {
+    pub fn write_transaction(&self) -> Result<WriteTransaction> {
         let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp = *self.current_timestamp.lock().unwrap();
+        let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
 
         // Register as active
         self.visibility_manager.register_active(tx_id);
@@ -149,7 +158,7 @@ impl GallifreyDB {
         // Capture snapshot
         let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
 
-        WriteTransaction::new(
+        Ok(WriteTransaction::new(
             tx_id,
             snapshot,
             Arc::clone(&self.current),
@@ -161,7 +170,7 @@ impl GallifreyDB {
             Arc::clone(&self.node_id_gen),
             Arc::clone(&self.edge_id_gen),
             Arc::clone(&self.version_id_gen),
-        )
+        ))
     }
 
     /// Execute a write operation in a transaction.
@@ -182,7 +191,7 @@ impl GallifreyDB {
     where
         F: FnOnce(&mut WriteTransaction) -> Result<T>,
     {
-        let mut tx = self.write_transaction();
+        let mut tx = self.write_transaction()?;
         let result = f(&mut tx)?;
         tx.commit()?;
         Ok(result)
@@ -246,7 +255,7 @@ impl GallifreyDB {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Node> {
-        let historical = self.historical.lock().unwrap();
+        let historical = self.historical.lock_or_err()?;
 
         // Find the version valid at this time
         let version_id = historical
@@ -277,7 +286,7 @@ impl GallifreyDB {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Edge> {
-        let historical = self.historical.lock().unwrap();
+        let historical = self.historical.lock_or_err()?;
 
         let version_id = historical
             .find_edge_version_at_time(edge_id, valid_time, transaction_time)
@@ -324,8 +333,12 @@ impl GallifreyDB {
     }
 
     /// Get statistics about the historical storage.
-    pub fn historical_stats(&self) -> crate::storage::historical::HistoricalStats {
-        self.historical.lock().unwrap().stats()
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the historical storage lock is poisoned.
+    pub fn historical_stats(&self) -> Result<crate::storage::historical::HistoricalStats> {
+        Ok(self.historical.lock_or_err()?.stats())
     }
 }
 
@@ -455,7 +468,7 @@ mod tests {
         db.create_node("Person", PropertyMapBuilder::new().build())
             .unwrap();
 
-        let stats = db.historical_stats();
+        let stats = db.historical_stats().unwrap();
         assert_eq!(stats.total_node_versions, 2);
         assert_eq!(stats.node_anchor_count, 2); // First versions are always anchors
     }
@@ -530,7 +543,7 @@ mod tests {
     fn test_explicit_write_transaction() {
         let db = GallifreyDB::new();
 
-        let mut tx = db.write_transaction();
+        let mut tx = db.write_transaction().unwrap();
         let n1 = tx
             .create_node(
                 "Person",
@@ -568,7 +581,7 @@ mod tests {
             )
             .unwrap();
 
-        let tx = db.read_transaction();
+        let tx = db.read_transaction().unwrap();
         let node = tx.get_node(node_id).unwrap();
         assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(42));
 
@@ -663,7 +676,7 @@ mod tests {
             .unwrap();
 
         // Start a read transaction - captures snapshot
-        let tx1 = db.read_transaction();
+        let tx1 = db.read_transaction().unwrap();
         let node_v1 = tx1.get_node(node_id).unwrap();
         assert_eq!(
             node_v1.get_property("version").and_then(|v| v.as_int()),
