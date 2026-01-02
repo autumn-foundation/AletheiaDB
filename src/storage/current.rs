@@ -507,9 +507,10 @@ mod tests {
             Some("Document")
         );
 
-        let retrieved_embedding = node.get_property("embedding").and_then(|v| v.as_vector());
-        assert!(retrieved_embedding.is_some());
-        assert_eq!(retrieved_embedding.unwrap(), &embedding[..]);
+        assert_eq!(
+            node.get_property("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
     }
 
     #[test]
@@ -525,13 +526,10 @@ mod tests {
         let node_id = storage.create_node("Embedding", props).unwrap();
 
         let node = storage.get_node(node_id).unwrap();
-        let retrieved = node
-            .get_property("embedding")
-            .and_then(|v| v.as_vector())
-            .unwrap();
-
-        assert_eq!(retrieved.len(), 384);
-        assert_eq!(retrieved, &embedding[..]);
+        assert_eq!(
+            node.get_property("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
     }
 
     #[test]
@@ -562,9 +560,10 @@ mod tests {
             Some(0.95)
         );
 
-        let retrieved = edge.get_property("embedding").and_then(|v| v.as_vector());
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap(), &edge_embedding[..]);
+        assert_eq!(
+            edge.get_property("embedding").and_then(|v| v.as_vector()),
+            Some(&edge_embedding[..])
+        );
     }
 
     #[test]
@@ -595,11 +594,12 @@ mod tests {
 
         // Verify update
         let updated_node = storage.get_node(node_id).unwrap();
-        let retrieved = updated_node
-            .get_property("embedding")
-            .and_then(|v| v.as_vector())
-            .unwrap();
-        assert_eq!(retrieved, &updated_embedding[..]);
+        assert_eq!(
+            updated_node
+                .get_property("embedding")
+                .and_then(|v| v.as_vector()),
+            Some(&updated_embedding[..])
+        );
     }
 
     #[test]
@@ -632,11 +632,12 @@ mod tests {
 
         // Verify
         let updated_edge = storage.get_edge(edge_id).unwrap();
-        let retrieved = updated_edge
-            .get_property("embedding")
-            .and_then(|v| v.as_vector())
-            .unwrap();
-        assert_eq!(retrieved, &updated_embedding[..]);
+        assert_eq!(
+            updated_edge
+                .get_property("embedding")
+                .and_then(|v| v.as_vector()),
+            Some(&updated_embedding[..])
+        );
     }
 
     #[test]
@@ -680,11 +681,10 @@ mod tests {
         let node_id = storage.create_node("EmptyVec", props).unwrap();
 
         let node = storage.get_node(node_id).unwrap();
-        let retrieved = node
-            .get_property("embedding")
-            .and_then(|v| v.as_vector())
-            .unwrap();
-        assert!(retrieved.is_empty());
+        assert_eq!(
+            node.get_property("embedding").and_then(|v| v.as_vector()),
+            Some(&empty_embedding[..])
+        );
     }
 
     #[test]
@@ -703,7 +703,7 @@ mod tests {
         let retrieved = node
             .get_property("embedding")
             .and_then(|v| v.as_vector())
-            .unwrap();
+            .expect("Embedding property should exist and be a vector");
 
         // Verify magnitude is approximately 1.0
         let magnitude: f32 = retrieved.iter().map(|x| x * x).sum::<f32>().sqrt();
