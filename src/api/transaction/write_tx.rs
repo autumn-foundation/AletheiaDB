@@ -1712,57 +1712,11 @@ mod conflict_detection_tests {
     use crate::storage::wal::{WalConfig, WriteAheadLog};
     use tempfile::TempDir;
 
-    /// Helper to create shared infrastructure for multiple transactions.
-    fn create_shared_infrastructure() -> (
-        Arc<CurrentStorage>,
-        Arc<Mutex<HistoricalStorage>>,
-        Arc<Mutex<TemporalIndexes>>,
-        Arc<Mutex<WriteAheadLog>>,
-        Arc<Mutex<Timestamp>>,
-        Arc<TxVisibilityManager>,
-        Arc<Mutex<IdGenerator>>,
-        Arc<Mutex<IdGenerator>>,
-        Arc<Mutex<IdGenerator>>,
-        TxIdGenerator,
-        TempDir,
-    ) {
-        let current = Arc::new(CurrentStorage::new());
-        let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
-
-        let temp_dir = TempDir::new().unwrap();
-        let wal_config = WalConfig {
-            wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false,
-            ..Default::default()
-        };
-        let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
-
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
-        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
-        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
-        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
-        let tx_id_gen = TxIdGenerator::new();
-        let visibility_manager = Arc::new(TxVisibilityManager::new());
-
-        (
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-            tx_id_gen,
-            temp_dir,
-        )
-    }
-
-    /// Create a write transaction using the shared infrastructure.
-    #[allow(clippy::too_many_arguments)]
-    fn create_write_tx(
+    /// Test harness for conflict detection tests.
+    ///
+    /// Bundles all shared infrastructure needed to create multiple concurrent
+    /// transactions for testing write-write conflict detection.
+    struct TestHarness {
         current: Arc<CurrentStorage>,
         historical: Arc<Mutex<HistoricalStorage>>,
         temporal_indexes: Arc<Mutex<TemporalIndexes>>,
@@ -1772,26 +1726,68 @@ mod conflict_detection_tests {
         node_id_gen: Arc<Mutex<IdGenerator>>,
         edge_id_gen: Arc<Mutex<IdGenerator>>,
         version_id_gen: Arc<Mutex<IdGenerator>>,
-        tx_id_gen: &TxIdGenerator,
-    ) -> WriteTransaction {
-        let snapshot = TransactionSnapshot {
-            snapshot_timestamp: *current_timestamp.lock().unwrap(),
-            active_transactions: std::collections::HashSet::new(),
-        };
+        tx_id_gen: TxIdGenerator,
+        _temp_dir: TempDir, // Keep alive for WAL directory
+    }
 
-        WriteTransaction::new(
-            tx_id_gen.next(),
-            snapshot,
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-        )
+    impl TestHarness {
+        /// Create a new test harness with all shared infrastructure.
+        fn new() -> Self {
+            let current = Arc::new(CurrentStorage::new());
+            let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+
+            let temp_dir = TempDir::new().unwrap();
+            let wal_config = WalConfig {
+                wal_dir: temp_dir.path().to_path_buf(),
+                sync_on_write: false,
+                ..Default::default()
+            };
+            let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
+
+            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let tx_id_gen = TxIdGenerator::new();
+            let visibility_manager = Arc::new(TxVisibilityManager::new());
+
+            TestHarness {
+                current,
+                historical,
+                temporal_indexes,
+                wal,
+                current_timestamp,
+                visibility_manager,
+                node_id_gen,
+                edge_id_gen,
+                version_id_gen,
+                tx_id_gen,
+                _temp_dir: temp_dir,
+            }
+        }
+
+        /// Create a new write transaction using the shared infrastructure.
+        fn create_tx(&self) -> WriteTransaction {
+            let snapshot = TransactionSnapshot {
+                snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
+                active_transactions: std::collections::HashSet::new(),
+            };
+
+            WriteTransaction::new(
+                self.tx_id_gen.next(),
+                snapshot,
+                self.current.clone(),
+                self.historical.clone(),
+                self.temporal_indexes.clone(),
+                self.wal.clone(),
+                self.current_timestamp.clone(),
+                self.visibility_manager.clone(),
+                self.node_id_gen.clone(),
+                self.edge_id_gen.clone(),
+                self.version_id_gen.clone(),
+            )
+        }
     }
 
     /// Test: First-committer-wins for node updates.
@@ -1809,34 +1805,11 @@ mod conflict_detection_tests {
     /// ```
     #[test]
     fn test_first_committer_wins_node_update() {
-        let (
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-            tx_id_gen,
-            _temp_dir,
-        ) = create_shared_infrastructure();
+        let harness = TestHarness::new();
 
         // Create initial node via transaction (so it has proper metadata)
         let node_id = {
-            let mut tx = create_write_tx(
-                current.clone(),
-                historical.clone(),
-                temporal_indexes.clone(),
-                wal.clone(),
-                current_timestamp.clone(),
-                visibility_manager.clone(),
-                node_id_gen.clone(),
-                edge_id_gen.clone(),
-                version_id_gen.clone(),
-                &tx_id_gen,
-            );
+            let mut tx = harness.create_tx();
             let id = tx
                 .create_node(
                     "Person",
@@ -1848,18 +1821,7 @@ mod conflict_detection_tests {
         };
 
         // T1: tx1 starts
-        let mut tx1 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx1 = harness.create_tx();
 
         // T2: tx1 updates node
         tx1.update_node(
@@ -1869,18 +1831,7 @@ mod conflict_detection_tests {
         .unwrap();
 
         // T3: tx2 starts
-        let mut tx2 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx2 = harness.create_tx();
 
         // T4: tx2 updates node
         tx2.update_node(
@@ -1893,7 +1844,7 @@ mod conflict_detection_tests {
         tx2.commit().unwrap();
 
         // Verify tx2's update was applied
-        let node_after_tx2 = current.get_node(node_id).unwrap();
+        let node_after_tx2 = harness.current.get_node(node_id).unwrap();
         assert_eq!(
             node_after_tx2.get_property("age").and_then(|v| v.as_int()),
             Some(32),
@@ -1917,7 +1868,7 @@ mod conflict_detection_tests {
         );
 
         // Verify the final value is still tx2's value (first committer wins)
-        let final_node = current.get_node(node_id).unwrap();
+        let final_node = harness.current.get_node(node_id).unwrap();
         assert_eq!(
             final_node.get_property("age").and_then(|v| v.as_int()),
             Some(32),
@@ -1928,34 +1879,11 @@ mod conflict_detection_tests {
     /// Test: First-committer-wins for edge updates.
     #[test]
     fn test_first_committer_wins_edge_update() {
-        let (
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-            tx_id_gen,
-            _temp_dir,
-        ) = create_shared_infrastructure();
+        let harness = TestHarness::new();
 
         // Create initial nodes and edge
         let (node1, node2, edge_id) = {
-            let mut tx = create_write_tx(
-                current.clone(),
-                historical.clone(),
-                temporal_indexes.clone(),
-                wal.clone(),
-                current_timestamp.clone(),
-                visibility_manager.clone(),
-                node_id_gen.clone(),
-                edge_id_gen.clone(),
-                version_id_gen.clone(),
-                &tx_id_gen,
-            );
+            let mut tx = harness.create_tx();
             let n1 = tx
                 .create_node("Person", PropertyMapBuilder::new().build())
                 .unwrap();
@@ -1975,18 +1903,7 @@ mod conflict_detection_tests {
         };
 
         // tx1 starts
-        let mut tx1 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx1 = harness.create_tx();
         tx1.update_edge(
             edge_id,
             PropertyMapBuilder::new().insert("weight", 10i64).build(),
@@ -1994,18 +1911,7 @@ mod conflict_detection_tests {
         .unwrap();
 
         // tx2 starts and commits first
-        let mut tx2 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx2 = harness.create_tx();
         tx2.update_edge(
             edge_id,
             PropertyMapBuilder::new().insert("weight", 20i64).build(),
@@ -2021,7 +1927,7 @@ mod conflict_detection_tests {
         );
 
         // Verify final value is tx2's
-        let final_edge = current.get_edge(edge_id).unwrap();
+        let final_edge = harness.current.get_edge(edge_id).unwrap();
         assert_eq!(
             final_edge.get_property("weight").and_then(|v| v.as_int()),
             Some(20)
@@ -2034,34 +1940,11 @@ mod conflict_detection_tests {
     /// Test: First-committer-wins for node deletion.
     #[test]
     fn test_first_committer_wins_node_delete() {
-        let (
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-            tx_id_gen,
-            _temp_dir,
-        ) = create_shared_infrastructure();
+        let harness = TestHarness::new();
 
         // Create initial node
         let node_id = {
-            let mut tx = create_write_tx(
-                current.clone(),
-                historical.clone(),
-                temporal_indexes.clone(),
-                wal.clone(),
-                current_timestamp.clone(),
-                visibility_manager.clone(),
-                node_id_gen.clone(),
-                edge_id_gen.clone(),
-                version_id_gen.clone(),
-                &tx_id_gen,
-            );
+            let mut tx = harness.create_tx();
             let id = tx
                 .create_node("Person", PropertyMapBuilder::new().build())
                 .unwrap();
@@ -2070,18 +1953,7 @@ mod conflict_detection_tests {
         };
 
         // tx1 starts and wants to update
-        let mut tx1 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx1 = harness.create_tx();
         tx1.update_node(
             node_id,
             PropertyMapBuilder::new().insert("age", 31i64).build(),
@@ -2089,23 +1961,12 @@ mod conflict_detection_tests {
         .unwrap();
 
         // tx2 starts and deletes the node, then commits
-        let mut tx2 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx2 = harness.create_tx();
         tx2.delete_node(node_id).unwrap();
         tx2.commit().unwrap();
 
         // Node should be deleted now
-        assert!(current.get_node(node_id).is_err());
+        assert!(harness.current.get_node(node_id).is_err());
 
         // tx1 tries to commit its update - should fail
         let result = tx1.commit();
@@ -2118,34 +1979,11 @@ mod conflict_detection_tests {
     /// Test: Delete vs Delete conflict.
     #[test]
     fn test_delete_delete_conflict() {
-        let (
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-            tx_id_gen,
-            _temp_dir,
-        ) = create_shared_infrastructure();
+        let harness = TestHarness::new();
 
         // Create initial node
         let node_id = {
-            let mut tx = create_write_tx(
-                current.clone(),
-                historical.clone(),
-                temporal_indexes.clone(),
-                wal.clone(),
-                current_timestamp.clone(),
-                visibility_manager.clone(),
-                node_id_gen.clone(),
-                edge_id_gen.clone(),
-                version_id_gen.clone(),
-                &tx_id_gen,
-            );
+            let mut tx = harness.create_tx();
             let id = tx
                 .create_node("Person", PropertyMapBuilder::new().build())
                 .unwrap();
@@ -2154,33 +1992,11 @@ mod conflict_detection_tests {
         };
 
         // tx1 wants to delete
-        let mut tx1 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx1 = harness.create_tx();
         tx1.delete_node(node_id).unwrap();
 
         // tx2 also wants to delete and commits first
-        let mut tx2 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx2 = harness.create_tx();
         tx2.delete_node(node_id).unwrap();
         tx2.commit().unwrap();
 
@@ -2195,34 +2011,11 @@ mod conflict_detection_tests {
     /// Test: No conflict when transactions modify different entities.
     #[test]
     fn test_no_conflict_different_entities() {
-        let (
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-            tx_id_gen,
-            _temp_dir,
-        ) = create_shared_infrastructure();
+        let harness = TestHarness::new();
 
         // Create two nodes
         let (node1, node2) = {
-            let mut tx = create_write_tx(
-                current.clone(),
-                historical.clone(),
-                temporal_indexes.clone(),
-                wal.clone(),
-                current_timestamp.clone(),
-                visibility_manager.clone(),
-                node_id_gen.clone(),
-                edge_id_gen.clone(),
-                version_id_gen.clone(),
-                &tx_id_gen,
-            );
+            let mut tx = harness.create_tx();
             let n1 = tx
                 .create_node(
                     "Person",
@@ -2240,18 +2033,7 @@ mod conflict_detection_tests {
         };
 
         // tx1 updates node1
-        let mut tx1 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx1 = harness.create_tx();
         tx1.update_node(
             node1,
             PropertyMapBuilder::new().insert("age", 30i64).build(),
@@ -2259,18 +2041,7 @@ mod conflict_detection_tests {
         .unwrap();
 
         // tx2 updates node2 and commits first
-        let mut tx2 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx2 = harness.create_tx();
         tx2.update_node(
             node2,
             PropertyMapBuilder::new().insert("age", 25i64).build(),
@@ -2283,7 +2054,8 @@ mod conflict_detection_tests {
 
         // Verify both updates were applied
         assert_eq!(
-            current
+            harness
+                .current
                 .get_node(node1)
                 .unwrap()
                 .get_property("age")
@@ -2291,7 +2063,8 @@ mod conflict_detection_tests {
             Some(30)
         );
         assert_eq!(
-            current
+            harness
+                .current
                 .get_node(node2)
                 .unwrap()
                 .get_property("age")
@@ -2303,50 +2076,16 @@ mod conflict_detection_tests {
     /// Test: No conflict for create operations (new entities).
     #[test]
     fn test_no_conflict_for_creates() {
-        let (
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-            tx_id_gen,
-            _temp_dir,
-        ) = create_shared_infrastructure();
+        let harness = TestHarness::new();
 
         // tx1 creates a node
-        let mut tx1 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx1 = harness.create_tx();
         let node1 = tx1
             .create_node("Person", PropertyMapBuilder::new().build())
             .unwrap();
 
         // tx2 creates a different node and commits first
-        let mut tx2 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx2 = harness.create_tx();
         let node2 = tx2
             .create_node("Person", PropertyMapBuilder::new().build())
             .unwrap();
@@ -2356,41 +2095,18 @@ mod conflict_detection_tests {
         tx1.commit().unwrap();
 
         // Both nodes should exist
-        assert!(current.get_node(node1).is_ok());
-        assert!(current.get_node(node2).is_ok());
+        assert!(harness.current.get_node(node1).is_ok());
+        assert!(harness.current.get_node(node2).is_ok());
     }
 
     /// Test: Conflict error message contains useful information.
     #[test]
     fn test_conflict_error_message() {
-        let (
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp,
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-            tx_id_gen,
-            _temp_dir,
-        ) = create_shared_infrastructure();
+        let harness = TestHarness::new();
 
         // Create initial node
         let node_id = {
-            let mut tx = create_write_tx(
-                current.clone(),
-                historical.clone(),
-                temporal_indexes.clone(),
-                wal.clone(),
-                current_timestamp.clone(),
-                visibility_manager.clone(),
-                node_id_gen.clone(),
-                edge_id_gen.clone(),
-                version_id_gen.clone(),
-                &tx_id_gen,
-            );
+            let mut tx = harness.create_tx();
             let id = tx
                 .create_node("Person", PropertyMapBuilder::new().build())
                 .unwrap();
@@ -2399,34 +2115,12 @@ mod conflict_detection_tests {
         };
 
         // tx1 updates
-        let mut tx1 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx1 = harness.create_tx();
         tx1.update_node(node_id, PropertyMapBuilder::new().build())
             .unwrap();
 
         // tx2 commits first
-        let mut tx2 = create_write_tx(
-            current.clone(),
-            historical.clone(),
-            temporal_indexes.clone(),
-            wal.clone(),
-            current_timestamp.clone(),
-            visibility_manager.clone(),
-            node_id_gen.clone(),
-            edge_id_gen.clone(),
-            version_id_gen.clone(),
-            &tx_id_gen,
-        );
+        let mut tx2 = harness.create_tx();
         tx2.update_node(node_id, PropertyMapBuilder::new().build())
             .unwrap();
         tx2.commit().unwrap();
