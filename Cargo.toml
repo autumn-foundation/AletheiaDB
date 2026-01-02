@@ -12,6 +12,7 @@ categories = ["database-implementations"]
 [dependencies]
 dashmap = "6.1"
 crc32fast = "1.4"
+usearch = "2.22"
 
 # Optional Tracy profiling support
 tracy-client = { version = "0.17", optional = true, default-features = false }
