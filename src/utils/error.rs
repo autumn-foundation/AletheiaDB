@@ -825,21 +825,23 @@ mod tests {
         assert!(format!("{}", err).contains("100000"));
 
         let err = VectorError::IndexOutOfBounds { index: 10, len: 5 };
-        assert!(format!("{}", err).contains("index"));
-        assert!(format!("{}", err).contains("10"));
-        assert!(format!("{}", err).contains("5"));
+        assert_eq!(
+            format!("{}", err),
+            "Vector index 10 out of bounds for length 5"
+        );
 
         let err = VectorError::NotFound {
             id: "vec_12345".to_string(),
         };
-        assert!(format!("{}", err).contains("not found"));
-        assert!(format!("{}", err).contains("vec_12345"));
+        assert_eq!(format!("{}", err), "Vector not found: vec_12345");
 
         let err = VectorError::InvalidVector {
             reason: "empty vector not allowed".to_string(),
         };
-        assert!(format!("{}", err).contains("Invalid vector"));
-        assert!(format!("{}", err).contains("empty vector not allowed"));
+        assert_eq!(
+            format!("{}", err),
+            "Invalid vector: empty vector not allowed"
+        );
     }
 
     #[test]
