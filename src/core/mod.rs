@@ -17,7 +17,21 @@ pub use interning::{GLOBAL_INTERNER, InternedString, StringInterner};
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 pub use vector::{
-    VectorDimension, cosine_similarity, cosine_similarity_normalized, dot_product,
-    euclidean_distance, is_normalized, magnitude, normalize, normalize_in_place,
-    squared_euclidean_distance, squared_magnitude,
+    // Types and constants
+    NORMALIZATION_TOLERANCE,
+    VectorDimension,
+    // Similarity functions
+    cosine_similarity,
+    cosine_similarity_normalized,
+    // Inner product
+    dot_product,
+    // Distance functions
+    euclidean_distance,
+    // Normalization functions
+    is_normalized,
+    magnitude,
+    normalize,
+    normalize_in_place,
+    squared_euclidean_distance,
+    squared_magnitude,
 };

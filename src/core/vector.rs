@@ -81,6 +81,26 @@ use crate::utils::error::{Error, Result};
 use std::fmt;
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+/// Default tolerance for floating-point comparisons in normalization operations.
+///
+/// This tolerance (1e-6) is appropriate for most f32 operations where accumulated
+/// floating-point errors are expected to be small. It's used as the default for
+/// functions like [`is_normalized`] when checking if a vector has unit magnitude.
+///
+/// For stricter or looser comparisons, functions accept an explicit tolerance parameter.
+pub const NORMALIZATION_TOLERANCE: f32 = 1e-6;
+
+/// Squared magnitude threshold for detecting near-zero vectors.
+///
+/// Vectors with squared magnitude below this threshold are treated as zero vectors
+/// in normalization operations. This prevents numerical instability from denormal
+/// numbers and avoids division by very small values that could cause overflow.
+const SQUARED_MAGNITUDE_THRESHOLD: f32 = 1e-20;
+
+// ============================================================================
 // Type Definitions
 // ============================================================================
 
@@ -1292,7 +1312,7 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> Result<f32> {
 ///
 /// This function uses SIMD-accelerated dot product internally:
 /// `magnitude(v) = sqrt(dot_product(v, v))`
-#[inline]
+#[inline(always)]
 pub fn magnitude(v: &[f32]) -> f32 {
     if v.is_empty() {
         return 0.0;
@@ -1322,7 +1342,7 @@ pub fn magnitude(v: &[f32]) -> f32 {
 /// let sq_mag = squared_magnitude(&v);
 /// assert!((sq_mag - 25.0).abs() < 1e-6); // 3² + 4² = 25
 /// ```
-#[inline]
+#[inline(always)]
 pub fn squared_magnitude(v: &[f32]) -> f32 {
     if v.is_empty() {
         return 0.0;
@@ -1371,13 +1391,16 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 /// Uses SIMD-accelerated scalar multiplication (AVX2/SSE2) for optimal performance.
 #[inline]
 pub fn normalize(v: &[f32]) -> Vec<f32> {
-    let mag = magnitude(v);
-    if mag == 0.0 {
+    let sq_mag = squared_magnitude(v);
+    // Use squared magnitude threshold to avoid denormal number issues.
+    // See SQUARED_MAGNITUDE_THRESHOLD for details.
+    if sq_mag < SQUARED_MAGNITUDE_THRESHOLD {
         // Return zero vector of same length
         return vec![0.0; v.len()];
     }
     // Copy then scale in place using SIMD
     let mut result: Vec<f32> = v.to_vec();
+    let mag = sq_mag.sqrt();
     let inv_mag = 1.0 / mag;
     scale_in_place(&mut result, inv_mag);
     result
@@ -1415,11 +1438,14 @@ pub fn normalize(v: &[f32]) -> Vec<f32> {
 /// Uses SIMD-accelerated scalar multiplication (AVX2/SSE2) for optimal performance.
 #[inline]
 pub fn normalize_in_place(v: &mut [f32]) {
-    let mag = magnitude(v);
-    if mag == 0.0 {
-        // Leave zero vector unchanged
+    let sq_mag = squared_magnitude(v);
+    // Use squared magnitude threshold to avoid denormal number issues.
+    // See SQUARED_MAGNITUDE_THRESHOLD for details.
+    if sq_mag < SQUARED_MAGNITUDE_THRESHOLD {
+        // Leave zero/near-zero vector unchanged
         return;
     }
+    let mag = sq_mag.sqrt();
     let inv_mag = 1.0 / mag;
     scale_in_place(v, inv_mag);
 }
@@ -1451,6 +1477,11 @@ pub fn normalize_in_place(v: &mut [f32]) {
 /// ```
 #[inline]
 pub fn is_normalized(v: &[f32], tolerance: f32) -> bool {
+    debug_assert!(
+        (0.0..1.0).contains(&tolerance),
+        "tolerance must be in range [0.0, 1.0), got {}",
+        tolerance
+    );
     // Use squared_magnitude to avoid sqrt for better numerical stability
     // |magnitude - 1.0| <= tolerance  ⟺  (1-tolerance)² <= ||v||² <= (1+tolerance)²
     let sq_mag = squared_magnitude(v);
