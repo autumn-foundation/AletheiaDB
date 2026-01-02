@@ -21,6 +21,8 @@ pub use vector::{
     DistanceMetric,
     NORMALIZATION_TOLERANCE,
     VectorDimension,
+    // Validation functions
+    check_dimensions_match,
     // Similarity functions
     cosine_similarity,
     cosine_similarity_normalized,
@@ -36,4 +38,6 @@ pub use vector::{
     normalize_in_place,
     squared_euclidean_distance,
     squared_magnitude,
+    validate_vector,
+    validate_vector_with_bounds,
 };

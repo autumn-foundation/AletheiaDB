@@ -22,6 +22,8 @@ pub enum Error {
     Query(QueryError),
     /// Transaction-related errors.
     Transaction(TransactionError),
+    /// Vector-related errors.
+    Vector(VectorError),
     /// I/O errors.
     Io(io::Error),
     /// Other errors.
@@ -42,6 +44,7 @@ impl fmt::Display for Error {
             Error::Temporal(e) => write!(f, "Temporal error: {}", e),
             Error::Query(e) => write!(f, "Query error: {}", e),
             Error::Transaction(e) => write!(f, "Transaction error: {}", e),
+            Error::Vector(e) => write!(f, "Vector error: {}", e),
             Error::Io(e) => write!(f, "I/O error: {}", e),
             Error::Other(msg) => write!(f, "{}", msg),
         }
@@ -85,6 +88,12 @@ impl From<io::Error> for Error {
 impl From<TransactionError> for Error {
     fn from(e: TransactionError) -> Self {
         Error::Transaction(e)
+    }
+}
+
+impl From<VectorError> for Error {
+    fn from(e: VectorError) -> Self {
+        Error::Vector(e)
     }
 }
 
@@ -410,6 +419,67 @@ impl fmt::Display for TransactionError {
 
 impl std::error::Error for TransactionError {}
 
+/// Errors related to vector operations and validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VectorError {
+    /// Vector dimensions do not match.
+    DimensionMismatch {
+        /// The expected dimension (from the first vector)
+        expected: usize,
+        /// The actual dimension (from the second vector)
+        actual: usize,
+    },
+    /// Vector contains NaN (Not a Number) values.
+    ContainsNaN {
+        /// Number of NaN values found
+        count: usize,
+    },
+    /// Vector contains infinity values.
+    ContainsInfinity {
+        /// Number of infinity values found
+        count: usize,
+    },
+    /// Vector dimension exceeds maximum allowed.
+    DimensionTooLarge {
+        /// The actual dimension
+        dimension: usize,
+        /// The maximum allowed dimension
+        max_allowed: usize,
+    },
+}
+
+impl fmt::Display for VectorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VectorError::DimensionMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "Vector dimension mismatch: expected {}, got {}",
+                    expected, actual
+                )
+            }
+            VectorError::ContainsNaN { count } => {
+                write!(f, "Vector contains {} NaN value(s)", count)
+            }
+            VectorError::ContainsInfinity { count } => {
+                write!(f, "Vector contains {} infinity value(s)", count)
+            }
+            VectorError::DimensionTooLarge {
+                dimension,
+                max_allowed,
+            } => {
+                write!(
+                    f,
+                    "Vector dimension {} exceeds maximum allowed {}",
+                    dimension, max_allowed
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for VectorError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +749,41 @@ mod tests {
         };
         let converted: Error = err.into();
         assert!(matches!(converted, Error::Transaction(_)));
+    }
+
+    #[test]
+    fn test_vector_error_display() {
+        let err = VectorError::DimensionMismatch {
+            expected: 128,
+            actual: 256,
+        };
+        assert!(format!("{}", err).contains("dimension mismatch"));
+        assert!(format!("{}", err).contains("128"));
+        assert!(format!("{}", err).contains("256"));
+
+        let err = VectorError::ContainsNaN { count: 3 };
+        assert!(format!("{}", err).contains("NaN"));
+        assert!(format!("{}", err).contains("3"));
+
+        let err = VectorError::ContainsInfinity { count: 2 };
+        assert!(format!("{}", err).contains("infinity"));
+        assert!(format!("{}", err).contains("2"));
+
+        let err = VectorError::DimensionTooLarge {
+            dimension: 200_000,
+            max_allowed: 100_000,
+        };
+        assert!(format!("{}", err).contains("200000"));
+        assert!(format!("{}", err).contains("100000"));
+    }
+
+    #[test]
+    fn test_vector_error_conversions() {
+        let err = VectorError::ContainsNaN { count: 1 };
+        let converted: Error = err.into();
+        assert!(matches!(converted, Error::Vector(_)));
+
+        // Test that Display works on converted error
+        assert!(format!("{}", converted).contains("Vector error"));
     }
 }
