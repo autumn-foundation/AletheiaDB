@@ -908,14 +908,7 @@ fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
 /// The result is always clamped to `[-1.0, 1.0]` to handle minor floating-point
 /// inaccuracies that could produce values slightly outside this range.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
-    if a.len() != b.len() {
-        return Err(Error::Query(
-            crate::utils::error::QueryError::InvalidParameter {
-                parameter: "vectors".to_string(),
-                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
-            },
-        ));
-    }
+    check_dimensions_match(a, b)?;
 
     // Handle empty vectors
     if a.is_empty() {
@@ -1019,14 +1012,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32> {
 /// - Correctness is more important than performance
 #[inline]
 pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
-    if a.len() != b.len() {
-        return Err(Error::Query(
-            crate::utils::error::QueryError::InvalidParameter {
-                parameter: "vectors".to_string(),
-                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
-            },
-        ));
-    }
+    check_dimensions_match(a, b)?;
 
     // Handle empty vectors
     if a.is_empty() {
@@ -1125,14 +1111,7 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
 /// - **Scalar**: Fallback for other platforms
 #[inline]
 pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
-    if a.len() != b.len() {
-        return Err(Error::Query(
-            crate::utils::error::QueryError::InvalidParameter {
-                parameter: "vectors".to_string(),
-                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
-            },
-        ));
-    }
+    check_dimensions_match(a, b)?;
 
     // Handle empty vectors
     if a.is_empty() {
@@ -1274,14 +1253,7 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32> {
 /// magnitudes (e.g., when working with pre-normalized vectors).
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> Result<f32> {
-    if a.len() != b.len() {
-        return Err(Error::Query(
-            crate::utils::error::QueryError::InvalidParameter {
-                parameter: "vectors".to_string(),
-                reason: format!("dimension mismatch: {} vs {}", a.len(), b.len()),
-            },
-        ));
-    }
+    check_dimensions_match(a, b)?;
 
     // Handle empty vectors
     if a.is_empty() {
@@ -1584,14 +1556,23 @@ pub fn is_normalized_default(v: &[f32]) -> bool {
 /// ```
 #[inline]
 pub fn validate_vector(v: &[f32]) -> Result<()> {
-    // Count NaN values first
-    let nan_count = v.iter().filter(|x| x.is_nan()).count();
+    // Use a single pass to count both NaN and Infinity values for efficiency.
+    // This is more efficient than iterating twice, especially for large vectors.
+    let (nan_count, inf_count) = v.iter().fold((0usize, 0usize), |(nan, inf), &val| {
+        if val.is_nan() {
+            (nan + 1, inf)
+        } else if val.is_infinite() {
+            (nan, inf + 1)
+        } else {
+            (nan, inf)
+        }
+    });
+
+    // Per the function's contract, NaN is checked first.
     if nan_count > 0 {
         return Err(Error::Vector(VectorError::ContainsNaN { count: nan_count }));
     }
 
-    // Count Infinity values (both positive and negative)
-    let inf_count = v.iter().filter(|x| x.is_infinite()).count();
     if inf_count > 0 {
         return Err(Error::Vector(VectorError::ContainsInfinity {
             count: inf_count,
