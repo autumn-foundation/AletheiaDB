@@ -847,6 +847,31 @@ impl PropertyMapBuilder {
         self
     }
 
+    /// Insert a vector property (convenience method for embeddings).
+    ///
+    /// This is a convenience wrapper around `insert()` for vector properties,
+    /// commonly used for storing embeddings in nodes and edges.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::property::PropertyMapBuilder;
+    ///
+    /// let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
+    /// let props = PropertyMapBuilder::new()
+    ///     .insert("name", "Document")
+    ///     .insert_vector("embedding", &embedding)
+    ///     .build();
+    ///
+    /// assert_eq!(
+    ///     props.get("embedding").and_then(|v| v.as_vector()),
+    ///     Some(&embedding[..])
+    /// );
+    /// ```
+    pub fn insert_vector<K: Into<PropertyKey>>(self, key: K, vector: &[f32]) -> Self {
+        self.insert(key, PropertyValue::vector(vector))
+    }
+
     /// Remove a property.
     pub fn remove(mut self, key: &str) -> Self {
         self.map.remove(key);
