@@ -1,0 +1,55 @@
+version: 2
+updates:
+  # Cargo dependencies - Daily updates with intelligent grouping
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "02:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    groups:
+      # Group development dependencies together
+      dev-dependencies:
+        dependency-type: "development"
+        patterns:
+          - "criterion"
+          - "proptest"
+          - "tempfile"
+          - "pretty_assertions"
+      # Group core dependencies - patch updates only for safety
+      core-dependencies:
+        dependency-type: "production"
+        update-types:
+          - "patch"
+        patterns:
+          - "dashmap"
+          - "crc32fast"
+          - "parking_lot"
+      # Optional dependencies grouped separately
+      optional-dependencies:
+        patterns:
+          - "tracy-client"
+    labels:
+      - "dependencies"
+      - "auto-merge-candidate"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+
+  # GitHub Actions - Weekly updates
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+      - "auto-merge-candidate"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"

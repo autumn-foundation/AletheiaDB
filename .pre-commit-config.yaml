@@ -1,0 +1,88 @@
+# Pre-commit hooks for GallifreyDB
+# Install: pre-commit install --hook-type pre-commit --hook-type commit-msg --hook-type pre-push
+# Run manually: pre-commit run --all-files
+
+repos:
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'  # Allow trailing spaces in markdown (for line breaks)
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  # Markdown linting
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.39.0
+    hooks:
+      - id: markdownlint
+        args: ['--fix', '--disable', 'MD013', 'MD033', 'MD041']
+        # MD013: Line length (disabled for code blocks)
+        # MD033: Inline HTML (disabled for badges, etc.)
+        # MD041: First line in file should be top-level heading (disabled)
+
+  # Rust formatting
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        description: Format Rust code with rustfmt
+        entry: cargo fmt --all --
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        description: Lint Rust code with clippy
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-check
+        name: cargo check
+        description: Check Rust code compiles
+        entry: cargo check --all-features
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+  # Conventional commits enforcement
+  - repo: https://github.com/compwa/commitizen-cli
+    rev: 0.6.0
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+        additional_dependencies: [commitizen]
+
+  # Security and tests (only on pre-push to avoid slowing down commits)
+  - repo: local
+    hooks:
+      - id: cargo-audit
+        name: cargo audit
+        description: Audit Rust dependencies for security vulnerabilities
+        entry: cargo audit
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-test
+        name: cargo test
+        description: Run Rust tests
+        entry: cargo test --all-features
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+# Global configuration
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+fail_fast: false  # Run all hooks even if one fails
