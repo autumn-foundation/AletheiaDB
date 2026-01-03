@@ -1792,10 +1792,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        target_os = "windows",
-        ignore = "IP metric crashes on Windows (usearch FFI issue)"
-    )]
     fn test_hnsw_index_new_different_metrics() {
         // Test each metric with new()
         for metric in [
@@ -1803,6 +1799,11 @@ mod tests {
             DistanceMetric::Euclidean,
             DistanceMetric::DotProduct,
         ] {
+            // Skip DotProduct on Windows due to usearch FFI issue
+            if metric == DistanceMetric::DotProduct && cfg!(target_os = "windows") {
+                continue;
+            }
+
             let config = HnswConfig::new(8, metric);
             let index = HnswIndex::new(config).unwrap();
 
