@@ -1,7 +1,6 @@
 # GallifreyDB
 
-[![CI](https://github.com/madmax983/GallifreyDB/actions/workflows/ci.yml/badge.svg)](https://github.com/madmax983/GallifreyDB/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/madmax983/GallifreyDB/branch/trunk/graph/badge.svg)](https://codecov.io/gh/madmax983/GallifreyDB)
+[![CI](https://github.com/madmax983/GallifreyDB/actions/workflows/ci.yml/badge.svg)](https://github.com/madmax983/GallifreyDB/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/madmax983/GallifreyDB/branch/trunk/graph/badge.svg)](https://codecov.io/gh/madmax983/GallifreyDB)
 
 A high-performance bi-temporal graph database in Rust, designed for LLM integration and temporal reasoning.
 

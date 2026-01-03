@@ -19,12 +19,6 @@ coverage:
         threshold: 2%
         if_ci_failed: error
 
-  # Individual coverage targets matching CLAUDE.md
-  target:
-    lines: 80%
-    functions: 75%
-    branches: 70%
-
 # Configure PR comments
 comment:
   layout: "reach, diff, flags, files"
@@ -53,7 +47,7 @@ parsers:
       conditional: yes
       loop: yes
       method: no
-      macro: no
+      macro: yes
 
 # GitHub integration
 github_checks:
