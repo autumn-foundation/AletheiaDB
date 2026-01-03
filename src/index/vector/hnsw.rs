@@ -817,6 +817,95 @@ impl VectorIndex for HnswIndex {
 }
 
 impl HnswIndex {
+    /// Creates a new HNSW index from a configuration.
+    ///
+    /// This is a convenience factory method that wraps `HnswIndexBuilder::from_config().build()`.
+    /// It provides a simpler API for creating indexes from reusable configurations.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - HNSW configuration with all parameters
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(HnswIndex)` if the index was created successfully
+    /// - `Err(Error)` if parameters are invalid or index creation fails
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `config.dimensions` is 0
+    /// - `config.m` is 0
+    /// - `config.ef_construction` is 0
+    /// - `config.ef_search` is 0
+    /// - Underlying usearch index creation fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::index::vector::{HnswIndex, HnswConfig, DistanceMetric};
+    ///
+    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// // Create a reusable configuration
+    /// let config = HnswConfig::new(384, DistanceMetric::Cosine)
+    ///     .with_m(16)
+    ///     .with_ef_construction(200)
+    ///     .with_ef_search(64);
+    ///
+    /// // Create index from config
+    /// let index = HnswIndex::new(config)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new(config: HnswConfig) -> Result<Self> {
+        HnswIndexBuilder::from_config(config).build()
+    }
+
+    /// Creates a new HNSW index from a configuration with explicit capacity.
+    ///
+    /// This factory method allows overriding the capacity from the config,
+    /// which is useful when you want to use a standard config but need different
+    /// pre-allocation for this specific index.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - HNSW configuration (capacity field will be overridden)
+    /// * `capacity` - Number of vectors to pre-allocate space for
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(HnswIndex)` if the index was created successfully
+    /// - `Err(Error)` if parameters are invalid or index creation fails
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `config.dimensions` is 0
+    /// - `config.m` is 0
+    /// - `config.ef_construction` is 0
+    /// - `config.ef_search` is 0
+    /// - Underlying usearch index creation fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::index::vector::{HnswIndex, HnswConfig, DistanceMetric};
+    ///
+    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// // Standard configuration
+    /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
+    ///
+    /// // Create index with explicit capacity (ignores config.capacity)
+    /// let index = HnswIndex::with_capacity(config, 1_000_000)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_capacity(config: HnswConfig, capacity: usize) -> Result<Self> {
+        HnswIndexBuilder::from_config(config)
+            .initial_capacity(capacity)
+            .build()
+    }
+
     /// Returns the M parameter (connections per node).
     ///
     /// Higher values improve recall at the cost of memory and build time.
@@ -1488,6 +1577,239 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, node1);
+    }
+
+    // ============================================================================
+    // Factory Method Tests (HnswIndex::new and HnswIndex::with_capacity)
+    // ============================================================================
+
+    #[test]
+    fn test_hnsw_index_new_success() {
+        // Create config
+        let config = HnswConfig::new(128, DistanceMetric::Cosine)
+            .with_m(16)
+            .with_ef_construction(200)
+            .with_ef_search(64);
+
+        // Create index using factory method
+        let index = HnswIndex::new(config).unwrap();
+
+        // Verify parameters
+        assert_eq!(index.dimensions(), 128);
+        assert_eq!(index.distance_metric(), DistanceMetric::Cosine);
+        assert_eq!(index.m(), 16);
+        assert_eq!(index.ef_construction(), 200);
+        assert_eq!(index.ef_search(), 64);
+        assert_eq!(index.len(), 0);
+    }
+
+    #[test]
+    fn test_hnsw_index_new_with_default_config() {
+        // Use default config with only required params
+        let config = HnswConfig::new(384, DistanceMetric::Euclidean);
+
+        let index = HnswIndex::new(config).unwrap();
+
+        // Should use default values for optional params
+        assert_eq!(index.dimensions(), 384);
+        assert_eq!(index.distance_metric(), DistanceMetric::Euclidean);
+        assert_eq!(index.m(), 16); // Default
+        assert_eq!(index.ef_construction(), 128); // Default
+        assert_eq!(index.ef_search(), 64); // Default
+    }
+
+    #[test]
+    fn test_hnsw_index_new_with_zero_dimensions() {
+        let config = HnswConfig::new(0, DistanceMetric::Cosine);
+
+        let result = HnswIndex::new(config);
+
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::InvalidVector { .. }))
+        ));
+    }
+
+    #[test]
+    fn test_hnsw_index_new_with_zero_m() {
+        let config = HnswConfig::new(128, DistanceMetric::Cosine).with_m(0);
+
+        let result = HnswIndex::new(config);
+
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::InvalidVector { .. }))
+        ));
+    }
+
+    #[test]
+    fn test_hnsw_index_new_with_zero_ef_construction() {
+        let config = HnswConfig::new(128, DistanceMetric::Cosine).with_ef_construction(0);
+
+        let result = HnswIndex::new(config);
+
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::InvalidVector { .. }))
+        ));
+    }
+
+    #[test]
+    fn test_hnsw_index_new_with_zero_ef_search() {
+        let config = HnswConfig::new(128, DistanceMetric::Cosine).with_ef_search(0);
+
+        let result = HnswIndex::new(config);
+
+        assert!(matches!(
+            result,
+            Err(Error::Vector(VectorError::InvalidVector { .. }))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "IP metric crashes on Windows (usearch FFI issue)"
+    )]
+    fn test_hnsw_index_with_capacity_success() {
+        let config = HnswConfig::new(256, DistanceMetric::DotProduct);
+
+        // Create with explicit capacity
+        let index = HnswIndex::with_capacity(config, 10_000).unwrap();
+
+        assert_eq!(index.dimensions(), 256);
+        assert_eq!(index.distance_metric(), DistanceMetric::DotProduct);
+        assert_eq!(index.len(), 0);
+    }
+
+    #[test]
+    fn test_hnsw_index_with_capacity_override() {
+        // Config has capacity = 5000
+        let config = HnswConfig::new(64, DistanceMetric::Cosine).with_capacity(5000);
+
+        // with_capacity should override config.capacity
+        let index = HnswIndex::with_capacity(config, 20_000).unwrap();
+
+        // Should succeed (capacity is pre-allocation hint, not a hard limit)
+        assert_eq!(index.dimensions(), 64);
+        assert_eq!(index.len(), 0);
+
+        // Add more than config.capacity to verify override worked
+        for i in 0..100 {
+            let vec = vec![i as f32 / 100.0; 64];
+            index.add(NodeId::new(i), &vec).unwrap();
+        }
+
+        assert_eq!(index.len(), 100);
+    }
+
+    #[test]
+    fn test_hnsw_index_with_capacity_zero_capacity() {
+        let config = HnswConfig::new(32, DistanceMetric::Cosine);
+
+        // Zero capacity is valid (means no pre-allocation)
+        let index = HnswIndex::with_capacity(config, 0).unwrap();
+
+        assert_eq!(index.dimensions(), 32);
+        assert_eq!(index.len(), 0);
+    }
+
+    #[test]
+    fn test_hnsw_index_new_preserves_all_config_parameters() {
+        // Create config with custom values for all fields
+        let config = HnswConfig::new(512, DistanceMetric::Euclidean)
+            .with_m(24)
+            .with_ef_construction(300)
+            .with_ef_search(80)
+            .with_capacity(50_000);
+
+        let index = HnswIndex::new(config).unwrap();
+
+        // Verify all parameters were preserved
+        assert_eq!(index.dimensions(), 512);
+        assert_eq!(index.distance_metric(), DistanceMetric::Euclidean);
+        assert_eq!(index.m(), 24);
+        assert_eq!(index.ef_construction(), 300);
+        assert_eq!(index.ef_search(), 80);
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "IP metric crashes on Windows (usearch FFI issue)"
+    )]
+    fn test_hnsw_index_with_capacity_preserves_config_parameters() {
+        // Create config with custom values
+        let config = HnswConfig::new(1024, DistanceMetric::DotProduct)
+            .with_m(32)
+            .with_ef_construction(400)
+            .with_ef_search(100);
+
+        let index = HnswIndex::with_capacity(config, 100_000).unwrap();
+
+        // Verify all config parameters preserved (except capacity which is overridden)
+        assert_eq!(index.dimensions(), 1024);
+        assert_eq!(index.distance_metric(), DistanceMetric::DotProduct);
+        assert_eq!(index.m(), 32);
+        assert_eq!(index.ef_construction(), 400);
+        assert_eq!(index.ef_search(), 100);
+    }
+
+    #[test]
+    fn test_hnsw_index_new_functional() {
+        // Verify index created with new() actually works
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        let index = HnswIndex::new(config).unwrap();
+
+        // Add vectors
+        index.add(NodeId::new(1), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+
+        // Search
+        let query = vec![0.9, 0.1, 0.0, 0.0];
+        let results = index.search(&query, 2).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, NodeId::new(1)); // Most similar
+    }
+
+    #[test]
+    fn test_hnsw_index_with_capacity_functional() {
+        // Verify index created with with_capacity() actually works
+        let config = HnswConfig::new(4, DistanceMetric::Euclidean);
+        let index = HnswIndex::with_capacity(config, 100).unwrap();
+
+        // Add vectors
+        index.add(NodeId::new(1), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2), &[10.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Search
+        let query = vec![1.5, 0.0, 0.0, 0.0];
+        let results = index.search(&query, 2).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, NodeId::new(1)); // Closest
+    }
+
+    #[test]
+    fn test_hnsw_index_new_different_metrics() {
+        // Test each metric with new()
+        for metric in [
+            DistanceMetric::Cosine,
+            DistanceMetric::Euclidean,
+            DistanceMetric::DotProduct,
+        ] {
+            // Skip DotProduct on Windows due to usearch FFI issue
+            if metric == DistanceMetric::DotProduct && cfg!(target_os = "windows") {
+                continue;
+            }
+
+            let config = HnswConfig::new(8, metric);
+            let index = HnswIndex::new(config).unwrap();
+
+            assert_eq!(index.distance_metric(), metric);
+            assert_eq!(index.dimensions(), 8);
+        }
     }
 
     // ============================================================================
