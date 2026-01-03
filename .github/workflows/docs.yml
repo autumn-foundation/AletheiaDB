@@ -48,7 +48,7 @@ jobs:
     name: Publish Documentation
     needs: build-docs
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/trunk'
     steps:
       - name: Download documentation artifacts
         uses: actions/download-artifact@v4
