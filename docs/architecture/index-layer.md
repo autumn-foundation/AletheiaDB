@@ -19,8 +19,9 @@ graph TB
             TI_TT["Transaction Time Index<br/>BTreeMap"]
         end
 
-        subgraph "Future Indexes"
-            VI["Vector Index<br/>HNSW"]
+        subgraph "Vector Indexes"
+            VI["Vector Index<br/>HNSW (usearch)"]
+            VIS["VectorIndexState<br/>RwLock~HnswIndex~"]
         end
     end
 
@@ -30,7 +31,9 @@ graph TB
     QE --> CI_IN
     QE --> TI_VT
     QE --> TI_TT
-    QE -.-> VI
+    QE --> VI
+
+    VI --> VIS
 
     style CI_N fill:#90EE90
     style CI_E fill:#90EE90
@@ -38,7 +41,8 @@ graph TB
     style CI_IN fill:#87CEEB
     style TI_VT fill:#DDA0DD
     style TI_TT fill:#DDA0DD
-    style VI fill:#FFE4B5
+    style VI fill:#FFD700
+    style VIS fill:#FFD700
 ```
 
 ## Current Indexes (DashMap)
@@ -394,35 +398,56 @@ flowchart TD
     REPLACE_IN --> DONE
 ```
 
-## Future: Vector Index (HNSW)
+## Vector Index (HNSW) ✅ Implemented
 
 ### Purpose
 
-Semantic similarity search for LLM-integrated queries.
+Semantic similarity search for LLM-integrated queries. Enables k-nearest-neighbor search on vector embeddings stored as node properties.
 
-### Proposed Structure
+### Implementation
+
+The vector index is integrated into `CurrentStorage` via `VectorIndexState`:
 
 ```mermaid
 classDiagram
-    class VectorIndex {
-        -index: HnswIndex
-        -id_map: DashMap~u64, NodeId~
-        -config: VectorIndexConfig
-        +find_similar(embedding, k) Vec~(NodeId, f32)~
-        +find_similar_with_label(embedding, k, label) Vec
-        +add_vector(NodeId, embedding)
-        +remove_vector(NodeId)
+    class CurrentStorage {
+        +nodes: DashMap~NodeId, Node~
+        +edges: DashMap~EdgeId, Edge~
+        +vector_index_state: Arc~RwLock~VectorIndexState~~
+        +enable_vector_index(property_name, config)
+        +find_similar(query_node_id, k)
+        +find_similar_with_label(query_node_id, label, k)
     }
 
-    class VectorIndexConfig {
+    class VectorIndexState {
+        -index: Option~Arc~HnswIndex~~
+        -property_name: Option~String~
+        -config: Option~HnswConfig~
+        +is_enabled() bool
+    }
+
+    class HnswIndex {
+        -inner: usearch::Index
+        -id_to_key: DashMap~NodeId, u64~
+        -key_to_id: DashMap~u64, NodeId~
+        +add(NodeId, embedding)
+        +remove(NodeId)
+        +search(embedding, k) Vec~(NodeId, f32)~
+        +search_with_filter(embedding, k, filter) Vec
+    }
+
+    class HnswConfig {
         +dimensions: usize
         +metric: DistanceMetric
         +connectivity: usize
         +expansion_add: usize
         +expansion_search: usize
+        +capacity: usize
     }
 
-    VectorIndex --> VectorIndexConfig
+    CurrentStorage --> VectorIndexState
+    VectorIndexState --> HnswIndex
+    HnswIndex --> HnswConfig
 ```
 
 ### HNSW Layers
@@ -447,20 +472,48 @@ graph TB
 ```mermaid
 sequenceDiagram
     participant Q as Query
-    participant HNSW as VectorIndex
-    participant L3 as Layer 3
-    participant L0 as Layer 0
+    participant CS as CurrentStorage
+    participant VIS as VectorIndexState
+    participant HNSW as HnswIndex
 
-    Q->>HNSW: find_similar(embedding, k=10)
-    HNSW->>L3: Enter at top layer
-    L3->>L3: Greedy search → nearest
+    Q->>CS: find_similar(query_node_id, k=10)
+    CS->>VIS: read().index
+    VIS-->>CS: Arc<HnswIndex>
+    CS->>CS: Get query node's embedding
+    CS->>HNSW: search(embedding, k+1)
+    HNSW->>HNSW: HNSW traversal
+    HNSW-->>CS: Vec<(NodeId, f32)>
+    CS->>CS: Filter out query node
+    CS->>CS: Truncate to k
+    CS-->>Q: Vec<(NodeId, similarity)>
+```
 
-    L3->>HNSW: Descend
-    HNSW->>L0: Search bottom layer
-    L0->>L0: Explore neighborhood
+### Auto-Indexing on CRUD Operations
 
-    L0-->>HNSW: k nearest neighbors
-    HNSW-->>Q: Vec<(NodeId, similarity)>
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CS as CurrentStorage
+    participant VIS as VectorIndexState
+    participant HNSW as HnswIndex
+
+    Note over C,HNSW: create_node() with vector property
+
+    C->>CS: create_node(label, props)
+    CS->>CS: Generate NodeId, insert into indexes
+    CS->>VIS: Check if enabled
+    VIS-->>CS: Yes, property_name = "embedding"
+    CS->>CS: Extract vector from properties
+    CS->>HNSW: add(node_id, vector)
+
+    alt Indexing succeeds
+        HNSW-->>CS: Ok(())
+        CS-->>C: Ok(node_id)
+    else Indexing fails
+        HNSW-->>CS: Err(e)
+        CS->>CS: Rollback: remove_node(node_id)
+        CS-->>C: Err(e)
+    end
 ```
 
 ## Index Selection
@@ -484,15 +537,27 @@ flowchart TD
 
 ### Performance Summary
 
-| Index | Structure | Insert | Lookup | Range | Use Case |
-|-------|-----------|--------|--------|-------|----------|
-| Current (nodes) | DashMap | O(1) | O(1) | - | Entity access |
-| Current (edges) | DashMap | O(1) | O(1) | - | Entity access |
-| Adjacency | CSR | O(E log E)* | O(1) | O(k) | Traversal |
-| Temporal | BTreeMap | O(log n) | O(log n) | O(log n + k) | Time-travel |
-| Vector | HNSW | O(log n) | O(log n) | - | Similarity |
+| Index | Structure | Insert | Lookup | Range | Use Case | Status |
+|-------|-----------|--------|--------|-------|----------|--------|
+| Current (nodes) | DashMap | O(1) | O(1) | - | Entity access | ✅ |
+| Current (edges) | DashMap | O(1) | O(1) | - | Entity access | ✅ |
+| Adjacency | CSR | O(E log E)* | O(1) | O(k) | Traversal | ✅ |
+| Temporal | BTreeMap | O(log n) | O(log n) | O(log n + k) | Time-travel | ✅ |
+| Vector | HNSW | O(log n) | O(log n) | - | Similarity | ✅ |
 
 *Adjacency is rebuilt, not incrementally updated.
+
+### Vector Index Performance Characteristics
+
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| `enable_vector_index()` | O(1) | One-time setup |
+| `add()` (on create_node) | O(log n) | Auto-indexed if enabled |
+| `remove()` (on delete_node) | O(log n) | Best-effort removal |
+| `find_similar(k)` | O(log n) | HNSW search + k+1 query |
+| `find_similar_with_label(k)` | O(n) | Full scan with label filter |
+
+**Note**: Label filtering currently uses post-filter approach (search all, then filter). Future optimization could use HNSW's native filtering for better performance.
 
 ## Related Documentation
 

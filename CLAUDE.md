@@ -774,9 +774,9 @@ When adding new serialization features:
 4. Update `parse_wal_entries_versioned()` for migration support
 5. Add tests for new format and backward compatibility
 
-## Vector Storage (Phase 1)
+## Vector Storage & Indexing (Phases 1-2)
 
-GallifreyDB supports storing dense vector embeddings as first-class property values. This enables semantic search, similarity matching, and RAG (Retrieval-Augmented Generation) workflows while preserving full bi-temporal versioning.
+GallifreyDB supports storing dense vector embeddings as first-class property values with integrated HNSW indexing for fast k-NN search. This enables semantic search, similarity matching, and RAG (Retrieval-Augmented Generation) workflows while preserving full bi-temporal versioning.
 
 ### Storing Vector Properties
 
@@ -978,35 +978,92 @@ match cosine_similarity(&a, &b) {
 }
 ```
 
+### Vector Index (k-NN Search)
+
+Enable HNSW-based k-nearest-neighbor search on vector properties:
+
+```rust
+use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+
+let db = GallifreyDB::new();
+
+// Enable vector indexing on a specific property
+let config = HnswConfig::new(384, DistanceMetric::Cosine)  // 384 dimensions
+    .with_capacity(10000);  // Expected number of vectors
+db.enable_vector_index("embedding", config)?;
+
+// Create nodes with embeddings - automatically indexed!
+let doc1 = db.create_node(
+    "Document",
+    PropertyMapBuilder::new()
+        .insert("title", "Introduction to Rust")
+        .insert_vector("embedding", &embedding1)
+        .build(),
+)?;
+
+let doc2 = db.create_node(
+    "Document",
+    PropertyMapBuilder::new()
+        .insert("title", "Advanced Rust Patterns")
+        .insert_vector("embedding", &embedding2)
+        .build(),
+)?;
+
+// Find similar nodes
+let similar = db.find_similar(doc1, 10)?;  // Returns Vec<(NodeId, f32)>
+for (node_id, similarity) in similar {
+    println!("Node {:?} has similarity {}", node_id, similarity);
+}
+
+// Find similar with label filter
+let similar_docs = db.find_similar_with_label(doc1, "Document", 5)?;
+```
+
+**Auto-Indexing Behavior:**
+- `create_node()`: Automatically indexes vectors, rolls back node on failure
+- `update_node()`: Updates index entry, rolls back update on failure
+- `delete_node()`: Removes from index (best-effort, no rollback needed)
+
+**Supported Distance Metrics:**
+| Metric | Use Case |
+|--------|----------|
+| `DistanceMetric::Cosine` | Semantic similarity (default) |
+| `DistanceMetric::Euclidean` | Spatial data, clustering |
+| `DistanceMetric::DotProduct` | MaxSim, ColBERT-style queries |
+
+**Configuration Options:**
+```rust
+let config = HnswConfig::new(dimensions, metric)
+    .with_capacity(expected_count)     // Pre-allocate index capacity
+    .with_connectivity(16)             // HNSW M parameter (default: 16)
+    .with_expansion_add(128)           // efConstruction (default: 128)
+    .with_expansion_search(64);        // ef search parameter (default: 64)
+```
+
 ## Future Considerations
 
-### Vector Search (SUPERRAG)
+### Vector Search (SUPERRAG) - Remaining Phases
 
-**Status**: Phase 1 complete (storage + similarity), Phases 2-5 pending
+**Status**: Phases 1-2 complete, Phases 3-5 pending
 
-Phase 1 provides the foundation for vector storage and similarity computation. Future phases will add:
+Phases 1-2 provide vector storage and HNSW k-NN search. Remaining phases will add:
 
-- **Phase 2**: HNSW index integration for k-NN search
 - **Phase 3**: Temporal vector queries (semantic time-travel)
 - **Phase 4**: Hybrid graph+vector queries
 - **Phase 5**: Advanced features (streaming, incremental updates)
 
-See **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** for the complete design including:
-- Architecture integration with existing storage
-- 5-phase implementation plan
-- Temporal vector strategy (versioned embeddings)
-- HNSW index integration (usearch recommended)
-- Hybrid query patterns
+See **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** for the complete design.
 
-**Key query patterns this enables (Phase 2+):**
+**Key query patterns Phase 3+ will enable:**
 ```rust
-// Semantic time-travel
+// Semantic time-travel (Phase 3)
 db.as_of(timestamp_2023).find_similar(embedding, k)
 
-// Graph + Vector: traverse then rank
+// Graph + Vector: traverse then rank (Phase 4)
 db.traverse(alice_id, "KNOWS").rank_by_similarity(bob_embedding, 10)
 
-// Knowledge evolution
+// Knowledge evolution (Phase 4)
 db.track_semantic_drift(node_id, time_range)
 ```
 

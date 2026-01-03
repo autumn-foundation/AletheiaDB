@@ -1,9 +1,20 @@
 # ADR-0011: Vector Search Integration (SUPERRAG)
 
-**Status:** Proposed
+**Status:** Accepted (Phases 1-2 Implemented)
 **Date:** 2024-12-31
+**Updated:** 2025-01-03
 **Deciders:** GallifreyDB Core Team
-**Categories:** index, vector, future
+**Categories:** index, vector
+
+## Implementation Status
+
+| Phase | Status | PR |
+|-------|--------|-----|
+| Phase 1: Vector Storage | ✅ Complete | #138 |
+| Phase 2: HNSW Index Integration | ✅ Complete | #169 |
+| Phase 3: Temporal Vector Support | 🔲 Planned | - |
+| Phase 4: Hybrid Query Engine | 🔲 Planned | - |
+| Phase 5: Persistence & Performance | 🔲 Planned | - |
 
 ## Context
 
@@ -242,6 +253,63 @@ db.traverse(alice_id, "KNOWS").rank_by_similarity(bob_embedding, 10)
 // Knowledge evolution: track semantic drift
 db.track_semantic_drift(node_id, time_range)
 ```
+
+## Implementation Details (Phases 1-2)
+
+### Phase 1: Vector Storage Foundation (Complete)
+
+Implemented in PR #138:
+
+- Added `PropertyValue::Vector(Arc<[f32]>)` variant to core property types
+- Implemented binary serialization/deserialization for vectors
+- Added comprehensive vector math module (`src/core/vector.rs`):
+  - `cosine_similarity()`, `cosine_similarity_normalized()`
+  - `euclidean_distance()`, `squared_euclidean_distance()`
+  - `dot_product()`
+  - `normalize()`, `normalize_in_place()`, `magnitude()`
+  - `validate_vector()`, `check_dimensions_match()`
+- Added `PropertyMapBuilder::insert_vector()` for convenient vector property creation
+- Full temporal versioning support for vector properties
+
+### Phase 2: HNSW Index Integration (Complete)
+
+Implemented in PR #169:
+
+**Architecture - VectorIndexState:**
+```rust
+struct VectorIndexState {
+    index: Option<Arc<HnswIndex>>,
+    property_name: Option<String>,
+    config: Option<HnswConfig>,
+}
+```
+
+Integrated into `CurrentStorage` using `parking_lot::RwLock` for efficient read-heavy access patterns.
+
+**Automatic Indexing:**
+- Vectors are automatically indexed on `create_node()` with rollback on failure
+- Vectors are updated on `update_node()` with rollback on failure
+- Vectors are removed on `delete_node()` (best-effort, no rollback)
+
+**Query API:**
+```rust
+impl CurrentStorage {
+    pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()>;
+    pub fn is_vector_index_enabled(&self) -> bool;
+    pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>>;
+    pub fn find_similar_with_label(&self, query_node_id: NodeId, label: &str, k: usize) -> Result<Vec<(NodeId, f32)>>;
+}
+```
+
+**Key Design Decisions:**
+1. **parking_lot::RwLock**: Chosen over std::sync::RwLock for better performance on read-heavy workloads
+2. **Arc-wrapped HnswIndex**: Enables cloning the Arc before dropping the lock, avoiding lifetime issues
+3. **Query node exclusion**: `find_similar()` excludes the query node from results (searches for k+1, filters, truncates)
+4. **Label filtering via GLOBAL_INTERNER**: Uses string interning for efficient label comparisons
+
+**Error Handling:**
+- Added `StorageError::PropertyNotFound` for query operations
+- Rollback semantics ensure graph consistency on indexing failures
 
 ## References
 

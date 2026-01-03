@@ -1,8 +1,19 @@
 # Vector Search Integration Design
 
-> **Status**: Proposed
+> **Status**: In Progress (Phases 1-2 Complete)
 > **Created**: 2024-12-30
+> **Updated**: 2025-01-03
 > **Goal**: Position GallifreyDB as SUPERRAG - Graph + Vector + Bi-temporal
+>
+> ## Implementation Progress
+>
+> | Phase | Status | Description |
+> |-------|--------|-------------|
+> | Phase 1 | ✅ Complete | Vector storage foundation (`PropertyValue::Vector`, similarity functions) |
+> | Phase 2 | ✅ Complete | HNSW index integration into CurrentStorage with auto-indexing |
+> | Phase 3 | 🔲 Planned | Temporal vector support |
+> | Phase 4 | 🔲 Planned | Hybrid query engine |
+> | Phase 5 | 🔲 Planned | Persistence & performance optimization |
 
 ## Executive Summary
 
@@ -154,43 +165,60 @@ pub trait HybridOps: GraphOps + VectorOps + TemporalOps {
 
 ## Implementation Plan
 
-### Phase 1: Vector Storage Foundation
-**Estimated effort**: 1-2 days
+### Phase 1: Vector Storage Foundation ✅ COMPLETE
+**Implemented in**: PR #138
 
-**Goals**:
-- Add `PropertyValue::Vector(Arc<[f32]>)` variant
-- Implement serialization/deserialization for vectors
-- Basic cosine similarity computation
-- Unit tests for vector operations
+**Accomplished**:
+- ✅ Added `PropertyValue::Vector(Arc<[f32]>)` variant
+- ✅ Implemented binary serialization/deserialization for vectors
+- ✅ Full vector math module with:
+  - `cosine_similarity()`, `cosine_similarity_normalized()`
+  - `euclidean_distance()`, `squared_euclidean_distance()`
+  - `dot_product()`
+  - `normalize()`, `normalize_in_place()`, `magnitude()`
+  - `validate_vector()`, `check_dimensions_match()`
+- ✅ `PropertyMapBuilder::insert_vector()` API
+- ✅ Comprehensive unit tests
 
-**Files to modify**:
-- `src/core/property.rs` - Add Vector variant
-- `src/storage/current.rs` - Handle vector properties
-- `src/storage/historical.rs` - Version vector changes
+**Files modified**:
+- `src/core/property.rs` - Added Vector variant
+- `src/core/vector.rs` - NEW: Vector utilities module
+- `src/core/mod.rs` - Export vector module
 
-**New files**:
-- `src/core/vector.rs` - Vector utilities (similarity, normalization)
+### Phase 2: HNSW Index Integration ✅ COMPLETE
+**Implemented in**: PR #169
 
-### Phase 2: HNSW Index Integration
-**Estimated effort**: 3-5 days
+**Accomplished**:
+- ✅ Integrated usearch crate via HnswIndex wrapper
+- ✅ Created VectorIndex trait and HnswIndex implementation
+- ✅ VectorIndexState integrated into CurrentStorage with parking_lot::RwLock
+- ✅ Automatic vector indexing on CRUD operations:
+  - `create_node()` - auto-index with rollback on failure
+  - `update_node()` - auto-update with rollback on failure
+  - `delete_node()` - auto-remove (best-effort)
+- ✅ k-NN query methods with label filtering
 
-**Goals**:
-- Integrate usearch (or hora) crate
-- Create `VectorIndex` structure
-- Index current-state vectors automatically
-- Implement k-NN queries
+**Files created/modified**:
+- `src/index/vector.rs` - VectorIndex trait + HnswIndex implementation
+- `src/storage/current.rs` - VectorIndexState integration + query methods
+- `src/db.rs` - Public API exposure
+- `src/utils/error.rs` - Added PropertyNotFound error
 
-**Files to create**:
-- `src/index/vector.rs` - VectorIndex implementation
-- `src/index/vector/hnsw.rs` - HNSW wrapper
-
-**API additions**:
+**Implemented API**:
 ```rust
-impl CurrentStorage {
-    pub fn find_similar(&self, embedding: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>>;
-    pub fn find_similar_with_label(&self, embedding: &[f32], k: usize, label: &str) -> Result<Vec<(NodeId, f32)>>;
+impl GallifreyDB {
+    pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()>;
+    pub fn is_vector_index_enabled(&self) -> bool;
+    pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>>;
+    pub fn find_similar_with_label(&self, query_node_id: NodeId, label: &str, k: usize) -> Result<Vec<(NodeId, f32)>>;
 }
 ```
+
+**Key Design Decisions**:
+- Uses `parking_lot::RwLock` for efficient read-heavy access
+- Arc-wrapped HnswIndex enables lock-free cloning before expensive operations
+- Query node is excluded from results (searches k+1, filters, truncates to k)
+- Label filtering uses GLOBAL_INTERNER for efficient string comparison
 
 ### Phase 3: Temporal Vector Support
 **Estimated effort**: 3-5 days
