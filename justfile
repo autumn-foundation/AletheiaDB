@@ -62,7 +62,7 @@ coverage:
 
 # Run coverage and check against thresholds
 coverage-check:
-    cargo llvm-cov --fail-under-lines 80
+    cargo llvm-cov --all-features --fail-under-lines 85 --fail-under-functions 88 --fail-under-regions 88
 
 # Generate coverage report in lcov format (for CI)
 coverage-ci:

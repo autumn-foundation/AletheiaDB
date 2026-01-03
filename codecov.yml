@@ -9,13 +9,13 @@ coverage:
   status:
     project:
       default:
-        target: 80%                    # Line coverage target
+        target: 85%                    # Line coverage target (current: 86.45%)
         threshold: 2%                   # Allow 2% drop before failing
         if_ci_failed: error
 
     patch:
       default:
-        target: 80%                    # New code should meet same standard
+        target: 85%                    # New code should meet same standard
         threshold: 2%
         if_ci_failed: error
 

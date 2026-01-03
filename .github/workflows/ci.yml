@@ -98,7 +98,7 @@ jobs:
           verbose: true
 
       - name: Check coverage thresholds
-        run: cargo llvm-cov --all-features --fail-under-lines 80 --fail-under-functions 75
+        run: cargo llvm-cov --all-features --fail-under-lines 85 --fail-under-functions 88 --fail-under-regions 88
 
   lint:
     name: Linting
