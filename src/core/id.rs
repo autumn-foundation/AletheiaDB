@@ -8,8 +8,16 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::utils::error::StorageError;
 
-/// Maximum valid ID value. Values above this are reserved for internal use.
-/// This prevents potential integer overflow issues and DoS attacks.
+/// Maximum valid ID value. Values above this are reserved.
+///
+/// This prevents potential DoS attacks where malicious code creates IDs with
+/// extreme values (like u64::MAX) that could cause issues in:
+/// - Arithmetic operations (addition/subtraction with IDs)
+/// - Array indexing or allocation attempts
+/// - Serialization buffer sizing
+///
+/// The reserved range of 1000 values provides a safety margin without meaningfully
+/// restricting the ID space (you can still have ~18 quintillion valid IDs).
 pub const MAX_VALID_ID: u64 = u64::MAX - 1000;
 
 /// Unique identifier for a node in the graph.
@@ -33,7 +41,7 @@ impl NodeId {
 
     /// Create a new NodeId without validation (for internal use only).
     ///
-    /// # Safety
+    /// # Internal Use Only
     /// This function bypasses validation. Only use when you're certain the ID is valid,
     /// such as when loading from trusted storage or in performance-critical paths where
     /// validation has already occurred.
@@ -76,7 +84,7 @@ impl EdgeId {
 
     /// Create a new EdgeId without validation (for internal use only).
     ///
-    /// # Safety
+    /// # Internal Use Only
     /// This function bypasses validation. Only use when you're certain the ID is valid,
     /// such as when loading from trusted storage or in performance-critical paths where
     /// validation has already occurred.
@@ -119,7 +127,7 @@ impl VersionId {
 
     /// Create a new VersionId without validation (for internal use only).
     ///
-    /// # Safety
+    /// # Internal Use Only
     /// This function bypasses validation. Only use when you're certain the ID is valid,
     /// such as when loading from trusted storage or in performance-critical paths where
     /// validation has already occurred.
@@ -405,3 +413,64 @@ mod tests {
         assert!(u64::MAX - MAX_VALID_ID >= 1000);
     }
 }
+
+    #[test]
+    fn test_id_validation_boundary_cases() {
+        // Test values around MAX_VALID_ID boundary
+        assert!(NodeId::new(MAX_VALID_ID - 1).is_ok());
+        assert!(NodeId::new(MAX_VALID_ID).is_ok());
+        assert!(NodeId::new(MAX_VALID_ID + 1).is_err());
+        assert!(NodeId::new(MAX_VALID_ID + 2).is_err());
+        
+        // Same for other ID types
+        assert!(EdgeId::new(MAX_VALID_ID - 1).is_ok());
+        assert!(EdgeId::new(MAX_VALID_ID).is_ok());
+        assert!(EdgeId::new(MAX_VALID_ID + 1).is_err());
+        
+        assert!(VersionId::new(MAX_VALID_ID - 1).is_ok());
+        assert!(VersionId::new(MAX_VALID_ID).is_ok());
+        assert!(VersionId::new(MAX_VALID_ID + 1).is_err());
+    }
+
+    #[test]
+    fn test_error_message_content() {
+        // Verify error messages are properly formatted
+        let err = NodeId::new(MAX_VALID_ID + 1).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Invalid"));
+        assert!(msg.contains("node"));
+        assert!(msg.contains("ID"));
+        assert!(msg.contains(&(MAX_VALID_ID + 1).to_string()));
+        assert!(msg.contains("exceeds maximum"));
+        assert!(msg.contains(&MAX_VALID_ID.to_string()));
+    }
+
+    #[test]
+    fn test_id_generator_respects_max_valid_id() {
+        // Verify ID generators produce valid IDs
+        let generator = IdGenerator::new();
+        for _ in 0..100 {
+            let id = generator.next();
+            assert!(
+                NodeId::new(id).is_ok(),
+                "Generator produced invalid ID: {}",
+                id
+            );
+        }
+        
+        // Test generator starting near the limit
+        let generator = IdGenerator::with_start(MAX_VALID_ID - 10);
+        for _ in 0..10 {
+            let id = generator.next();
+            assert!(
+                NodeId::new(id).is_ok(),
+                "Generator near limit produced invalid ID: {}",
+                id
+            );
+        }
+        
+        // Note: After MAX_VALID_ID, generator would produce invalid IDs.
+        // In practice, this would require ~18 quintillion operations,
+        // which is unrealistic for a single database instance.
+        // If needed, IdGenerator could be enhanced to check MAX_VALID_ID.
+    }
