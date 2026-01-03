@@ -47,4 +47,5 @@ jobs:
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
         with:
-          extra_args: --all-files --verbose
+          # Only run pre-commit stage hooks (skip commit-msg which needs git auth in CI)
+          extra_args: --all-files --verbose --hook-stage pre-commit
