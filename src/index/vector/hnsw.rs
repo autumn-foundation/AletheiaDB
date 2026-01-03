@@ -986,8 +986,7 @@ mod tests {
             .with_m(16)
             .with_ef_construction(128);
 
-        let config3 = HnswConfig::new(384, DistanceMetric::Cosine)
-            .with_m(32); // Different M
+        let config3 = HnswConfig::new(384, DistanceMetric::Cosine).with_m(32); // Different M
 
         assert_eq!(config1, config2);
         assert_ne!(config1, config3);
