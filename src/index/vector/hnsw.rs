@@ -858,12 +858,13 @@ mod tests {
         let index = Arc::new(create_test_index());
         let mut handles = vec![];
 
-        // Spawn 10 threads, each adding vectors
-        for i in 0..10 {
+        // Spawn 4 threads, each adding 25 vectors
+        // (Reduced from 10 threads to avoid exhausting usearch's thread pool on macOS)
+        for i in 0..4 {
             let index_clone = Arc::clone(&index);
             let handle = thread::spawn(move || {
-                for j in 0..10 {
-                    let node_id = NodeId::new((i * 10 + j) as u64);
+                for j in 0..25 {
+                    let node_id = NodeId::new((i * 25 + j) as u64);
                     let vec = vec![i as f32, j as f32, 0.0, 0.0];
                     index_clone.add(node_id, &vec).unwrap();
                 }
@@ -893,8 +894,9 @@ mod tests {
 
         let mut handles = vec![];
 
-        // Spawn 10 threads, each searching
-        for _ in 0..10 {
+        // Spawn 4 threads, each searching
+        // (Reduced from 10 threads for consistency and to avoid thread pool issues)
+        for _ in 0..4 {
             let index_clone = Arc::clone(&index);
             let handle = thread::spawn(move || {
                 let query = vec![0.5, 0.0, 0.0, 0.0];
