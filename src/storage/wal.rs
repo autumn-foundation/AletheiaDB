@@ -580,7 +580,7 @@ impl WriteAheadLog {
                     if offset + 12 > buffer.len() {
                         break;
                     }
-                    let node_id = NodeId::new(u64::from_le_bytes([
+                    let node_id = NodeId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -631,7 +631,7 @@ impl WriteAheadLog {
                     if offset + 28 > buffer.len() {
                         break;
                     }
-                    let edge_id = EdgeId::new(u64::from_le_bytes([
+                    let edge_id = EdgeId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -643,7 +643,7 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
-                    let source = NodeId::new(u64::from_le_bytes([
+                    let source = NodeId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -655,7 +655,7 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
-                    let target = NodeId::new(u64::from_le_bytes([
+                    let target = NodeId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -708,7 +708,7 @@ impl WriteAheadLog {
                     if offset + 16 > buffer.len() {
                         break;
                     }
-                    let node_id = NodeId::new(u64::from_le_bytes([
+                    let node_id = NodeId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -720,7 +720,7 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
-                    let version_id = VersionId::new(u64::from_le_bytes([
+                    let version_id = VersionId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -776,7 +776,7 @@ impl WriteAheadLog {
                     if offset + 16 > buffer.len() {
                         break;
                     }
-                    let edge_id = EdgeId::new(u64::from_le_bytes([
+                    let edge_id = EdgeId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -788,7 +788,7 @@ impl WriteAheadLog {
                     ]));
                     offset += 8;
 
-                    let version_id = VersionId::new(u64::from_le_bytes([
+                    let version_id = VersionId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -876,7 +876,7 @@ impl WriteAheadLog {
                     if offset + 8 > buffer.len() {
                         break;
                     }
-                    let node_id = NodeId::new(u64::from_le_bytes([
+                    let node_id = NodeId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -903,7 +903,7 @@ impl WriteAheadLog {
                     if offset + 8 > buffer.len() {
                         break;
                     }
-                    let edge_id = EdgeId::new(u64::from_le_bytes([
+                    let edge_id = EdgeId::new_unchecked(u64::from_le_bytes([
                         buffer[offset],
                         buffer[offset + 1],
                         buffer[offset + 2],
@@ -1220,7 +1220,7 @@ fn parse_wal_entries_versioned(
                 if offset + 12 > buffer.len() {
                     break;
                 }
-                let node_id = NodeId::new(u64::from_le_bytes([
+                let node_id = NodeId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1269,7 +1269,7 @@ fn parse_wal_entries_versioned(
                 if offset + 28 > buffer.len() {
                     break;
                 }
-                let edge_id = EdgeId::new(u64::from_le_bytes([
+                let edge_id = EdgeId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1281,7 +1281,7 @@ fn parse_wal_entries_versioned(
                 ]));
                 offset += 8;
 
-                let source = NodeId::new(u64::from_le_bytes([
+                let source = NodeId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1293,7 +1293,7 @@ fn parse_wal_entries_versioned(
                 ]));
                 offset += 8;
 
-                let target = NodeId::new(u64::from_le_bytes([
+                let target = NodeId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1344,7 +1344,7 @@ fn parse_wal_entries_versioned(
                 if offset + 16 > buffer.len() {
                     break;
                 }
-                let node_id = NodeId::new(u64::from_le_bytes([
+                let node_id = NodeId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1356,7 +1356,7 @@ fn parse_wal_entries_versioned(
                 ]));
                 offset += 8;
 
-                let version_id = VersionId::new(u64::from_le_bytes([
+                let version_id = VersionId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1410,7 +1410,7 @@ fn parse_wal_entries_versioned(
                 if offset + 16 > buffer.len() {
                     break;
                 }
-                let edge_id = EdgeId::new(u64::from_le_bytes([
+                let edge_id = EdgeId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1422,7 +1422,7 @@ fn parse_wal_entries_versioned(
                 ]));
                 offset += 8;
 
-                let version_id = VersionId::new(u64::from_le_bytes([
+                let version_id = VersionId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1510,7 +1510,7 @@ fn parse_wal_entries_versioned(
                 if offset + 8 > buffer.len() {
                     break;
                 }
-                let node_id = NodeId::new(u64::from_le_bytes([
+                let node_id = NodeId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1537,7 +1537,7 @@ fn parse_wal_entries_versioned(
                 if offset + 8 > buffer.len() {
                     break;
                 }
-                let edge_id = EdgeId::new(u64::from_le_bytes([
+                let edge_id = EdgeId::new_unchecked(u64::from_le_bytes([
                     buffer[offset],
                     buffer[offset + 1],
                     buffer[offset + 2],
@@ -1612,7 +1612,7 @@ mod tests {
         let wal = WriteAheadLog::new(config)?;
 
         let operation = WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Person".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -1659,7 +1659,7 @@ mod tests {
         let mut wal = WriteAheadLog::new(config)?;
 
         let operation = WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Person".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -1687,7 +1687,7 @@ mod tests {
         // Append multiple entries to trigger rotation
         for i in 0..10 {
             let operation = WalOperation::CreateNode {
-                node_id: NodeId::new(i),
+                node_id: NodeId::new(i).unwrap(),
                 label: "Person".to_string(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
@@ -1714,7 +1714,7 @@ mod tests {
 
         // Log a delete node operation
         let operation = WalOperation::DeleteNode {
-            node_id: NodeId::new(42),
+            node_id: NodeId::new(42).unwrap(),
             temporal: BiTemporalInterval::current(time::now()),
         };
 
@@ -1751,7 +1751,7 @@ mod tests {
 
         // Log a delete edge operation
         let operation = WalOperation::DeleteEdge {
-            edge_id: EdgeId::new(99),
+            edge_id: EdgeId::new(99).unwrap(),
             temporal: BiTemporalInterval::current(time::now()),
         };
 
@@ -1789,25 +1789,25 @@ mod tests {
         // Log a sequence of mixed operations
         let ops = vec![
             WalOperation::CreateNode {
-                node_id: NodeId::new(1),
+                node_id: NodeId::new(1).unwrap(),
                 label: "Person".to_string(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             },
             WalOperation::CreateEdge {
-                edge_id: EdgeId::new(1),
-                source: NodeId::new(1),
-                target: NodeId::new(2),
+                edge_id: EdgeId::new(1).unwrap(),
+                source: NodeId::new(1).unwrap(),
+                target: NodeId::new(2).unwrap(),
                 label: "KNOWS".to_string(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             },
             WalOperation::DeleteNode {
-                node_id: NodeId::new(3),
+                node_id: NodeId::new(3).unwrap(),
                 temporal: BiTemporalInterval::current(time::now()),
             },
             WalOperation::DeleteEdge {
-                edge_id: EdgeId::new(2),
+                edge_id: EdgeId::new(2).unwrap(),
                 temporal: BiTemporalInterval::current(time::now()),
             },
         ];
@@ -1874,7 +1874,7 @@ mod tests {
         );
 
         let operation = WalOperation::CreateNode {
-            node_id: NodeId::new(42),
+            node_id: NodeId::new(42).unwrap(),
             label: "Person".to_string(),
             properties: properties.clone(),
             temporal,
@@ -1937,9 +1937,9 @@ mod tests {
             BiTemporalInterval::new(TimeRange::new(5000, 6000), TimeRange::new(7000, 8000));
 
         let operation = WalOperation::CreateEdge {
-            edge_id: EdgeId::new(99),
-            source: NodeId::new(1),
-            target: NodeId::new(2),
+            edge_id: EdgeId::new(99).unwrap(),
+            source: NodeId::new(1).unwrap(),
+            target: NodeId::new(2).unwrap(),
             label: "FRIENDS_WITH".to_string(),
             properties: properties.clone(),
             temporal,
@@ -2000,8 +2000,8 @@ mod tests {
             BiTemporalInterval::new(TimeRange::new(10000, 20000), TimeRange::from(15000));
 
         let operation = WalOperation::UpdateNode {
-            node_id: NodeId::new(42),
-            version_id: VersionId::new(2),
+            node_id: NodeId::new(42).unwrap(),
+            version_id: VersionId::new(2).unwrap(),
             label: "Person".to_string(),
             properties: properties.clone(),
             temporal,
@@ -2049,12 +2049,12 @@ mod tests {
         let temporal = BiTemporalInterval::new(TimeRange::new(100, 200), TimeRange::new(300, 400));
 
         wal.append(WalOperation::DeleteNode {
-            node_id: NodeId::new(5),
+            node_id: NodeId::new(5).unwrap(),
             temporal,
         })?;
 
         wal.append(WalOperation::DeleteEdge {
-            edge_id: EdgeId::new(10),
+            edge_id: EdgeId::new(10).unwrap(),
             temporal,
         })?;
 
@@ -2109,7 +2109,7 @@ mod tests {
 
         // Append an entry to create a segment
         wal.append(WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Test".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -2157,7 +2157,7 @@ mod tests {
                 BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::new(3000, 4000));
 
             wal.append(WalOperation::CreateNode {
-                node_id: NodeId::new(100),
+                node_id: NodeId::new(100).unwrap(),
                 label: "TestNode".to_string(),
                 properties: original_properties.clone(),
                 temporal: original_temporal,
@@ -2218,7 +2218,7 @@ mod tests {
 
         let mut wal = WriteAheadLog::new(config)?;
         wal.append(WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Test".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -2261,7 +2261,7 @@ mod tests {
 
         let mut wal = WriteAheadLog::new(config)?;
         wal.append(WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Test".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),

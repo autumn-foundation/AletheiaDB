@@ -667,7 +667,7 @@ impl WriteTransaction {
 
                     // Generate version ID for tombstone
                     let tombstone_version_id =
-                        VersionId::new(self.version_id_gen.lock_or_err()?.next());
+                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
 
                     // Create tombstone temporal interval
                     // The tombstone marks when the deletion occurred. Its transaction_time
@@ -714,7 +714,7 @@ impl WriteTransaction {
 
                     // Generate version ID for tombstone
                     let tombstone_version_id =
-                        VersionId::new(self.version_id_gen.lock_or_err()?.next());
+                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
 
                     // Create tombstone temporal interval
                     // The tombstone marks when the deletion occurred. Its transaction_time
@@ -929,8 +929,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let node_id = NodeId::new(self.node_id_gen.lock_or_err()?.next());
-        let version_id = VersionId::new(self.version_id_gen.lock_or_err()?.next());
+        let node_id = NodeId::new_unchecked(self.node_id_gen.lock_or_err()?.next());
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
         let label_interned = GLOBAL_INTERNER.intern(label);
 
         // Get timestamp for temporal interval
@@ -966,8 +966,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let edge_id = EdgeId::new(self.edge_id_gen.lock_or_err()?.next());
-        let version_id = VersionId::new(self.version_id_gen.lock_or_err()?.next());
+        let edge_id = EdgeId::new_unchecked(self.edge_id_gen.lock_or_err()?.next());
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
         let label_interned = GLOBAL_INTERNER.intern(label);
 
         // Get timestamp for temporal interval
@@ -1000,7 +1000,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current node to preserve label
         let node = self.current.get_node(node_id)?;
-        let version_id = VersionId::new(self.version_id_gen.lock_or_err()?.next());
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;
@@ -1030,7 +1030,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current edge to preserve source, target, label
         let edge = self.current.get_edge(edge_id)?;
-        let version_id = VersionId::new(self.version_id_gen.lock_or_err()?.next());
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;
@@ -1252,8 +1252,8 @@ mod tests {
         let props = PropertyMapBuilder::new().build();
 
         // Try to create edge with non-existent nodes
-        let node1 = NodeId::new(999);
-        let node2 = NodeId::new(1000);
+        let node1 = NodeId::new(999).unwrap();
+        let node2 = NodeId::new(1000).unwrap();
 
         tx.create_edge(node1, node2, "KNOWS", props).unwrap();
 
@@ -1302,7 +1302,7 @@ mod tests {
         let (mut tx, _temp_dir) = create_test_write_tx();
 
         let props = PropertyMapBuilder::new().insert("age", 30i64).build();
-        let result = tx.update_node(NodeId::new(999), props);
+        let result = tx.update_node(NodeId::new(999).unwrap(), props);
 
         // Should fail because node doesn't exist
         assert!(result.is_err());
@@ -1343,7 +1343,7 @@ mod tests {
         let (mut tx, _temp_dir) = create_test_write_tx();
 
         let props = PropertyMapBuilder::new().insert("strength", 5i64).build();
-        let result = tx.update_edge(EdgeId::new(999), props);
+        let result = tx.update_edge(EdgeId::new(999).unwrap(), props);
 
         // Should fail because edge doesn't exist
         assert!(result.is_err());
@@ -1375,7 +1375,7 @@ mod tests {
     fn test_delete_node_not_found() {
         let (mut tx, _temp_dir) = create_test_write_tx();
 
-        let result = tx.delete_node(NodeId::new(999));
+        let result = tx.delete_node(NodeId::new(999).unwrap());
 
         // Should fail because node doesn't exist
         assert!(result.is_err());
@@ -1413,7 +1413,7 @@ mod tests {
     fn test_delete_edge_not_found() {
         let (mut tx, _temp_dir) = create_test_write_tx();
 
-        let result = tx.delete_edge(EdgeId::new(999));
+        let result = tx.delete_edge(EdgeId::new(999).unwrap());
 
         // Should fail because edge doesn't exist
         assert!(result.is_err());

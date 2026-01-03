@@ -183,7 +183,7 @@ mod tests {
         let current = Arc::new(CurrentStorage::new());
         let tx = create_test_read_tx(TxId::new(1), current);
 
-        let result = tx.get_node(NodeId::new(999));
+        let result = tx.get_node(NodeId::new(999).unwrap());
         assert!(result.is_err());
     }
 

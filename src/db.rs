@@ -748,7 +748,7 @@ mod tests {
             // This should fail validation (non-existent target)
             tx.create_edge(
                 valid_node,
-                NodeId::new(9999),
+                NodeId::new(9999).unwrap(),
                 "KNOWS",
                 PropertyMapBuilder::new().build(),
             )?;

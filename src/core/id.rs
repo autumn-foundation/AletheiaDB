@@ -6,15 +6,40 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use crate::utils::error::StorageError;
+
+/// Maximum valid ID value. Values above this are reserved for internal use.
+/// This prevents potential integer overflow issues and DoS attacks.
+pub const MAX_VALID_ID: u64 = u64::MAX - 1000;
 
 /// Unique identifier for a node in the graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(u64);
 
 impl NodeId {
-    /// Create a new NodeId from a u64 value.
+    /// Create a new NodeId from a u64 value with validation.
+    ///
+    /// Returns an error if the ID exceeds MAX_VALID_ID.
     #[inline]
-    pub const fn new(id: u64) -> Self {
+    pub fn new(id: u64) -> Result<Self, StorageError> {
+        if id > MAX_VALID_ID {
+            return Err(StorageError::InvalidId {
+                id,
+                id_type: "node",
+                reason: format!("ID {} exceeds maximum allowed value {}", id, MAX_VALID_ID),
+            });
+        }
+        Ok(NodeId(id))
+    }
+
+    /// Create a new NodeId without validation (for internal use only).
+    ///
+    /// # Safety
+    /// This function bypasses validation. Only use when you're certain the ID is valid,
+    /// such as when loading from trusted storage or in performance-critical paths where
+    /// validation has already occurred.
+    #[inline]
+    pub(crate) const fn new_unchecked(id: u64) -> Self {
         NodeId(id)
     }
 
@@ -36,9 +61,29 @@ impl fmt::Display for NodeId {
 pub struct EdgeId(u64);
 
 impl EdgeId {
-    /// Create a new EdgeId from a u64 value.
+    /// Create a new EdgeId from a u64 value with validation.
+    ///
+    /// Returns an error if the ID exceeds MAX_VALID_ID.
     #[inline]
-    pub const fn new(id: u64) -> Self {
+    pub fn new(id: u64) -> Result<Self, StorageError> {
+        if id > MAX_VALID_ID {
+            return Err(StorageError::InvalidId {
+                id,
+                id_type: "edge",
+                reason: format!("ID {} exceeds maximum allowed value {}", id, MAX_VALID_ID),
+            });
+        }
+        Ok(EdgeId(id))
+    }
+
+    /// Create a new EdgeId without validation (for internal use only).
+    ///
+    /// # Safety
+    /// This function bypasses validation. Only use when you're certain the ID is valid,
+    /// such as when loading from trusted storage or in performance-critical paths where
+    /// validation has already occurred.
+    #[inline]
+    pub(crate) const fn new_unchecked(id: u64) -> Self {
         EdgeId(id)
     }
 
@@ -60,9 +105,29 @@ impl fmt::Display for EdgeId {
 pub struct VersionId(u64);
 
 impl VersionId {
-    /// Create a new VersionId from a u64 value.
+    /// Create a new VersionId from a u64 value with validation.
+    ///
+    /// Returns an error if the ID exceeds MAX_VALID_ID.
     #[inline]
-    pub const fn new(id: u64) -> Self {
+    pub fn new(id: u64) -> Result<Self, StorageError> {
+        if id > MAX_VALID_ID {
+            return Err(StorageError::InvalidId {
+                id,
+                id_type: "version",
+                reason: format!("ID {} exceeds maximum allowed value {}", id, MAX_VALID_ID),
+            });
+        }
+        Ok(VersionId(id))
+    }
+
+    /// Create a new VersionId without validation (for internal use only).
+    ///
+    /// # Safety
+    /// This function bypasses validation. Only use when you're certain the ID is valid,
+    /// such as when loading from trusted storage or in performance-critical paths where
+    /// validation has already occurred.
+    #[inline]
+    pub(crate) const fn new_unchecked(id: u64) -> Self {
         VersionId(id)
     }
 
@@ -192,25 +257,25 @@ mod tests {
 
     #[test]
     fn test_node_id_creation() {
-        let id = NodeId::new(42);
+        let id = NodeId::new(42).unwrap();
         assert_eq!(id.as_u64(), 42);
     }
 
     #[test]
     fn test_edge_id_creation() {
-        let id = EdgeId::new(100);
+        let id = EdgeId::new(100).unwrap();
         assert_eq!(id.as_u64(), 100);
     }
 
     #[test]
     fn test_version_id_creation() {
-        let id = VersionId::new(1000);
+        let id = VersionId::new(1000).unwrap();
         assert_eq!(id.as_u64(), 1000);
     }
 
     #[test]
     fn test_entity_id_from_node() {
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let entity_id: EntityId = node_id.into();
         assert!(entity_id.is_node());
         assert!(!entity_id.is_edge());
@@ -219,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_entity_id_from_edge() {
-        let edge_id = EdgeId::new(2);
+        let edge_id = EdgeId::new(2).unwrap();
         let entity_id: EntityId = edge_id.into();
         assert!(!entity_id.is_node());
         assert!(entity_id.is_edge());
@@ -244,9 +309,9 @@ mod tests {
 
     #[test]
     fn test_id_display() {
-        let node = NodeId::new(42);
-        let edge = EdgeId::new(100);
-        let version = VersionId::new(1000);
+        let node = NodeId::new(42).unwrap();
+        let edge = EdgeId::new(100).unwrap();
+        let version = VersionId::new(1000).unwrap();
 
         assert_eq!(format!("{}", node), "Node(42)");
         assert_eq!(format!("{}", edge), "Edge(100)");
@@ -257,12 +322,89 @@ mod tests {
     fn test_ids_are_distinct_types() {
         // This test ensures that you cannot accidentally use one type where another is expected.
         // This is enforced by the type system, so we just verify we can create different types.
-        let _node = NodeId::new(1);
-        let _edge = EdgeId::new(1);
-        let _version = VersionId::new(1);
+        // Use new_unchecked since we're just testing the type system, not validation.
+        let _node = NodeId::new_unchecked(1);
+        let _edge = EdgeId::new_unchecked(1);
+        let _version = VersionId::new_unchecked(1);
 
         // The following would fail to compile (which is what we want):
         // fn takes_node_id(_id: NodeId) {}
         // takes_node_id(_edge); // Type error!
+    }
+
+    #[test]
+    fn test_id_validation_accepts_valid_ids() {
+        // Valid IDs should be accepted
+        assert!(NodeId::new(0).is_ok());
+        assert!(NodeId::new(42).is_ok());
+        assert!(NodeId::new(MAX_VALID_ID).is_ok());
+
+        assert!(EdgeId::new(0).is_ok());
+        assert!(EdgeId::new(100).is_ok());
+        assert!(EdgeId::new(MAX_VALID_ID).is_ok());
+
+        assert!(VersionId::new(0).is_ok());
+        assert!(VersionId::new(1000).is_ok());
+        assert!(VersionId::new(MAX_VALID_ID).is_ok());
+    }
+
+    #[test]
+    fn test_id_validation_rejects_out_of_range() {
+        // IDs exceeding MAX_VALID_ID should be rejected
+        let node_result = NodeId::new(MAX_VALID_ID + 1);
+        assert!(node_result.is_err());
+        if let Err(StorageError::InvalidId { id, id_type, reason }) = node_result {
+            assert_eq!(id, MAX_VALID_ID + 1);
+            assert_eq!(id_type, "node");
+            assert!(reason.contains("exceeds maximum"));
+        } else {
+            panic!("Expected InvalidId error");
+        }
+
+        let edge_result = EdgeId::new(u64::MAX);
+        assert!(edge_result.is_err());
+        if let Err(StorageError::InvalidId { id, id_type, .. }) = edge_result {
+            assert_eq!(id, u64::MAX);
+            assert_eq!(id_type, "edge");
+        } else {
+            panic!("Expected InvalidId error");
+        }
+
+        let version_result = VersionId::new(MAX_VALID_ID + 1000);
+        assert!(version_result.is_err());
+        if let Err(StorageError::InvalidId { id_type, .. }) = version_result {
+            assert_eq!(id_type, "version");
+        } else {
+            panic!("Expected InvalidId error");
+        }
+    }
+
+    #[test]
+    fn test_new_unchecked_bypasses_validation() {
+        // new_unchecked should create IDs without validation
+        // This is for internal use where we know the ID is safe
+        let node = NodeId::new_unchecked(42);
+        assert_eq!(node.as_u64(), 42);
+
+        let edge = EdgeId::new_unchecked(100);
+        assert_eq!(edge.as_u64(), 100);
+
+        let version = VersionId::new_unchecked(1000);
+        assert_eq!(version.as_u64(), 1000);
+
+        // Even out-of-range values work with new_unchecked (though they shouldn't be used)
+        let _risky_node = NodeId::new_unchecked(u64::MAX);
+        let _risky_edge = EdgeId::new_unchecked(u64::MAX);
+        let _risky_version = VersionId::new_unchecked(u64::MAX);
+    }
+
+    #[test]
+    fn test_max_valid_id_constant() {
+        // Verify the MAX_VALID_ID constant is set correctly
+        assert_eq!(MAX_VALID_ID, u64::MAX - 1000);
+        
+        // Verify it leaves room for reserved values
+        assert!(MAX_VALID_ID < u64::MAX);
+        assert!(u64::MAX - MAX_VALID_ID >= 1000);
     }
 }

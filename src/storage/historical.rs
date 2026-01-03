@@ -472,8 +472,8 @@ mod tests {
     fn test_create_first_version() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
-        let version_id = VersionId::new(100);
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("Person");
         let temporal = BiTemporalInterval::current(1000);
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
@@ -496,13 +496,13 @@ mod tests {
             max_delta_chain: 10,
         });
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Person");
 
         // Create 5 versions
         let mut version_ids = Vec::new();
         for i in 0..5 {
-            let version_id = VersionId::new(100 + i);
+            let version_id = VersionId::new(100 + i).unwrap();
             let temporal = BiTemporalInterval::current(1000 + (i as i64) * 100);
             let props = PropertyMapBuilder::new()
                 .insert("name", "Alice")
@@ -544,11 +544,11 @@ mod tests {
     fn test_property_reconstruction() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Person");
 
         // Version 1: name=Alice, age=30
-        let v1 = VersionId::new(1);
+        let v1 = VersionId::new(1).unwrap();
         storage
             .add_node_version(
                 node_id,
@@ -563,7 +563,7 @@ mod tests {
             .unwrap();
 
         // Version 2: name=Alice, age=31 (delta)
-        let v2 = VersionId::new(2);
+        let v2 = VersionId::new(2).unwrap();
         storage
             .add_node_version(
                 node_id,
@@ -587,13 +587,13 @@ mod tests {
     fn test_find_version_at_time() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Person");
 
         // Create versions at different times
-        let v1 = VersionId::new(1);
-        let v2 = VersionId::new(2);
-        let v3 = VersionId::new(3);
+        let v1 = VersionId::new(1).unwrap();
+        let v2 = VersionId::new(2).unwrap();
+        let v3 = VersionId::new(3).unwrap();
 
         storage
             .add_node_version(
@@ -659,8 +659,8 @@ mod tests {
         for i in 0..3 {
             storage
                 .add_node_version(
-                    NodeId::new(1),
-                    VersionId::new(i),
+                    NodeId::new(1).unwrap(),
+                    VersionId::new(i).unwrap(),
                     BiTemporalInterval::current(1000 + (i as i64) * 100),
                     label,
                     PropertyMapBuilder::new().build(),
@@ -699,8 +699,8 @@ mod tests {
     fn test_create_node_version_with_vector_property() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
-        let version_id = VersionId::new(100);
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("Document");
         let temporal = BiTemporalInterval::current(1000);
 
@@ -731,11 +731,11 @@ mod tests {
     fn test_delta_computation_with_vector_change() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Document");
 
         // Version 1: Initial embedding
-        let v1 = VersionId::new(1);
+        let v1 = VersionId::new(1).unwrap();
         let embedding_v1 = vec![0.1f32, 0.2, 0.3];
         storage
             .add_node_version(
@@ -751,7 +751,7 @@ mod tests {
             .unwrap();
 
         // Version 2: Updated embedding (should create delta)
-        let v2 = VersionId::new(2);
+        let v2 = VersionId::new(2).unwrap();
         let embedding_v2 = vec![0.4f32, 0.5, 0.6];
         storage
             .add_node_version(
@@ -788,11 +788,11 @@ mod tests {
     fn test_delta_only_vector_changes() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Document");
 
         // Version 1: title + embedding
-        let v1 = VersionId::new(1);
+        let v1 = VersionId::new(1).unwrap();
         let embedding_v1 = vec![0.1f32, 0.2];
         storage
             .add_node_version(
@@ -808,7 +808,7 @@ mod tests {
             .unwrap();
 
         // Version 2: Only embedding changes
-        let v2 = VersionId::new(2);
+        let v2 = VersionId::new(2).unwrap();
         let embedding_v2 = vec![0.9f32, 0.8];
         storage
             .add_node_version(
@@ -843,14 +843,14 @@ mod tests {
     fn test_vector_unchanged_between_versions() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Document");
 
         // Same embedding for both versions
         let embedding = vec![0.5f32, 0.5, 0.5];
 
         // Version 1
-        let v1 = VersionId::new(1);
+        let v1 = VersionId::new(1).unwrap();
         storage
             .add_node_version(
                 node_id,
@@ -865,7 +865,7 @@ mod tests {
             .unwrap();
 
         // Version 2: Same embedding, different title
-        let v2 = VersionId::new(2);
+        let v2 = VersionId::new(2).unwrap();
         storage
             .add_node_version(
                 node_id,
@@ -911,7 +911,7 @@ mod tests {
             max_delta_chain: 10,
         });
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Document");
 
         // Create 3 versions with different embeddings
@@ -921,7 +921,7 @@ mod tests {
             storage
                 .add_node_version(
                     node_id,
-                    VersionId::new(i as u64),
+                    VersionId::new(i as u64).unwrap(),
                     BiTemporalInterval::current(1000 + (i as i64) * 100),
                     label,
                     PropertyMapBuilder::new()
@@ -934,19 +934,19 @@ mod tests {
         // V0: anchor (first), V1: delta, V2: anchor (interval=2)
         assert!(
             storage
-                .get_node_version(VersionId::new(0))
+                .get_node_version(VersionId::new(0).unwrap())
                 .unwrap()
                 .is_anchor()
         );
         assert!(
             storage
-                .get_node_version(VersionId::new(1))
+                .get_node_version(VersionId::new(1).unwrap())
                 .unwrap()
                 .is_delta()
         );
         assert!(
             storage
-                .get_node_version(VersionId::new(2))
+                .get_node_version(VersionId::new(2).unwrap())
                 .unwrap()
                 .is_anchor()
         );
@@ -954,7 +954,7 @@ mod tests {
         // Verify each version reconstructs correctly
         for (i, emb) in embeddings.iter().enumerate() {
             let props = storage
-                .reconstruct_node_properties(VersionId::new(i as u64))
+                .reconstruct_node_properties(VersionId::new(i as u64).unwrap())
                 .unwrap();
             assert_eq!(
                 props.get("embedding").and_then(|v| v.as_vector()),
@@ -967,12 +967,12 @@ mod tests {
     fn test_edge_version_with_vector() {
         let mut storage = HistoricalStorage::new();
 
-        let edge_id = EdgeId::new(1);
-        let version_id = VersionId::new(100);
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("SIMILAR_TO");
         let temporal = BiTemporalInterval::current(1000);
-        let source = NodeId::new(10);
-        let target = NodeId::new(20);
+        let source = NodeId::new(10).unwrap();
+        let target = NodeId::new(20).unwrap();
 
         // Edge with relationship embedding
         let embedding = vec![0.8f32, 0.1, 0.1];
@@ -1005,13 +1005,13 @@ mod tests {
     fn test_edge_delta_with_vector_change() {
         let mut storage = HistoricalStorage::new();
 
-        let edge_id = EdgeId::new(1);
+        let edge_id = EdgeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("SIMILAR_TO");
-        let source = NodeId::new(10);
-        let target = NodeId::new(20);
+        let source = NodeId::new(10).unwrap();
+        let target = NodeId::new(20).unwrap();
 
         // Version 1: Initial edge
-        let v1 = VersionId::new(1);
+        let v1 = VersionId::new(1).unwrap();
         let embedding_v1 = vec![0.5f32, 0.5];
         storage
             .add_edge_version(
@@ -1029,7 +1029,7 @@ mod tests {
             .unwrap();
 
         // Version 2: Updated embedding and weight
-        let v2 = VersionId::new(2);
+        let v2 = VersionId::new(2).unwrap();
         let embedding_v2 = vec![0.9f32, 0.1];
         storage
             .add_edge_version(
@@ -1062,7 +1062,7 @@ mod tests {
     fn test_high_dimensional_vector_versioning() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Embedding");
 
         // High-dimensional embedding (like OpenAI's 1536-dim)
@@ -1071,7 +1071,7 @@ mod tests {
             .map(|i| (i as f32) / DIMENSIONS as f32)
             .collect();
 
-        let v1 = VersionId::new(1);
+        let v1 = VersionId::new(1).unwrap();
         storage
             .add_node_version(
                 node_id,
@@ -1099,7 +1099,7 @@ mod tests {
     fn test_version_time_travel_with_vectors() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Document");
 
         // Create versions at different times with different embeddings
@@ -1113,7 +1113,7 @@ mod tests {
             storage
                 .add_node_version(
                     node_id,
-                    VersionId::new(i as u64),
+                    VersionId::new(i as u64).unwrap(),
                     BiTemporalInterval::new(
                         TimeRange::new(*start, *end),
                         TimeRange::new(0, Timestamp::MAX),
@@ -1131,9 +1131,9 @@ mod tests {
         let v_at_750 = storage.find_node_version_at_time(node_id, 750, 0);
         let v_at_1500 = storage.find_node_version_at_time(node_id, 1500, 0);
 
-        assert_eq!(v_at_250, Some(VersionId::new(0)));
-        assert_eq!(v_at_750, Some(VersionId::new(1)));
-        assert_eq!(v_at_1500, Some(VersionId::new(2)));
+        assert_eq!(v_at_250, Some(VersionId::new(0).unwrap()));
+        assert_eq!(v_at_750, Some(VersionId::new(1).unwrap()));
+        assert_eq!(v_at_1500, Some(VersionId::new(2).unwrap()));
 
         // Verify each has correct embedding
         for (vid, expected_emb) in [
@@ -1157,14 +1157,14 @@ mod tests {
     fn test_empty_vector_versioning() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("EmptyEmbedding");
 
         // Empty vector should work with delta compression
         let empty_vec: Vec<f32> = vec![];
 
         // Version 1: empty vector
-        let v1 = VersionId::new(1);
+        let v1 = VersionId::new(1).unwrap();
         storage
             .add_node_version(
                 node_id,
@@ -1179,7 +1179,7 @@ mod tests {
             .unwrap();
 
         // Version 2: still empty (should be excluded from delta as unchanged)
-        let v2 = VersionId::new(2);
+        let v2 = VersionId::new(2).unwrap();
         storage
             .add_node_version(
                 node_id,
@@ -1211,7 +1211,7 @@ mod tests {
     fn test_vector_with_special_float_values() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("SpecialFloats");
 
         // Note: NaN and Infinity are allowed in storage (validation is optional).
@@ -1220,7 +1220,7 @@ mod tests {
 
         let special_vec = vec![f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0];
 
-        let v1 = VersionId::new(1);
+        let v1 = VersionId::new(1).unwrap();
         storage
             .add_node_version(
                 node_id,
@@ -1250,14 +1250,14 @@ mod tests {
     fn test_nan_in_vector_delta_behavior() {
         let mut storage = HistoricalStorage::new();
 
-        let node_id = NodeId::new(1);
+        let node_id = NodeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("NaNTest");
 
         // NaN != NaN per IEEE 754, so same NaN values will be detected as
         // "changed" in delta computation. This is documented behavior.
         let nan_vec = vec![f32::NAN, 1.0];
 
-        let v1 = VersionId::new(1);
+        let v1 = VersionId::new(1).unwrap();
         storage
             .add_node_version(
                 node_id,
@@ -1271,7 +1271,7 @@ mod tests {
             .unwrap();
 
         // Same NaN values - will be treated as changed due to NaN != NaN
-        let v2 = VersionId::new(2);
+        let v2 = VersionId::new(2).unwrap();
         storage
             .add_node_version(
                 node_id,

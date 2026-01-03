@@ -209,8 +209,8 @@ mod tests {
     #[test]
     fn test_write_buffer_add_node() {
         let mut buffer = WriteBuffer::new();
-        let node_id = NodeId::new(1);
-        let version_id = VersionId::new(1);
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
         let label = crate::core::interning::GLOBAL_INTERNER.intern("Person");
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
@@ -226,16 +226,16 @@ mod tests {
         assert_eq!(buffer.len(), 1);
         assert!(!buffer.is_empty());
         assert!(buffer.has_modified_node(node_id));
-        assert!(!buffer.has_modified_node(NodeId::new(2)));
+        assert!(!buffer.has_modified_node(NodeId::new(2).unwrap()));
     }
 
     #[test]
     fn test_write_buffer_add_edge() {
         let mut buffer = WriteBuffer::new();
-        let edge_id = EdgeId::new(1);
-        let version_id = VersionId::new(1);
-        let source = NodeId::new(1);
-        let target = NodeId::new(2);
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
         let label = crate::core::interning::GLOBAL_INTERNER.intern("KNOWS");
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
@@ -252,15 +252,15 @@ mod tests {
 
         assert_eq!(buffer.len(), 1);
         assert!(buffer.has_modified_edge(edge_id));
-        assert!(!buffer.has_modified_edge(EdgeId::new(2)));
+        assert!(!buffer.has_modified_edge(EdgeId::new(2).unwrap()));
     }
 
     #[test]
     fn test_write_buffer_multiple_operations() {
         let mut buffer = WriteBuffer::new();
-        let node_id = NodeId::new(1);
-        let edge_id = EdgeId::new(1);
-        let version_id = VersionId::new(1);
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
         let label = crate::core::interning::GLOBAL_INTERNER.intern("Test");
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
@@ -279,7 +279,7 @@ mod tests {
             edge_id,
             version_id,
             source: node_id,
-            target: NodeId::new(2),
+            target: NodeId::new(2).unwrap(),
             label,
             properties,
             temporal,
@@ -293,8 +293,8 @@ mod tests {
     #[test]
     fn test_write_buffer_clear() {
         let mut buffer = WriteBuffer::new();
-        let node_id = NodeId::new(1);
-        let version_id = VersionId::new(1);
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
         let label = crate::core::interning::GLOBAL_INTERNER.intern("Test");
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
@@ -319,9 +319,9 @@ mod tests {
     #[test]
     fn test_write_buffer_update_tracking() {
         let mut buffer = WriteBuffer::new();
-        let node_id = NodeId::new(1);
-        let version_id_1 = VersionId::new(1);
-        let version_id_2 = VersionId::new(2);
+        let node_id = NodeId::new(1).unwrap();
+        let version_id_1 = VersionId::new(1).unwrap();
+        let version_id_2 = VersionId::new(2).unwrap();
         let label = crate::core::interning::GLOBAL_INTERNER.intern("Test");
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());

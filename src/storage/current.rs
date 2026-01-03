@@ -180,8 +180,8 @@ impl CurrentStorage {
     ///
     /// Returns the ID of the newly created node.
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
-        let node_id = NodeId::new(self.node_id_gen.next());
-        let version_id = VersionId::new(self.version_id_gen.next());
+        let node_id = NodeId::new_unchecked(self.node_id_gen.next());
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next());
         let label_interned = GLOBAL_INTERNER.intern(label);
 
         let node = Node::new(node_id, label_interned, properties.clone(), version_id);
@@ -215,8 +215,8 @@ impl CurrentStorage {
             return Err(StorageError::NodeNotFound(target).into());
         }
 
-        let edge_id = EdgeId::new(self.edge_id_gen.next());
-        let version_id = VersionId::new(self.version_id_gen.next());
+        let edge_id = EdgeId::new_unchecked(self.edge_id_gen.next());
+        let version_id = VersionId::new_unchecked(self.version_id_gen.next());
         let label_interned = GLOBAL_INTERNER.intern(label);
 
         let edge = Edge::new(
@@ -602,8 +602,8 @@ mod tests {
         let storage = CurrentStorage::new();
 
         let result = storage.create_edge(
-            NodeId::new(999),
-            NodeId::new(1000),
+            NodeId::new(999).unwrap(),
+            NodeId::new(1000).unwrap(),
             "KNOWS",
             PropertyMapBuilder::new().build(),
         );

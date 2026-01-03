@@ -98,7 +98,7 @@ impl AdjacencyIndex {
 
         // Iterate through all node IDs in order
         for node_id in 0..=max_node_id {
-            let node = NodeId::new(node_id);
+            let node = NodeId::new_unchecked(node_id);
             if let Some(mut adj_list) = adjacency_map.remove(&node) {
                 // Sort by target for deterministic ordering
                 adj_list.sort_by_key(|e| e.target);
@@ -185,8 +185,8 @@ mod tests {
     fn test_empty_index() {
         let index = AdjacencyIndex::new();
         assert_eq!(index.edge_count(), 0);
-        assert_eq!(index.degree(NodeId::new(0)), 0);
-        assert_eq!(index.get_adjacency(NodeId::new(0)).len(), 0);
+        assert_eq!(index.degree(NodeId::new(0).unwrap()), 0);
+        assert_eq!(index.get_adjacency(NodeId::new(0).unwrap()).len(), 0);
     }
 
     #[test]
@@ -194,28 +194,28 @@ mod tests {
         let knows = GLOBAL_INTERNER.intern("KNOWS");
 
         let edges = vec![
-            (NodeId::new(0), NodeId::new(1), EdgeId::new(0), knows),
-            (NodeId::new(0), NodeId::new(2), EdgeId::new(1), knows),
-            (NodeId::new(1), NodeId::new(2), EdgeId::new(2), knows),
+            (NodeId::new(0).unwrap(), NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
+            (NodeId::new(0).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
+            (NodeId::new(1).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(2).unwrap(), knows),
         ];
 
         let index = AdjacencyIndex::build(edges);
 
         // Node 0 has 2 outgoing edges
-        assert_eq!(index.degree(NodeId::new(0)), 2);
-        let adj0 = index.get_adjacency(NodeId::new(0));
+        assert_eq!(index.degree(NodeId::new(0).unwrap()), 2);
+        let adj0 = index.get_adjacency(NodeId::new(0).unwrap());
         assert_eq!(adj0.len(), 2);
-        assert_eq!(adj0[0].target, NodeId::new(1));
-        assert_eq!(adj0[1].target, NodeId::new(2));
+        assert_eq!(adj0[0].target, NodeId::new(1).unwrap());
+        assert_eq!(adj0[1].target, NodeId::new(2).unwrap());
 
         // Node 1 has 1 outgoing edge
-        assert_eq!(index.degree(NodeId::new(1)), 1);
-        let adj1 = index.get_adjacency(NodeId::new(1));
+        assert_eq!(index.degree(NodeId::new(1).unwrap()), 1);
+        let adj1 = index.get_adjacency(NodeId::new(1).unwrap());
         assert_eq!(adj1.len(), 1);
-        assert_eq!(adj1[0].target, NodeId::new(2));
+        assert_eq!(adj1[0].target, NodeId::new(2).unwrap());
 
         // Node 2 has no outgoing edges
-        assert_eq!(index.degree(NodeId::new(2)), 0);
+        assert_eq!(index.degree(NodeId::new(2).unwrap()), 0);
 
         // Total edges
         assert_eq!(index.edge_count(), 3);
@@ -227,51 +227,51 @@ mod tests {
         let follows = GLOBAL_INTERNER.intern("FOLLOWS");
 
         let edges = vec![
-            (NodeId::new(0), NodeId::new(1), EdgeId::new(0), knows),
-            (NodeId::new(0), NodeId::new(2), EdgeId::new(1), follows),
-            (NodeId::new(0), NodeId::new(3), EdgeId::new(2), knows),
+            (NodeId::new(0).unwrap(), NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
+            (NodeId::new(0).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), follows),
+            (NodeId::new(0).unwrap(), NodeId::new(3).unwrap(), EdgeId::new(2).unwrap(), knows),
         ];
 
         let index = AdjacencyIndex::build(edges);
 
         // Get all edges from node 0
-        assert_eq!(index.degree(NodeId::new(0)), 3);
+        assert_eq!(index.degree(NodeId::new(0).unwrap()), 3);
 
         // Get only KNOWS edges from node 0
         let knows_edges: Vec<_> = index
-            .get_adjacency_with_label(NodeId::new(0), knows)
+            .get_adjacency_with_label(NodeId::new(0).unwrap(), knows)
             .collect();
         assert_eq!(knows_edges.len(), 2);
 
         // Get only FOLLOWS edges from node 0
         let follows_edges: Vec<_> = index
-            .get_adjacency_with_label(NodeId::new(0), follows)
+            .get_adjacency_with_label(NodeId::new(0).unwrap(), follows)
             .collect();
         assert_eq!(follows_edges.len(), 1);
-        assert_eq!(follows_edges[0].target, NodeId::new(2));
+        assert_eq!(follows_edges[0].target, NodeId::new(2).unwrap());
     }
 
     #[test]
     fn test_node_without_edges() {
         let knows = GLOBAL_INTERNER.intern("KNOWS");
 
-        let edges = vec![(NodeId::new(0), NodeId::new(1), EdgeId::new(0), knows)];
+        let edges = vec![(NodeId::new(0).unwrap(), NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows)];
 
         let index = AdjacencyIndex::build(edges);
 
         // Node 5 doesn't exist
-        assert_eq!(index.degree(NodeId::new(5)), 0);
-        assert!(!index.has_edges(NodeId::new(5)));
-        assert_eq!(index.get_adjacency(NodeId::new(5)).len(), 0);
+        assert_eq!(index.degree(NodeId::new(5).unwrap()), 0);
+        assert!(!index.has_edges(NodeId::new(5).unwrap()));
+        assert_eq!(index.get_adjacency(NodeId::new(5).unwrap()).len(), 0);
     }
 
     #[test]
     fn test_adjacency_entry() {
         let label = GLOBAL_INTERNER.intern("TEST");
-        let entry = AdjacencyEntry::new(NodeId::new(1), EdgeId::new(100), label);
+        let entry = AdjacencyEntry::new(NodeId::new(1).unwrap(), EdgeId::new(100).unwrap(), label);
 
-        assert_eq!(entry.target, NodeId::new(1));
-        assert_eq!(entry.edge_id, EdgeId::new(100));
+        assert_eq!(entry.target, NodeId::new(1).unwrap());
+        assert_eq!(entry.edge_id, EdgeId::new(100).unwrap());
         assert_eq!(entry.label, label);
     }
 
@@ -280,17 +280,17 @@ mod tests {
         // Edges deliberately out of order
         let knows = GLOBAL_INTERNER.intern("KNOWS");
         let edges = vec![
-            (NodeId::new(0), NodeId::new(3), EdgeId::new(2), knows),
-            (NodeId::new(0), NodeId::new(1), EdgeId::new(0), knows),
-            (NodeId::new(0), NodeId::new(2), EdgeId::new(1), knows),
+            (NodeId::new(0).unwrap(), NodeId::new(3).unwrap(), EdgeId::new(2).unwrap(), knows),
+            (NodeId::new(0).unwrap(), NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
+            (NodeId::new(0).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
         ];
 
         let index = AdjacencyIndex::build(edges);
-        let adj = index.get_adjacency(NodeId::new(0));
+        let adj = index.get_adjacency(NodeId::new(0).unwrap());
 
         // Should be sorted by target
-        assert_eq!(adj[0].target, NodeId::new(1));
-        assert_eq!(adj[1].target, NodeId::new(2));
-        assert_eq!(adj[2].target, NodeId::new(3));
+        assert_eq!(adj[0].target, NodeId::new(1).unwrap());
+        assert_eq!(adj[1].target, NodeId::new(2).unwrap());
+        assert_eq!(adj[2].target, NodeId::new(3).unwrap());
     }
 }
