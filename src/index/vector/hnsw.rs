@@ -915,4 +915,188 @@ mod tests {
         // Index should be created successfully
         assert_eq!(index.dimensions(), 4);
     }
+
+    // ============================================================================
+    // Property-Based Tests
+    // ============================================================================
+
+    use proptest::prelude::*;
+
+    /// Strategy for generating valid f32 vectors (no NaN/Infinity)
+    fn valid_f32_vector(dims: usize) -> impl Strategy<Value = Vec<f32>> {
+        prop::collection::vec(
+            // Generate finite floats in reasonable range
+            prop::num::f32::NORMAL.prop_filter("must be finite", |f| f.is_finite()),
+            dims,
+        )
+    }
+
+    /// Strategy for generating valid NodeId
+    fn valid_node_id() -> impl Strategy<Value = NodeId> {
+        (1u64..1000u64).prop_map(NodeId::new)
+    }
+
+    proptest! {
+        /// Property: Search results must be sorted by distance (ascending)
+        /// Invariant: For all i < j, results[i].distance <= results[j].distance
+        #[test]
+        fn prop_search_results_sorted(
+            vectors in prop::collection::vec((valid_node_id(), valid_f32_vector(4)), 1..20),
+            query in valid_f32_vector(4)
+        ) {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .initial_capacity(100)
+                .build()
+                .unwrap();
+
+            // Add all vectors
+            for (id, vec) in &vectors {
+                let _ = index.add(*id, vec);
+            }
+
+            // Search
+            let k = vectors.len().min(10);
+            let results = index.search(&query, k).unwrap();
+
+            // Verify results are sorted ascending by distance
+            for i in 0..results.len().saturating_sub(1) {
+                prop_assert!(
+                    results[i].1 <= results[i + 1].1,
+                    "Results not sorted: distance[{}]={} > distance[{}]={}",
+                    i, results[i].1, i + 1, results[i + 1].1
+                );
+            }
+        }
+
+        /// Property: len() must match number of unique NodeIds added
+        /// Invariant: index.len() == unique_ids_added
+        #[test]
+        fn prop_len_matches_unique_adds(
+            operations in prop::collection::vec(
+                (valid_node_id(), valid_f32_vector(4)),
+                1..30
+            )
+        ) {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .initial_capacity(100)
+                .build()
+                .unwrap();
+
+            // Track unique IDs
+            let mut unique_ids = std::collections::HashSet::new();
+
+            // Perform operations
+            for (id, vec) in &operations {
+                let _ = index.add(*id, vec);
+                unique_ids.insert(*id);
+            }
+
+            // Verify len matches unique count
+            prop_assert_eq!(
+                index.len(),
+                unique_ids.len(),
+                "Index len ({}) doesn't match unique IDs added ({})",
+                index.len(),
+                unique_ids.len()
+            );
+        }
+
+        /// Property: Adding then removing a vector should result in index.len() unchanged
+        /// Invariant: len_before_add == len_after_remove
+        #[test]
+        fn prop_add_remove_invariant(
+            initial_ops in prop::collection::vec((valid_node_id(), valid_f32_vector(4)), 1..10),
+            test_id in valid_node_id(),
+            test_vec in valid_f32_vector(4)
+        ) {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .initial_capacity(100)
+                .build()
+                .unwrap();
+
+            // Add initial vectors (but not test_id)
+            for (id, vec) in &initial_ops {
+                if *id != test_id {
+                    let _ = index.add(*id, vec);
+                }
+            }
+
+            let len_before = index.len();
+
+            // Add test vector
+            index.add(test_id, &test_vec).unwrap();
+            prop_assert_eq!(index.len(), len_before + 1, "Add should increase len by 1");
+
+            // Remove test vector
+            index.remove(test_id).unwrap();
+            prop_assert_eq!(index.len(), len_before, "Remove should restore original len");
+        }
+
+        /// Property: Search with k > index.len() should return all vectors
+        /// Invariant: results.len() == min(k, index.len())
+        #[test]
+        fn prop_search_k_bound(
+            vectors in prop::collection::vec((valid_node_id(), valid_f32_vector(4)), 1..15),
+            query in valid_f32_vector(4),
+            k in 1usize..100
+        ) {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .initial_capacity(100)
+                .build()
+                .unwrap();
+
+            // Track unique IDs
+            let mut unique_count = 0;
+            let mut seen = std::collections::HashSet::new();
+            for (id, vec) in &vectors {
+                let _ = index.add(*id, vec);
+                if seen.insert(*id) {
+                    unique_count += 1;
+                }
+            }
+
+            let results = index.search(&query, k).unwrap();
+            let expected_len = k.min(unique_count);
+
+            prop_assert_eq!(
+                results.len(),
+                expected_len,
+                "Search should return min(k={}, index.len()={}) = {} results, got {}",
+                k, unique_count, expected_len, results.len()
+            );
+        }
+
+        /// Property: Filtered search should only return results matching predicate
+        /// Invariant: All results satisfy the predicate
+        #[test]
+        fn prop_filtered_search_correctness(
+            vectors in prop::collection::vec((valid_node_id(), valid_f32_vector(4)), 1..20),
+            query in valid_f32_vector(4),
+            allowed_ids in prop::collection::hash_set(valid_node_id(), 1..10)
+        ) {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .initial_capacity(100)
+                .build()
+                .unwrap();
+
+            // Add vectors
+            for (id, vec) in &vectors {
+                let _ = index.add(*id, vec);
+            }
+
+            // Search with filter
+            let results = index
+                .search_with_filter(&query, 10, |id| allowed_ids.contains(id))
+                .unwrap();
+
+            // Verify all results match predicate
+            for (id, _dist) in &results {
+                prop_assert!(
+                    allowed_ids.contains(id),
+                    "Result {:?} not in allowed set",
+                    id
+                );
+            }
+        }
+    }
 }
