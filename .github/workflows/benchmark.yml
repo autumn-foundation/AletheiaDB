@@ -63,10 +63,15 @@ jobs:
           output-file-path: gallifreydb_output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
+          # GitHub Pages configuration
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
           # Show alert with commit comment on detecting possible performance regression
           alert-threshold: '150%'
           comment-on-alert: true
           fail-on-alert: false
+          # Show chart on GitHub Pages
+          max-items-in-chart: 100
 
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v4
