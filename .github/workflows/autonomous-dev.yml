@@ -1,0 +1,216 @@
+name: Autonomous Development
+
+on:
+  schedule:
+    # Daily at 3 AM UTC (low traffic time)
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Specific issue number to work on (optional)'
+        required: false
+        type: number
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  autonomous-development:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # Safety: prevent runaway processes
+
+    steps:
+      - name: Check rate limits
+        id: check-limits
+        run: |
+          # Count open automated PRs
+          AUTOMATED_PRS=$(gh pr list --repo ${{ github.repository }} --label "automated-implementation" --state open --json number --jq 'length')
+          echo "automated_prs=$AUTOMATED_PRS" >> $GITHUB_OUTPUT
+
+          # Safety: Max 5 automated PRs open at once
+          if [ "$AUTOMATED_PRS" -ge 5 ]; then
+            echo "Too many automated PRs open ($AUTOMATED_PRS). Skipping run."
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Find eligible issue
+        id: find-issue
+        if: steps.check-limits.outputs.should_run == 'true'
+        run: |
+          # Find issues labeled 'autonomous-ready' that are open
+          ISSUES=$(gh issue list \
+            --repo ${{ github.repository }} \
+            --label "autonomous-ready" \
+            --state open \
+            --json number,title,labels,updatedAt \
+            --limit 20)
+
+          # Filter out issues with recent failed attempts (commented by bot in last 7 days)
+          # For now, just pick the oldest updated issue
+          ISSUE_NUMBER=$(echo "$ISSUES" | jq -r 'sort_by(.updatedAt) | .[0].number // empty')
+
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "No eligible issues found with 'autonomous-ready' label."
+            echo "issue_number=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Selected issue #$ISSUE_NUMBER"
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Manual issue override
+        if: github.event.inputs.issue_number != ''
+        run: |
+          echo "issue_number=${{ github.event.inputs.issue_number }}" >> $GITHUB_OUTPUT
+        id: manual-override
+
+      - name: Autonomous development
+        if: steps.find-issue.outputs.issue_number != '' || steps.manual-override.outputs.issue_number != ''
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          model: claude-sonnet-4.5
+          max_turns: 100
+          prompt: |
+            You are an autonomous developer for GallifreyDB, a high-performance bi-temporal graph database.
+
+            **Your Mission:**
+            Work on issue #${{ steps.find-issue.outputs.issue_number || steps.manual-override.outputs.issue_number }} and create a high-quality pull request.
+
+            **Workflow:**
+
+            1. **Read and understand the issue:**
+               - Use `gh issue view ${{ steps.find-issue.outputs.issue_number || steps.manual-override.outputs.issue_number }}` to get full details
+               - Read any linked files, related issues, or documentation
+               - Understand acceptance criteria
+
+            2. **Self-Assessment (CRITICAL):**
+               Before proceeding, honestly assess if you can complete this issue:
+               - Is the scope clear and well-defined?
+               - Do you have enough context?
+               - Is this within your capabilities? (avoid: major architecture changes, breaking changes, complex algorithms)
+               - Would a human developer need to make design decisions?
+
+               If uncertain, comment on the issue:
+               "Autonomous developer assessed this issue but determined it needs human decision-making because: [reasons]"
+               Then EXIT gracefully.
+
+            3. **Create worktree:**
+               ```bash
+               # Determine branch name from issue
+               ISSUE_TITLE=$(gh issue view ${{ steps.find-issue.outputs.issue_number || steps.manual-override.outputs.issue_number }} --json title -q .title)
+               BRANCH_NAME="auto/issue-${{ steps.find-issue.outputs.issue_number || steps.manual-override.outputs.issue_number }}-$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | head -c 30)"
+               just worktree-new "$BRANCH_NAME"
+               cd "agents/$BRANCH_NAME"
+               ```
+
+            4. **Implement the solution:**
+               - Follow ALL guidelines in CLAUDE.md
+               - Read existing code before modifying
+               - Use conventional commits
+               - Add/update tests
+               - Keep changes focused and minimal
+               - No over-engineering
+
+            5. **Quality checks (MANDATORY):**
+               ```bash
+               just fmt          # Format code
+               just lint         # Run clippy
+               just test         # Run tests
+               just coverage-check  # Verify coverage
+               ```
+
+               If ANY check fails, you MUST fix it before proceeding.
+
+            6. **Create PR:**
+               - Use descriptive title: "fix(issue-${{ steps.find-issue.outputs.issue_number || steps.manual-override.outputs.issue_number }}): [clear description]"
+               - In PR body, include:
+                 * Summary of changes
+                 * How you tested
+                 * Link to issue: "Closes #${{ steps.find-issue.outputs.issue_number || steps.manual-override.outputs.issue_number }}"
+                 * Self-assessment of confidence level
+                 * Any concerns or areas needing review
+
+               ```bash
+               just worktree-pr "fix: [title]" "$(cat <<'EOF'
+               ## Summary
+               [Your summary]
+
+               ## Changes
+               - [List of changes]
+
+               ## Testing
+               - [How you tested]
+
+               ## Autonomous Development Notes
+               - **Confidence Level:** [High/Medium/Low]
+               - **Issue:** Closes #${{ steps.find-issue.outputs.issue_number || steps.manual-override.outputs.issue_number }}
+               - **Concerns:** [Any areas needing extra review]
+
+               🤖 Generated autonomously by Claude Code
+
+               Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
+               EOF
+               )"
+               ```
+
+            7. **Label the PR:**
+               ```bash
+               gh pr edit --add-label "automated-implementation"
+               gh pr edit --add-label "needs-review"
+               ```
+
+            8. **Comment on issue:**
+               After creating PR, comment on the original issue:
+               "🤖 Autonomous developer has created PR #[number] to address this issue. Please review!"
+
+            **Safety Rules:**
+            - NEVER skip tests or quality checks
+            - NEVER make breaking changes without explicit approval in issue
+            - NEVER modify core architecture without human review
+            - NEVER auto-merge (human review required)
+            - If stuck for >30 minutes, comment on issue and exit gracefully
+            - If tests fail after multiple attempts, create draft PR explaining the issue
+
+            **What to work on:**
+            ✅ Good candidates:
+            - Documentation improvements
+            - Test coverage gaps
+            - Small bug fixes with clear repro
+            - Tech debt cleanup
+            - Performance optimizations with benchmarks
+            - Adding missing error handling
+
+            ❌ Avoid:
+            - Major architectural changes
+            - Breaking API changes
+            - Complex algorithm implementations
+            - Issues requiring design decisions
+            - Anything that needs stakeholder input
+
+            **Remember:**
+            - Quality > Speed
+            - When in doubt, ask (comment on issue)
+            - Follow CLAUDE.md religiously
+            - You represent autonomous AI development - make it count!
+
+            Good luck! 🚀
+
+      - name: Report failure
+        if: failure()
+        run: |
+          ISSUE_NUM="${{ steps.find-issue.outputs.issue_number || steps.manual-override.outputs.issue_number }}"
+          if [ -n "$ISSUE_NUM" ]; then
+            gh issue comment "$ISSUE_NUM" --body "🤖 Autonomous developer attempted this issue but encountered an error. A human should review the workflow logs."
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

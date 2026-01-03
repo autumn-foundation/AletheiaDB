@@ -109,6 +109,32 @@ We will implement a comprehensive CI/CD automation suite with the following comp
 - Security best practices
 - Known pre-1.0 limitations
 
+### 8. Autonomous Development (Experimental)
+
+**Workflow:** `.github/workflows/autonomous-dev.yml`
+**Documentation:** `docs/AUTONOMOUS_DEVELOPMENT.md`
+
+- **Daily autonomous issue resolution** (3 AM UTC)
+- Claude Code picks up issues labeled `autonomous-ready`
+- Creates worktree, implements solution, runs tests, creates PR
+- **Experimental feature** pushing boundaries of AI-assisted development
+
+**Safety mechanisms:**
+- Only works on `autonomous-ready` labeled issues (human-curated)
+- Max 1 PR per day, max 5 open automated PRs
+- All PRs require human review (no auto-merge)
+- Must pass all CI quality gates
+- Self-assessment: autonomous developer evaluates if it can complete the issue
+- Failure handling: comments on issue if unable to complete
+
+**Issue selection criteria:**
+- Clear scope and acceptance criteria
+- Appropriate complexity (docs, tests, small bugs)
+- Self-contained with all context provided
+- Avoids: architecture changes, breaking changes, design decisions
+
+**The vision:** Use GallifreyDB itself to track autonomous development patterns, success rates, and codebase context over time - demonstrating **temporal reasoning for AI software development**.
+
 ## Consequences
 
 ### Positive
@@ -121,6 +147,9 @@ We will implement a comprehensive CI/CD automation suite with the following comp
 - **Proactive issue detection**: Weekly scans identify tech debt before it becomes critical
 - **Better documentation**: Conventional commits enforce clear intent
 - **GitHub Pages integration**: Documentation and benchmarks auto-publish
+- **Continuous forward momentum**: Autonomous developer works on issues even when humans are busy
+- **Cutting-edge AI demonstration**: Showcases state-of-the-art autonomous AI development
+- **Dogfooding opportunity**: Can use GallifreyDB to track autonomous development patterns
 
 ### Negative
 
@@ -129,6 +158,9 @@ We will implement a comprehensive CI/CD automation suite with the following comp
 - **False positives**: AI scans may create spurious issues requiring triage
 - **Maintenance burden**: Workflows themselves need maintenance as GitHub Actions evolve
 - **Cognitive load**: Contributors must learn conventional commit format
+- **Autonomous PR quality variance**: Automated PRs may need more review/iteration than human PRs
+- **API cost**: Daily autonomous development consumes Claude API credits
+- **Experimental risk**: Autonomous development is bleeding-edge, may have unexpected failures
 
 ### Neutral
 
@@ -250,6 +282,9 @@ Repository settings → Actions → General:
 Repository settings → Pages:
 - Source: **gh-pages branch**
 
+Repository settings → Secrets and variables → Actions:
+- **ANTHROPIC_API_KEY**: Required for autonomous development and code health scans
+
 ## References
 
 - PR #160: Implementation of CI/CD automation suite
@@ -260,3 +295,5 @@ Repository settings → Pages:
 - [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action)
 - CLAUDE.md: "Development Workflow" section
 - WORKTREE_WORKFLOW.md: Parallel development with git worktrees
+- docs/AUTONOMOUS_DEVELOPMENT.md: Autonomous development documentation
+- .github/ISSUE_TEMPLATE/autonomous-ready.md: Issue template for autonomous tasks
