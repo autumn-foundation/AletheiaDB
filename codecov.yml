@@ -1,0 +1,54 @@
+# Codecov Configuration for GallifreyDB
+# Enforces the coverage thresholds defined in CLAUDE.md
+
+coverage:
+  precision: 2
+  round: down
+  range: "70...100"
+
+  status:
+    project:
+      default:
+        target: 85%                    # Line coverage target (current: 86.45%)
+        threshold: 2%                   # Allow 2% drop before failing
+        if_ci_failed: error
+
+    patch:
+      default:
+        target: 85%                    # New code should meet same standard
+        threshold: 2%
+        if_ci_failed: error
+
+# Configure PR comments
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+  require_base: false
+  require_head: true
+
+# Ignore patterns
+ignore:
+  - "benches/**/*"                     # Benchmark code
+  - "examples/**/*"                    # Example code
+  - "tests/**/*"                       # Integration tests
+  - "**/tests.rs"                      # Test modules
+  - "**/test_*.rs"                     # Test files
+
+# Component tracking
+flag_management:
+  default_rules:
+    carryforward: true
+
+# Only process lcov format from CI
+parsers:
+  gcov:
+    branch_detection:
+      conditional: yes
+      loop: yes
+      method: no
+      macro: yes
+
+# GitHub integration
+github_checks:
+  annotations: true

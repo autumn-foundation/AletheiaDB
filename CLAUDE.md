@@ -623,9 +623,9 @@ unsafe {
 ### Coverage Requirements
 
 GallifreyDB enforces strict code coverage thresholds:
-- **Minimum 80% line coverage**
-- **Minimum 75% function coverage**
-- **Minimum 70% branch coverage**
+- **Minimum 85% line coverage** (current: 86.45%)
+- **Minimum 88% function coverage** (current: 89.10%)
+- **Minimum 88% region coverage** (current: 88.91%)
 
 See `TESTING.md` for detailed instructions on running coverage reports.
 

@@ -93,9 +93,12 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
+          flags: unittests
+          name: codecov-umbrella
+          verbose: true
 
       - name: Check coverage thresholds
-        run: cargo llvm-cov --all-features --fail-under-lines 80 --fail-under-functions 75
+        run: cargo llvm-cov --all-features --fail-under-lines 85 --fail-under-functions 88 --fail-under-regions 88
 
   lint:
     name: Linting
