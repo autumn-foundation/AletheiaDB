@@ -116,7 +116,17 @@ use crate::index::vector::{DistanceMetric, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
 
 /// Maximum number of results that can be requested in a search.
-/// This prevents DoS attacks via excessive memory allocation.
+///
+/// This prevents DoS attacks via excessive memory allocation when an attacker
+/// requests an extremely large k value. With 10,000 results max:
+/// - Memory per search: ~10,000 * (8 bytes NodeId + 4 bytes f32) = ~120KB
+/// - This is reasonable for concurrent queries without risking OOM
+///
+/// **Design Choice**: This is a global constant rather than per-index configuration
+/// to maintain a consistent security boundary across all indexes. If use cases
+/// require larger k values, this can be made configurable in future versions,
+/// but 10,000 results should be sufficient for most similarity search use cases
+/// (typically k=10 to k=100).
 const MAX_K: usize = 10_000;
 
 /// Configuration for HNSW (Hierarchical Navigable Small World) index.
@@ -350,6 +360,15 @@ impl HnswConfig {
 /// - `ef_construction`: Build-time expansion (default: 200)
 /// - `ef_search`: Query-time expansion (default: 10)
 /// - `initial_capacity`: Pre-allocated capacity (default: 0 - grows dynamically)
+///
+/// # Validation Strategy
+///
+/// **Design Choice**: Parameter validation happens at `build()` time, not in setters.
+/// This allows the builder pattern to be more flexible (e.g., setting invalid values
+/// temporarily during construction) and provides a single point of failure with clear
+/// error messages. The trade-off is that errors are deferred rather than fail-fast,
+/// but this is acceptable for a builder pattern where the user explicitly calls
+/// `build()` to finalize configuration.
 ///
 /// # Examples
 ///
@@ -634,8 +653,13 @@ impl VectorIndex for HnswIndex {
         // Convert NodeId to u64 key
         let key = id.as_u64();
 
-        // Remove existing vector if present (usearch doesn't allow duplicates with multi: false)
-        // We ignore errors from remove since the key may not exist
+        // Handle duplicate IDs: remove then re-add
+        // usearch doesn't provide a native "upsert" operation, and with multi=false
+        // it doesn't allow duplicate keys. The VectorIndex trait contract says:
+        // "If a vector with the same id already exists, it will be replaced."
+        // So we remove first (if exists) then add. This involves two operations but
+        // ensures correct replacement semantics.
+        // We ignore errors from remove since the key may not exist (first insert).
         let _ = self.index.remove(key);
 
         // Add to index
@@ -688,11 +712,15 @@ impl VectorIndex for HnswIndex {
         // usearch returns DISTANCES (not similarities) for all metrics:
         // - Cosine: 1 - cos(a,b), range [0, 2] (0 = identical, 2 = opposite)
         // - L2sq: ||a-b||^2, range [0, ∞) (0 = identical)
+        //   Note: usearch uses L2sq internally (squared Euclidean) for performance,
+        //   avoiding the sqrt computation. This is faster and preserves ordering.
         // - DotProduct: -dot(a,b), range (-∞, ∞) (more negative = more similar)
         //
         // We convert to similarities where higher = more similar:
         // - Cosine: similarity = 1 - distance (recovers original cosine similarity)
-        // - L2sq: similarity = -distance (negative squared distance, higher = more similar)
+        // - Euclidean: similarity = -distance (negative squared distance, higher = more similar)
+        //   Users get negative L2 squared distance, not L2 distance. This maintains
+        //   ordering (closer vectors = less negative = higher similarity).
         // - DotProduct: similarity = -distance (recovers original dot product)
         let mut results: Vec<(NodeId, f32)> = matches
             .keys
@@ -1642,6 +1670,61 @@ mod tests {
                     "Result {:?} not in allowed set",
                     id
                 );
+            }
+        }
+
+        /// Property: Index handles extreme (but finite) values without panicking
+        /// Tests numerical stability with very large and very small values
+        #[test]
+        fn prop_handles_extreme_values(
+            vectors in prop::collection::vec(
+                (
+                    valid_node_id(),
+                    prop::collection::vec(
+                        (-1e6f32..1e6f32).prop_filter("finite", |f| f.is_finite()),
+                        4
+                    )
+                ),
+                1..10
+            ),
+            query in prop::collection::vec(
+                (-1e6f32..1e6f32).prop_filter("finite", |f| f.is_finite()),
+                4
+            )
+        ) {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .initial_capacity(100)
+                .build()
+                .unwrap();
+
+            // Add all vectors - should not panic
+            for (id, vec) in &vectors {
+                let _ = index.add(*id, vec);
+            }
+
+            // Search with extreme values - should not panic
+            let results = index.search(&query, 5);
+
+            // Either succeeds or returns valid error (not panic)
+            match results {
+                Ok(res) => {
+                    // Results should be sorted
+                    for i in 0..res.len().saturating_sub(1) {
+                        prop_assert!(
+                            res[i].1 >= res[i + 1].1,
+                            "Results not sorted with extreme values"
+                        );
+                    }
+                }
+                Err(e) => {
+                    // If it errors, it should be a proper error (not panic)
+                    // This would only happen if usearch has numerical issues
+                    prop_assert!(
+                        matches!(e, Error::Vector(_)),
+                        "Unexpected error type with extreme values: {:?}",
+                        e
+                    );
+                }
             }
         }
     }
