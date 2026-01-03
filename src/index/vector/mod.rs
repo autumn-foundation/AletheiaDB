@@ -410,3 +410,9 @@ mod tests {
         assert_ne!(metric, DistanceMetric::Euclidean);
     }
 }
+
+// HNSW implementation
+pub mod hnsw;
+
+// Re-export HNSW types for convenience
+pub use hnsw::{HnswIndex, HnswIndexBuilder};

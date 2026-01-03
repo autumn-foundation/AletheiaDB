@@ -16,3 +16,4 @@ pub use adjacency::{AdjacencyEntry, AdjacencyIndex};
 pub use current::CurrentIndexes;
 pub use temporal::TemporalIndexes;
 pub use vector::{DistanceMetric, VectorIndex};
+pub use vector::{HnswIndex, HnswIndexBuilder};
