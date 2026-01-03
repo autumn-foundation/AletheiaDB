@@ -60,6 +60,8 @@ jobs:
           allowed-conclusions: success
           # Wait for all critical checks
           check-regexp: '(Test Suite|Code Coverage|Linting|Security Audit|Benchmarks).*'
+          # Timeout after 30 minutes to prevent indefinite waiting
+          timeout: 1800
 
       - name: Comment on major version update
         if: steps.check_update.outputs.safe-to-merge == 'false'

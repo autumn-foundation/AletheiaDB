@@ -22,6 +22,8 @@ jobs:
   bump-version:
     name: Bump Version
     runs-on: ubuntu-latest
+    # Only allow version bumps from trunk branch
+    if: github.ref == 'refs/heads/trunk'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -78,11 +80,22 @@ jobs:
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumped to version: $NEW_VERSION"
 
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Update CHANGELOG.md
+        run: |
+          # Generate updated CHANGELOG.md with the new version
+          git-cliff --config cliff.toml --output CHANGELOG.md
+          echo "Generated CHANGELOG.md for v${{ steps.bump.outputs.new_version }}"
+
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore(release): Bump version to ${{ steps.bump.outputs.new_version }}"
+          commit-message: "chore(release): Bump version to ${{ steps.bump.outputs.new_version }} and update CHANGELOG"
           branch: release/v${{ steps.bump.outputs.new_version }}
           delete-branch: true
           title: "Release v${{ steps.bump.outputs.new_version }}"

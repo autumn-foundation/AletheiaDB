@@ -39,20 +39,8 @@ jobs:
           echo "$CHANGELOG" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Update CHANGELOG.md
-        if: github.event_name == 'push'
-        run: |
-          # Generate full CHANGELOG.md
-          git-cliff --config cliff.toml --output CHANGELOG.md
-
-          # Commit if changed
-          if ! git diff --quiet CHANGELOG.md; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add CHANGELOG.md
-            git commit -m "docs: Update CHANGELOG.md for $(git describe --tags --abbrev=0)"
-            git push origin HEAD:trunk
-          fi
+      # Note: CHANGELOG.md should be updated in the version-bump PR, not here
+      # This avoids race conditions with pushing to trunk during release
 
   create-release:
     name: Create Release

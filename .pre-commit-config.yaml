@@ -43,10 +43,11 @@ repos:
       - id: cargo-clippy
         name: cargo clippy
         description: Lint Rust code with clippy
-        entry: cargo clippy --all-targets --all-features -- -D warnings
+        entry: cargo clippy --all-targets --all-features
         language: system
         types: [rust]
         pass_filenames: false
+        # Note: -D warnings is enforced in CI, not here to allow local iteration
 
       - id: cargo-check
         name: cargo check
