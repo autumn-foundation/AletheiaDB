@@ -416,4 +416,4 @@ mod tests {
 pub mod hnsw;
 
 // Re-export HNSW types for convenience
-pub use hnsw::{HnswIndex, HnswIndexBuilder};
+pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};

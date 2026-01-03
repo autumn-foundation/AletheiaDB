@@ -119,6 +119,226 @@ use crate::utils::{Error, Result, error::VectorError};
 /// This prevents DoS attacks via excessive memory allocation.
 const MAX_K: usize = 10_000;
 
+/// Configuration for HNSW (Hierarchical Navigable Small World) index.
+///
+/// This struct encapsulates all parameters needed to configure an HNSW index
+/// for approximate nearest neighbor search. It provides sensible defaults
+/// optimized for a balance between accuracy, speed, and memory usage.
+///
+/// # Parameters
+///
+/// ## Required Parameters
+///
+/// - **`dimensions`**: Vector dimensionality (must be > 0)
+///   - Common values: 384 (MiniLM), 768 (MPNet), 1536 (OpenAI), 3072 (large models)
+///   - Affects: Memory usage scales linearly with dimensions
+///
+/// - **`metric`**: Distance metric for similarity computation
+///   - `Cosine`: Best for semantic similarity (normalized vectors)
+///   - `Euclidean`: Best for spatial data and clustering
+///   - `DotProduct`: Best for MaxSim operations (ColBERT, etc.)
+///
+/// ## Performance Tuning Parameters
+///
+/// - **`m`**: Maximum number of bidirectional connections per node (default: 16)
+///   - Range: 8-64, typical: 12-32
+///   - **Higher values**: Better recall, more memory (O(n * M * d) bytes), slower build
+///   - **Lower values**: Less memory, faster build, lower recall
+///   - Memory impact: Each connection adds ~4 bytes per vector
+///   - Recommended: 16 for general use, 32 for high recall requirements
+///
+/// - **`ef_construction`**: Candidate list size during index construction (default: 128)
+///   - Range: 100-500, typical: 100-400
+///   - **Higher values**: Better index quality, slower build time (O(log n) per insert)
+///   - **Lower values**: Faster build, potentially lower recall
+///   - Build time impact: Roughly linear with ef_construction
+///   - Recommended: 128 for balanced performance, 200+ for high-quality indexes
+///
+/// - **`ef_search`**: Candidate list size during query processing (default: 64)
+///   - Range: 10-500, typical: 10-100
+///   - **Higher values**: Better recall, slower queries
+///   - **Lower values**: Faster queries, lower recall (~90% at ef=10)
+///   - Query time impact: Roughly linear with ef_search
+///   - Can be adjusted at runtime via `HnswIndex::set_ef_search()`
+///   - Recommended: 64 for balanced recall/speed, 10 for low-latency
+///
+/// - **`capacity`**: Initial capacity hint for pre-allocation (default: 0)
+///   - Pre-allocates space for the specified number of vectors
+///   - Reduces reallocation overhead during bulk insertion
+///   - Recommended: Set to expected index size if known in advance
+///
+/// # Examples
+///
+/// ```rust
+/// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+///
+/// // Use default configuration
+/// let config = HnswConfig::default()
+///     .with_dimensions(384)
+///     .with_metric(DistanceMetric::Cosine);
+///
+/// // High-recall configuration
+/// let config = HnswConfig::default()
+///     .with_dimensions(768)
+///     .with_metric(DistanceMetric::Cosine)
+///     .with_m(32)
+///     .with_ef_construction(200)
+///     .with_ef_search(100);
+///
+/// // Low-latency configuration
+/// let config = HnswConfig::default()
+///     .with_dimensions(384)
+///     .with_metric(DistanceMetric::Cosine)
+///     .with_m(12)
+///     .with_ef_construction(100)
+///     .with_ef_search(10);
+///
+/// // Production configuration with known capacity
+/// let config = HnswConfig::default()
+///     .with_dimensions(1536)
+///     .with_metric(DistanceMetric::Cosine)
+///     .with_capacity(1_000_000); // Pre-allocate for 1M vectors
+/// ```
+///
+/// # Performance Trade-offs
+///
+/// ```text
+/// Configuration    | Recall | Build Speed | Query Speed | Memory
+/// -----------------|--------|-------------|-------------|--------
+/// Low Latency      |  ~90%  | Fast        | Fast        | Low
+/// (M=12, ef_c=100, ef_s=10)
+///
+/// Balanced (Default) | ~95% | Medium      | Medium      | Medium
+/// (M=16, ef_c=128, ef_s=64)
+///
+/// High Recall      | ~98%  | Slow        | Slow        | High
+/// (M=32, ef_c=200, ef_s=100)
+/// ```
+///
+/// # See Also
+///
+/// - [`HnswIndexBuilder`]: Builder for creating indexes from config
+/// - [`VectorIndex`]: Trait implemented by HNSW index
+/// - Module documentation for tuning guidelines
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HnswConfig {
+    /// Vector dimensionality (must be > 0)
+    pub dimensions: usize,
+    /// Distance metric for similarity computation
+    pub metric: DistanceMetric,
+    /// Maximum bidirectional connections per node (default: 16)
+    pub m: usize,
+    /// Build-time candidate list size (default: 128)
+    pub ef_construction: usize,
+    /// Query-time candidate list size (default: 64)
+    pub ef_search: usize,
+    /// Initial capacity for pre-allocation (default: 0)
+    pub capacity: usize,
+}
+
+impl Default for HnswConfig {
+    /// Returns a default HNSW configuration optimized for balanced performance.
+    ///
+    /// Default values:
+    /// - `dimensions`: 0 (must be set before use)
+    /// - `metric`: Cosine
+    /// - `m`: 16
+    /// - `ef_construction`: 128
+    /// - `ef_search`: 64
+    /// - `capacity`: 0
+    ///
+    /// # Note
+    ///
+    /// The `dimensions` field defaults to 0 and must be set to a valid value (> 0)
+    /// before building an index.
+    fn default() -> Self {
+        HnswConfig {
+            dimensions: 0,
+            metric: DistanceMetric::Cosine,
+            m: 16,
+            ef_construction: 128,
+            ef_search: 64,
+            capacity: 0,
+        }
+    }
+}
+
+impl HnswConfig {
+    /// Creates a new configuration with the specified dimensions and metric.
+    ///
+    /// Other parameters are set to their default values.
+    ///
+    /// # Arguments
+    ///
+    /// * `dimensions` - Vector dimensionality (must be > 0)
+    /// * `metric` - Distance metric to use
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    ///
+    /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
+    /// ```
+    pub fn new(dimensions: usize, metric: DistanceMetric) -> Self {
+        HnswConfig {
+            dimensions,
+            metric,
+            ..Default::default()
+        }
+    }
+
+    /// Sets the vector dimensionality.
+    pub fn with_dimensions(mut self, dimensions: usize) -> Self {
+        self.dimensions = dimensions;
+        self
+    }
+
+    /// Sets the distance metric.
+    pub fn with_metric(mut self, metric: DistanceMetric) -> Self {
+        self.metric = metric;
+        self
+    }
+
+    /// Sets the maximum bidirectional connections per node (M parameter).
+    ///
+    /// Higher values improve recall but increase memory usage and build time.
+    /// Typical range: 8-64, recommended: 16 (default) to 32 (high recall).
+    pub fn with_m(mut self, m: usize) -> Self {
+        self.m = m;
+        self
+    }
+
+    /// Sets the build-time candidate list size (ef_construction parameter).
+    ///
+    /// Higher values create better quality indexes but take longer to build.
+    /// Typical range: 100-500, recommended: 128 (default) to 200+ (high quality).
+    pub fn with_ef_construction(mut self, ef_construction: usize) -> Self {
+        self.ef_construction = ef_construction;
+        self
+    }
+
+    /// Sets the query-time candidate list size (ef_search parameter).
+    ///
+    /// Higher values improve recall but slow down queries.
+    /// Typical range: 10-500, recommended: 64 (default) for balanced recall/speed.
+    ///
+    /// Note: This can be adjusted at runtime via `HnswIndex::set_ef_search()`.
+    pub fn with_ef_search(mut self, ef_search: usize) -> Self {
+        self.ef_search = ef_search;
+        self
+    }
+
+    /// Sets the initial capacity for pre-allocation.
+    ///
+    /// Pre-allocates space for the specified number of vectors to reduce
+    /// reallocation overhead during bulk insertion.
+    pub fn with_capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity;
+        self
+    }
+}
+
 /// Builder for configuring and creating an `HnswIndex`.
 ///
 /// Required parameters:
@@ -180,6 +400,46 @@ impl HnswIndexBuilder {
             ef_construction: 200, // Good default for build quality
             ef_search: 10,        // Fast searches with ~90% recall
             initial_capacity: None,
+        }
+    }
+
+    /// Creates a new builder from an `HnswConfig`.
+    ///
+    /// This allows you to configure the index using a reusable configuration
+    /// object rather than chaining builder methods.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - HNSW configuration with all parameters
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::index::vector::{HnswConfig, HnswIndexBuilder, DistanceMetric};
+    ///
+    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// // Create a reusable configuration
+    /// let config = HnswConfig::new(384, DistanceMetric::Cosine)
+    ///     .with_m(32)
+    ///     .with_ef_construction(200);
+    ///
+    /// // Build index from config
+    /// let index = HnswIndexBuilder::from_config(config).build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_config(config: HnswConfig) -> Self {
+        HnswIndexBuilder {
+            dimensions: config.dimensions,
+            metric: config.metric,
+            m: config.m,
+            ef_construction: config.ef_construction,
+            ef_search: config.ef_search,
+            initial_capacity: if config.capacity > 0 {
+                Some(config.capacity)
+            } else {
+                None
+            },
         }
     }
 
@@ -598,6 +858,144 @@ mod tests {
             .build()
             .expect("Failed to create test index")
     }
+
+    // ============================================================================
+    // HnswConfig Tests
+    // ============================================================================
+
+    #[test]
+    fn test_hnsw_config_default() {
+        let config = HnswConfig::default();
+
+        assert_eq!(config.dimensions, 0);
+        assert_eq!(config.metric, DistanceMetric::Cosine);
+        assert_eq!(config.m, 16);
+        assert_eq!(config.ef_construction, 128);
+        assert_eq!(config.ef_search, 64);
+        assert_eq!(config.capacity, 0);
+    }
+
+    #[test]
+    fn test_hnsw_config_new() {
+        let config = HnswConfig::new(384, DistanceMetric::Euclidean);
+
+        assert_eq!(config.dimensions, 384);
+        assert_eq!(config.metric, DistanceMetric::Euclidean);
+        // Other fields should have defaults
+        assert_eq!(config.m, 16);
+        assert_eq!(config.ef_construction, 128);
+        assert_eq!(config.ef_search, 64);
+        assert_eq!(config.capacity, 0);
+    }
+
+    #[test]
+    fn test_hnsw_config_builder_pattern() {
+        let config = HnswConfig::default()
+            .with_dimensions(768)
+            .with_metric(DistanceMetric::DotProduct)
+            .with_m(32)
+            .with_ef_construction(200)
+            .with_ef_search(100)
+            .with_capacity(10_000);
+
+        assert_eq!(config.dimensions, 768);
+        assert_eq!(config.metric, DistanceMetric::DotProduct);
+        assert_eq!(config.m, 32);
+        assert_eq!(config.ef_construction, 200);
+        assert_eq!(config.ef_search, 100);
+        assert_eq!(config.capacity, 10_000);
+    }
+
+    #[test]
+    fn test_hnsw_config_clone() {
+        let config1 = HnswConfig::new(384, DistanceMetric::Cosine)
+            .with_m(24)
+            .with_capacity(5000);
+
+        let config2 = config1.clone();
+
+        assert_eq!(config1, config2);
+        assert_eq!(config2.dimensions, 384);
+        assert_eq!(config2.m, 24);
+        assert_eq!(config2.capacity, 5000);
+    }
+
+    #[test]
+    fn test_hnsw_config_debug() {
+        let config = HnswConfig::new(128, DistanceMetric::Cosine);
+        let debug_str = format!("{:?}", config);
+
+        // Should contain key information
+        assert!(debug_str.contains("128"));
+        assert!(debug_str.contains("Cosine"));
+    }
+
+    #[test]
+    fn test_hnsw_index_builder_from_config() {
+        let config = HnswConfig::new(4, DistanceMetric::Cosine)
+            .with_m(32)
+            .with_ef_construction(200)
+            .with_ef_search(100)
+            .with_capacity(1000);
+
+        let index = HnswIndexBuilder::from_config(config).build().unwrap();
+
+        assert_eq!(index.dimensions(), 4);
+        assert_eq!(index.distance_metric(), DistanceMetric::Cosine);
+        assert_eq!(index.m(), 32);
+        assert_eq!(index.ef_construction(), 200);
+        assert_eq!(index.ef_search(), 100);
+    }
+
+    #[test]
+    fn test_hnsw_index_builder_from_config_zero_capacity() {
+        // Config with capacity = 0 should result in None for initial_capacity
+        let config = HnswConfig::new(4, DistanceMetric::Cosine);
+
+        let index = HnswIndexBuilder::from_config(config).build().unwrap();
+
+        assert_eq!(index.dimensions(), 4);
+    }
+
+    #[test]
+    fn test_hnsw_config_partial_customization() {
+        // Only customize some fields
+        let config = HnswConfig::default()
+            .with_dimensions(512)
+            .with_metric(DistanceMetric::Euclidean)
+            .with_m(20);
+
+        // Check customized fields
+        assert_eq!(config.dimensions, 512);
+        assert_eq!(config.metric, DistanceMetric::Euclidean);
+        assert_eq!(config.m, 20);
+
+        // Check defaults are preserved
+        assert_eq!(config.ef_construction, 128);
+        assert_eq!(config.ef_search, 64);
+        assert_eq!(config.capacity, 0);
+    }
+
+    #[test]
+    fn test_hnsw_config_equality() {
+        let config1 = HnswConfig::new(384, DistanceMetric::Cosine)
+            .with_m(16)
+            .with_ef_construction(128);
+
+        let config2 = HnswConfig::new(384, DistanceMetric::Cosine)
+            .with_m(16)
+            .with_ef_construction(128);
+
+        let config3 = HnswConfig::new(384, DistanceMetric::Cosine)
+            .with_m(32); // Different M
+
+        assert_eq!(config1, config2);
+        assert_ne!(config1, config3);
+    }
+
+    // ============================================================================
+    // HnswIndex Tests
+    // ============================================================================
 
     #[test]
     fn test_hnsw_add_and_search() {
