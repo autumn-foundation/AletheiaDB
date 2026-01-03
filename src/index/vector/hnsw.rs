@@ -345,11 +345,11 @@ pub struct HnswIndex {
     dimensions: usize,
     /// Cached metric for O(1) access
     metric: DistanceMetric,
-    #[allow(dead_code)]
     /// Connections per node (M parameter)
     #[allow(dead_code)]
     m: usize,
     /// Build-time expansion factor
+    #[allow(dead_code)]
     ef_construction: usize,
     /// Query-time expansion factor
     #[allow(dead_code)]
@@ -432,9 +432,11 @@ impl VectorIndex for HnswIndex {
             .map(|(&key, &distance)| (NodeId::new(key), distance))
             .collect();
 
-        // usearch returns DISTANCES (not similarities) for all metrics
-        // Lower distance = more similar for ALL metrics (Cosine, Euclidean, DotProduct)
-        // Results are already sorted ascending (lowest distance first), which is what we want
+        // usearch returns DISTANCES (not similarities) for all metrics:
+        // - Cosine: 1 - cos(a,b), range [0, 2] (0 = identical, 2 = opposite)
+        // - L2sq: ||a-b||^2, range [0, ∞) (0 = identical)
+        // - DotProduct: -dot(a,b), range (-∞, ∞) (more negative = more similar)
+        // Results are sorted ascending (lowest distance = best match first)
 
         Ok(results)
     }
@@ -487,8 +489,8 @@ impl VectorIndex for HnswIndex {
             .map(|(&key, &distance)| (NodeId::new(key), distance))
             .collect();
 
-        // usearch returns DISTANCES (not similarities) for all metrics
-        // Results are already sorted ascending (lowest distance first)
+        // usearch returns DISTANCES (see search() for metric details)
+        // Results are sorted ascending (lowest distance = best match first)
 
         Ok(results)
     }
@@ -503,6 +505,63 @@ impl VectorIndex for HnswIndex {
 
     fn distance_metric(&self) -> DistanceMetric {
         self.metric
+    }
+}
+
+impl HnswIndex {
+    /// Returns the M parameter (connections per node).
+    ///
+    /// Higher values improve recall at the cost of memory and build time.
+    /// Typical range: 8-64, default: 16.
+    #[must_use]
+    pub fn m(&self) -> usize {
+        self.m
+    }
+
+    /// Returns the ef_construction parameter (build-time expansion).
+    ///
+    /// Higher values improve index quality at the cost of build time.
+    /// Typical range: 100-500, default: 200.
+    #[must_use]
+    pub fn ef_construction(&self) -> usize {
+        self.ef_construction
+    }
+
+    /// Returns the ef_search parameter (query-time expansion).
+    ///
+    /// Higher values improve recall at the cost of query latency.
+    /// Typical range: 10-500, default: 10.
+    ///
+    /// Note: This returns the configured value. To change ef_search at runtime,
+    /// use `set_ef_search()`.
+    #[must_use]
+    pub fn ef_search(&self) -> usize {
+        self.ef_search
+    }
+
+    /// Sets the ef_search parameter for subsequent queries.
+    ///
+    /// This allows runtime tuning of the recall/latency trade-off without
+    /// rebuilding the index.
+    ///
+    /// # Arguments
+    ///
+    /// * `ef_search` - New expansion factor (must be > 0)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use gallifreydb::index::{HnswIndexBuilder, DistanceMetric};
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+    /// #     .build().unwrap();
+    /// // Start with fast queries (lower recall)
+    /// index.set_ef_search(10);
+    ///
+    /// // Switch to high-recall mode for important queries
+    /// index.set_ef_search(100);
+    /// ```
+    pub fn set_ef_search(&self, ef_search: usize) {
+        self.index.change_expansion_search(ef_search);
     }
 }
 
@@ -754,7 +813,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: IP metric appears to crash on Windows - investigate usearch FFI issue
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "IP metric crashes on Windows (usearch FFI issue)"
+    )]
     fn test_hnsw_dotproduct_metric() {
         let index = HnswIndexBuilder::new(4, DistanceMetric::DotProduct)
             .initial_capacity(100)
