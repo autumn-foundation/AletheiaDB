@@ -42,7 +42,7 @@
 //! - **Range**: 10-500
 //! - **Higher values**: Better recall, slower queries
 //! - **Default**: 10 (fast queries, ~90% recall)
-//! - **Can be adjusted at runtime** (not yet exposed in builder)
+//! - **Can be adjusted at runtime** via `set_ef_search()` method
 //!
 //! ## Recommended Configurations
 //!
@@ -424,19 +424,32 @@ impl VectorIndex for HnswIndex {
             .search(query, k_capped)
             .map_err(|e| Error::Vector(VectorError::IndexError(format!("Search failed: {}", e))))?;
 
-        // Convert results to (NodeId, f32) and sort by similarity (descending)
-        let results: Vec<(NodeId, f32)> = matches
-            .keys
-            .iter()
-            .zip(matches.distances.iter())
-            .map(|(&key, &distance)| (NodeId::new(key), distance))
-            .collect();
-
+        // Convert distances to similarities based on metric
         // usearch returns DISTANCES (not similarities) for all metrics:
         // - Cosine: 1 - cos(a,b), range [0, 2] (0 = identical, 2 = opposite)
         // - L2sq: ||a-b||^2, range [0, ∞) (0 = identical)
         // - DotProduct: -dot(a,b), range (-∞, ∞) (more negative = more similar)
-        // Results are sorted ascending (lowest distance = best match first)
+        //
+        // We convert to similarities where higher = more similar:
+        // - Cosine: similarity = 1 - distance (recovers original cosine similarity)
+        // - L2sq: similarity = -distance (negative squared distance, higher = more similar)
+        // - DotProduct: similarity = -distance (recovers original dot product)
+        let mut results: Vec<(NodeId, f32)> = matches
+            .keys
+            .iter()
+            .zip(matches.distances.iter())
+            .map(|(&key, &distance)| {
+                let similarity = match self.metric {
+                    DistanceMetric::Cosine => 1.0 - distance,
+                    DistanceMetric::Euclidean => -distance,
+                    DistanceMetric::DotProduct => -distance,
+                };
+                (NodeId::new(key), similarity)
+            })
+            .collect();
+
+        // Sort by similarity descending (highest similarity first) to match trait contract
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(results)
     }
@@ -481,16 +494,23 @@ impl VectorIndex for HnswIndex {
                 )))
             })?;
 
-        // Convert results to (NodeId, f32) and sort by similarity
-        let results: Vec<(NodeId, f32)> = matches
+        // Convert distances to similarities (same logic as search())
+        let mut results: Vec<(NodeId, f32)> = matches
             .keys
             .iter()
             .zip(matches.distances.iter())
-            .map(|(&key, &distance)| (NodeId::new(key), distance))
+            .map(|(&key, &distance)| {
+                let similarity = match self.metric {
+                    DistanceMetric::Cosine => 1.0 - distance,
+                    DistanceMetric::Euclidean => -distance,
+                    DistanceMetric::DotProduct => -distance,
+                };
+                (NodeId::new(key), similarity)
+            })
             .collect();
 
-        // usearch returns DISTANCES (see search() for metric details)
-        // Results are sorted ascending (lowest distance = best match first)
+        // Sort by similarity descending (highest similarity first) to match trait contract
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(results)
     }
@@ -978,6 +998,71 @@ mod tests {
         assert_eq!(index.dimensions(), 4);
     }
 
+    #[test]
+    fn test_set_ef_search_runtime() {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .ef_search(10)
+            .initial_capacity(100)
+            .build()
+            .unwrap();
+
+        // Add some vectors
+        for i in 0..20 {
+            let vec = vec![i as f32 / 20.0, 0.0, 0.0, 0.0];
+            index.add(NodeId::new(i), &vec).unwrap();
+        }
+
+        // Search with low ef_search
+        index.set_ef_search(10);
+        let query = vec![0.5, 0.0, 0.0, 0.0];
+        let results_low = index.search(&query, 5).unwrap();
+
+        // Search with high ef_search (should give same or better recall)
+        index.set_ef_search(100);
+        let results_high = index.search(&query, 5).unwrap();
+
+        // Both should return results
+        assert!(!results_low.is_empty());
+        assert!(!results_high.is_empty());
+        // High ef_search should return at least as many results with similar quality
+        assert_eq!(results_low.len(), results_high.len());
+    }
+
+    #[test]
+    fn test_parameter_getters() {
+        let index = HnswIndexBuilder::new(128, DistanceMetric::Euclidean)
+            .m(32)
+            .ef_construction(400)
+            .ef_search(50)
+            .build()
+            .unwrap();
+
+        assert_eq!(index.m(), 32);
+        assert_eq!(index.ef_construction(), 400);
+        assert_eq!(index.ef_search(), 50);
+        assert_eq!(index.dimensions(), 128);
+        assert_eq!(index.distance_metric(), DistanceMetric::Euclidean);
+    }
+
+    #[test]
+    fn test_single_vector_index() {
+        let index = create_test_index();
+
+        // Add only one vector
+        let node1 = NodeId::new(1);
+        let vec1 = vec![1.0, 0.0, 0.0, 0.0];
+        index.add(node1, &vec1).unwrap();
+
+        assert_eq!(index.len(), 1);
+
+        // Search should return the single vector
+        let query = vec![0.9, 0.1, 0.0, 0.0];
+        let results = index.search(&query, 10).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node1);
+    }
+
     // ============================================================================
     // Property-Based Tests
     // ============================================================================
@@ -999,8 +1084,8 @@ mod tests {
     }
 
     proptest! {
-        /// Property: Search results must be sorted by distance (ascending)
-        /// Invariant: For all i < j, results[i].distance <= results[j].distance
+        /// Property: Search results must be sorted by similarity (descending)
+        /// Invariant: For all i < j, results[i].similarity >= results[j].similarity
         #[test]
         fn prop_search_results_sorted(
             vectors in prop::collection::vec((valid_node_id(), valid_f32_vector(4)), 1..20),
@@ -1020,11 +1105,11 @@ mod tests {
             let k = vectors.len().min(10);
             let results = index.search(&query, k).unwrap();
 
-            // Verify results are sorted ascending by distance
+            // Verify results are sorted descending by similarity (higher = more similar)
             for i in 0..results.len().saturating_sub(1) {
                 prop_assert!(
-                    results[i].1 <= results[i + 1].1,
-                    "Results not sorted: distance[{}]={} > distance[{}]={}",
+                    results[i].1 >= results[i + 1].1,
+                    "Results not sorted: similarity[{}]={} < similarity[{}]={}",
                     i, results[i].1, i + 1, results[i + 1].1
                 );
             }
