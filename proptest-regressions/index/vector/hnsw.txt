@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bfe540b05fa2a88ae3dd6ea53884ca315ce292c2c07e8b15205ef51b4895d913 # shrinks to vectors = [(NodeId(1), [1.3692522e-37, 1.765563e-33, 6.325966e-5, 124008230000.0]), (NodeId(2), [1.740676e-12, 1.0541914e21, 6.079182e-6, 2.0330628e28])], query = [4.170426e-17, 1.0578049e-28, 40300730.0, 252197680000.0]

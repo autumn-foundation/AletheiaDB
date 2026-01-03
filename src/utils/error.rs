@@ -479,6 +479,8 @@ pub enum VectorError {
         /// Description of why the vector is invalid
         reason: String,
     },
+    /// Error from underlying vector index implementation.
+    IndexError(String),
 }
 
 impl fmt::Display for VectorError {
@@ -515,6 +517,9 @@ impl fmt::Display for VectorError {
             }
             VectorError::InvalidVector { reason } => {
                 write!(f, "Invalid vector: {}", reason)
+            }
+            VectorError::IndexError(msg) => {
+                write!(f, "Vector index error: {}", msg)
             }
         }
     }

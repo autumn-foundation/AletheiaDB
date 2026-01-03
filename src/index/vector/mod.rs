@@ -345,7 +345,8 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// - **Cosine**: Returns cosine similarity in range [-1, 1]. Higher is more similar.
     ///   Typical threshold for "similar": >0.7
-    /// - **Euclidean**: Returns L2 distance in range [0, ∞). Lower is more similar.
+    /// - **Euclidean**: Returns negative squared L2 distance in range (-∞, 0]. Higher is more similar.
+    ///   (More negative = more distant, closer to 0 = more similar)
     ///   Threshold depends on embedding magnitude and dimensionality.
     /// - **DotProduct**: Returns inner product in range (-∞, ∞). Higher is more similar.
     ///   Threshold depends on embedding normalization.
@@ -410,3 +411,9 @@ mod tests {
         assert_ne!(metric, DistanceMetric::Euclidean);
     }
 }
+
+// HNSW implementation
+pub mod hnsw;
+
+// Re-export HNSW types for convenience
+pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};
