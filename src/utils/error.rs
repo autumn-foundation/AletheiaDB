@@ -148,6 +148,8 @@ pub enum StorageError {
         /// The type of lock that was poisoned (e.g., "Mutex", "RwLock")
         lock_type: &'static str,
     },
+    /// Property with the given key was not found.
+    PropertyNotFound(String),
 }
 
 impl fmt::Display for StorageError {
@@ -179,6 +181,9 @@ impl fmt::Display for StorageError {
                     "{} lock poisoned: a thread panicked while holding this lock",
                     lock_type
                 )
+            }
+            StorageError::PropertyNotFound(key) => {
+                write!(f, "Property not found: {}", key)
             }
         }
     }
@@ -667,6 +672,10 @@ mod tests {
         assert!(format!("{}", err).contains("Mutex"));
         assert!(format!("{}", err).contains("lock poisoned"));
         assert!(format!("{}", err).contains("panicked"));
+
+        // Test PropertyNotFound
+        let err = StorageError::PropertyNotFound("embedding".to_string());
+        assert_eq!(format!("{}", err), "Property not found: embedding");
     }
 
     #[test]

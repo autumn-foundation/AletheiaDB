@@ -9,7 +9,11 @@ use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMap;
 use crate::index::current::CurrentIndexes;
+use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
+use crate::index::vector::VectorIndex;
 use crate::utils::error::{Result, StorageError};
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 /// Statistics about current storage
 #[derive(Debug, Clone)]
@@ -18,6 +22,27 @@ pub struct CurrentStats {
     pub node_count: usize,
     /// Number of edges
     pub edge_count: usize,
+}
+
+/// Internal state for vector indexing.
+struct VectorIndexState {
+    index: Option<Arc<HnswIndex>>,
+    property_name: Option<String>,
+    config: Option<HnswConfig>,
+}
+
+impl VectorIndexState {
+    fn new() -> Self {
+        VectorIndexState {
+            index: None,
+            property_name: None,
+            config: None,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.index.is_some()
+    }
 }
 
 /// Current-state storage engine.
@@ -34,6 +59,8 @@ pub struct CurrentStorage {
     edge_id_gen: IdGenerator,
     /// ID generator for versions
     version_id_gen: IdGenerator,
+    /// Vector index state
+    vector_index_state: Arc<RwLock<VectorIndexState>>,
 }
 
 impl CurrentStorage {
@@ -44,6 +71,88 @@ impl CurrentStorage {
             node_id_gen: IdGenerator::new(),
             edge_id_gen: IdGenerator::new(),
             version_id_gen: IdGenerator::new(),
+            vector_index_state: Arc::new(RwLock::new(VectorIndexState::new())),
+        }
+    }
+
+    /// Enable vector indexing for a specific property.
+    ///
+    /// Once enabled, nodes with the specified property will be automatically
+    /// indexed for similarity search. The property must contain vector values.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - Name of the property containing vectors
+    /// * `config` - HNSW index configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if vector indexing is already enabled.
+    pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
+        let mut state = self.vector_index_state.write();
+        if state.is_enabled() {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError(
+                    "Vector index is already enabled".to_string()
+                )
+            ));
+        }
+        let index = HnswIndex::new(config.clone())?;
+        state.index = Some(Arc::new(index));
+        state.property_name = Some(property_name.to_string());
+        state.config = Some(config);
+        Ok(())
+    }
+
+    /// Check if vector indexing is enabled.
+    pub fn is_vector_index_enabled(&self) -> bool {
+        self.vector_index_state.read().is_enabled()
+    }
+
+    /// Try to add a node's vector to the index.
+    /// Returns Ok(true) if indexed, Ok(false) if not applicable, Err on failure.
+    fn try_index_vector(&self, node_id: NodeId, properties: &PropertyMap) -> Result<bool> {
+        let state = self.vector_index_state.read();
+        let Some(ref index) = state.index else { return Ok(false) };
+        let Some(ref prop_name) = state.property_name else { return Ok(false) };
+        let Some(value) = properties.get(prop_name) else { return Ok(false) };
+        let Some(vector) = value.as_vector() else { return Ok(false) };
+        let index = Arc::clone(index);
+        drop(state);
+        index.add(node_id, vector)?;
+        Ok(true)
+    }
+
+    /// Try to remove a node from the vector index.
+    /// Returns Ok(true) if removed, Ok(false) if not applicable, Err on failure.
+    fn try_remove_from_index(&self, node_id: NodeId) -> Result<bool> {
+        let state = self.vector_index_state.read();
+        let Some(ref index) = state.index else { return Ok(false) };
+        let index = Arc::clone(index);
+        drop(state);
+        index.remove(node_id)?;
+        Ok(true)
+    }
+
+    /// Update the vector index when node properties change.
+    fn update_vector_index(&self, node_id: NodeId, new_props: &PropertyMap, old_props: &PropertyMap) -> Result<()> {
+        let state = self.vector_index_state.read();
+        let Some(ref index) = state.index else { return Ok(()) };
+        let Some(ref prop_name) = state.property_name else { return Ok(()) };
+        let old_vec = old_props.get(prop_name).and_then(|v| v.as_vector());
+        let new_vec = new_props.get(prop_name).and_then(|v| v.as_vector());
+        let index = Arc::clone(index);
+        drop(state);
+        match (old_vec, new_vec) {
+            (None, None) => Ok(()),
+            (None, Some(v)) => { index.add(node_id, v)?; Ok(()) }
+            (Some(_), None) => { index.remove(node_id)?; Ok(()) }
+            (Some(o), Some(n)) => {
+                if o == n { return Ok(()); }
+                index.remove(node_id)?;
+                index.add(node_id, n)?;
+                Ok(())
+            }
         }
     }
 
@@ -55,8 +164,15 @@ impl CurrentStorage {
         let version_id = VersionId::new(self.version_id_gen.next());
         let label_interned = GLOBAL_INTERNER.intern(label);
 
-        let node = Node::new(node_id, label_interned, properties, version_id);
-        self.indexes.insert_node(node);
+        let node = Node::new(node_id, label_interned, properties.clone(), version_id);
+        self.indexes.insert_node(node.clone());
+
+        // Try to index vector property if enabled
+        if let Err(e) = self.try_index_vector(node_id, &properties) {
+            // Rollback: remove node from indexes
+            self.indexes.remove_node(node_id);
+            return Err(e);
+        }
 
         Ok(node_id)
     }
@@ -156,8 +272,25 @@ impl CurrentStorage {
 
     /// Update a node directly (used by WriteTransaction).
     pub fn update_node_direct(&self, node: Node) -> Result<()> {
-        // Remove old version and insert new
-        self.indexes.insert_node(node);
+        // Get old properties for rollback
+        let old_node = self.indexes.get_node(node.id);
+        let old_properties = old_node.as_ref().map(|n| n.properties.clone());
+
+        // Update node
+        self.indexes.insert_node(node.clone());
+
+        // Update vector index
+        if let Some(old_props) = old_properties {
+            if let Err(e) = self.update_vector_index(node.id, &node.properties, &old_props) {
+                // Rollback: restore old properties
+                if let Some(mut restored) = old_node {
+                    restored.properties = old_props;
+                    self.indexes.insert_node(restored);
+                }
+                return Err(e);
+            }
+        }
+
         Ok(())
     }
 
@@ -173,6 +306,10 @@ impl CurrentStorage {
         self.indexes
             .remove_node(id)
             .ok_or(StorageError::NodeNotFound(id))?;
+
+        // Best-effort vector index removal (ignore errors)
+        let _ = self.try_remove_from_index(id);
+
         Ok(())
     }
 
@@ -280,6 +417,91 @@ impl CurrentStorage {
     #[inline]
     pub fn in_degree(&self, node: NodeId) -> usize {
         self.indexes.in_degree(node)
+    }
+
+
+    /// Find k most similar nodes to the query node based on vector similarity.
+    ///
+    /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
+    /// The query node itself is excluded from results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Vector index is not enabled
+    /// - Query node is not found
+    /// - Query node does not have the indexed vector property
+    /// - The property is not a vector
+    pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
+        let state = self.vector_index_state.read();
+        let index = state.index.as_ref()
+            .ok_or_else(|| crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError("Vector index is not enabled".to_string())
+            ))?;
+        let prop_name = state.property_name.as_ref()
+            .ok_or_else(|| crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError("Vector property name not set".to_string())
+            ))?;
+
+        let query_node = self.indexes.get_node(query_node_id)
+            .ok_or(StorageError::NodeNotFound(query_node_id))?;
+        let query_vec_ref = query_node.properties.get(prop_name)
+            .ok_or_else(|| StorageError::PropertyNotFound(prop_name.clone()))?
+            .as_vector()
+            .ok_or_else(|| crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::InvalidVector { reason: "Property is not a vector".to_string() }
+            ))?;
+
+        let query_vector: Vec<f32> = query_vec_ref.to_vec();
+        let index = Arc::clone(index);
+        drop(state);
+        drop(query_node);
+
+        let mut results = index.search(&query_vector, k + 1)?;
+        results.retain(|(id, _)| *id != query_node_id);
+        results.truncate(k);
+        Ok(results)
+    }
+
+    /// Find k most similar nodes with a specific label.
+    ///
+    /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
+    /// Only nodes with the specified label are returned. The query node is excluded.
+    pub fn find_similar_with_label(&self, query_node_id: NodeId, label: &str, k: usize) -> Result<Vec<(NodeId, f32)>> {
+        let state = self.vector_index_state.read();
+        let index = state.index.as_ref()
+            .ok_or_else(|| crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError("Vector index is not enabled".to_string())
+            ))?;
+        let prop_name = state.property_name.as_ref()
+            .ok_or_else(|| crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError("Vector property name not set".to_string())
+            ))?;
+
+        let query_node = self.indexes.get_node(query_node_id)
+            .ok_or(StorageError::NodeNotFound(query_node_id))?;
+        let query_vec_ref = query_node.properties.get(prop_name)
+            .ok_or_else(|| StorageError::PropertyNotFound(prop_name.clone()))?
+            .as_vector()
+            .ok_or_else(|| crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::InvalidVector { reason: "Property is not a vector".to_string() }
+            ))?;
+
+        let query_vector: Vec<f32> = query_vec_ref.to_vec();
+        let label_id = GLOBAL_INTERNER.intern(label);
+        let index = Arc::clone(index);
+        drop(state);
+        drop(query_node);
+
+        let mut results = index.search_with_filter(&query_vector, k + 10, |node_id| {
+            self.indexes.get_node(*node_id)
+                .map(|n| n.label == label_id)
+                .unwrap_or(false)
+        })?;
+
+        results.retain(|(id, _)| *id != query_node_id);
+        results.truncate(k);
+        Ok(results)
     }
 
     /// Get statistics about the current storage
@@ -571,7 +793,7 @@ mod tests {
         let storage = CurrentStorage::new();
 
         // Create node with initial embedding
-        let initial_embedding = vec![0.1f32, 0.2, 0.3];
+        let initial_embedding = vec![0.1f32, 0.2, 0.3, 0.0];
         let props = PropertyMapBuilder::new()
             .insert("name", "Document")
             .insert_vector("embedding", &initial_embedding)
@@ -583,7 +805,7 @@ mod tests {
         let mut node = storage.get_node(node_id).unwrap();
 
         // Update with new embedding
-        let updated_embedding = vec![0.9f32, 0.8, 0.7];
+        let updated_embedding = vec![0.9f32, 0.8, 0.7, 0.0];
         let new_props = PropertyMapBuilder::new()
             .insert("name", "Document")
             .insert_vector("embedding", &updated_embedding)
@@ -692,7 +914,7 @@ mod tests {
         let storage = CurrentStorage::new();
 
         // Vector with normalized values (common for embeddings)
-        let normalized_embedding = vec![0.5773503f32, 0.5773503, 0.5773503]; // unit vector
+        let normalized_embedding = vec![0.5773503f32, 0.5773503, 0.5773503, 0.0]; // unit vector
         let props = PropertyMapBuilder::new()
             .insert_vector("embedding", &normalized_embedding)
             .build();
@@ -709,4 +931,206 @@ mod tests {
         let magnitude: f32 = retrieved.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((magnitude - 1.0).abs() < 1e-5);
     }
+    // ========================================================================
+    // Vector Index Integration Tests (VS-030)
+    // ========================================================================
+
+    #[test]
+    fn test_enable_vector_index() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+        assert!(!storage.is_vector_index_enabled());
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+        assert!(storage.is_vector_index_enabled());
+    }
+
+    #[test]
+    fn test_enable_vector_index_twice_fails() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config.clone()).unwrap();
+
+        let result = storage.enable_vector_index("embedding", config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auto_index_on_create() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        let embedding = vec![1.0f32, 0.0, 0.0, 0.0];
+        let props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &embedding)
+            .build();
+        let node_id = storage.create_node("Document", props).unwrap();
+
+        let node = storage.get_node(node_id).unwrap();
+        assert_eq!(node.get_property("embedding").and_then(|v| v.as_vector()), Some(&embedding[..]));
+    }
+
+    #[test]
+    fn test_auto_index_dimension_mismatch_rolls_back() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        // Wrong dimension - 2D instead of 3D
+        let wrong_embedding = vec![1.0f32, 0.0];
+        let props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &wrong_embedding)
+            .build();
+
+        let result = storage.create_node("Document", props);
+        assert!(result.is_err());
+        assert_eq!(storage.node_count(), 0); // Rollback worked
+    }
+
+    #[test]
+    fn test_find_similar() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let v2 = vec![0.9f32, 0.1, 0.0, 0.0];
+        let v3 = vec![0.0f32, 1.0, 0.0, 0.0];
+
+        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
+        let node2 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v2).build()).unwrap();
+        let _node3 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v3).build()).unwrap();
+
+        let results = storage.find_similar(node1, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|(id, _)| *id != node1));
+        assert_eq!(results[0].0, node2); // Most similar
+    }
+
+    #[test]
+    fn test_find_similar_with_label() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let v2 = vec![0.9f32, 0.1, 0.0, 0.0];
+        let v3 = vec![0.8f32, 0.2, 0.0, 0.0];
+
+        let node1 = storage.create_node("Person", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
+        let node2 = storage.create_node("Person", PropertyMapBuilder::new().insert_vector("embedding", &v2).build()).unwrap();
+        let _node3 = storage.create_node("Document", PropertyMapBuilder::new().insert_vector("embedding", &v3).build()).unwrap();
+
+        let results = storage.find_similar_with_label(node1, "Person", 2).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node2);
+    }
+
+    #[test]
+    fn test_find_similar_index_not_enabled() {
+        let storage = CurrentStorage::new();
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
+
+        let result = storage.find_similar(node1, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_similar_node_not_found() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        let result = storage.find_similar(NodeId::new(999), 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_similar_property_not_found() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert("name", "test").build()).unwrap();
+        let result = storage.find_similar(node1, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_node_updates_index() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let v2 = vec![0.0f32, 1.0, 0.0, 0.0];
+
+        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
+        let node2 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v2).build()).unwrap();
+
+        // Update node1 to be similar to node2
+        let v1_updated = vec![0.1f32, 0.9, 0.0, 0.0];
+        let mut node1_obj = storage.get_node(node1).unwrap();
+        node1_obj.properties = PropertyMapBuilder::new().insert_vector("embedding", &v1_updated).build();
+        storage.update_node_direct(node1_obj).unwrap();
+
+        let results = storage.find_similar(node2, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node1);
+    }
+
+    #[test]
+    fn test_delete_node_removes_from_index() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let v2 = vec![0.9f32, 0.1, 0.0, 0.0];
+
+        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
+        let node2 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v2).build()).unwrap();
+
+        storage.delete_node_direct(node2).unwrap();
+
+        let results = storage.find_similar(node1, 2).unwrap();
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_create_node_without_vector_property() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        // Create node without vector - should succeed
+        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert("name", "test").build()).unwrap();
+        assert_eq!(storage.node_count(), 1);
+        let node = storage.get_node(node1).unwrap();
+        assert_eq!(node.get_property("name").and_then(|v| v.as_str()), Some("test"));
+    }
+
 }
