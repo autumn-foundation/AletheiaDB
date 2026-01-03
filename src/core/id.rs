@@ -26,7 +26,6 @@ impl NodeId {
             return Err(StorageError::InvalidId {
                 id,
                 id_type: "node",
-                reason: format!("ID {} exceeds maximum allowed value {}", id, MAX_VALID_ID),
             });
         }
         Ok(NodeId(id))
@@ -70,7 +69,6 @@ impl EdgeId {
             return Err(StorageError::InvalidId {
                 id,
                 id_type: "edge",
-                reason: format!("ID {} exceeds maximum allowed value {}", id, MAX_VALID_ID),
             });
         }
         Ok(EdgeId(id))
@@ -114,7 +112,6 @@ impl VersionId {
             return Err(StorageError::InvalidId {
                 id,
                 id_type: "version",
-                reason: format!("ID {} exceeds maximum allowed value {}", id, MAX_VALID_ID),
             });
         }
         Ok(VersionId(id))
@@ -353,17 +350,16 @@ mod tests {
         // IDs exceeding MAX_VALID_ID should be rejected
         let node_result = NodeId::new(MAX_VALID_ID + 1);
         assert!(node_result.is_err());
-        if let Err(StorageError::InvalidId { id, id_type, reason }) = node_result {
+        if let Err(StorageError::InvalidId { id, id_type }) = node_result {
             assert_eq!(id, MAX_VALID_ID + 1);
             assert_eq!(id_type, "node");
-            assert!(reason.contains("exceeds maximum"));
         } else {
             panic!("Expected InvalidId error");
         }
 
         let edge_result = EdgeId::new(u64::MAX);
         assert!(edge_result.is_err());
-        if let Err(StorageError::InvalidId { id, id_type, .. }) = edge_result {
+        if let Err(StorageError::InvalidId { id, id_type }) = edge_result {
             assert_eq!(id, u64::MAX);
             assert_eq!(id_type, "edge");
         } else {
@@ -372,7 +368,8 @@ mod tests {
 
         let version_result = VersionId::new(MAX_VALID_ID + 1000);
         assert!(version_result.is_err());
-        if let Err(StorageError::InvalidId { id_type, .. }) = version_result {
+        if let Err(StorageError::InvalidId { id, id_type }) = version_result {
+            assert_eq!(id, MAX_VALID_ID + 1000);
             assert_eq!(id_type, "version");
         } else {
             panic!("Expected InvalidId error");
