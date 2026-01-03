@@ -16,7 +16,6 @@ updates:
           - "criterion"
           - "proptest"
           - "tempfile"
-          - "pretty_assertions"
       # Group core dependencies - patch updates only for safety
       core-dependencies:
         dependency-type: "production"
@@ -25,7 +24,7 @@ updates:
         patterns:
           - "dashmap"
           - "crc32fast"
-          - "parking_lot"
+          - "usearch"
       # Optional dependencies grouped separately
       optional-dependencies:
         patterns:

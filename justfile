@@ -140,22 +140,22 @@ changelog-preview:
 
 # Show current version
 version:
-    @cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version'
+    @cargo metadata --format-version 1 --no-deps | python -c "import json, sys; print(json.load(sys.stdin)['packages'][0]['version'])"
 
 # Bump patch version (0.1.0 -> 0.1.1)
 version-patch:
     cargo set-version --bump patch
-    @echo "✓ Version bumped to $(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')"
+    @echo "✓ Version bumped to $$(cargo metadata --format-version 1 --no-deps | python -c 'import json, sys; print(json.load(sys.stdin)[\"packages\"][0][\"version\"])')"
 
 # Bump minor version (0.1.0 -> 0.2.0)
 version-minor:
     cargo set-version --bump minor
-    @echo "✓ Version bumped to $(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')"
+    @echo "✓ Version bumped to $$(cargo metadata --format-version 1 --no-deps | python -c 'import json, sys; print(json.load(sys.stdin)[\"packages\"][0][\"version\"])')"
 
 # Bump major version (0.1.0 -> 1.0.0)
 version-major:
     cargo set-version --bump major
-    @echo "✓ Version bumped to $(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')"
+    @echo "✓ Version bumped to $$(cargo metadata --format-version 1 --no-deps | python -c 'import json, sys; print(json.load(sys.stdin)[\"packages\"][0][\"version\"])')"
 
 # Preview what the next version would be based on commits
 version-preview:
