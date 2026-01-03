@@ -120,6 +120,60 @@ doc-private:
 doc-check:
     cargo doc --no-deps
 
+# === Changelog Management ===
+
+# Generate changelog for unreleased changes
+changelog:
+    git-cliff --config cliff.toml --unreleased --strip header
+
+# Generate full CHANGELOG.md file
+changelog-full:
+    git-cliff --config cliff.toml --output CHANGELOG.md
+    @echo "✓ CHANGELOG.md generated successfully!"
+
+# Preview what the next release changelog would look like
+changelog-preview:
+    @echo "=== Next Release Changelog Preview ==="
+    @git-cliff --config cliff.toml --unreleased --strip header
+
+# === Version Management ===
+
+# Show current version
+version:
+    @cargo metadata --format-version 1 --no-deps | python -c "import json, sys; print(json.load(sys.stdin)['packages'][0]['version'])"
+
+# Bump patch version (0.1.0 -> 0.1.1)
+version-patch:
+    cargo set-version --bump patch
+    @echo "✓ Version bumped to $$(cargo metadata --format-version 1 --no-deps | python -c 'import json, sys; print(json.load(sys.stdin)[\"packages\"][0][\"version\"])')"
+
+# Bump minor version (0.1.0 -> 0.2.0)
+version-minor:
+    cargo set-version --bump minor
+    @echo "✓ Version bumped to $$(cargo metadata --format-version 1 --no-deps | python -c 'import json, sys; print(json.load(sys.stdin)[\"packages\"][0][\"version\"])')"
+
+# Bump major version (0.1.0 -> 1.0.0)
+version-major:
+    cargo set-version --bump major
+    @echo "✓ Version bumped to $$(cargo metadata --format-version 1 --no-deps | python -c 'import json, sys; print(json.load(sys.stdin)[\"packages\"][0][\"version\"])')"
+
+# Preview what the next version would be based on commits
+version-preview:
+    #!/usr/bin/env bash
+    LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+    echo "Last tag: $LAST_TAG"
+    if [ "$LAST_TAG" = "none" ]; then
+        echo "Next version: minor bump (no previous tags)"
+    else
+        if git log ${LAST_TAG}..HEAD --grep="BREAKING CHANGE" --grep="!:" | grep -q .; then
+            echo "Next version: MAJOR bump (breaking changes detected)"
+        elif git log ${LAST_TAG}..HEAD --grep="^feat" | grep -q .; then
+            echo "Next version: MINOR bump (new features detected)"
+        else
+            echo "Next version: PATCH bump (bug fixes only)"
+        fi
+    fi
+
 # === Performance Testing ===
 
 # Run criterion benchmarks (when implemented)
@@ -129,6 +183,25 @@ criterion:
 # Generate flamegraph (requires cargo-flamegraph)
 flamegraph:
     cargo flamegraph --bench current_state
+
+# === Pre-commit Hooks ===
+
+# Install pre-commit hooks
+setup-hooks:
+    #!/usr/bin/env bash
+    if command -v pwsh &> /dev/null; then
+        pwsh -File scripts/setup-hooks.ps1
+    else
+        bash scripts/setup-hooks.sh
+    fi
+
+# Run pre-commit hooks on all files
+pre-commit-all:
+    pre-commit run --all-files
+
+# Update pre-commit hook versions
+pre-commit-update:
+    pre-commit autoupdate
 
 # === Maintenance ===
 

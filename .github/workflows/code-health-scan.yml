@@ -1,0 +1,229 @@
+name: Weekly Code Health Scan
+
+on:
+  schedule:
+    # Every Monday at 9 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+jobs:
+  security-scan:
+    name: Security & Vulnerability Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better analysis
+
+      - name: Check for existing open security issues
+        id: check_issues
+        run: |
+          # Get count of open automated security scan issues
+          ISSUE_COUNT=$(gh issue list --label "automated-scan,security" --state open --json number | jq '. | length')
+          echo "open_issues=$ISSUE_COUNT" >> $GITHUB_OUTPUT
+          echo "Found $ISSUE_COUNT open security scan issues"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Run Claude Security Scan
+        if: steps.check_issues.outputs.open_issues < 5
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            **AUTOMATED SECURITY SCAN**
+
+            Perform a comprehensive security analysis of the GallifreyDB codebase. Focus on:
+
+            1. **Unsafe Code Review**
+               - Review all `unsafe` blocks in the codebase
+               - Verify SAFETY comments are present and accurate
+               - Check for potential UB (undefined behavior)
+
+            2. **Input Validation**
+               - Ensure all external inputs are validated
+               - Check for potential panic paths from user input
+               - Verify error handling doesn't expose internal details
+
+            3. **Dependency Security**
+               - Review Cargo.toml for known vulnerable dependencies (though cargo-audit catches most)
+               - Check for deprecated or unmaintained dependencies
+
+            4. **Temporal Database Specific**
+               - Check for temporal paradoxes or consistency violations
+               - Ensure WAL write paths are crash-safe
+               - Verify ACID properties are maintained
+
+            5. **Memory Safety**
+               - Look for potential memory leaks (unclosed files, unbounded caches)
+               - Check for data races in concurrent code
+
+            **For each finding:**
+            - Create a GitHub issue with title: "Security: [Brief Description]"
+            - Add labels: `security`, `automated-scan`
+            - Include:
+              - File path and line numbers
+              - Severity: Critical/High/Medium/Low
+              - Detailed explanation of the vulnerability
+              - Potential impact
+              - Suggested fix with code example
+              - References to relevant security best practices
+
+            **Only create issues for HIGH or CRITICAL findings.**
+            Skip low-severity issues that are better addressed in code review.
+
+            Check for existing open issues with `automated-scan` and `security` labels before creating duplicates.
+
+  performance-opportunities:
+    name: Performance Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for existing open performance issues
+        id: check_issues
+        run: |
+          ISSUE_COUNT=$(gh issue list --label "automated-scan,performance" --state open --json number | jq '. | length')
+          echo "open_issues=$ISSUE_COUNT" >> $GITHUB_OUTPUT
+          echo "Found $ISSUE_COUNT open performance scan issues"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Run Claude Performance Scan
+        if: steps.check_issues.outputs.open_issues < 5
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            **AUTOMATED PERFORMANCE SCAN**
+
+            Analyze GallifreyDB for performance optimization opportunities. Remember our performance targets from CLAUDE.md:
+            - Current-state queries: <1µs single-hop, <100µs 3-hop
+            - Time-travel queries: <10ms reconstruction
+            - Storage overhead: <2X vs non-temporal
+
+            Focus on:
+
+            1. **Hot Path Analysis**
+               - Review current-state query paths (most critical)
+               - Look for unnecessary allocations in tight loops
+               - Check for missing `#[inline]` on small hot functions
+
+            2. **Memory Efficiency**
+               - Identify opportunities for Arc deduplication
+               - Look for excessive cloning
+               - Check for missing string interning opportunities
+
+            3. **Cache Locality**
+               - Review data structure layouts for cache efficiency
+               - Check for struct-of-arrays vs array-of-structs opportunities
+               - Identify cold fields that could be boxed/separated
+
+            4. **Algorithmic Improvements**
+               - Look for O(n²) algorithms that could be O(n log n)
+               - Check for unnecessary sorting or filtering
+               - Identify opportunities for lazy evaluation
+
+            5. **Temporal Operations**
+               - Review anchor+delta reconstruction efficiency
+               - Check for opportunities to skip versions during reconstruction
+               - Look for excessive B-tree index overhead
+
+            **For each finding:**
+            - Create a GitHub issue with title: "Performance: [Brief Description]"
+            - Add labels: `performance`, `automated-scan`
+            - Include:
+              - File path and line numbers (use format `file.rs:123`)
+              - Current performance characteristic (if measurable)
+              - Suggested optimization with code example
+              - Expected improvement (rough estimate)
+              - Trade-offs and risks
+
+            **Only create issues for opportunities with >10% expected improvement.**
+            Check for existing open issues to avoid duplicates.
+
+  code-quality:
+    name: Code Quality & Maintainability
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for existing open code-quality issues
+        id: check_issues
+        run: |
+          ISSUE_COUNT=$(gh issue list --label "automated-scan,code-quality" --state open --json number | jq '. | length')
+          echo "open_issues=$ISSUE_COUNT" >> $GITHUB_OUTPUT
+          echo "Found $ISSUE_COUNT open code-quality scan issues"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Run Claude Code Quality Scan
+        if: steps.check_issues.outputs.open_issues < 5
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            **AUTOMATED CODE QUALITY SCAN**
+
+            Review GallifreyDB for code quality and maintainability improvements. Focus on:
+
+            1. **Error Handling**
+               - Find `.unwrap()` or `.expect()` in production code (not tests)
+               - Look for panics in error paths
+               - Check for Result types being ignored
+               - Verify error messages are helpful
+
+            2. **API Design**
+               - Look for inconsistent naming patterns
+               - Check public APIs for ergonomics issues
+               - Verify documentation on public functions
+               - Look for missing #[must_use] on Result types
+
+            3. **Code Complexity**
+               - Identify functions >100 lines that could be split
+               - Look for deeply nested code (>4 levels)
+               - Check for overly complex match statements
+               - Find opportunities to extract helper functions
+
+            4. **Testing Gaps**
+               - Look for critical paths without tests
+               - Check for missing edge case tests
+               - Identify temporal invariants that aren't tested
+               - Look for untested error paths
+
+            5. **Documentation**
+               - Check for missing module-level docs
+               - Look for complex algorithms without explanation
+               - Verify SAFETY comments on all unsafe blocks
+               - Find TODOs or FIXMEs in code
+
+            6. **Technical Debt**
+               - Identify deprecated patterns still in use
+               - Look for hardcoded values that should be configurable
+               - Check for duplicated code that could be abstracted
+               - Find commented-out code that should be removed
+
+            **For each finding:**
+            - Create a GitHub issue with title: "Code Quality: [Brief Description]"
+            - Add labels: `code-quality`, `automated-scan`
+            - Include:
+              - File path and line numbers (format: `file.rs:123`)
+              - Current state and why it's problematic
+              - Suggested improvement with example
+              - Impact on maintainability
+              - Effort estimate (Low/Medium/High)
+
+            **Only create issues for HIGH impact or LOW effort improvements.**
+            Check for existing open issues to avoid duplicates.
