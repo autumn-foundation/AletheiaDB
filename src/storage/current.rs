@@ -279,7 +279,15 @@ impl CurrentStorage {
     /// Insert a node directly (used by WriteTransaction).
     /// Does not generate IDs - caller must provide them.
     pub fn insert_node_direct(&self, node: Node) -> Result<()> {
+        // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
+        // we have not modified any graph state, so we can safely return error without rollback.
+        // This prevents the VS-030 bug where transaction-created nodes bypassed indexing,
+        // causing them to be missing from HNSW index and invisible to find_similar queries.
+        self.try_index_vector(node.id, &node.properties)?;
+
+        // Vector indexing succeeded, now insert the node into the main indexes.
         self.indexes.insert_node(node);
+
         Ok(())
     }
 
@@ -523,6 +531,109 @@ impl CurrentStorage {
         results.retain(|(id, _)| *id != query_node_id);
         results.truncate(k);
         Ok(results)
+    }
+
+    /// Find k most similar nodes to a raw embedding vector.
+    ///
+    /// This is useful when searching with embeddings that don't correspond to any
+    /// existing node in the graph (e.g., query embeddings from external sources).
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - The query embedding vector
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Returns
+    ///
+    /// A list of (NodeId, similarity_score) pairs sorted by similarity (highest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Vector index is not enabled
+    /// - Embedding dimensions don't match the indexed property
+    pub fn find_similar_by_embedding(
+        &self,
+        embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        let index = self.prepare_vector_search_raw(embedding)?;
+        let results = index.search(embedding, k)?;
+        Ok(results)
+    }
+
+    /// Find k most similar nodes with a specific label to a raw embedding vector.
+    ///
+    /// Like `find_similar_by_embedding()`, but filters results to only include
+    /// nodes with the specified label.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - The query embedding vector
+    /// * `label` - Only return nodes with this label
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Returns
+    ///
+    /// A list of (NodeId, similarity_score) pairs sorted by similarity (highest first).
+    /// All results have the specified label.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Vector index is not enabled
+    /// - Embedding dimensions don't match the indexed property
+    pub fn find_similar_by_embedding_with_label(
+        &self,
+        embedding: &[f32],
+        label: &str,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        let index = self.prepare_vector_search_raw(embedding)?;
+
+        // Intern the label for efficient comparison
+        let label_id = GLOBAL_INTERNER.intern(label);
+
+        // Use adaptive over-fetch heuristic for filtered search
+        let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
+
+        // Filter during HNSW traversal for better performance
+        let mut results = index.search_with_filter(embedding, candidates_to_fetch, |node_id| {
+            self.indexes
+                .get_node(*node_id)
+                .is_some_and(|n| n.label == label_id)
+        })?;
+
+        // Truncate to requested k (search_with_filter may return more)
+        results.truncate(k);
+        Ok(results)
+    }
+
+    /// Helper method to prepare for raw embedding vector search.
+    /// Returns the Arc<HnswIndex> and validates the embedding.
+    fn prepare_vector_search_raw(&self, embedding: &[f32]) -> Result<Arc<HnswIndex>> {
+        let state = self.vector_index_state.read();
+        let index = state.index.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Vector index is not enabled. Call enable_vector_index() first.".to_string(),
+            ))
+        })?;
+
+        // Validate embedding dimensions match index
+        let expected_dims = index.dimensions();
+        if embedding.len() != expected_dims {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::DimensionMismatch {
+                    expected: expected_dims,
+                    actual: embedding.len(),
+                },
+            ));
+        }
+
+        let index = Arc::clone(index);
+        drop(state);
+
+        Ok(index)
     }
 
     /// Get statistics about the current storage

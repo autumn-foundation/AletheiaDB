@@ -401,6 +401,88 @@ impl GallifreyDB {
             .find_similar_with_label(query_node_id, label, k)
     }
 
+    /// Find k most similar nodes to a raw embedding vector.
+    ///
+    /// This is useful when searching with embeddings that don't correspond to any
+    /// existing node in the graph, such as query embeddings from external sources
+    /// or user input.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - The query embedding vector
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Returns
+    ///
+    /// A list of (NodeId, similarity_score) pairs sorted by similarity (highest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Vector index is not enabled
+    /// - Embedding dimensions don't match the indexed property
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Search with an embedding from external source (e.g., user query)
+    /// let query_embedding = get_embedding_from_llm("rust programming");
+    /// let similar = db.find_similar_by_embedding(&query_embedding, 10)?;
+    /// for (node_id, similarity) in similar {
+    ///     println!("Node {:?} has similarity {}", node_id, similarity);
+    /// }
+    /// ```
+    pub fn find_similar_by_embedding(
+        &self,
+        embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        self.current.find_similar_by_embedding(embedding, k)
+    }
+
+    /// Find k most similar nodes with a specific label to a raw embedding vector.
+    ///
+    /// Like `find_similar_by_embedding()`, but filters results to only include
+    /// nodes with the specified label.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - The query embedding vector
+    /// * `label` - Only return nodes with this label
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Returns
+    ///
+    /// A list of (NodeId, similarity_score) pairs sorted by similarity (highest first).
+    /// All results have the specified label.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Vector index is not enabled
+    /// - Embedding dimensions don't match the indexed property
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find similar documents only
+    /// let query_embedding = get_embedding_from_llm("rust programming");
+    /// let similar_docs = db.find_similar_by_embedding_with_label(
+    ///     &query_embedding,
+    ///     "Document",
+    ///     5
+    /// )?;
+    /// ```
+    pub fn find_similar_by_embedding_with_label(
+        &self,
+        embedding: &[f32],
+        label: &str,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        self.current
+            .find_similar_by_embedding_with_label(embedding, label, k)
+    }
+
     /// Get the number of nodes in the current state.
     #[inline]
     pub fn node_count(&self) -> usize {
@@ -849,5 +931,557 @@ mod tests {
                 .and_then(|v| v.as_int()),
             Some(1)
         );
+    }
+
+    // ==================== Vector Index API Tests ====================
+
+    #[test]
+    fn test_enable_vector_index() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Trying to enable again should fail
+        let config2 = HnswConfig::new(3, DistanceMetric::Cosine);
+        assert!(db.enable_vector_index("embedding", config2).is_err());
+    }
+
+    #[test]
+    fn test_find_similar_basic() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create nodes with vector embeddings
+        let doc1 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Rust Programming")
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let doc2 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Rust Advanced")
+                    .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let doc3 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Python Basics")
+                    .insert_vector("embedding", &[0.0f32, 1.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Find similar to doc1
+        let similar = db.find_similar(doc1, 2).unwrap();
+
+        // Should return 2 results (excluding doc1 itself)
+        assert_eq!(similar.len(), 2);
+
+        // doc2 should be most similar (both about Rust)
+        assert_eq!(similar[0].0, doc2);
+        assert!(similar[0].1 > 0.9); // High similarity
+
+        // doc3 should be less similar
+        assert_eq!(similar[1].0, doc3);
+        assert!(similar[1].1 < 0.5); // Lower similarity
+    }
+
+    #[test]
+    fn test_find_similar_with_label() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create Document nodes
+        let doc1 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let doc2 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Create Person nodes with similar embeddings
+        let _person1 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.95f32, 0.05, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Find similar Documents only (should exclude Person nodes)
+        let similar = db.find_similar_with_label(doc1, "Document", 5).unwrap();
+
+        // Should only return doc2 (not person1)
+        assert_eq!(similar.len(), 1);
+        assert_eq!(similar[0].0, doc2);
+    }
+
+    #[test]
+    fn test_vector_index_not_enabled() {
+        let db = GallifreyDB::new();
+
+        // Create node with vector
+        let node_id = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Try to search without enabling index - should fail
+        assert!(db.find_similar(node_id, 5).is_err());
+    }
+
+    #[test]
+    fn test_vector_index_with_euclidean_distance() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index with Euclidean distance
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create nodes with vector embeddings
+        let doc1 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let doc2 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let doc3 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[10.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Find similar to doc1
+        let similar = db.find_similar(doc1, 2).unwrap();
+
+        assert_eq!(similar.len(), 2);
+
+        // With Euclidean distance, doc2 (distance 1.0) should be closer than doc3 (distance 10.0)
+        assert_eq!(similar[0].0, doc2);
+        assert_eq!(similar[1].0, doc3);
+    }
+
+    #[test]
+    fn test_vector_index_with_large_k() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create 5 nodes
+        let mut node_ids = Vec::new();
+        for i in 0..5 {
+            let node_id = db
+                .create_node(
+                    "Document",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[i as f32, 0.0, 0.0])
+                        .build(),
+                )
+                .unwrap();
+            node_ids.push(node_id);
+        }
+
+        // Request k=10 (more than available)
+        let similar = db.find_similar(node_ids[0], 10).unwrap();
+
+        // Should return at most 4 results (5 total - 1 query node)
+        assert!(similar.len() <= 4);
+    }
+
+    /// Regression test for VS-030 bug: nodes created via write transactions
+    /// must be indexed for vector search.
+    ///
+    /// Prior to fix: insert_node_direct() only called indexes.insert_node(),
+    /// skipping try_index_vector(). This meant all transaction-created nodes
+    /// were missing from the HNSW index, causing find_similar to return empty results.
+    #[test]
+    fn test_transaction_nodes_are_indexed() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create nodes via write transaction (not convenience method)
+        let (doc1, doc2, _doc3) = db
+            .write(|tx| {
+                let d1 = tx.create_node(
+                    "Document",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                        .build(),
+                )?;
+                let d2 = tx.create_node(
+                    "Document",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                        .build(),
+                )?;
+                let d3 = tx.create_node(
+                    "Document",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[0.0f32, 1.0, 0.0])
+                        .build(),
+                )?;
+                Ok((d1, d2, d3))
+            })
+            .unwrap();
+
+        // CRITICAL: These nodes were created via transaction, not db.create_node()
+        // Before the fix, insert_node_direct() didn't index vectors, so this would fail
+        let similar = db.find_similar(doc1, 2).unwrap();
+
+        // Should find doc2 and doc3
+        assert_eq!(similar.len(), 2);
+        assert_eq!(similar[0].0, doc2); // Most similar
+        assert!(similar[0].1 > 0.9); // High similarity
+    }
+
+    #[test]
+    fn test_find_similar_by_embedding() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create nodes with vector embeddings
+        let doc1 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Rust Programming")
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let doc2 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Rust Advanced")
+                    .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let _doc3 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Python Basics")
+                    .insert_vector("embedding", &[0.0f32, 1.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Search with an external query embedding (similar to doc1)
+        let query_embedding = [0.95f32, 0.05, 0.0];
+        let similar = db.find_similar_by_embedding(&query_embedding, 2).unwrap();
+
+        // Should return doc1 first (most similar to query), then doc2
+        assert_eq!(similar.len(), 2);
+        assert_eq!(similar[0].0, doc1); // Most similar
+        assert!(similar[0].1 > 0.99); // Very high similarity
+        assert_eq!(similar[1].0, doc2);
+    }
+
+    #[test]
+    fn test_find_similar_by_embedding_with_label() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create Document nodes
+        let doc1 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let doc2 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Create Person nodes with similar embeddings
+        let _person1 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.95f32, 0.05, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Search for Documents only with query embedding
+        let query_embedding = [1.0f32, 0.0, 0.0];
+        let similar = db
+            .find_similar_by_embedding_with_label(&query_embedding, "Document", 5)
+            .unwrap();
+
+        // Should only return Documents (doc1 and doc2), not person1
+        assert_eq!(similar.len(), 2);
+        assert!(similar.iter().any(|(id, _)| *id == doc1));
+        assert!(similar.iter().any(|(id, _)| *id == doc2));
+    }
+
+    #[test]
+    fn test_find_similar_by_embedding_dimension_mismatch() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index with 3 dimensions
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create a node
+        db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+
+        // Try to search with wrong dimensions (4 instead of 3)
+        let wrong_embedding = [1.0f32, 0.0, 0.0, 0.0];
+        let result = db.find_similar_by_embedding(&wrong_embedding, 5);
+
+        // Should fail with dimension mismatch error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_similar_empty_database() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index but don't add any nodes
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Search should return empty results, not error
+        let query_embedding = [1.0f32, 0.0, 0.0];
+        let results = db.find_similar_by_embedding(&query_embedding, 10).unwrap();
+
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_find_similar_k_zero() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index and add some nodes
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+
+        // Search with k=0 should return empty results, not error
+        let query_embedding = [1.0f32, 0.0, 0.0];
+        let results = db.find_similar_by_embedding(&query_embedding, 0).unwrap();
+
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_vector_indexing() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Arc::new(GallifreyDB::new());
+
+        // Enable vector index
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(1000);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Spawn multiple threads that create nodes with vectors concurrently
+        let mut handles = vec![];
+        for i in 0..10 {
+            let db_clone = Arc::clone(&db);
+            let handle = thread::spawn(move || {
+                // Use non-zero vectors to avoid issues with cosine similarity
+                let base = (i as f32 + 1.0) / 10.0;
+                db_clone
+                    .create_node(
+                        "Document",
+                        PropertyMapBuilder::new()
+                            .insert_vector("embedding", &[base, base, base, base])
+                            .build(),
+                    )
+                    .unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        let node_ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // Verify all nodes were indexed - search should return results
+        // (Note: find_similar excludes the query node, so we check for OTHER nodes)
+        for node_id in &node_ids {
+            let results = db.find_similar(*node_id, 5).unwrap();
+            // With 10 nodes and k=5, we should get at least 4 results (excluding query node)
+            // HNSW is approximate, so we allow for slight variation
+            assert!(
+                results.len() >= 4,
+                "Expected >=4 results for node {:?}, got {}",
+                node_id,
+                results.len()
+            );
+            // Verify results don't include the query node (it's excluded by design)
+            assert!(
+                results.iter().all(|(id, _)| *id != *node_id),
+                "Query node {:?} should not appear in its own results",
+                node_id
+            );
+            // Verify similarity scores are reasonable (between 0 and 1)
+            for (_, score) in &results {
+                assert!(
+                    (0.0..=1.0).contains(score),
+                    "Similarity score {} out of range",
+                    score
+                );
+            }
+        }
+
+        // Verify total count
+        assert_eq!(db.node_count(), 10);
+    }
+
+    #[test]
+    fn test_find_similar_with_missing_property() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index on "embedding" property
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create some nodes with the indexed property
+        let doc1 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let _doc2 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Create a node WITHOUT the indexed property (should be ignored in searches)
+        let _doc_no_vector = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "No embedding")
+                    .build(),
+            )
+            .unwrap();
+
+        // Search should only find nodes with the property
+        let results = db.find_similar(doc1, 5).unwrap();
+
+        // Should find doc2 but not doc_no_vector
+        assert_eq!(results.len(), 1); // Only doc2 (doc1 is excluded as query node)
     }
 }
