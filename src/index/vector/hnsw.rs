@@ -733,7 +733,10 @@ impl VectorIndex for HnswIndex {
                     DistanceMetric::DotProduct => -distance,
                 };
                 // Key comes from our own index, always valid
-                (NodeId::new(key).expect("ID from index should be valid"), similarity)
+                (
+                    NodeId::new(key).expect("ID from index should be valid"),
+                    similarity,
+                )
             })
             .collect();
 
@@ -796,7 +799,10 @@ impl VectorIndex for HnswIndex {
                     DistanceMetric::DotProduct => -distance,
                 };
                 // Key comes from our own index, always valid
-                (NodeId::new(key).expect("ID from index should be valid"), similarity)
+                (
+                    NodeId::new(key).expect("ID from index should be valid"),
+                    similarity,
+                )
             })
             .collect();
 
@@ -1265,8 +1271,12 @@ mod tests {
         let index = create_test_index();
 
         // Add only 2 vectors
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+            .unwrap();
 
         // Search for more than available
         let query = vec![0.5, 0.5, 0.0, 0.0];
@@ -1281,9 +1291,15 @@ mod tests {
         let index = create_test_index();
 
         // Add vectors
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2).unwrap(), &[0.9, 0.1, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(3).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[0.9, 0.1, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(3).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+            .unwrap();
 
         // Filter to only allow node 1 and 3
         let allowed = [NodeId::new(1).unwrap(), NodeId::new(3).unwrap()];
@@ -1304,8 +1320,12 @@ mod tests {
         let index = create_test_index();
 
         // Add vectors
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+            .unwrap();
 
         // Filter that rejects everything
         let query = vec![1.0, 0.0, 0.0, 0.0];
@@ -1322,8 +1342,12 @@ mod tests {
             .unwrap();
 
         // Add orthogonal vectors
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+            .unwrap();
 
         // Query should be most similar to node 1
         let query = vec![0.9, 0.1, 0.0, 0.0];
@@ -1339,8 +1363,12 @@ mod tests {
             .build()
             .unwrap();
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2).unwrap(), &[10.0, 0.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[10.0, 0.0, 0.0, 0.0])
+            .unwrap();
 
         // Query closest to node 1
         let query = vec![1.5, 0.0, 0.0, 0.0];
@@ -1360,8 +1388,12 @@ mod tests {
             .build()
             .unwrap();
 
-        index.add(NodeId::new(1).unwrap(), &[2.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[2.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
 
         // Dot product with [1,0,0,0]: node1=2.0, node2=1.0
         let query = vec![1.0, 0.0, 0.0, 0.0];
@@ -1765,8 +1797,12 @@ mod tests {
         let index = HnswIndex::new(config).unwrap();
 
         // Add vectors
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+            .unwrap();
 
         // Search
         let query = vec![0.9, 0.1, 0.0, 0.0];
@@ -1783,8 +1819,12 @@ mod tests {
         let index = HnswIndex::with_capacity(config, 100).unwrap();
 
         // Add vectors
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2).unwrap(), &[10.0, 0.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[10.0, 0.0, 0.0, 0.0])
+            .unwrap();
 
         // Search
         let query = vec![1.5, 0.0, 0.0, 0.0];
