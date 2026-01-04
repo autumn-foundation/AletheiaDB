@@ -667,7 +667,7 @@ impl WriteTransaction {
 
                     // Generate version ID for tombstone
                     let tombstone_version_id =
-                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
+                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
 
                     // Create tombstone temporal interval
                     // The tombstone marks when the deletion occurred. Its transaction_time
@@ -714,7 +714,7 @@ impl WriteTransaction {
 
                     // Generate version ID for tombstone
                     let tombstone_version_id =
-                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
+                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
 
                     // Create tombstone temporal interval
                     // The tombstone marks when the deletion occurred. Its transaction_time
@@ -929,8 +929,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let node_id = NodeId::new_unchecked(self.node_id_gen.lock_or_err()?.next());
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
+        let node_id = NodeId::new_unchecked(self.node_id_gen.lock_or_err()?.next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
         let label_interned = GLOBAL_INTERNER.intern(label);
 
         // Get timestamp for temporal interval
@@ -966,8 +966,8 @@ impl WriteOps for WriteTransaction {
         }
 
         // Generate IDs
-        let edge_id = EdgeId::new_unchecked(self.edge_id_gen.lock_or_err()?.next());
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
+        let edge_id = EdgeId::new_unchecked(self.edge_id_gen.lock_or_err()?.next()?);
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
         let label_interned = GLOBAL_INTERNER.intern(label);
 
         // Get timestamp for temporal interval
@@ -1000,7 +1000,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current node to preserve label
         let node = self.current.get_node(node_id)?;
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;
@@ -1030,7 +1030,7 @@ impl WriteOps for WriteTransaction {
 
         // Get current edge to preserve source, target, label
         let edge = self.current.get_edge(edge_id)?;
-        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next());
+        let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;

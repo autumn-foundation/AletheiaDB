@@ -239,21 +239,18 @@ impl IdGenerator {
     ///
     /// This method is thread-safe and lock-free.
     ///
-    /// # Panics
-    ///
-    /// Panics if the generator would exceed `MAX_VALID_ID`. In practice, this requires
+    /// Returns an error if the generator would exceed `MAX_VALID_ID`. In practice, this requires
     /// ~18 quintillion operations and is unrealistic for a single database instance.
     #[inline]
-    pub fn next(&self) -> u64 {
+    pub fn next(&self) -> Result<u64, StorageError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         if id > MAX_VALID_ID {
-            panic!(
-                "ID generator exhausted: generated ID {} exceeds MAX_VALID_ID ({}). \
-                 This indicates either a bug or an unrealistic number of operations.",
-                id, MAX_VALID_ID
-            );
+            return Err(StorageError::InvalidId {
+                id,
+                id_type: "generated",
+            });
         }
-        id
+        Ok(id)
     }
 
     /// Get the current value without incrementing.
@@ -312,17 +309,17 @@ mod tests {
     #[test]
     fn test_id_generator() {
         let generator = IdGenerator::new();
-        assert_eq!(generator.next(), 0);
-        assert_eq!(generator.next(), 1);
-        assert_eq!(generator.next(), 2);
+        assert_eq!(generator.next(), Ok(0));
+        assert_eq!(generator.next(), Ok(1));
+        assert_eq!(generator.next(), Ok(2));
         assert_eq!(generator.current(), 3);
     }
 
     #[test]
     fn test_id_generator_with_start() {
         let generator = IdGenerator::with_start(100);
-        assert_eq!(generator.next(), 100);
-        assert_eq!(generator.next(), 101);
+        assert_eq!(generator.next(), Ok(100));
+        assert_eq!(generator.next(), Ok(101));
     }
 
     #[test]
@@ -463,7 +460,7 @@ mod tests {
         // Verify ID generators produce valid IDs
         let generator = IdGenerator::new();
         for _ in 0..100 {
-            let id = generator.next();
+            let id = generator.next().expect("Generator should produce valid ID");
             assert!(
                 NodeId::new(id).is_ok(),
                 "Generator produced invalid ID: {}",
@@ -474,7 +471,7 @@ mod tests {
         // Test generator starting near the limit
         let generator = IdGenerator::with_start(MAX_VALID_ID - 10);
         for _ in 0..10 {
-            let id = generator.next();
+            let id = generator.next().expect("Generator near limit should produce valid ID");
             assert!(
                 NodeId::new(id).is_ok(),
                 "Generator near limit produced invalid ID: {}",
@@ -488,12 +485,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ID generator exhausted")]
-    fn test_id_generator_panics_on_overflow() {
-        // Verify generator panics when exceeding MAX_VALID_ID
+    fn test_id_generator_returns_error_on_overflow() {
+        // Verify generator returns error when exceeding MAX_VALID_ID
         let generator = IdGenerator::with_start(MAX_VALID_ID);
-        let _ = generator.next(); // This should be OK (at MAX_VALID_ID)
-        let _ = generator.next(); // This should panic (exceeds MAX_VALID_ID)
+        assert!(generator.next().is_ok()); // This should be OK (at MAX_VALID_ID)
+        assert!(generator.next().is_err()); // This should error (exceeds MAX_VALID_ID)
+
+        // Verify error type
+        let err = generator.next().unwrap_err();
+        assert!(matches!(err, StorageError::InvalidId { id_type: "generated", .. }));
     }
 
     #[test]
