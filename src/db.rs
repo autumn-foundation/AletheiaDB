@@ -11,11 +11,11 @@ use crate::core::id::{EdgeId, IdGenerator, NodeId};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
+use crate::index::vector::hnsw::HnswConfig;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
 use crate::storage::wal::{WalConfig, WriteAheadLog};
-use crate::index::vector::hnsw::HnswConfig;
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::MutexExt;
 use std::sync::{Arc, Mutex};
@@ -309,7 +309,6 @@ impl GallifreyDB {
         ))
     }
 
-
     // ========================================================================
     // Vector Indexing API (VS-030)
     // ========================================================================
@@ -398,7 +397,8 @@ impl GallifreyDB {
         label: &str,
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        self.current.find_similar_with_label(query_node_id, label, k)
+        self.current
+            .find_similar_with_label(query_node_id, label, k)
     }
 
     /// Get the number of nodes in the current state.

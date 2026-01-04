@@ -9,8 +9,8 @@ use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMap;
 use crate::index::current::CurrentIndexes;
-use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::VectorIndex;
+use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::utils::error::{Result, StorageError};
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -93,8 +93,8 @@ impl CurrentStorage {
         if state.is_enabled() {
             return Err(crate::utils::error::Error::Vector(
                 crate::utils::error::VectorError::IndexError(
-                    "Vector index is already enabled".to_string()
-                )
+                    "Vector index is already enabled".to_string(),
+                ),
             ));
         }
         let index = HnswIndex::new(config.clone())?;
@@ -114,12 +114,13 @@ impl CurrentStorage {
     fn try_index_vector(&self, node_id: NodeId, properties: &PropertyMap) -> Result<bool> {
         let state = self.vector_index_state.read();
         if let (Some(index), Some(prop_name)) = (state.index.as_ref(), state.property_name.as_ref())
-            && let Some(vector) = properties.get(prop_name).and_then(|v| v.as_vector()) {
-                let index = Arc::clone(index);
-                drop(state); // Drop lock before potentially long operation
-                index.add(node_id, vector)?;
-                return Ok(true);
-            }
+            && let Some(vector) = properties.get(prop_name).and_then(|v| v.as_vector())
+        {
+            let index = Arc::clone(index);
+            drop(state); // Drop lock before potentially long operation
+            index.add(node_id, vector)?;
+            return Ok(true);
+        }
         Ok(false)
     }
 
@@ -127,7 +128,9 @@ impl CurrentStorage {
     /// Returns Ok(true) if removed, Ok(false) if not applicable, Err on failure.
     fn try_remove_from_index(&self, node_id: NodeId) -> Result<bool> {
         let state = self.vector_index_state.read();
-        let Some(ref index) = state.index else { return Ok(false) };
+        let Some(ref index) = state.index else {
+            return Ok(false);
+        };
         let index = Arc::clone(index);
         drop(state);
         index.remove(node_id)?;
@@ -135,20 +138,37 @@ impl CurrentStorage {
     }
 
     /// Update the vector index when node properties change.
-    fn update_vector_index(&self, node_id: NodeId, new_props: &PropertyMap, old_props: &PropertyMap) -> Result<()> {
+    fn update_vector_index(
+        &self,
+        node_id: NodeId,
+        new_props: &PropertyMap,
+        old_props: &PropertyMap,
+    ) -> Result<()> {
         let state = self.vector_index_state.read();
-        let Some(ref index) = state.index else { return Ok(()) };
-        let Some(ref prop_name) = state.property_name else { return Ok(()) };
+        let Some(ref index) = state.index else {
+            return Ok(());
+        };
+        let Some(ref prop_name) = state.property_name else {
+            return Ok(());
+        };
         let old_vec = old_props.get(prop_name).and_then(|v| v.as_vector());
         let new_vec = new_props.get(prop_name).and_then(|v| v.as_vector());
         let index = Arc::clone(index);
         drop(state);
         match (old_vec, new_vec) {
             (None, None) => Ok(()),
-            (None, Some(v)) => { index.add(node_id, v)?; Ok(()) }
-            (Some(_), None) => { index.remove(node_id)?; Ok(()) }
+            (None, Some(v)) => {
+                index.add(node_id, v)?;
+                Ok(())
+            }
+            (Some(_), None) => {
+                index.remove(node_id)?;
+                Ok(())
+            }
             (Some(o), Some(n)) => {
-                if o == n { return Ok(()); }
+                if o == n {
+                    return Ok(());
+                }
                 // Note: HnswIndex::add() is an upsert operation (remove + add internally)
                 index.add(node_id, n)?;
                 Ok(())
@@ -280,11 +300,12 @@ impl CurrentStorage {
 
         // Update vector index
         if let Some(ref old) = old_node
-            && let Err(e) = self.update_vector_index(node.id, &node.properties, &old.properties) {
-                // Rollback: restore the original node
-                self.indexes.insert_node(old.clone());
-                return Err(e);
-            }
+            && let Err(e) = self.update_vector_index(node.id, &node.properties, &old.properties)
+        {
+            // Rollback: restore the original node
+            self.indexes.insert_node(old.clone());
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -414,28 +435,37 @@ impl CurrentStorage {
         self.indexes.in_degree(node)
     }
 
-
     /// Helper method to prepare for vector search.
     /// Returns the Arc<HnswIndex> and the query vector.
     fn prepare_vector_search(&self, query_node_id: NodeId) -> Result<(Arc<HnswIndex>, Vec<f32>)> {
         let state = self.vector_index_state.read();
-        let index = state.index.as_ref()
-            .ok_or_else(|| crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError("Vector index is not enabled".to_string())
-            ))?;
-        let prop_name = state.property_name.as_ref()
-            .ok_or_else(|| crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError("Vector property name not set".to_string())
-            ))?;
+        let index = state.index.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Vector index is not enabled".to_string(),
+            ))
+        })?;
+        let prop_name = state.property_name.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Vector property name not set".to_string(),
+            ))
+        })?;
 
-        let query_node = self.indexes.get_node(query_node_id)
+        let query_node = self
+            .indexes
+            .get_node(query_node_id)
             .ok_or(StorageError::NodeNotFound(query_node_id))?;
-        let query_vec_ref = query_node.properties.get(prop_name)
+        let query_vec_ref = query_node
+            .properties
+            .get(prop_name)
             .ok_or_else(|| StorageError::PropertyNotFound(prop_name.clone()))?
             .as_vector()
-            .ok_or_else(|| crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::InvalidVector { reason: "Property is not a vector".to_string() }
-            ))?;
+            .ok_or_else(|| {
+                crate::utils::error::Error::Vector(
+                    crate::utils::error::VectorError::InvalidVector {
+                        reason: "Property is not a vector".to_string(),
+                    },
+                )
+            })?;
 
         let query_vector: Vec<f32> = query_vec_ref.to_vec();
         let index = Arc::clone(index);
@@ -470,18 +500,25 @@ impl CurrentStorage {
     ///
     /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
     /// Only nodes with the specified label are returned. The query node is excluded.
-    pub fn find_similar_with_label(&self, query_node_id: NodeId, label: &str, k: usize) -> Result<Vec<(NodeId, f32)>> {
+    pub fn find_similar_with_label(
+        &self,
+        query_node_id: NodeId,
+        label: &str,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
         let (index, query_vector) = self.prepare_vector_search(query_node_id)?;
         let label_id = GLOBAL_INTERNER.intern(label);
 
         // Fetch a multiple of k candidates to increase the chance of finding enough matches.
         // Cap the over-fetch to prevent excessive memory usage with large k.
         let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
-        let mut results = index.search_with_filter(&query_vector, candidates_to_fetch, |node_id| {
-            self.indexes.get_node(*node_id)
-                .map(|n| n.label == label_id)
-                .unwrap_or(false)
-        })?;
+        let mut results =
+            index.search_with_filter(&query_vector, candidates_to_fetch, |node_id| {
+                self.indexes
+                    .get_node(*node_id)
+                    .map(|n| n.label == label_id)
+                    .unwrap_or(false)
+            })?;
 
         results.retain(|(id, _)| *id != query_node_id);
         results.truncate(k);
@@ -936,7 +973,9 @@ mod tests {
         let storage = CurrentStorage::new();
 
         let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
-        storage.enable_vector_index("embedding", config.clone()).unwrap();
+        storage
+            .enable_vector_index("embedding", config.clone())
+            .unwrap();
 
         let result = storage.enable_vector_index("embedding", config);
         assert!(result.is_err());
@@ -957,7 +996,10 @@ mod tests {
         let node_id = storage.create_node("Document", props).unwrap();
 
         let node = storage.get_node(node_id).unwrap();
-        assert_eq!(node.get_property("embedding").and_then(|v| v.as_vector()), Some(&embedding[..]));
+        assert_eq!(
+            node.get_property("embedding").and_then(|v| v.as_vector()),
+            Some(&embedding[..])
+        );
     }
 
     #[test]
@@ -991,9 +1033,30 @@ mod tests {
         let v2 = vec![0.9f32, 0.1, 0.0, 0.0];
         let v3 = vec![0.0f32, 1.0, 0.0, 0.0];
 
-        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
-        let node2 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v2).build()).unwrap();
-        let _node3 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v3).build()).unwrap();
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+        let node2 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v2)
+                    .build(),
+            )
+            .unwrap();
+        let _node3 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v3)
+                    .build(),
+            )
+            .unwrap();
 
         let results = storage.find_similar(node1, 2).unwrap();
         assert_eq!(results.len(), 2);
@@ -1013,9 +1076,30 @@ mod tests {
         let v2 = vec![0.9f32, 0.1, 0.0, 0.0];
         let v3 = vec![0.8f32, 0.2, 0.0, 0.0];
 
-        let node1 = storage.create_node("Person", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
-        let node2 = storage.create_node("Person", PropertyMapBuilder::new().insert_vector("embedding", &v2).build()).unwrap();
-        let _node3 = storage.create_node("Document", PropertyMapBuilder::new().insert_vector("embedding", &v3).build()).unwrap();
+        let node1 = storage
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+        let node2 = storage
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v2)
+                    .build(),
+            )
+            .unwrap();
+        let _node3 = storage
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v3)
+                    .build(),
+            )
+            .unwrap();
 
         let results = storage.find_similar_with_label(node1, "Person", 2).unwrap();
         assert_eq!(results.len(), 1);
@@ -1026,7 +1110,14 @@ mod tests {
     fn test_find_similar_index_not_enabled() {
         let storage = CurrentStorage::new();
         let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
-        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
 
         let result = storage.find_similar(node1, 2);
         assert!(result.is_err());
@@ -1052,7 +1143,12 @@ mod tests {
         let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
         storage.enable_vector_index("embedding", config).unwrap();
 
-        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert("name", "test").build()).unwrap();
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new().insert("name", "test").build(),
+            )
+            .unwrap();
         let result = storage.find_similar(node1, 2);
         assert!(result.is_err());
     }
@@ -1068,13 +1164,29 @@ mod tests {
         let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
         let v2 = vec![0.0f32, 1.0, 0.0, 0.0];
 
-        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
-        let node2 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v2).build()).unwrap();
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+        let node2 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v2)
+                    .build(),
+            )
+            .unwrap();
 
         // Update node1 to be similar to node2
         let v1_updated = vec![0.1f32, 0.9, 0.0, 0.0];
         let mut node1_obj = storage.get_node(node1).unwrap();
-        node1_obj.properties = PropertyMapBuilder::new().insert_vector("embedding", &v1_updated).build();
+        node1_obj.properties = PropertyMapBuilder::new()
+            .insert_vector("embedding", &v1_updated)
+            .build();
         storage.update_node_direct(node1_obj).unwrap();
 
         let results = storage.find_similar(node2, 1).unwrap();
@@ -1093,8 +1205,22 @@ mod tests {
         let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
         let v2 = vec![0.9f32, 0.1, 0.0, 0.0];
 
-        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v1).build()).unwrap();
-        let node2 = storage.create_node("Doc", PropertyMapBuilder::new().insert_vector("embedding", &v2).build()).unwrap();
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+        let node2 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v2)
+                    .build(),
+            )
+            .unwrap();
 
         storage.delete_node_direct(node2).unwrap();
 
@@ -1111,10 +1237,17 @@ mod tests {
         storage.enable_vector_index("embedding", config).unwrap();
 
         // Create node without vector - should succeed
-        let node1 = storage.create_node("Doc", PropertyMapBuilder::new().insert("name", "test").build()).unwrap();
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new().insert("name", "test").build(),
+            )
+            .unwrap();
         assert_eq!(storage.node_count(), 1);
         let node = storage.get_node(node1).unwrap();
-        assert_eq!(node.get_property("name").and_then(|v| v.as_str()), Some("test"));
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("test")
+        );
     }
-
 }
