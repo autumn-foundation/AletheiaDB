@@ -44,8 +44,21 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Cache pre-commit hooks
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-3|${{ runner.os }}|${{ hashFiles('.pre-commit-config.yaml') }}
+
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
+        env:
+          # Prevent git from prompting for credentials in CI
+          GIT_TERMINAL_PROMPT: '0'
+          # Skip git credential helper
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'credential.helper'
+          GIT_CONFIG_VALUE_0: ''
         with:
           # Only run pre-commit stage hooks (skip commit-msg which needs git auth in CI)
           extra_args: --all-files --verbose --hook-stage pre-commit
