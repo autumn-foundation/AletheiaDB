@@ -1326,4 +1326,105 @@ mod tests {
         // Should fail with dimension mismatch error
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_find_similar_empty_database() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index but don't add any nodes
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Search should return empty results, not error
+        let query_embedding = [1.0f32, 0.0, 0.0];
+        let results = db.find_similar_by_embedding(&query_embedding, 10).unwrap();
+
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_find_similar_k_zero() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index and add some nodes
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                .build(),
+        )
+        .unwrap();
+
+        // Search with k=0 should return empty results, not error
+        let query_embedding = [1.0f32, 0.0, 0.0];
+        let results = db.find_similar_by_embedding(&query_embedding, 0).unwrap();
+
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_vector_indexing() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Arc::new(GallifreyDB::new());
+
+        // Enable vector index
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(1000);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Spawn multiple threads that create nodes with vectors concurrently
+        let mut handles = vec![];
+        for i in 0..10 {
+            let db_clone = Arc::clone(&db);
+            let handle = thread::spawn(move || {
+                // Use non-zero vectors to avoid issues with cosine similarity
+                let base = (i as f32 + 1.0) / 10.0;
+                db_clone
+                    .create_node(
+                        "Document",
+                        PropertyMapBuilder::new()
+                            .insert_vector("embedding", &[base, base, base, base])
+                            .build(),
+                    )
+                    .unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        let node_ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // Verify all nodes were indexed - search should return results
+        // (Note: find_similar excludes the query node, so we check for OTHER nodes)
+        for node_id in &node_ids {
+            let results = db.find_similar(*node_id, 5).unwrap();
+            assert!(!results.is_empty(), "No results for node {:?}", node_id);
+            // Verify results don't include the query node (it's excluded by design)
+            assert!(
+                results.iter().all(|(id, _)| *id != *node_id),
+                "Query node {:?} should not appear in its own results",
+                node_id
+            );
+            // Verify similarity scores are reasonable (between 0 and 1)
+            for (_, score) in &results {
+                assert!(
+                    (0.0..=1.0).contains(score),
+                    "Similarity score {} out of range",
+                    score
+                );
+            }
+        }
+
+        // Verify total count
+        assert_eq!(db.node_count(), 10);
+    }
 }

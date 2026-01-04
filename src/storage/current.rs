@@ -555,7 +555,7 @@ impl CurrentStorage {
         embedding: &[f32],
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let (index, _) = self.prepare_vector_search_raw(embedding)?;
+        let index = self.prepare_vector_search_raw(embedding)?;
         let results = index.search(embedding, k)?;
         Ok(results)
     }
@@ -587,7 +587,7 @@ impl CurrentStorage {
         label: &str,
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let (index, _) = self.prepare_vector_search_raw(embedding)?;
+        let index = self.prepare_vector_search_raw(embedding)?;
 
         // Use adaptive over-fetch heuristic
         let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
@@ -610,11 +610,11 @@ impl CurrentStorage {
 
     /// Helper method to prepare for raw embedding vector search.
     /// Returns the Arc<HnswIndex> and validates the embedding.
-    fn prepare_vector_search_raw(&self, embedding: &[f32]) -> Result<(Arc<HnswIndex>, usize)> {
+    fn prepare_vector_search_raw(&self, embedding: &[f32]) -> Result<Arc<HnswIndex>> {
         let state = self.vector_index_state.read();
         let index = state.index.as_ref().ok_or_else(|| {
             crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Vector index is not enabled".to_string(),
+                "Vector index is not enabled. Call enable_vector_index() first.".to_string(),
             ))
         })?;
 
@@ -632,7 +632,7 @@ impl CurrentStorage {
         let index = Arc::clone(index);
         drop(state);
 
-        Ok((index, expected_dims))
+        Ok(index)
     }
 
     /// Get statistics about the current storage
