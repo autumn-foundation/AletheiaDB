@@ -527,4 +527,255 @@ mod tests {
         // Validation should add minimal overhead (< 2ns per operation on modern hardware)
         // We don't assert this in the test since it's hardware-dependent
     }
+
+    #[test]
+    fn test_id_generator_concurrent_near_limit() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::collections::HashSet;
+
+        // Start generator 20 IDs before the limit
+        let ids_before_limit = 20u64;
+        let generator = Arc::new(IdGenerator::with_start(MAX_VALID_ID - ids_before_limit + 1));
+
+        // Spawn 10 threads, each trying to generate 5 IDs
+        let num_threads = 10;
+        let ids_per_thread = 5;
+        let total_attempts = num_threads * ids_per_thread;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|_| {
+                let gen_clone = Arc::clone(&generator);
+                thread::spawn(move || {
+                    let mut results = Vec::new();
+                    for _ in 0..ids_per_thread {
+                        results.push(gen_clone.next());
+                    }
+                    results
+                })
+            })
+            .collect();
+
+        // Collect all results
+        let mut all_results = Vec::new();
+        for handle in handles {
+            let thread_results = handle.join().expect("Thread panicked");
+            all_results.extend(thread_results);
+        }
+
+        // Verify results
+        let mut successful_ids = HashSet::new();
+        let mut error_count = 0;
+
+        for result in all_results {
+            match result {
+                Ok(id) => {
+                    // Verify ID is valid
+                    assert!(id <= MAX_VALID_ID, "Generated ID {} exceeds MAX_VALID_ID", id);
+                    // Verify no duplicates (critical for concurrency correctness)
+                    assert!(successful_ids.insert(id), "Duplicate ID generated: {}", id);
+                }
+                Err(e) => {
+                    // Verify error is the expected overflow error
+                    assert!(
+                        matches!(e, StorageError::InvalidId { id_type: "generated", .. }),
+                        "Unexpected error type: {:?}",
+                        e
+                    );
+                    error_count += 1;
+                }
+            }
+        }
+
+        // We started with 20 IDs available (MAX_VALID_ID - start + 1 = 20)
+        // So exactly 20 should succeed and the rest should fail
+        assert_eq!(
+            successful_ids.len(),
+            ids_before_limit as usize,
+            "Expected exactly {} successful ID generations",
+            ids_before_limit
+        );
+        assert_eq!(
+            error_count,
+            total_attempts - ids_before_limit as usize,
+            "Expected {} errors when exceeding limit",
+            total_attempts - ids_before_limit as usize
+        );
+
+        // Verify all successful IDs are in the expected range
+        for id in &successful_ids {
+            assert!(
+                *id > MAX_VALID_ID - ids_before_limit && *id <= MAX_VALID_ID,
+                "ID {} outside expected range [{}, {}]",
+                id,
+                MAX_VALID_ID - ids_before_limit + 1,
+                MAX_VALID_ID
+            );
+        }
+
+        println!("\nConcurrent ID Generation Test Results:");
+        println!("  Threads: {}", num_threads);
+        println!("  Attempts per thread: {}", ids_per_thread);
+        println!("  Total attempts: {}", total_attempts);
+        println!("  Successful: {} (no duplicates)", successful_ids.len());
+        println!("  Errors: {}", error_count);
+        println!("  ID range: {} - {}",
+            successful_ids.iter().min().unwrap(),
+            successful_ids.iter().max().unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Generate valid IDs (0..=MAX_VALID_ID)
+    fn valid_id_strategy() -> impl Strategy<Value = u64> {
+        0..=MAX_VALID_ID
+    }
+
+    // Generate any u64 value
+    fn any_u64_strategy() -> impl Strategy<Value = u64> {
+        any::<u64>()
+    }
+
+    proptest! {
+        /// Property: Any ID that passes validation must be <= MAX_VALID_ID
+        #[test]
+        fn prop_validated_ids_within_bounds(raw_id in valid_id_strategy()) {
+            // All valid IDs should successfully create NodeId
+            let node_id = NodeId::new(raw_id).expect("Valid ID should not fail");
+            prop_assert!(node_id.as_u64() <= MAX_VALID_ID);
+
+            // Same for EdgeId and VersionId
+            let edge_id = EdgeId::new(raw_id).expect("Valid ID should not fail");
+            prop_assert!(edge_id.as_u64() <= MAX_VALID_ID);
+
+            let version_id = VersionId::new(raw_id).expect("Valid ID should not fail");
+            prop_assert!(version_id.as_u64() <= MAX_VALID_ID);
+        }
+
+        /// Property: Any ID > MAX_VALID_ID must be rejected
+        #[test]
+        fn prop_invalid_ids_rejected(offset in 1u64..=1000) {
+            let invalid_id = MAX_VALID_ID + offset;
+
+            // All invalid IDs should fail validation
+            prop_assert!(NodeId::new(invalid_id).is_err());
+            prop_assert!(EdgeId::new(invalid_id).is_err());
+            prop_assert!(VersionId::new(invalid_id).is_err());
+        }
+
+        /// Property: ID roundtrip (ID -> u64 -> ID) preserves value
+        #[test]
+        fn prop_id_roundtrip_preserves_value(raw_id in valid_id_strategy()) {
+            // NodeId roundtrip
+            let node_id = NodeId::new(raw_id).unwrap();
+            let roundtrip_node = NodeId::new(node_id.as_u64()).unwrap();
+            prop_assert_eq!(node_id, roundtrip_node);
+
+            // EdgeId roundtrip
+            let edge_id = EdgeId::new(raw_id).unwrap();
+            let roundtrip_edge = EdgeId::new(edge_id.as_u64()).unwrap();
+            prop_assert_eq!(edge_id, roundtrip_edge);
+
+            // VersionId roundtrip
+            let version_id = VersionId::new(raw_id).unwrap();
+            let roundtrip_version = VersionId::new(version_id.as_u64()).unwrap();
+            prop_assert_eq!(version_id, roundtrip_version);
+        }
+
+        /// Property: ID ordering is consistent with u64 ordering
+        #[test]
+        fn prop_id_ordering_consistent(a in valid_id_strategy(), b in valid_id_strategy()) {
+            let node_a = NodeId::new(a).unwrap();
+            let node_b = NodeId::new(b).unwrap();
+
+            // Ordering should match raw u64 ordering
+            prop_assert_eq!(node_a.cmp(&node_b), a.cmp(&b));
+            prop_assert_eq!(node_a == node_b, a == b);
+            prop_assert_eq!(node_a < node_b, a < b);
+            prop_assert_eq!(node_a > node_b, a > b);
+        }
+
+        /// Property: ID generator produces strictly increasing sequence
+        #[test]
+        fn prop_generator_monotonic_increasing(start in 0u64..MAX_VALID_ID-100, count in 1usize..100) {
+            let generator = IdGenerator::with_start(start);
+            let mut prev_id: Option<u64> = None;
+
+            for _ in 0..count {
+                match generator.next() {
+                    Ok(id) => {
+                        // Verify ID is within bounds
+                        prop_assert!(id <= MAX_VALID_ID, "Generator must respect MAX_VALID_ID");
+
+                        // Verify strictly increasing (if not first ID)
+                        if let Some(prev) = prev_id {
+                            prop_assert!(id > prev, "Generator must produce strictly increasing IDs");
+                        }
+
+                        prev_id = Some(id);
+                    }
+                    Err(_) => {
+                        // Once we hit an error, all future calls should also error
+                        if let Some(prev) = prev_id {
+                            prop_assert!(prev >= MAX_VALID_ID, "Generator should only error after MAX_VALID_ID");
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        /// Property: ID generator never produces duplicates
+        #[test]
+        fn prop_generator_no_duplicates(start in 0u64..MAX_VALID_ID-1000, count in 1usize..1000) {
+            let generator = IdGenerator::with_start(start);
+            let mut seen = std::collections::HashSet::new();
+
+            for _ in 0..count {
+                match generator.next() {
+                    Ok(id) => {
+                        prop_assert!(seen.insert(id), "Generator produced duplicate ID: {}", id);
+                    }
+                    Err(_) => break, // Hit the limit
+                }
+            }
+        }
+
+        /// Property: new_unchecked accepts any value (for internal use)
+        #[test]
+        fn prop_new_unchecked_accepts_all(raw_id in any_u64_strategy()) {
+            // new_unchecked should work with any value, even invalid ones
+            let node = NodeId::new_unchecked(raw_id);
+            prop_assert_eq!(node.as_u64(), raw_id);
+
+            let edge = EdgeId::new_unchecked(raw_id);
+            prop_assert_eq!(edge.as_u64(), raw_id);
+
+            let version = VersionId::new_unchecked(raw_id);
+            prop_assert_eq!(version.as_u64(), raw_id);
+        }
+
+        /// Property: Validation is consistent (always returns same result for same input)
+        #[test]
+        fn prop_validation_is_deterministic(raw_id in any_u64_strategy()) {
+            // Call validation twice with same input
+            let result1 = NodeId::new(raw_id);
+            let result2 = NodeId::new(raw_id);
+
+            // Results should be identical
+            match (result1, result2) {
+                (Ok(id1), Ok(id2)) => prop_assert_eq!(id1, id2),
+                (Err(_), Err(_)) => {
+                    // Both should reject invalid IDs
+                    prop_assert!(raw_id > MAX_VALID_ID);
+                }
+                _ => prop_assert!(false, "Validation must be deterministic"),
+            }
+        }
+    }
 }

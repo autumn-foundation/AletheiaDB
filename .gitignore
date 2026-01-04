@@ -41,3 +41,6 @@ nul
 
 # Git worktrees for parallel development
 agents/
+
+# Proptest regression files
+proptest-regressions/
