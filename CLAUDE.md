@@ -1,5 +1,25 @@
 # GallifreyDB Architecture & Development Guidelines
 
+## ⚠️ CRITICAL: NEVER COMMIT DIRECTLY TO TRUNK ⚠️
+
+**TRUNK IS A PROTECTED BRANCH. YOU MUST ALWAYS USE WORKTREES AND PULL REQUESTS.**
+
+Before making ANY code changes:
+1. Check current branch: `git branch --show-current`
+2. If on `trunk`, STOP and create a worktree: `just worktree-new feature/your-feature-name`
+3. Work in the worktree, commit there, push, and create a PR
+4. NEVER use `git commit` when on trunk - there is a pre-commit hook to prevent this
+
+**The ONLY acceptable commits to trunk are automated merges from approved PRs.**
+
+Breaking this rule causes:
+- Build failures in CI
+- Merge conflicts for other developers
+- Formatting inconsistencies
+- Wasted time fixing preventable issues
+
+This is enforced by a pre-commit hook that will block direct commits to trunk.
+
 ## Project Overview
 
 GallifreyDB is a high-performance bi-temporal graph database written in Rust. It tracks both **valid time** (when facts were true in reality) and **transaction time** (when facts were recorded in the database), while maintaining performance comparable to regular graph databases for current-state queries.

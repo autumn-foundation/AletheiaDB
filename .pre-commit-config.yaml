@@ -57,6 +57,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: block-trunk-commits
+        name: block commits to trunk
+        description: Prevent direct commits to protected trunk branch
+        entry: bash -c 'BRANCH=$(git branch --show-current); if [ "$BRANCH" = "trunk" ] || [ "$BRANCH" = "main" ]; then echo "❌ ERROR: Direct commits to trunk/main are forbidden!"; echo ""; echo "Please use a worktree:"; echo "  just worktree-new feature/your-feature-name"; echo ""; echo "See CLAUDE.md for details."; exit 1; fi'
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Conventional commits enforcement
   - repo: https://github.com/compwa/commitizen-cli
     rev: 0.6.0
