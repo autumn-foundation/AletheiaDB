@@ -63,6 +63,9 @@ pub use core::{
 
 pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
 pub use db::GallifreyDB;
-pub use index::{AdjacencyIndex, CurrentIndexes, TemporalIndexes};
+pub use index::{
+    AdjacencyIndex, CurrentIndexes, TemporalIndexes,
+    vector::{DistanceMetric, HnswConfig},
+};
 pub use storage::CurrentStorage;
 pub use utils::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
