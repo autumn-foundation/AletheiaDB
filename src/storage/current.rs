@@ -113,14 +113,14 @@ impl CurrentStorage {
     /// Returns Ok(true) if indexed, Ok(false) if not applicable, Err on failure.
     fn try_index_vector(&self, node_id: NodeId, properties: &PropertyMap) -> Result<bool> {
         let state = self.vector_index_state.read();
-        let Some(ref index) = state.index else { return Ok(false) };
-        let Some(ref prop_name) = state.property_name else { return Ok(false) };
-        let Some(value) = properties.get(prop_name) else { return Ok(false) };
-        let Some(vector) = value.as_vector() else { return Ok(false) };
-        let index = Arc::clone(index);
-        drop(state);
-        index.add(node_id, vector)?;
-        Ok(true)
+        if let (Some(index), Some(prop_name)) = (state.index.as_ref(), state.property_name.as_ref())
+            && let Some(vector) = properties.get(prop_name).and_then(|v| v.as_vector()) {
+                let index = Arc::clone(index);
+                drop(state); // Drop lock before potentially long operation
+                index.add(node_id, vector)?;
+                return Ok(true);
+            }
+        Ok(false)
     }
 
     /// Try to remove a node from the vector index.
@@ -149,7 +149,7 @@ impl CurrentStorage {
             (Some(_), None) => { index.remove(node_id)?; Ok(()) }
             (Some(o), Some(n)) => {
                 if o == n { return Ok(()); }
-                index.remove(node_id)?;
+                // Note: HnswIndex::add() is an upsert operation (remove + add internally)
                 index.add(node_id, n)?;
                 Ok(())
             }
@@ -272,24 +272,19 @@ impl CurrentStorage {
 
     /// Update a node directly (used by WriteTransaction).
     pub fn update_node_direct(&self, node: Node) -> Result<()> {
-        // Get old properties for rollback
+        // Save old node for potential rollback
         let old_node = self.indexes.get_node(node.id);
-        let old_properties = old_node.as_ref().map(|n| n.properties.clone());
 
         // Update node
         self.indexes.insert_node(node.clone());
 
         // Update vector index
-        if let Some(old_props) = old_properties {
-            if let Err(e) = self.update_vector_index(node.id, &node.properties, &old_props) {
-                // Rollback: restore old properties
-                if let Some(mut restored) = old_node {
-                    restored.properties = old_props;
-                    self.indexes.insert_node(restored);
-                }
+        if let Some(ref old) = old_node
+            && let Err(e) = self.update_vector_index(node.id, &node.properties, &old.properties) {
+                // Rollback: restore the original node
+                self.indexes.insert_node(old.clone());
                 return Err(e);
             }
-        }
 
         Ok(())
     }
@@ -420,6 +415,36 @@ impl CurrentStorage {
     }
 
 
+    /// Helper method to prepare for vector search.
+    /// Returns the Arc<HnswIndex> and the query vector.
+    fn prepare_vector_search(&self, query_node_id: NodeId) -> Result<(Arc<HnswIndex>, Vec<f32>)> {
+        let state = self.vector_index_state.read();
+        let index = state.index.as_ref()
+            .ok_or_else(|| crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError("Vector index is not enabled".to_string())
+            ))?;
+        let prop_name = state.property_name.as_ref()
+            .ok_or_else(|| crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError("Vector property name not set".to_string())
+            ))?;
+
+        let query_node = self.indexes.get_node(query_node_id)
+            .ok_or(StorageError::NodeNotFound(query_node_id))?;
+        let query_vec_ref = query_node.properties.get(prop_name)
+            .ok_or_else(|| StorageError::PropertyNotFound(prop_name.clone()))?
+            .as_vector()
+            .ok_or_else(|| crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::InvalidVector { reason: "Property is not a vector".to_string() }
+            ))?;
+
+        let query_vector: Vec<f32> = query_vec_ref.to_vec();
+        let index = Arc::clone(index);
+        drop(state);
+        drop(query_node);
+
+        Ok((index, query_vector))
+    }
+
     /// Find k most similar nodes to the query node based on vector similarity.
     ///
     /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
@@ -433,29 +458,7 @@ impl CurrentStorage {
     /// - Query node does not have the indexed vector property
     /// - The property is not a vector
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
-        let state = self.vector_index_state.read();
-        let index = state.index.as_ref()
-            .ok_or_else(|| crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError("Vector index is not enabled".to_string())
-            ))?;
-        let prop_name = state.property_name.as_ref()
-            .ok_or_else(|| crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError("Vector property name not set".to_string())
-            ))?;
-
-        let query_node = self.indexes.get_node(query_node_id)
-            .ok_or(StorageError::NodeNotFound(query_node_id))?;
-        let query_vec_ref = query_node.properties.get(prop_name)
-            .ok_or_else(|| StorageError::PropertyNotFound(prop_name.clone()))?
-            .as_vector()
-            .ok_or_else(|| crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::InvalidVector { reason: "Property is not a vector".to_string() }
-            ))?;
-
-        let query_vector: Vec<f32> = query_vec_ref.to_vec();
-        let index = Arc::clone(index);
-        drop(state);
-        drop(query_node);
+        let (index, query_vector) = self.prepare_vector_search(query_node_id)?;
 
         let mut results = index.search(&query_vector, k + 1)?;
         results.retain(|(id, _)| *id != query_node_id);
@@ -468,32 +471,13 @@ impl CurrentStorage {
     /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
     /// Only nodes with the specified label are returned. The query node is excluded.
     pub fn find_similar_with_label(&self, query_node_id: NodeId, label: &str, k: usize) -> Result<Vec<(NodeId, f32)>> {
-        let state = self.vector_index_state.read();
-        let index = state.index.as_ref()
-            .ok_or_else(|| crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError("Vector index is not enabled".to_string())
-            ))?;
-        let prop_name = state.property_name.as_ref()
-            .ok_or_else(|| crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError("Vector property name not set".to_string())
-            ))?;
-
-        let query_node = self.indexes.get_node(query_node_id)
-            .ok_or(StorageError::NodeNotFound(query_node_id))?;
-        let query_vec_ref = query_node.properties.get(prop_name)
-            .ok_or_else(|| StorageError::PropertyNotFound(prop_name.clone()))?
-            .as_vector()
-            .ok_or_else(|| crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::InvalidVector { reason: "Property is not a vector".to_string() }
-            ))?;
-
-        let query_vector: Vec<f32> = query_vec_ref.to_vec();
+        let (index, query_vector) = self.prepare_vector_search(query_node_id)?;
         let label_id = GLOBAL_INTERNER.intern(label);
-        let index = Arc::clone(index);
-        drop(state);
-        drop(query_node);
 
-        let mut results = index.search_with_filter(&query_vector, k + 10, |node_id| {
+        // Fetch a multiple of k candidates to increase the chance of finding enough matches.
+        // Cap the over-fetch to prevent excessive memory usage with large k.
+        let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
+        let mut results = index.search_with_filter(&query_vector, candidates_to_fetch, |node_id| {
             self.indexes.get_node(*node_id)
                 .map(|n| n.label == label_id)
                 .unwrap_or(false)
