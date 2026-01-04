@@ -531,6 +531,110 @@ impl CurrentStorage {
         Ok(results)
     }
 
+    /// Find k most similar nodes to a raw embedding vector.
+    ///
+    /// This is useful when searching with embeddings that don't correspond to any
+    /// existing node in the graph (e.g., query embeddings from external sources).
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - The query embedding vector
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Returns
+    ///
+    /// A list of (NodeId, similarity_score) pairs sorted by similarity (highest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Vector index is not enabled
+    /// - Embedding dimensions don't match the indexed property
+    pub fn find_similar_by_embedding(
+        &self,
+        embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        let (index, _) = self.prepare_vector_search_raw(embedding)?;
+        let results = index.search(embedding, k)?;
+        Ok(results)
+    }
+
+    /// Find k most similar nodes with a specific label to a raw embedding vector.
+    ///
+    /// Like `find_similar_by_embedding()`, but filters results to only include
+    /// nodes with the specified label.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - The query embedding vector
+    /// * `label` - Only return nodes with this label
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Returns
+    ///
+    /// A list of (NodeId, similarity_score) pairs sorted by similarity (highest first).
+    /// All results have the specified label.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Vector index is not enabled
+    /// - Embedding dimensions don't match the indexed property
+    pub fn find_similar_by_embedding_with_label(
+        &self,
+        embedding: &[f32],
+        label: &str,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        let (index, _) = self.prepare_vector_search_raw(embedding)?;
+
+        // Use adaptive over-fetch heuristic
+        let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
+        let candidates = index.search(embedding, candidates_to_fetch)?;
+
+        // Filter by label and take top k
+        let label_interned = GLOBAL_INTERNER.intern(label);
+        let results: Vec<_> = candidates
+            .into_iter()
+            .filter(|(node_id, _)| {
+                self.indexes
+                    .get_node(*node_id)
+                    .is_some_and(|n| n.label == label_interned)
+            })
+            .take(k)
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Helper method to prepare for raw embedding vector search.
+    /// Returns the Arc<HnswIndex> and validates the embedding.
+    fn prepare_vector_search_raw(&self, embedding: &[f32]) -> Result<(Arc<HnswIndex>, usize)> {
+        let state = self.vector_index_state.read();
+        let index = state.index.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Vector index is not enabled".to_string(),
+            ))
+        })?;
+
+        // Validate embedding dimensions match index
+        let expected_dims = index.dimensions();
+        if embedding.len() != expected_dims {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::DimensionMismatch {
+                    expected: expected_dims,
+                    actual: embedding.len(),
+                },
+            ));
+        }
+
+        let index = Arc::clone(index);
+        drop(state);
+
+        Ok((index, expected_dims))
+    }
+
     /// Get statistics about the current storage
     pub fn stats(&self) -> CurrentStats {
         CurrentStats {
