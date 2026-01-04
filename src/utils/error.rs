@@ -196,7 +196,9 @@ impl fmt::Display for StorageError {
                 write!(
                     f,
                     "Invalid {} ID {}: exceeds maximum allowed value {} (reserved range for internal use)",
-                    id_type, id, crate::core::id::MAX_VALID_ID
+                    id_type,
+                    id,
+                    crate::core::id::MAX_VALID_ID
                 )
             }
         }
