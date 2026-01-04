@@ -279,8 +279,10 @@ impl CurrentStorage {
     /// Insert a node directly (used by WriteTransaction).
     /// Does not generate IDs - caller must provide them.
     pub fn insert_node_direct(&self, node: Node) -> Result<()> {
-        // Attempt to index the vector first. If this fails, we haven't modified
-        // any state yet, so we can just return the error.
+        // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
+        // we have not modified any graph state, so we can safely return error without rollback.
+        // This prevents the VS-030 bug where transaction-created nodes bypassed indexing,
+        // causing them to be missing from HNSW index and invisible to find_similar queries.
         self.try_index_vector(node.id, &node.properties)?;
 
         // Vector indexing succeeded, now insert the node into the main indexes.
@@ -589,22 +591,21 @@ impl CurrentStorage {
     ) -> Result<Vec<(NodeId, f32)>> {
         let index = self.prepare_vector_search_raw(embedding)?;
 
-        // Use adaptive over-fetch heuristic
+        // Intern the label for efficient comparison
+        let label_id = GLOBAL_INTERNER.intern(label);
+
+        // Use adaptive over-fetch heuristic for filtered search
         let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
-        let candidates = index.search(embedding, candidates_to_fetch)?;
 
-        // Filter by label and take top k
-        let label_interned = GLOBAL_INTERNER.intern(label);
-        let results: Vec<_> = candidates
-            .into_iter()
-            .filter(|(node_id, _)| {
-                self.indexes
-                    .get_node(*node_id)
-                    .is_some_and(|n| n.label == label_interned)
-            })
-            .take(k)
-            .collect();
+        // Filter during HNSW traversal for better performance
+        let mut results = index.search_with_filter(embedding, candidates_to_fetch, |node_id| {
+            self.indexes
+                .get_node(*node_id)
+                .is_some_and(|n| n.label == label_id)
+        })?;
 
+        // Truncate to requested k (search_with_filter may return more)
+        results.truncate(k);
         Ok(results)
     }
 

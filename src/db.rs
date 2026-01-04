@@ -1152,6 +1152,10 @@ mod tests {
 
     /// Regression test for VS-030 bug: nodes created via write transactions
     /// must be indexed for vector search.
+    ///
+    /// Prior to fix: insert_node_direct() only called indexes.insert_node(),
+    /// skipping try_index_vector(). This meant all transaction-created nodes
+    /// were missing from the HNSW index, causing find_similar to return empty results.
     #[test]
     fn test_transaction_nodes_are_indexed() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
@@ -1407,7 +1411,14 @@ mod tests {
         // (Note: find_similar excludes the query node, so we check for OTHER nodes)
         for node_id in &node_ids {
             let results = db.find_similar(*node_id, 5).unwrap();
-            assert!(!results.is_empty(), "No results for node {:?}", node_id);
+            // With 10 nodes and k=5, we should get at least 4 results (excluding query node)
+            // HNSW is approximate, so we allow for slight variation
+            assert!(
+                results.len() >= 4,
+                "Expected >=4 results for node {:?}, got {}",
+                node_id,
+                results.len()
+            );
             // Verify results don't include the query node (it's excluded by design)
             assert!(
                 results.iter().all(|(id, _)| *id != *node_id),
@@ -1426,5 +1437,51 @@ mod tests {
 
         // Verify total count
         assert_eq!(db.node_count(), 10);
+    }
+
+    #[test]
+    fn test_find_similar_with_missing_property() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index on "embedding" property
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create some nodes with the indexed property
+        let doc1 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let _doc2 = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Create a node WITHOUT the indexed property (should be ignored in searches)
+        let _doc_no_vector = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "No embedding")
+                    .build(),
+            )
+            .unwrap();
+
+        // Search should only find nodes with the property
+        let results = db.find_similar(doc1, 5).unwrap();
+
+        // Should find doc2 but not doc_no_vector
+        assert_eq!(results.len(), 1); // Only doc2 (doc1 is excluded as query node)
     }
 }
