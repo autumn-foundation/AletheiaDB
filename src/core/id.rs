@@ -238,9 +238,22 @@ impl IdGenerator {
     /// Generate the next unique ID.
     ///
     /// This method is thread-safe and lock-free.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the generator would exceed `MAX_VALID_ID`. In practice, this requires
+    /// ~18 quintillion operations and is unrealistic for a single database instance.
     #[inline]
     pub fn next(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        if id > MAX_VALID_ID {
+            panic!(
+                "ID generator exhausted: generated ID {} exceeds MAX_VALID_ID ({}). \
+                 This indicates either a bug or an unrealistic number of operations.",
+                id, MAX_VALID_ID
+            );
+        }
+        id
     }
 
     /// Get the current value without incrementing.
@@ -407,12 +420,11 @@ mod tests {
     fn test_max_valid_id_constant() {
         // Verify the MAX_VALID_ID constant is set correctly
         assert_eq!(MAX_VALID_ID, u64::MAX - 1000);
-        
+
         // Verify it leaves room for reserved values
         assert!(MAX_VALID_ID < u64::MAX);
         assert!(u64::MAX - MAX_VALID_ID >= 1000);
     }
-}
 
     #[test]
     fn test_id_validation_boundary_cases() {
@@ -421,12 +433,12 @@ mod tests {
         assert!(NodeId::new(MAX_VALID_ID).is_ok());
         assert!(NodeId::new(MAX_VALID_ID + 1).is_err());
         assert!(NodeId::new(MAX_VALID_ID + 2).is_err());
-        
+
         // Same for other ID types
         assert!(EdgeId::new(MAX_VALID_ID - 1).is_ok());
         assert!(EdgeId::new(MAX_VALID_ID).is_ok());
         assert!(EdgeId::new(MAX_VALID_ID + 1).is_err());
-        
+
         assert!(VersionId::new(MAX_VALID_ID - 1).is_ok());
         assert!(VersionId::new(MAX_VALID_ID).is_ok());
         assert!(VersionId::new(MAX_VALID_ID + 1).is_err());
@@ -443,6 +455,7 @@ mod tests {
         assert!(msg.contains(&(MAX_VALID_ID + 1).to_string()));
         assert!(msg.contains("exceeds maximum"));
         assert!(msg.contains(&MAX_VALID_ID.to_string()));
+        assert!(msg.contains("reserved range for internal use"));
     }
 
     #[test]
@@ -457,7 +470,7 @@ mod tests {
                 id
             );
         }
-        
+
         // Test generator starting near the limit
         let generator = IdGenerator::with_start(MAX_VALID_ID - 10);
         for _ in 0..10 {
@@ -468,9 +481,50 @@ mod tests {
                 id
             );
         }
-        
+
         // Note: After MAX_VALID_ID, generator would produce invalid IDs.
         // In practice, this would require ~18 quintillion operations,
         // which is unrealistic for a single database instance.
-        // If needed, IdGenerator could be enhanced to check MAX_VALID_ID.
     }
+
+    #[test]
+    #[should_panic(expected = "ID generator exhausted")]
+    fn test_id_generator_panics_on_overflow() {
+        // Verify generator panics when exceeding MAX_VALID_ID
+        let generator = IdGenerator::with_start(MAX_VALID_ID);
+        let _ = generator.next(); // This should be OK (at MAX_VALID_ID)
+        let _ = generator.next(); // This should panic (exceeds MAX_VALID_ID)
+    }
+
+    #[test]
+    fn test_id_validation_performance() {
+        // Verify validation overhead is negligible
+        // This is a simple smoke test - proper benchmarking should use criterion
+        use std::time::Instant;
+
+        let iterations = 1_000_000;
+
+        // Time validated creation
+        let start = Instant::now();
+        for i in 0..iterations {
+            let _ = NodeId::new(i);
+        }
+        let validated_duration = start.elapsed();
+
+        // Time unchecked creation (for comparison)
+        let start = Instant::now();
+        for i in 0..iterations {
+            let _ = NodeId::new_unchecked(i);
+        }
+        let unchecked_duration = start.elapsed();
+
+        // Print results for manual inspection (not asserted in test)
+        println!("\nID Validation Performance (1M iterations):");
+        println!("  Validated:  {:?} ({} ns/op)", validated_duration, validated_duration.as_nanos() / iterations as u128);
+        println!("  Unchecked:  {:?} ({} ns/op)", unchecked_duration, unchecked_duration.as_nanos() / iterations as u128);
+        println!("  Overhead:   {:?}", validated_duration.saturating_sub(unchecked_duration));
+
+        // Validation should add minimal overhead (< 2ns per operation on modern hardware)
+        // We don't assert this in the test since it's hardware-dependent
+    }
+}
