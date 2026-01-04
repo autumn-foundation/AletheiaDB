@@ -12,6 +12,7 @@ categories = ["database-implementations"]
 [dependencies]
 dashmap = "6.1"
 crc32fast = "1.4"
+parking_lot = "0.12"
 usearch = "2.22"
 
 # Optional Tracy profiling support

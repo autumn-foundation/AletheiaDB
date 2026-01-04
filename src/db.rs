@@ -11,6 +11,7 @@ use crate::core::id::{EdgeId, IdGenerator, NodeId};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
+use crate::index::vector::hnsw::HnswConfig;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
@@ -306,6 +307,98 @@ impl GallifreyDB {
             properties,
             version.id,
         ))
+    }
+
+    // ========================================================================
+    // Vector Indexing API (VS-030)
+    // ========================================================================
+
+    /// Enable vector indexing for a specific property.
+    ///
+    /// Once enabled, nodes with the specified property will be automatically
+    /// indexed for similarity search. The property must contain vector values.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - Name of the property containing vectors
+    /// * `config` - HNSW index configuration (dimensions, metric, etc.)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    ///
+    /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
+    /// db.enable_vector_index("embedding", config)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if vector indexing is already enabled.
+    pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
+        self.current.enable_vector_index(property_name, config)
+    }
+
+    /// Check if vector indexing is enabled.
+    pub fn is_vector_index_enabled(&self) -> bool {
+        self.current.is_vector_index_enabled()
+    }
+
+    /// Find k most similar nodes to a query node based on vector similarity.
+    ///
+    /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
+    /// The query node itself is excluded from results.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_node_id` - The node to find similar nodes for
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find the 5 most similar documents to a given document
+    /// let results = db.find_similar(doc_id, 5)?;
+    /// for (node_id, score) in results {
+    ///     println!("Similar node {} with score {}", node_id, score);
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Vector index is not enabled
+    /// - Query node is not found
+    /// - Query node does not have the indexed vector property
+    pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
+        self.current.find_similar(query_node_id, k)
+    }
+
+    /// Find k most similar nodes with a specific label.
+    ///
+    /// This is useful for finding similar nodes within a category, e.g.,
+    /// "find similar documents" or "find similar users".
+    ///
+    /// # Arguments
+    ///
+    /// * `query_node_id` - The node to find similar nodes for
+    /// * `label` - Only return nodes with this label
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find similar Person nodes only
+    /// let similar_people = db.find_similar_with_label(person_id, "Person", 10)?;
+    /// ```
+    pub fn find_similar_with_label(
+        &self,
+        query_node_id: NodeId,
+        label: &str,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        self.current
+            .find_similar_with_label(query_node_id, label, k)
     }
 
     /// Get the number of nodes in the current state.
