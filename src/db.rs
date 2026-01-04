@@ -1067,4 +1067,51 @@ mod tests {
         // Should return at most 4 results (5 total - 1 query node)
         assert!(similar.len() <= 4);
     }
+
+    /// Regression test for VS-030 bug: nodes created via write transactions
+    /// must be indexed for vector search.
+    #[test]
+    fn test_transaction_nodes_are_indexed() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Create nodes via write transaction (not convenience method)
+        let (doc1, doc2, _doc3) = db
+            .write(|tx| {
+                let d1 = tx.create_node(
+                    "Document",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                        .build(),
+                )?;
+                let d2 = tx.create_node(
+                    "Document",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                        .build(),
+                )?;
+                let d3 = tx.create_node(
+                    "Document",
+                    PropertyMapBuilder::new()
+                        .insert_vector("embedding", &[0.0f32, 1.0, 0.0])
+                        .build(),
+                )?;
+                Ok((d1, d2, d3))
+            })
+            .unwrap();
+
+        // CRITICAL: These nodes were created via transaction, not db.create_node()
+        // Before the fix, insert_node_direct() didn't index vectors, so this would fail
+        let similar = db.find_similar(doc1, 2).unwrap();
+
+        // Should find doc2 and doc3
+        assert_eq!(similar.len(), 2);
+        assert_eq!(similar[0].0, doc2); // Most similar
+        assert!(similar[0].1 > 0.9); // High similarity
+    }
 }

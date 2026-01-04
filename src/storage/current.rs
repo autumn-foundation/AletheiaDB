@@ -279,16 +279,12 @@ impl CurrentStorage {
     /// Insert a node directly (used by WriteTransaction).
     /// Does not generate IDs - caller must provide them.
     pub fn insert_node_direct(&self, node: Node) -> Result<()> {
-        let node_id = node.id;
-        let properties = node.properties.clone();
-        self.indexes.insert_node(node);
+        // Attempt to index the vector first. If this fails, we haven't modified
+        // any state yet, so we can just return the error.
+        self.try_index_vector(node.id, &node.properties)?;
 
-        // Try to index vector property if enabled
-        if let Err(e) = self.try_index_vector(node_id, &properties) {
-            // Rollback: remove node from indexes
-            self.indexes.remove_node(node_id);
-            return Err(e);
-        }
+        // Vector indexing succeeded, now insert the node into the main indexes.
+        self.indexes.insert_node(node);
 
         Ok(())
     }
