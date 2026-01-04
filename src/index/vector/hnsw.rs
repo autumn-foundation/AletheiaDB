@@ -73,11 +73,11 @@
 //!     .build()?;
 //!
 //! // Add vectors
-//! let node1 = NodeId::new(1);
+//! let node1 = NodeId::new(1).unwrap();
 //! let embedding1 = vec![0.1f32; 384];
 //! index.add(node1, &embedding1)?;
 //!
-//! let node2 = NodeId::new(2);
+//! let node2 = NodeId::new(2).unwrap();
 //! let embedding2 = vec![0.2f32; 384];
 //! index.add(node2, &embedding2)?;
 //!
@@ -732,7 +732,8 @@ impl VectorIndex for HnswIndex {
                     DistanceMetric::Euclidean => -distance,
                     DistanceMetric::DotProduct => -distance,
                 };
-                (NodeId::new(key), similarity)
+                // Key comes from our own index, always valid
+                (NodeId::new(key).expect("ID from index should be valid"), similarity)
             })
             .collect();
 
@@ -767,7 +768,8 @@ impl VectorIndex for HnswIndex {
 
         // Create filter function that converts key to NodeId
         let filter = |key: u64| -> bool {
-            let node_id = NodeId::new(key);
+            // Key comes from our own index, always valid
+            let node_id = NodeId::new(key).expect("ID from index should be valid");
             predicate(&node_id)
         };
 
@@ -793,7 +795,8 @@ impl VectorIndex for HnswIndex {
                     DistanceMetric::Euclidean => -distance,
                     DistanceMetric::DotProduct => -distance,
                 };
-                (NodeId::new(key), similarity)
+                // Key comes from our own index, always valid
+                (NodeId::new(key).expect("ID from index should be valid"), similarity)
             })
             .collect();
 
@@ -1118,11 +1121,11 @@ mod tests {
         let index = create_test_index();
 
         // Add vectors
-        let node1 = NodeId::new(1);
+        let node1 = NodeId::new(1).unwrap();
         let vec1 = vec![1.0, 0.0, 0.0, 0.0];
         index.add(node1, &vec1).unwrap();
 
-        let node2 = NodeId::new(2);
+        let node2 = NodeId::new(2).unwrap();
         let vec2 = vec![0.0, 1.0, 0.0, 0.0];
         index.add(node2, &vec2).unwrap();
 
@@ -1139,7 +1142,7 @@ mod tests {
         let index = create_test_index();
 
         // Add and remove
-        let node1 = NodeId::new(1);
+        let node1 = NodeId::new(1).unwrap();
         let vec1 = vec![1.0, 0.0, 0.0, 0.0];
         index.add(node1, &vec1).unwrap();
 
@@ -1154,7 +1157,7 @@ mod tests {
         let index = create_test_index();
 
         // Removing non-existent node should be no-op
-        let result = index.remove(NodeId::new(999));
+        let result = index.remove(NodeId::new(999).unwrap());
         assert!(result.is_ok());
     }
 
@@ -1190,7 +1193,7 @@ mod tests {
     fn test_hnsw_wrong_dimensions() {
         let index = create_test_index(); // 4D index
 
-        let node1 = NodeId::new(1);
+        let node1 = NodeId::new(1).unwrap();
         let wrong_vec = vec![1.0, 0.0]; // Only 2D
 
         let result = index.add(node1, &wrong_vec);
@@ -1204,7 +1207,7 @@ mod tests {
     fn test_hnsw_nan_vector() {
         let index = create_test_index();
 
-        let node1 = NodeId::new(1);
+        let node1 = NodeId::new(1).unwrap();
         let nan_vec = vec![1.0, f32::NAN, 0.0, 0.0];
 
         let result = index.add(node1, &nan_vec);
@@ -1218,7 +1221,7 @@ mod tests {
     fn test_hnsw_infinity_vector() {
         let index = create_test_index();
 
-        let node1 = NodeId::new(1);
+        let node1 = NodeId::new(1).unwrap();
         let inf_vec = vec![1.0, f32::INFINITY, 0.0, 0.0];
 
         let result = index.add(node1, &inf_vec);
@@ -1245,7 +1248,7 @@ mod tests {
     fn test_hnsw_duplicate_id() {
         let index = create_test_index();
 
-        let node1 = NodeId::new(1);
+        let node1 = NodeId::new(1).unwrap();
         let vec1 = vec![1.0, 0.0, 0.0, 0.0];
         index.add(node1, &vec1).unwrap();
 
@@ -1262,8 +1265,8 @@ mod tests {
         let index = create_test_index();
 
         // Add only 2 vectors
-        index.add(NodeId::new(1), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
 
         // Search for more than available
         let query = vec![0.5, 0.5, 0.0, 0.0];
@@ -1278,12 +1281,12 @@ mod tests {
         let index = create_test_index();
 
         // Add vectors
-        index.add(NodeId::new(1), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2), &[0.9, 0.1, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(3), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2).unwrap(), &[0.9, 0.1, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(3).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
 
         // Filter to only allow node 1 and 3
-        let allowed = [NodeId::new(1), NodeId::new(3)];
+        let allowed = [NodeId::new(1).unwrap(), NodeId::new(3).unwrap()];
         let query = vec![1.0, 0.0, 0.0, 0.0];
         let results = index
             .search_with_filter(&query, 10, |id| allowed.contains(id))
@@ -1291,9 +1294,9 @@ mod tests {
 
         // Should only return nodes 1 and 3
         assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|(id, _)| *id == NodeId::new(1)));
-        assert!(results.iter().any(|(id, _)| *id == NodeId::new(3)));
-        assert!(!results.iter().any(|(id, _)| *id == NodeId::new(2)));
+        assert!(results.iter().any(|(id, _)| *id == NodeId::new(1).unwrap()));
+        assert!(results.iter().any(|(id, _)| *id == NodeId::new(3).unwrap()));
+        assert!(!results.iter().any(|(id, _)| *id == NodeId::new(2).unwrap()));
     }
 
     #[test]
@@ -1301,8 +1304,8 @@ mod tests {
         let index = create_test_index();
 
         // Add vectors
-        index.add(NodeId::new(1), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
 
         // Filter that rejects everything
         let query = vec![1.0, 0.0, 0.0, 0.0];
@@ -1319,14 +1322,14 @@ mod tests {
             .unwrap();
 
         // Add orthogonal vectors
-        index.add(NodeId::new(1), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
 
         // Query should be most similar to node 1
         let query = vec![0.9, 0.1, 0.0, 0.0];
         let results = index.search(&query, 2).unwrap();
 
-        assert_eq!(results[0].0, NodeId::new(1));
+        assert_eq!(results[0].0, NodeId::new(1).unwrap());
     }
 
     #[test]
@@ -1336,14 +1339,14 @@ mod tests {
             .build()
             .unwrap();
 
-        index.add(NodeId::new(1), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2), &[10.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2).unwrap(), &[10.0, 0.0, 0.0, 0.0]).unwrap();
 
         // Query closest to node 1
         let query = vec![1.5, 0.0, 0.0, 0.0];
         let results = index.search(&query, 2).unwrap();
 
-        assert_eq!(results[0].0, NodeId::new(1));
+        assert_eq!(results[0].0, NodeId::new(1).unwrap());
     }
 
     #[test]
@@ -1357,14 +1360,14 @@ mod tests {
             .build()
             .unwrap();
 
-        index.add(NodeId::new(1), &[2.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[2.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
 
         // Dot product with [1,0,0,0]: node1=2.0, node2=1.0
         let query = vec![1.0, 0.0, 0.0, 0.0];
         let results = index.search(&query, 2).unwrap();
 
-        assert_eq!(results[0].0, NodeId::new(1)); // Higher dot product
+        assert_eq!(results[0].0, NodeId::new(1).unwrap()); // Higher dot product
     }
 
     #[test]
@@ -1565,7 +1568,7 @@ mod tests {
         let index = create_test_index();
 
         // Add only one vector
-        let node1 = NodeId::new(1);
+        let node1 = NodeId::new(1).unwrap();
         let vec1 = vec![1.0, 0.0, 0.0, 0.0];
         index.add(node1, &vec1).unwrap();
 
@@ -1762,15 +1765,15 @@ mod tests {
         let index = HnswIndex::new(config).unwrap();
 
         // Add vectors
-        index.add(NodeId::new(1), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
 
         // Search
         let query = vec![0.9, 0.1, 0.0, 0.0];
         let results = index.search(&query, 2).unwrap();
 
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, NodeId::new(1)); // Most similar
+        assert_eq!(results[0].0, NodeId::new(1).unwrap()); // Most similar
     }
 
     #[test]
@@ -1780,15 +1783,15 @@ mod tests {
         let index = HnswIndex::with_capacity(config, 100).unwrap();
 
         // Add vectors
-        index.add(NodeId::new(1), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2), &[10.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.add(NodeId::new(2).unwrap(), &[10.0, 0.0, 0.0, 0.0]).unwrap();
 
         // Search
         let query = vec![1.5, 0.0, 0.0, 0.0];
         let results = index.search(&query, 2).unwrap();
 
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, NodeId::new(1)); // Closest
+        assert_eq!(results[0].0, NodeId::new(1).unwrap()); // Closest
     }
 
     #[test]
