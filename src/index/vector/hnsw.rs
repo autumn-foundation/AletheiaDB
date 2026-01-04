@@ -732,11 +732,7 @@ impl VectorIndex for HnswIndex {
                     DistanceMetric::Euclidean => -distance,
                     DistanceMetric::DotProduct => -distance,
                 };
-                // Key comes from our own index, always valid
-                (
-                    NodeId::new(key).expect("ID from index should be valid"),
-                    similarity,
-                )
+                (NodeId::new(key), similarity)
             })
             .collect();
 
@@ -771,8 +767,7 @@ impl VectorIndex for HnswIndex {
 
         // Create filter function that converts key to NodeId
         let filter = |key: u64| -> bool {
-            // Key comes from our own index, always valid
-            let node_id = NodeId::new(key).expect("ID from index should be valid");
+            let node_id = NodeId::new(key);
             predicate(&node_id)
         };
 
@@ -798,11 +793,7 @@ impl VectorIndex for HnswIndex {
                     DistanceMetric::Euclidean => -distance,
                     DistanceMetric::DotProduct => -distance,
                 };
-                // Key comes from our own index, always valid
-                (
-                    NodeId::new(key).expect("ID from index should be valid"),
-                    similarity,
-                )
+                (NodeId::new(key), similarity)
             })
             .collect();
 
