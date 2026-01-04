@@ -732,10 +732,11 @@ impl VectorIndex for HnswIndex {
                     DistanceMetric::Euclidean => -distance,
                     DistanceMetric::DotProduct => -distance,
                 };
-                // SAFETY: key from HNSW index was originally a validated NodeId
-                (NodeId::new_unchecked(key), similarity)
+                NodeId::new(key)
+                    .map(|node_id| (node_id, similarity))
+                    .map_err(Error::Storage)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         // Sort by similarity descending (highest similarity first) to match trait contract
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -768,8 +769,9 @@ impl VectorIndex for HnswIndex {
 
         // Create filter function that converts key to NodeId
         let filter = |key: u64| -> bool {
-            let node_id = NodeId::new_unchecked(key); // SAFETY: from HNSW index
-            predicate(&node_id)
+            NodeId::new(key)
+                .map(|node_id| predicate(&node_id))
+                .unwrap_or(false)
         };
 
         // Perform filtered search
