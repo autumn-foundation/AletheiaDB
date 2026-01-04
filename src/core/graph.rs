@@ -171,11 +171,11 @@ mod tests {
             .insert("age", 30i64)
             .build();
 
-        let node = Node::new(NodeId::new(1), label, props, VersionId::new(100));
+        let node = Node::new(NodeId::new(1).unwrap(), label, props, VersionId::new(100).unwrap());
 
-        assert_eq!(node.id, NodeId::new(1));
+        assert_eq!(node.id, NodeId::new(1).unwrap());
         assert_eq!(node.label, label);
-        assert_eq!(node.current_version, VersionId::new(100));
+        assert_eq!(node.current_version, VersionId::new(100).unwrap());
         assert_eq!(
             node.get_property("name").and_then(|v| v.as_str()),
             Some("Alice")
@@ -189,10 +189,10 @@ mod tests {
         let other_label = GLOBAL_INTERNER.intern("Company");
 
         let node = Node::new(
-            NodeId::new(1),
+            NodeId::new(1).unwrap(),
             label,
             PropertyMapBuilder::new().build(),
-            VersionId::new(1),
+            VersionId::new(1).unwrap(),
         );
 
         assert!(node.has_label(label));
@@ -205,19 +205,19 @@ mod tests {
         let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
 
         let edge = Edge::new(
-            EdgeId::new(1),
+            EdgeId::new(1).unwrap(),
             label,
-            NodeId::new(1),
-            NodeId::new(2),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
             props,
-            VersionId::new(100),
+            VersionId::new(100).unwrap(),
         );
 
-        assert_eq!(edge.id, EdgeId::new(1));
+        assert_eq!(edge.id, EdgeId::new(1).unwrap());
         assert_eq!(edge.label, label);
-        assert_eq!(edge.source, NodeId::new(1));
-        assert_eq!(edge.target, NodeId::new(2));
-        assert_eq!(edge.current_version, VersionId::new(100));
+        assert_eq!(edge.source, NodeId::new(1).unwrap());
+        assert_eq!(edge.target, NodeId::new(2).unwrap());
+        assert_eq!(edge.current_version, VersionId::new(100).unwrap());
         assert_eq!(
             edge.get_property("since").and_then(|v| v.as_int()),
             Some(2020)
@@ -227,16 +227,16 @@ mod tests {
     #[test]
     fn test_edge_connects() {
         let edge = Edge::new(
-            EdgeId::new(1),
+            EdgeId::new(1).unwrap(),
             GLOBAL_INTERNER.intern("KNOWS"),
-            NodeId::new(1),
-            NodeId::new(2),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
             PropertyMapBuilder::new().build(),
-            VersionId::new(1),
+            VersionId::new(1).unwrap(),
         );
 
-        assert!(edge.connects(NodeId::new(1), NodeId::new(2)));
-        assert!(!edge.connects(NodeId::new(2), NodeId::new(1)));
-        assert!(!edge.connects(NodeId::new(1), NodeId::new(3)));
+        assert!(edge.connects(NodeId::new(1).unwrap(), NodeId::new(2).unwrap()));
+        assert!(!edge.connects(NodeId::new(2).unwrap(), NodeId::new(1).unwrap()));
+        assert!(!edge.connects(NodeId::new(1).unwrap(), NodeId::new(3).unwrap()));
     }
 }

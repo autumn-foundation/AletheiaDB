@@ -273,21 +273,21 @@ mod tests {
 
     pub(super) fn create_test_node(id: u64, label: &str) -> Node {
         Node::new(
-            NodeId::new(id),
+            NodeId::new(id).unwrap(),
             GLOBAL_INTERNER.intern(label),
             PropertyMapBuilder::new().build(),
-            VersionId::new(1),
+            VersionId::new(1).unwrap(),
         )
     }
 
     pub(super) fn create_test_edge(id: u64, source: u64, target: u64, label: &str) -> Edge {
         Edge::new(
-            EdgeId::new(id),
+            EdgeId::new(id).unwrap(),
             GLOBAL_INTERNER.intern(label),
-            NodeId::new(source),
-            NodeId::new(target),
+            NodeId::new(source).unwrap(),
+            NodeId::new(target).unwrap(),
             PropertyMapBuilder::new().build(),
-            VersionId::new(1),
+            VersionId::new(1).unwrap(),
         )
     }
 
@@ -297,22 +297,22 @@ mod tests {
 
         // Initially empty
         assert_eq!(indexes.node_count(), 0);
-        assert!(!indexes.contains_node(NodeId::new(1)));
+        assert!(!indexes.contains_node(NodeId::new(1).unwrap()));
 
         // Insert node
         let node = create_test_node(1, "Person");
         indexes.insert_node(node.clone());
 
         assert_eq!(indexes.node_count(), 1);
-        assert!(indexes.contains_node(NodeId::new(1)));
+        assert!(indexes.contains_node(NodeId::new(1).unwrap()));
 
         // Get node
-        let retrieved = indexes.get_node(NodeId::new(1)).unwrap();
+        let retrieved = indexes.get_node(NodeId::new(1).unwrap()).unwrap();
         assert_eq!(retrieved.id, node.id);
         assert_eq!(retrieved.label, node.label);
 
         // Remove node
-        let removed = indexes.remove_node(NodeId::new(1)).unwrap();
+        let removed = indexes.remove_node(NodeId::new(1).unwrap()).unwrap();
         assert_eq!(removed.id, node.id);
         assert_eq!(indexes.node_count(), 0);
     }
@@ -326,16 +326,16 @@ mod tests {
         indexes.insert_edge(edge.clone());
 
         assert_eq!(indexes.edge_count(), 1);
-        assert!(indexes.contains_edge(EdgeId::new(1)));
+        assert!(indexes.contains_edge(EdgeId::new(1).unwrap()));
 
         // Get edge
-        let retrieved = indexes.get_edge(EdgeId::new(1)).unwrap();
+        let retrieved = indexes.get_edge(EdgeId::new(1).unwrap()).unwrap();
         assert_eq!(retrieved.id, edge.id);
         assert_eq!(retrieved.source, edge.source);
         assert_eq!(retrieved.target, edge.target);
 
         // Remove edge
-        let removed = indexes.remove_edge(EdgeId::new(1)).unwrap();
+        let removed = indexes.remove_edge(EdgeId::new(1).unwrap()).unwrap();
         assert_eq!(removed.id, edge.id);
         assert_eq!(indexes.edge_count(), 0);
     }
@@ -358,17 +358,17 @@ mod tests {
         indexes.rebuild_adjacency();
 
         // Test outgoing edges
-        assert_eq!(indexes.out_degree(NodeId::new(0)), 2);
-        assert_eq!(indexes.out_degree(NodeId::new(1)), 1);
-        assert_eq!(indexes.out_degree(NodeId::new(2)), 0);
+        assert_eq!(indexes.out_degree(NodeId::new(0).unwrap()), 2);
+        assert_eq!(indexes.out_degree(NodeId::new(1).unwrap()), 1);
+        assert_eq!(indexes.out_degree(NodeId::new(2).unwrap()), 0);
 
-        let outgoing = indexes.get_outgoing(NodeId::new(0));
+        let outgoing = indexes.get_outgoing(NodeId::new(0).unwrap());
         assert_eq!(outgoing.len(), 2);
 
         // Test incoming edges
-        assert_eq!(indexes.in_degree(NodeId::new(0)), 0);
-        assert_eq!(indexes.in_degree(NodeId::new(1)), 1);
-        assert_eq!(indexes.in_degree(NodeId::new(2)), 2);
+        assert_eq!(indexes.in_degree(NodeId::new(0).unwrap()), 0);
+        assert_eq!(indexes.in_degree(NodeId::new(1).unwrap()), 1);
+        assert_eq!(indexes.in_degree(NodeId::new(2).unwrap()), 2);
     }
 
     #[test]
@@ -386,11 +386,11 @@ mod tests {
         indexes.rebuild_adjacency();
 
         // Get only KNOWS edges
-        let knows_edges = indexes.get_outgoing_with_label(NodeId::new(0), knows);
+        let knows_edges = indexes.get_outgoing_with_label(NodeId::new(0).unwrap(), knows);
         assert_eq!(knows_edges.len(), 2);
 
         // Get only FOLLOWS edges
-        let follows_edges = indexes.get_outgoing_with_label(NodeId::new(0), follows);
+        let follows_edges = indexes.get_outgoing_with_label(NodeId::new(0).unwrap(), follows);
         assert_eq!(follows_edges.len(), 1);
     }
 
@@ -421,13 +421,13 @@ mod tests {
 
         // Rebuild once
         indexes.rebuild_adjacency();
-        let first_out = indexes.get_outgoing(NodeId::new(0));
-        let first_in = indexes.get_incoming(NodeId::new(1));
+        let first_out = indexes.get_outgoing(NodeId::new(0).unwrap());
+        let first_in = indexes.get_incoming(NodeId::new(1).unwrap());
 
         // Rebuild again
         indexes.rebuild_adjacency();
-        let second_out = indexes.get_outgoing(NodeId::new(0));
-        let second_in = indexes.get_incoming(NodeId::new(1));
+        let second_out = indexes.get_outgoing(NodeId::new(0).unwrap());
+        let second_in = indexes.get_incoming(NodeId::new(1).unwrap());
 
         // Results should be identical
         assert_eq!(first_out.len(), second_out.len());
@@ -453,16 +453,16 @@ mod tests {
         indexes.rebuild_adjacency();
 
         // Verify adjacency reflects all edges
-        assert_eq!(indexes.out_degree(NodeId::new(0)), 2); // KNOWS and LIKES
-        assert_eq!(indexes.in_degree(NodeId::new(2)), 2); // from 1 and 0
+        assert_eq!(indexes.out_degree(NodeId::new(0).unwrap()), 2); // KNOWS and LIKES
+        assert_eq!(indexes.in_degree(NodeId::new(2).unwrap()), 2); // from 1 and 0
 
         // Remove an edge
-        indexes.remove_edge(EdgeId::new(1));
+        indexes.remove_edge(EdgeId::new(1).unwrap());
         indexes.rebuild_adjacency();
 
         // Verify adjacency updated correctly
-        assert_eq!(indexes.out_degree(NodeId::new(1)), 0);
-        assert_eq!(indexes.in_degree(NodeId::new(2)), 1); // only from 0 now
+        assert_eq!(indexes.out_degree(NodeId::new(1).unwrap()), 0);
+        assert_eq!(indexes.in_degree(NodeId::new(2).unwrap()), 1); // only from 0 now
     }
 }
 
@@ -503,7 +503,7 @@ mod proptests {
                         indexes.insert_edge(create_test_edge(*id, *src, *tgt, "TEST"));
                     }
                     EdgeOp::Remove(id) => {
-                        let _ = indexes.remove_edge(EdgeId::new(*id));
+                        let _ = indexes.remove_edge(EdgeId::new(*id).unwrap());
                     }
                 }
             }
@@ -517,8 +517,8 @@ mod proptests {
             let mut total_in_degree = 0;
 
             for node_id in 0..10 {
-                total_out_degree += indexes.out_degree(NodeId::new(node_id));
-                total_in_degree += indexes.in_degree(NodeId::new(node_id));
+                total_out_degree += indexes.out_degree(NodeId::new(node_id).unwrap());
+                total_in_degree += indexes.in_degree(NodeId::new(node_id).unwrap());
             }
 
             // Each edge appears once in outgoing and once in incoming
@@ -537,7 +537,7 @@ mod proptests {
                         indexes.insert_edge(create_test_edge(*id, *src, *tgt, "TEST"));
                     }
                     EdgeOp::Remove(id) => {
-                        let _ = indexes.remove_edge(EdgeId::new(*id));
+                        let _ = indexes.remove_edge(EdgeId::new(*id).unwrap());
                     }
                 }
             }
@@ -546,7 +546,7 @@ mod proptests {
             indexes.rebuild_adjacency();
             let first_results: Vec<_> = (0..10)
                 .map(|i| {
-                    let node = NodeId::new(i);
+                    let node = NodeId::new(i).unwrap();
                     (indexes.get_outgoing(node), indexes.get_incoming(node))
                 })
                 .collect();
@@ -554,7 +554,7 @@ mod proptests {
             indexes.rebuild_adjacency();
             let second_results: Vec<_> = (0..10)
                 .map(|i| {
-                    let node = NodeId::new(i);
+                    let node = NodeId::new(i).unwrap();
                     (indexes.get_outgoing(node), indexes.get_incoming(node))
                 })
                 .collect();
@@ -642,8 +642,8 @@ mod concurrency_tests {
         let mut total_out_degree = 0;
         let mut total_in_degree = 0;
         for i in 0..10 {
-            total_out_degree += indexes.out_degree(NodeId::new(i));
-            total_in_degree += indexes.in_degree(NodeId::new(i));
+            total_out_degree += indexes.out_degree(NodeId::new(i).unwrap());
+            total_in_degree += indexes.in_degree(NodeId::new(i).unwrap());
         }
 
         assert_eq!(
@@ -690,7 +690,7 @@ mod concurrency_tests {
         let indexes_clone = Arc::clone(&indexes);
         let remove_handle = thread::spawn(move || {
             for i in 0..50 {
-                indexes_clone.remove_edge(EdgeId::new(i));
+                indexes_clone.remove_edge(EdgeId::new(i).unwrap());
                 thread::sleep(Duration::from_micros(5));
             }
         });
@@ -708,7 +708,7 @@ mod concurrency_tests {
         // Verify adjacency matches
         let mut total_degree = 0;
         for i in 0..10 {
-            total_degree += indexes.out_degree(NodeId::new(i));
+            total_degree += indexes.out_degree(NodeId::new(i).unwrap());
         }
         assert_eq!(total_degree, 50, "Adjacency should reflect removed edges");
     }
@@ -773,7 +773,7 @@ mod concurrency_tests {
 
         let mut total_degree = 0;
         for i in 0..20 {
-            total_degree += indexes.out_degree(NodeId::new(i));
+            total_degree += indexes.out_degree(NodeId::new(i).unwrap());
         }
         assert_eq!(
             total_degree, 300,

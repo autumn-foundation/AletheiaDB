@@ -462,8 +462,8 @@ mod tests {
         let temporal = BiTemporalInterval::current(1000);
 
         let version = NodeVersion::new_anchor(
-            VersionId::new(1),
-            NodeId::new(10),
+            VersionId::new(1).unwrap(),
+            NodeId::new(10).unwrap(),
             temporal,
             crate::core::interning::GLOBAL_INTERNER.intern("Person"),
             props,
@@ -471,7 +471,7 @@ mod tests {
 
         assert!(version.is_anchor());
         assert!(!version.is_delta());
-        assert_eq!(version.node_id, NodeId::new(10));
+        assert_eq!(version.node_id, NodeId::new(10).unwrap());
     }
 
     #[test]
@@ -483,19 +483,19 @@ mod tests {
         let temporal = BiTemporalInterval::current(2000);
 
         let version = EdgeVersion::new_delta(
-            VersionId::new(2),
-            EdgeId::new(20),
+            VersionId::new(2).unwrap(),
+            EdgeId::new(20).unwrap(),
             temporal,
             crate::core::interning::GLOBAL_INTERNER.intern("KNOWS"),
-            NodeId::new(1),
-            NodeId::new(2),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
             &old_props,
             &new_props,
-            VersionId::new(1),
+            VersionId::new(1).unwrap(),
         );
 
         assert!(!version.is_anchor());
         assert!(version.is_delta());
-        assert_eq!(version.prev_version, Some(VersionId::new(1)));
+        assert_eq!(version.prev_version, Some(VersionId::new(1).unwrap()));
     }
 }

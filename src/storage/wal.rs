@@ -18,7 +18,7 @@ use crate::core::{
     property::PropertyMap,
     temporal::{BiTemporalInterval, Timestamp, time},
 };
-use crate::utils::error::{Result, StorageError};
+use crate::utils::error::{Error, Result, StorageError};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -211,6 +211,42 @@ pub struct WriteAheadLog {
     current_segment: u64,
     writer: Option<BufWriter<File>>,
     current_size: usize,
+}
+
+/// Helper to deserialize and validate a NodeId from WAL buffer
+#[inline]
+fn deserialize_node_id(buffer: &[u8], offset: usize, context: &str) -> Result<NodeId> {
+    let raw_id = u64::from_le_bytes([
+        buffer[offset], buffer[offset + 1], buffer[offset + 2], buffer[offset + 3],
+        buffer[offset + 4], buffer[offset + 5], buffer[offset + 6], buffer[offset + 7],
+    ]);
+    NodeId::new(raw_id).map_err(|e| Error::Storage(StorageError::CorruptedData(
+        format!("Invalid node ID in WAL {}: {}", context, e)
+    )))
+}
+
+/// Helper to deserialize and validate an EdgeId from WAL buffer
+#[inline]
+fn deserialize_edge_id(buffer: &[u8], offset: usize, context: &str) -> Result<EdgeId> {
+    let raw_id = u64::from_le_bytes([
+        buffer[offset], buffer[offset + 1], buffer[offset + 2], buffer[offset + 3],
+        buffer[offset + 4], buffer[offset + 5], buffer[offset + 6], buffer[offset + 7],
+    ]);
+    EdgeId::new(raw_id).map_err(|e| Error::Storage(StorageError::CorruptedData(
+        format!("Invalid edge ID in WAL {}: {}", context, e)
+    )))
+}
+
+/// Helper to deserialize and validate a VersionId from WAL buffer
+#[inline]
+fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result<VersionId> {
+    let raw_id = u64::from_le_bytes([
+        buffer[offset], buffer[offset + 1], buffer[offset + 2], buffer[offset + 3],
+        buffer[offset + 4], buffer[offset + 5], buffer[offset + 6], buffer[offset + 7],
+    ]);
+    VersionId::new(raw_id).map_err(|e| Error::Storage(StorageError::CorruptedData(
+        format!("Invalid version ID in WAL {}: {}", context, e)
+    )))
 }
 
 impl WriteAheadLog {
@@ -488,6 +524,42 @@ impl WriteAheadLog {
         Ok(entries)
     }
 
+    /// Helper to deserialize and validate a NodeId from WAL buffer
+    #[inline]
+    fn deserialize_node_id(buffer: &[u8], offset: usize, context: &str) -> Result<NodeId> {
+        let raw_id = u64::from_le_bytes([
+            buffer[offset], buffer[offset + 1], buffer[offset + 2], buffer[offset + 3],
+            buffer[offset + 4], buffer[offset + 5], buffer[offset + 6], buffer[offset + 7],
+        ]);
+        NodeId::new(raw_id).map_err(|e| Error::Storage(StorageError::CorruptedData(
+            format!("Invalid node ID in WAL {}: {}", context, e)
+        )))
+    }
+
+    /// Helper to deserialize and validate an EdgeId from WAL buffer
+    #[inline]
+    fn deserialize_edge_id(buffer: &[u8], offset: usize, context: &str) -> Result<EdgeId> {
+        let raw_id = u64::from_le_bytes([
+            buffer[offset], buffer[offset + 1], buffer[offset + 2], buffer[offset + 3],
+            buffer[offset + 4], buffer[offset + 5], buffer[offset + 6], buffer[offset + 7],
+        ]);
+        EdgeId::new(raw_id).map_err(|e| Error::Storage(StorageError::CorruptedData(
+            format!("Invalid edge ID in WAL {}: {}", context, e)
+        )))
+    }
+
+    /// Helper to deserialize and validate a VersionId from WAL buffer
+    #[inline]
+    fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result<VersionId> {
+        let raw_id = u64::from_le_bytes([
+            buffer[offset], buffer[offset + 1], buffer[offset + 2], buffer[offset + 3],
+            buffer[offset + 4], buffer[offset + 5], buffer[offset + 6], buffer[offset + 7],
+        ]);
+        VersionId::new(raw_id).map_err(|e| Error::Storage(StorageError::CorruptedData(
+            format!("Invalid version ID in WAL {}: {}", context, e)
+        )))
+    }
+
     /// Read WAL entries from a single segment file
     fn read_segment(&self, path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         use std::io::Read;
@@ -580,16 +652,7 @@ impl WriteAheadLog {
                     if offset + 12 > buffer.len() {
                         break;
                     }
-                    let node_id = NodeId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let node_id = Self::deserialize_node_id(&buffer, offset, "CreateNode")?;
                     offset += 8;
 
                     let label_len = u32::from_le_bytes([
@@ -631,40 +694,13 @@ impl WriteAheadLog {
                     if offset + 28 > buffer.len() {
                         break;
                     }
-                    let edge_id = EdgeId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let edge_id = Self::deserialize_edge_id(&buffer, offset, "CreateEdge")?;
                     offset += 8;
 
-                    let source = NodeId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let source = Self::deserialize_node_id(&buffer, offset, "CreateEdge source")?;
                     offset += 8;
 
-                    let target = NodeId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let target = Self::deserialize_node_id(&buffer, offset, "CreateEdge target")?;
                     offset += 8;
 
                     let label_len = u32::from_le_bytes([
@@ -708,28 +744,10 @@ impl WriteAheadLog {
                     if offset + 16 > buffer.len() {
                         break;
                     }
-                    let node_id = NodeId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let node_id = Self::deserialize_node_id(&buffer, offset, "UpdateNode")?;
                     offset += 8;
 
-                    let version_id = VersionId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let version_id = Self::deserialize_version_id(&buffer, offset, "UpdateNode")?;
                     offset += 8;
 
                     let (label, properties, temporal) = if version >= WAL_VERSION {
@@ -776,28 +794,10 @@ impl WriteAheadLog {
                     if offset + 16 > buffer.len() {
                         break;
                     }
-                    let edge_id = EdgeId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let edge_id = Self::deserialize_edge_id(&buffer, offset, "UpdateEdge")?;
                     offset += 8;
 
-                    let version_id = VersionId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let version_id = Self::deserialize_version_id(&buffer, offset, "UpdateEdge")?;
                     offset += 8;
 
                     let (label, properties, temporal) = if version >= WAL_VERSION {
@@ -876,16 +876,7 @@ impl WriteAheadLog {
                     if offset + 8 > buffer.len() {
                         break;
                     }
-                    let node_id = NodeId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let node_id = Self::deserialize_node_id(&buffer, offset, "DeleteNode")?;
                     offset += 8;
 
                     let temporal = if version >= WAL_VERSION {
@@ -903,16 +894,7 @@ impl WriteAheadLog {
                     if offset + 8 > buffer.len() {
                         break;
                     }
-                    let edge_id = EdgeId::new(u64::from_le_bytes([
-                        buffer[offset],
-                        buffer[offset + 1],
-                        buffer[offset + 2],
-                        buffer[offset + 3],
-                        buffer[offset + 4],
-                        buffer[offset + 5],
-                        buffer[offset + 6],
-                        buffer[offset + 7],
-                    ]));
+                    let edge_id = Self::deserialize_edge_id(&buffer, offset, "DeleteEdge")?;
                     offset += 8;
 
                     let temporal = if version >= WAL_VERSION {
@@ -1220,16 +1202,7 @@ fn parse_wal_entries_versioned(
                 if offset + 12 > buffer.len() {
                     break;
                 }
-                let node_id = NodeId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let node_id = deserialize_node_id(&buffer, offset, "CreateNode (migration)")?;
                 offset += 8;
 
                 let label_len = u32::from_le_bytes([
@@ -1269,40 +1242,13 @@ fn parse_wal_entries_versioned(
                 if offset + 28 > buffer.len() {
                     break;
                 }
-                let edge_id = EdgeId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let edge_id = deserialize_edge_id(&buffer, offset, "CreateEdge (migration)")?;
                 offset += 8;
 
-                let source = NodeId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let source = deserialize_node_id(&buffer, offset, "CreateEdge source (migration)")?;
                 offset += 8;
 
-                let target = NodeId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let target = deserialize_node_id(&buffer, offset, "CreateEdge target (migration)")?;
                 offset += 8;
 
                 let label_len = u32::from_le_bytes([
@@ -1344,28 +1290,10 @@ fn parse_wal_entries_versioned(
                 if offset + 16 > buffer.len() {
                     break;
                 }
-                let node_id = NodeId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let node_id = deserialize_node_id(&buffer, offset, "UpdateNode (migration)")?;
                 offset += 8;
 
-                let version_id = VersionId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let version_id = deserialize_version_id(&buffer, offset, "UpdateNode (migration)")?;
                 offset += 8;
 
                 let (label, properties, temporal) = if version >= WAL_VERSION {
@@ -1410,28 +1338,10 @@ fn parse_wal_entries_versioned(
                 if offset + 16 > buffer.len() {
                     break;
                 }
-                let edge_id = EdgeId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let edge_id = deserialize_edge_id(&buffer, offset, "UpdateEdge (migration)")?;
                 offset += 8;
 
-                let version_id = VersionId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let version_id = deserialize_version_id(&buffer, offset, "UpdateEdge (migration)")?;
                 offset += 8;
 
                 let (label, properties, temporal) = if version >= WAL_VERSION {
@@ -1510,16 +1420,7 @@ fn parse_wal_entries_versioned(
                 if offset + 8 > buffer.len() {
                     break;
                 }
-                let node_id = NodeId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let node_id = deserialize_node_id(&buffer, offset, "DeleteNode (migration)")?;
                 offset += 8;
 
                 let temporal = if version >= WAL_VERSION {
@@ -1537,16 +1438,7 @@ fn parse_wal_entries_versioned(
                 if offset + 8 > buffer.len() {
                     break;
                 }
-                let edge_id = EdgeId::new(u64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]));
+                let edge_id = deserialize_edge_id(&buffer, offset, "DeleteEdge (migration)")?;
                 offset += 8;
 
                 let temporal = if version >= WAL_VERSION {
@@ -1564,8 +1456,7 @@ fn parse_wal_entries_versioned(
                 return Err(StorageError::CorruptedData(format!(
                     "Unknown WAL operation type: {}",
                     op_type
-                ))
-                .into());
+                )).into())
             }
         };
 
@@ -1612,7 +1503,7 @@ mod tests {
         let wal = WriteAheadLog::new(config)?;
 
         let operation = WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Person".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -1659,7 +1550,7 @@ mod tests {
         let mut wal = WriteAheadLog::new(config)?;
 
         let operation = WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Person".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -1687,7 +1578,7 @@ mod tests {
         // Append multiple entries to trigger rotation
         for i in 0..10 {
             let operation = WalOperation::CreateNode {
-                node_id: NodeId::new(i),
+                node_id: NodeId::new(i).unwrap(),
                 label: "Person".to_string(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
@@ -1714,7 +1605,7 @@ mod tests {
 
         // Log a delete node operation
         let operation = WalOperation::DeleteNode {
-            node_id: NodeId::new(42),
+            node_id: NodeId::new(42).unwrap(),
             temporal: BiTemporalInterval::current(time::now()),
         };
 
@@ -1751,7 +1642,7 @@ mod tests {
 
         // Log a delete edge operation
         let operation = WalOperation::DeleteEdge {
-            edge_id: EdgeId::new(99),
+            edge_id: EdgeId::new(99).unwrap(),
             temporal: BiTemporalInterval::current(time::now()),
         };
 
@@ -1789,25 +1680,25 @@ mod tests {
         // Log a sequence of mixed operations
         let ops = vec![
             WalOperation::CreateNode {
-                node_id: NodeId::new(1),
+                node_id: NodeId::new(1).unwrap(),
                 label: "Person".to_string(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             },
             WalOperation::CreateEdge {
-                edge_id: EdgeId::new(1),
-                source: NodeId::new(1),
-                target: NodeId::new(2),
+                edge_id: EdgeId::new(1).unwrap(),
+                source: NodeId::new(1).unwrap(),
+                target: NodeId::new(2).unwrap(),
                 label: "KNOWS".to_string(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             },
             WalOperation::DeleteNode {
-                node_id: NodeId::new(3),
+                node_id: NodeId::new(3).unwrap(),
                 temporal: BiTemporalInterval::current(time::now()),
             },
             WalOperation::DeleteEdge {
-                edge_id: EdgeId::new(2),
+                edge_id: EdgeId::new(2).unwrap(),
                 temporal: BiTemporalInterval::current(time::now()),
             },
         ];
@@ -1874,7 +1765,7 @@ mod tests {
         );
 
         let operation = WalOperation::CreateNode {
-            node_id: NodeId::new(42),
+            node_id: NodeId::new(42).unwrap(),
             label: "Person".to_string(),
             properties: properties.clone(),
             temporal,
@@ -1937,9 +1828,9 @@ mod tests {
             BiTemporalInterval::new(TimeRange::new(5000, 6000), TimeRange::new(7000, 8000));
 
         let operation = WalOperation::CreateEdge {
-            edge_id: EdgeId::new(99),
-            source: NodeId::new(1),
-            target: NodeId::new(2),
+            edge_id: EdgeId::new(99).unwrap(),
+            source: NodeId::new(1).unwrap(),
+            target: NodeId::new(2).unwrap(),
             label: "FRIENDS_WITH".to_string(),
             properties: properties.clone(),
             temporal,
@@ -2000,8 +1891,8 @@ mod tests {
             BiTemporalInterval::new(TimeRange::new(10000, 20000), TimeRange::from(15000));
 
         let operation = WalOperation::UpdateNode {
-            node_id: NodeId::new(42),
-            version_id: VersionId::new(2),
+            node_id: NodeId::new(42).unwrap(),
+            version_id: VersionId::new(2).unwrap(),
             label: "Person".to_string(),
             properties: properties.clone(),
             temporal,
@@ -2049,12 +1940,12 @@ mod tests {
         let temporal = BiTemporalInterval::new(TimeRange::new(100, 200), TimeRange::new(300, 400));
 
         wal.append(WalOperation::DeleteNode {
-            node_id: NodeId::new(5),
+            node_id: NodeId::new(5).unwrap(),
             temporal,
         })?;
 
         wal.append(WalOperation::DeleteEdge {
-            edge_id: EdgeId::new(10),
+            edge_id: EdgeId::new(10).unwrap(),
             temporal,
         })?;
 
@@ -2109,7 +2000,7 @@ mod tests {
 
         // Append an entry to create a segment
         wal.append(WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Test".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -2157,7 +2048,7 @@ mod tests {
                 BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::new(3000, 4000));
 
             wal.append(WalOperation::CreateNode {
-                node_id: NodeId::new(100),
+                node_id: NodeId::new(100).unwrap(),
                 label: "TestNode".to_string(),
                 properties: original_properties.clone(),
                 temporal: original_temporal,
@@ -2218,7 +2109,7 @@ mod tests {
 
         let mut wal = WriteAheadLog::new(config)?;
         wal.append(WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Test".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -2261,7 +2152,7 @@ mod tests {
 
         let mut wal = WriteAheadLog::new(config)?;
         wal.append(WalOperation::CreateNode {
-            node_id: NodeId::new(1),
+            node_id: NodeId::new(1).unwrap(),
             label: "Test".to_string(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),

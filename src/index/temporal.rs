@@ -192,10 +192,10 @@ mod tests {
     fn test_insert_and_find_node_versions() {
         let mut indexes = TemporalIndexes::new();
 
-        let node_id = NodeId::new(1);
-        let v1 = VersionId::new(100);
-        let v2 = VersionId::new(101);
-        let v3 = VersionId::new(102);
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
+        let v3 = VersionId::new(102).unwrap();
 
         // Insert versions at different valid times
         indexes.insert_node_version(
@@ -237,9 +237,9 @@ mod tests {
     fn test_transaction_time_range_query() {
         let mut indexes = TemporalIndexes::new();
 
-        let edge_id = EdgeId::new(1);
-        let v1 = VersionId::new(100);
-        let v2 = VersionId::new(101);
+        let edge_id = EdgeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
 
         // Version recorded at tx time 1000
         indexes.insert_edge_version(
@@ -275,7 +275,7 @@ mod tests {
         let indexes = TemporalIndexes::new();
 
         let results =
-            indexes.find_node_versions_in_valid_time_range(NodeId::new(1), TimeRange::new(0, 1000));
+            indexes.find_node_versions_in_valid_time_range(NodeId::new(1).unwrap(), TimeRange::new(0, 1000));
 
         assert_eq!(results.len(), 0);
     }
@@ -284,10 +284,10 @@ mod tests {
     fn test_multiple_entities() {
         let mut indexes = TemporalIndexes::new();
 
-        let node1 = NodeId::new(1);
-        let node2 = NodeId::new(2);
-        let v1 = VersionId::new(100);
-        let v2 = VersionId::new(101);
+        let node1 = NodeId::new(1).unwrap();
+        let node2 = NodeId::new(2).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
 
         indexes.insert_node_version(node1, v1, BiTemporalInterval::current(1000));
 
@@ -307,8 +307,8 @@ mod tests {
         let mut indexes = TemporalIndexes::new();
 
         indexes.insert_node_version(
-            NodeId::new(1),
-            VersionId::new(100),
+            NodeId::new(1).unwrap(),
+            VersionId::new(100).unwrap(),
             BiTemporalInterval::current(1000),
         );
 
@@ -321,8 +321,8 @@ mod tests {
 
     #[test]
     fn test_temporal_key_ordering() {
-        let node1 = EntityId::Node(NodeId::new(1));
-        let node2 = EntityId::Node(NodeId::new(2));
+        let node1 = EntityId::Node(NodeId::new(1).unwrap());
+        let node2 = EntityId::Node(NodeId::new(2).unwrap());
 
         let key1 = TemporalKey::new(node1, 1000);
         let key2 = TemporalKey::new(node1, 2000);

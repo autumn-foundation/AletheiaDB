@@ -58,7 +58,7 @@ fn bench_single_hop_traversal(c: &mut Criterion) {
 
     for graph_size in [100, 1000, 10000] {
         let storage = create_test_graph(graph_size, 10);
-        let first_node = gallifreydb::NodeId::new(0);
+        let first_node = gallifreydb::NodeId::new(0).unwrap();
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_nodes", graph_size)),
@@ -81,7 +81,7 @@ fn bench_single_hop_traversal(c: &mut Criterion) {
 /// Target: <100µs per operation
 fn bench_multi_hop_traversal(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let start_node = gallifreydb::NodeId::new(0);
+    let start_node = gallifreydb::NodeId::new(0).unwrap();
 
     c.bench_function("3_hop_traversal", |b| {
         b.iter(|| {
@@ -113,7 +113,7 @@ fn bench_multi_hop_traversal(c: &mut Criterion) {
 /// Target: <100ns per operation
 fn bench_node_lookup(c: &mut Criterion) {
     let storage = create_test_graph(10000, 10);
-    let node_id = gallifreydb::NodeId::new(5000);
+    let node_id = gallifreydb::NodeId::new(5000).unwrap();
 
     c.bench_function("node_lookup", |b| {
         b.iter(|| {
@@ -126,7 +126,7 @@ fn bench_node_lookup(c: &mut Criterion) {
 /// Benchmark edge lookup by ID.
 fn bench_edge_lookup(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let edge_id = gallifreydb::EdgeId::new(5000);
+    let edge_id = gallifreydb::EdgeId::new(5000).unwrap();
 
     c.bench_function("edge_lookup", |b| {
         b.iter(|| {
@@ -139,7 +139,7 @@ fn bench_edge_lookup(c: &mut Criterion) {
 /// Benchmark labeled edge traversal.
 fn bench_labeled_traversal(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let node_id = gallifreydb::NodeId::new(0);
+    let node_id = gallifreydb::NodeId::new(0).unwrap();
 
     c.bench_function("labeled_traversal", |b| {
         b.iter(|| {
@@ -198,7 +198,7 @@ fn bench_edge_creation(c: &mut Criterion) {
 /// Benchmark graph degree queries.
 fn bench_degree_queries(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let node_id = gallifreydb::NodeId::new(0);
+    let node_id = gallifreydb::NodeId::new(0).unwrap();
 
     c.bench_function("out_degree", |b| {
         b.iter(|| {
@@ -218,7 +218,7 @@ fn bench_degree_queries(c: &mut Criterion) {
 /// Benchmark finding neighbors (targets of outgoing edges).
 fn bench_find_neighbors(c: &mut Criterion) {
     let storage = create_test_graph(1000, 10);
-    let node_id = gallifreydb::NodeId::new(0);
+    let node_id = gallifreydb::NodeId::new(0).unwrap();
 
     c.bench_function("find_neighbors", |b| {
         b.iter(|| {

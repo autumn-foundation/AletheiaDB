@@ -150,6 +150,13 @@ pub enum StorageError {
     },
     /// Property with the given key was not found.
     PropertyNotFound(String),
+    /// Invalid ID value (out of range or reserved).
+    InvalidId {
+        /// The invalid ID value
+        id: u64,
+        /// The type of ID (node/edge/version)
+        id_type: &'static str,
+    },
 }
 
 impl fmt::Display for StorageError {
@@ -184,6 +191,13 @@ impl fmt::Display for StorageError {
             }
             StorageError::PropertyNotFound(key) => {
                 write!(f, "Property not found: {}", key)
+            }
+            StorageError::InvalidId { id, id_type } => {
+                write!(
+                    f,
+                    "Invalid {} ID {}: exceeds maximum allowed value {} (reserved range for internal use)",
+                    id_type, id, crate::core::id::MAX_VALID_ID
+                )
             }
         }
     }
@@ -538,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_storage_error_display() {
-        let err = StorageError::NodeNotFound(NodeId::new(42));
+        let err = StorageError::NodeNotFound(NodeId::new(42).unwrap());
         assert_eq!(format!("{}", err), "Node not found: Node(42)");
 
         let err = StorageError::InvalidProperty {
@@ -580,7 +594,7 @@ mod tests {
 
     #[test]
     fn test_error_conversions() {
-        let storage_err = StorageError::NodeNotFound(NodeId::new(1));
+        let storage_err = StorageError::NodeNotFound(NodeId::new(1).unwrap());
         let err: Error = storage_err.clone().into();
         assert!(matches!(err, Error::Storage(_)));
 
@@ -597,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = Error::Storage(StorageError::NodeNotFound(NodeId::new(42)));
+        let err = Error::Storage(StorageError::NodeNotFound(NodeId::new(42).unwrap()));
         assert!(format!("{}", err).contains("Storage error"));
         assert!(format!("{}", err).contains("Node not found"));
 
@@ -612,7 +626,7 @@ mod tests {
         }
 
         fn returns_error() -> Result<i32> {
-            Err(StorageError::NodeNotFound(NodeId::new(1)).into())
+            Err(StorageError::NodeNotFound(NodeId::new(1).unwrap()).into())
         }
 
         assert_eq!(returns_result().unwrap(), 42);
@@ -622,11 +636,11 @@ mod tests {
     #[test]
     fn test_all_storage_error_variants() {
         // Test EdgeNotFound
-        let err = StorageError::EdgeNotFound(EdgeId::new(1));
+        let err = StorageError::EdgeNotFound(EdgeId::new(1).unwrap());
         assert!(format!("{}", err).contains("Edge not found"));
 
         // Test VersionNotFound
-        let err = StorageError::VersionNotFound(VersionId::new(1));
+        let err = StorageError::VersionNotFound(VersionId::new(1).unwrap());
         assert!(format!("{}", err).contains("Version not found"));
 
         // Test DuplicateId
@@ -698,7 +712,7 @@ mod tests {
 
         // Test VersionAlreadyClosed
         let err = TemporalError::VersionAlreadyClosed {
-            version_id: VersionId::new(42),
+            version_id: VersionId::new(42).unwrap(),
         };
         assert!(format!("{}", err).contains("already closed"));
         assert!(format!("{}", err).contains("42"));

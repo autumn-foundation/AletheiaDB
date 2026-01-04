@@ -144,6 +144,40 @@ pub struct VersionId(u64);
 fn get_node(id: u64) -> Node { /* which kind of ID? */ }
 ```
 
+**ID Validation and Security:**
+
+All ID types validate values on construction to prevent security issues:
+
+```rust
+// GOOD: Use validated constructors in public API
+pub fn create_node(&self, id: u64) -> Result<NodeId> {
+    NodeId::new(id)  // Validates ID is within MAX_VALID_ID
+}
+
+// INTERNAL USE ONLY: new_unchecked() bypasses validation
+// - MUST remain pub(crate) - never expose in public API
+// - Only use when ID is known valid (WAL recovery, trusted storage)
+// - Document safety reasoning at call site
+impl NodeId {
+    pub(crate) const fn new_unchecked(id: u64) -> Self {
+        NodeId(id)
+    }
+}
+```
+
+**Critical Security Rule**: The `new_unchecked()` methods MUST remain `pub(crate)`.
+Never expose them in:
+- Public API functions
+- C FFI boundaries
+- External plugin systems
+- Any untrusted context
+
+IDs exceeding `MAX_VALID_ID` (u64::MAX - 1000) are rejected to prevent:
+- Arithmetic overflow in ID operations
+- Excessive memory allocation attempts
+- Serialization buffer overflow
+- DoS attacks via extreme values
+
 **Temporal Types:**
 ```rust
 // GOOD: Explicit temporal semantics
