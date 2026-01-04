@@ -1131,7 +1131,7 @@ mod tests {
         let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
         storage.enable_vector_index("embedding", config).unwrap();
 
-        let result = storage.find_similar(NodeId::new(999), 2);
+        let result = storage.find_similar(NodeId::new(999).unwrap(), 2);
         assert!(result.is_err());
     }
 

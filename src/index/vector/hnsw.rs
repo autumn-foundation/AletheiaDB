@@ -1381,7 +1381,7 @@ mod tests {
             let index_clone = Arc::clone(&index);
             let handle = thread::spawn(move || {
                 for j in 0..25 {
-                    let node_id = NodeId::new((i * 25 + j) as u64);
+                    let node_id = NodeId::new((i * 25 + j) as u64).unwrap();
                     let vec = vec![i as f32, j as f32, 0.0, 0.0];
                     index_clone.add(node_id, &vec).unwrap();
                 }
@@ -1405,7 +1405,7 @@ mod tests {
         // Add some vectors first
         for i in 0..100 {
             index
-                .add(NodeId::new(i), &[i as f32 / 100.0, 0.0, 0.0, 0.0])
+                .add(NodeId::new(i).unwrap(), &[i as f32 / 100.0, 0.0, 0.0, 0.0])
                 .unwrap();
         }
 
@@ -1440,7 +1440,7 @@ mod tests {
             let handle = thread::spawn(move || {
                 // Add vectors
                 for j in 0..20 {
-                    let node_id = NodeId::new((i * 20 + j) as u64);
+                    let node_id = NodeId::new((i * 20 + j) as u64).unwrap();
                     let vec = vec![i as f32, j as f32, 0.0, 0.0];
                     index_clone.add(node_id, &vec).unwrap();
                 }
@@ -1528,7 +1528,7 @@ mod tests {
         // Add some vectors
         for i in 0..20 {
             let vec = vec![i as f32 / 20.0, 0.0, 0.0, 0.0];
-            index.add(NodeId::new(i), &vec).unwrap();
+            index.add(NodeId::new(i).unwrap(), &vec).unwrap();
         }
 
         // Search with low ef_search
@@ -1700,7 +1700,7 @@ mod tests {
         // Add more than config.capacity to verify override worked
         for i in 0..100 {
             let vec = vec![i as f32 / 100.0; 64];
-            index.add(NodeId::new(i), &vec).unwrap();
+            index.add(NodeId::new(i).unwrap(), &vec).unwrap();
         }
 
         assert_eq!(index.len(), 100);
@@ -1832,7 +1832,7 @@ mod tests {
 
     /// Strategy for generating valid NodeId
     fn valid_node_id() -> impl Strategy<Value = NodeId> {
-        (1u64..1000u64).prop_map(NodeId::new)
+        (1u64..1000u64).prop_map(|id| NodeId::new(id).unwrap())
     }
 
     proptest! {
