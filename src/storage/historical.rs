@@ -566,7 +566,7 @@ mod tests {
 
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
-        let label = GLOBAL_INTERNER.intern("Person");
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
         let temporal = BiTemporalInterval::current(1000);
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
 
@@ -589,7 +589,7 @@ mod tests {
         });
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Person");
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
 
         // Create 5 versions
         let mut version_ids = Vec::new();
@@ -637,7 +637,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Person");
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
 
         // Version 1: name=Alice, age=30
         let v1 = VersionId::new(1).unwrap();
@@ -680,7 +680,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Person");
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
 
         // Create versions at different times
         let v1 = VersionId::new(1).unwrap();
@@ -747,7 +747,7 @@ mod tests {
         );
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Test");
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
 
         // Add 3 versions - should succeed
         for i in 0..3 {
@@ -797,7 +797,7 @@ mod tests {
         let edge_id = EdgeId::new(1).unwrap();
         let source = NodeId::new(1).unwrap();
         let target = NodeId::new(2).unwrap();
-        let label = GLOBAL_INTERNER.intern("KNOWS");
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         // Add 2 versions - should succeed
         for i in 0..2 {
@@ -847,7 +847,7 @@ mod tests {
             max_delta_chain: 10,
         });
 
-        let label = GLOBAL_INTERNER.intern("Test");
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
 
         // Add 3 node versions (anchor, delta, anchor)
         for i in 0..3 {
@@ -895,7 +895,7 @@ mod tests {
 
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
-        let label = GLOBAL_INTERNER.intern("Document");
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
         let temporal = BiTemporalInterval::current(1000);
 
         // Create node with vector embedding
@@ -926,7 +926,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Document");
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
 
         // Version 1: Initial embedding
         let v1 = VersionId::new(1).unwrap();
@@ -983,7 +983,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Document");
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
 
         // Version 1: title + embedding
         let v1 = VersionId::new(1).unwrap();
@@ -1038,7 +1038,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Document");
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
 
         // Same embedding for both versions
         let embedding = vec![0.5f32, 0.5, 0.5];
@@ -1106,7 +1106,7 @@ mod tests {
         });
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Document");
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
 
         // Create 3 versions with different embeddings
         let embeddings = [vec![0.1f32, 0.2], vec![0.3f32, 0.4], vec![0.5f32, 0.6]];
@@ -1163,7 +1163,7 @@ mod tests {
 
         let edge_id = EdgeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
-        let label = GLOBAL_INTERNER.intern("SIMILAR_TO");
+        let label = GLOBAL_INTERNER.intern("SIMILAR_TO").unwrap();
         let temporal = BiTemporalInterval::current(1000);
         let source = NodeId::new(10).unwrap();
         let target = NodeId::new(20).unwrap();
@@ -1200,7 +1200,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let edge_id = EdgeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("SIMILAR_TO");
+        let label = GLOBAL_INTERNER.intern("SIMILAR_TO").unwrap();
         let source = NodeId::new(10).unwrap();
         let target = NodeId::new(20).unwrap();
 
@@ -1257,7 +1257,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Embedding");
+        let label = GLOBAL_INTERNER.intern("Embedding").unwrap();
 
         // High-dimensional embedding (like OpenAI's 1536-dim)
         const DIMENSIONS: usize = 1536;
@@ -1294,7 +1294,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("Document");
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
 
         // Create versions at different times with different embeddings
         let embeddings = [
@@ -1352,7 +1352,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("EmptyEmbedding");
+        let label = GLOBAL_INTERNER.intern("EmptyEmbedding").unwrap();
 
         // Empty vector should work with delta compression
         let empty_vec: Vec<f32> = vec![];
@@ -1406,7 +1406,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("SpecialFloats");
+        let label = GLOBAL_INTERNER.intern("SpecialFloats").unwrap();
 
         // Note: NaN and Infinity are allowed in storage (validation is optional).
         // However, NaN != NaN per IEEE 754, so delta computation treats NaN
@@ -1445,7 +1445,7 @@ mod tests {
         let mut storage = HistoricalStorage::new();
 
         let node_id = NodeId::new(1).unwrap();
-        let label = GLOBAL_INTERNER.intern("NaNTest");
+        let label = GLOBAL_INTERNER.intern("NaNTest").unwrap();
 
         // NaN != NaN per IEEE 754, so same NaN values will be detected as
         // "changed" in delta computation. This is documented behavior.

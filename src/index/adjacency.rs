@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_build_simple_graph() {
-        let knows = GLOBAL_INTERNER.intern("KNOWS");
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         let edges = vec![
             (
@@ -238,8 +238,8 @@ mod tests {
 
     #[test]
     fn test_multiple_edge_labels() {
-        let knows = GLOBAL_INTERNER.intern("KNOWS");
-        let follows = GLOBAL_INTERNER.intern("FOLLOWS");
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let follows = GLOBAL_INTERNER.intern("FOLLOWS").unwrap();
 
         let edges = vec![
             (
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn test_node_without_edges() {
-        let knows = GLOBAL_INTERNER.intern("KNOWS");
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
 
         let edges = vec![(
             NodeId::new(0).unwrap(),
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_adjacency_entry() {
-        let label = GLOBAL_INTERNER.intern("TEST");
+        let label = GLOBAL_INTERNER.intern("TEST").unwrap();
         let entry = AdjacencyEntry::new(NodeId::new(1).unwrap(), EdgeId::new(100).unwrap(), label);
 
         assert_eq!(entry.target, NodeId::new(1).unwrap());
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn test_sorted_adjacency() {
         // Edges deliberately out of order
-        let knows = GLOBAL_INTERNER.intern("KNOWS");
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
         let edges = vec![
             (
                 NodeId::new(0).unwrap(),

@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_node_creation() {
-        let label = GLOBAL_INTERNER.intern("Person");
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
         let props = PropertyMapBuilder::new()
             .insert("name", "Alice")
             .insert("age", 30i64)
@@ -190,8 +190,8 @@ mod tests {
 
     #[test]
     fn test_node_has_label() {
-        let label = GLOBAL_INTERNER.intern("Person");
-        let other_label = GLOBAL_INTERNER.intern("Company");
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let other_label = GLOBAL_INTERNER.intern("Company").unwrap();
 
         let node = Node::new(
             NodeId::new(1).unwrap(),
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_edge_creation() {
-        let label = GLOBAL_INTERNER.intern("KNOWS");
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
         let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
 
         let edge = Edge::new(
@@ -233,7 +233,7 @@ mod tests {
     fn test_edge_connects() {
         let edge = Edge::new(
             EdgeId::new(1).unwrap(),
-            GLOBAL_INTERNER.intern("KNOWS"),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
             PropertyMapBuilder::new().build(),
