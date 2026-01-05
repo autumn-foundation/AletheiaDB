@@ -72,7 +72,7 @@ use parking_lot::RwLock;
 use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::index::vector::hnsw::HnswIndex;
-use crate::index::vector::{DistanceMetric, HnswConfig, VectorIndex};
+use crate::index::vector::{DistanceMetric, HnswConfig, TemporalSearchResults, VectorIndex};
 use crate::utils::{Error, Result, TemporalError};
 
 /// Retention policy for snapshot cleanup.
@@ -939,7 +939,7 @@ impl TemporalVectorIndex {
         query_embedding: &[f32],
         k: usize,
         time_range: TimeRange,
-    ) -> Result<Vec<(Timestamp, Vec<(NodeId, f32)>)>> {
+    ) -> Result<TemporalSearchResults> {
         let snapshots = self.snapshots.read();
 
         let mut results = Vec::new();
@@ -1287,7 +1287,7 @@ mod tests {
 
         // Each snapshot should have results
         for (timestamp, similar_nodes) in results {
-            assert!(timestamp >= 1000 && timestamp <= 3000);
+            assert!((1000..=3000).contains(&timestamp));
             // Each snapshot should contain at least one similar node
             assert!(!similar_nodes.is_empty());
         }

@@ -10,7 +10,7 @@ use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use crate::index::current::CurrentIndexes;
-use crate::index::vector::VectorIndex;
+use crate::index::vector::{TemporalSearchResults, VectorIndex};
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::utils::error::{Result, StorageError};
@@ -825,7 +825,7 @@ impl CurrentStorage {
         embedding: &[f32],
         k: usize,
         time_range: crate::core::temporal::TimeRange,
-    ) -> Result<Vec<(Timestamp, Vec<(NodeId, f32)>)>> {
+    ) -> Result<TemporalSearchResults> {
         let state = self.temporal_vector_index_state.read();
         let index = state.index.as_ref().ok_or_else(|| {
             crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
@@ -857,12 +857,11 @@ impl CurrentStorage {
         timestamp: Timestamp,
     ) -> Result<()> {
         let state = self.temporal_vector_index_state.read();
-        if let Some(index) = &state.index {
-            if let Some(prop_name) = &state.property_name {
-                if let Some(vector) = properties.get(prop_name).and_then(|v| v.as_vector()) {
-                    index.add(node_id, vector, timestamp)?;
-                }
-            }
+        if let Some(index) = &state.index
+            && let Some(prop_name) = &state.property_name
+            && let Some(vector) = properties.get(prop_name).and_then(|v| v.as_vector())
+        {
+            index.add(node_id, vector, timestamp)?;
         }
         Ok(())
     }

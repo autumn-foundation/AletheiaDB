@@ -12,6 +12,7 @@ use crate::core::property::PropertyMap;
 use crate::core::temporal::{Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
 use crate::index::vector::hnsw::HnswConfig;
+use crate::index::vector::TemporalSearchResults;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
@@ -644,7 +645,7 @@ impl GallifreyDB {
         embedding: &[f32],
         k: usize,
         time_range: crate::core::temporal::TimeRange,
-    ) -> Result<Vec<(Timestamp, Vec<(NodeId, f32)>)>> {
+    ) -> Result<TemporalSearchResults> {
         self.current.find_similar_in_range(embedding, k, time_range)
     }
 

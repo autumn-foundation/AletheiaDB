@@ -565,7 +565,12 @@ impl VectorIndex for HnswIndex {
         };
 
         // Get ef_search parameter
-        let ef_search = *self.ef_search.read();
+        // CRITICAL: ef_search must be >= fetch_k for HNSW to find k neighbors
+        // For small graphs, use higher ef_search for better recall
+        // HNSW's probabilistic structure doesn't work well with very few nodes
+        let configured_ef_search = *self.ef_search.read();
+        let min_ef_for_small_graphs = 200;
+        let ef_search = configured_ef_search.max(fetch_k).max(min_ef_for_small_graphs);
 
         // Perform search
         let inner = self.inner.read();
@@ -581,7 +586,7 @@ impl VectorIndex for HnswIndex {
         for neighbor in results {
             let data_id = neighbor.d_id;
 
-            // Lookup NodeId for this DataId (O(1) using reverse mapping)
+            // Lookup NodeId for this NodeId (O(1) using reverse mapping)
             if let Some(node_id_ref) = self.reverse_id_mapping.get(&data_id) {
                 let node_id = *node_id_ref.value();
 
