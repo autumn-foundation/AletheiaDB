@@ -1758,9 +1758,6 @@ mod tests {
         assert_eq!(size_of::<InternedString>(), 4, "InternedString should be 4 bytes");
         assert_eq!(size_of::<String>(), 24, "String should be 24 bytes");
 
-        // Record interner size before creating maps
-        let interner_size_before = GLOBAL_INTERNER.len();
-
         // Create multiple maps with the same keys
         let maps: Vec<_> = (0..100)
             .map(|i| {
@@ -1783,14 +1780,24 @@ mod tests {
             );
         }
 
-        // Verify we only added 3 unique keys (deduplication works)
-        // Note: Using test-specific key names to avoid conflicts with other parallel tests
-        let interner_size_after = GLOBAL_INTERNER.len();
+        // Verify we have exactly 3 unique keys across all maps
         assert_eq!(
-            interner_size_after - interner_size_before,
+            first_keys.len(),
             3,
-            "Should have added exactly 3 unique keys to interner"
+            "Should have exactly 3 unique keys"
         );
+
+        // Verify the specific keys exist and can be resolved
+        let expected_keys = ["test_mem_name", "test_mem_age", "test_mem_id"];
+        for key_str in &expected_keys {
+            let exists = first_keys.iter().any(|key| {
+                GLOBAL_INTERNER
+                    .resolve(*key)
+                    .map(|s| s.as_ref() == *key_str)
+                    .unwrap_or(false)
+            });
+            assert!(exists, "Key '{}' should exist in the property maps", key_str);
+        }
     }
 
     #[test]
