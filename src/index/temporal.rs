@@ -274,8 +274,10 @@ mod tests {
     fn test_empty_index() {
         let indexes = TemporalIndexes::new();
 
-        let results =
-            indexes.find_node_versions_in_valid_time_range(NodeId::new(1).unwrap(), TimeRange::new(0, 1000));
+        let results = indexes.find_node_versions_in_valid_time_range(
+            NodeId::new(1).unwrap(),
+            TimeRange::new(0, 1000),
+        );
 
         assert_eq!(results.len(), 0);
     }

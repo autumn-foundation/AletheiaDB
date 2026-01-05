@@ -194,9 +194,24 @@ mod tests {
         let knows = GLOBAL_INTERNER.intern("KNOWS");
 
         let edges = vec![
-            (NodeId::new(0).unwrap(), NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
-            (NodeId::new(0).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
-            (NodeId::new(1).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(2).unwrap(), knows),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(1).unwrap(),
+                EdgeId::new(0).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                EdgeId::new(2).unwrap(),
+                knows,
+            ),
         ];
 
         let index = AdjacencyIndex::build(edges);
@@ -227,9 +242,24 @@ mod tests {
         let follows = GLOBAL_INTERNER.intern("FOLLOWS");
 
         let edges = vec![
-            (NodeId::new(0).unwrap(), NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
-            (NodeId::new(0).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), follows),
-            (NodeId::new(0).unwrap(), NodeId::new(3).unwrap(), EdgeId::new(2).unwrap(), knows),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(1).unwrap(),
+                EdgeId::new(0).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                follows,
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(3).unwrap(),
+                EdgeId::new(2).unwrap(),
+                knows,
+            ),
         ];
 
         let index = AdjacencyIndex::build(edges);
@@ -255,7 +285,12 @@ mod tests {
     fn test_node_without_edges() {
         let knows = GLOBAL_INTERNER.intern("KNOWS");
 
-        let edges = vec![(NodeId::new(0).unwrap(), NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows)];
+        let edges = vec![(
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            EdgeId::new(0).unwrap(),
+            knows,
+        )];
 
         let index = AdjacencyIndex::build(edges);
 
@@ -280,9 +315,24 @@ mod tests {
         // Edges deliberately out of order
         let knows = GLOBAL_INTERNER.intern("KNOWS");
         let edges = vec![
-            (NodeId::new(0).unwrap(), NodeId::new(3).unwrap(), EdgeId::new(2).unwrap(), knows),
-            (NodeId::new(0).unwrap(), NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
-            (NodeId::new(0).unwrap(), NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(3).unwrap(),
+                EdgeId::new(2).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(1).unwrap(),
+                EdgeId::new(0).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                knows,
+            ),
         ];
 
         let index = AdjacencyIndex::build(edges);

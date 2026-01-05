@@ -173,7 +173,7 @@ pub trait VectorIndex: Send + Sync {
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
     /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
-    /// let node_id = NodeId::new(123);
+    /// let node_id = NodeId::new(123).unwrap();
     /// let embedding = vec![0.1, 0.2, 0.3, 0.4];
     /// index.add(node_id, &embedding)?;
     /// # Ok(())
@@ -201,7 +201,7 @@ pub trait VectorIndex: Send + Sync {
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
     /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
-    /// let node_id = NodeId::new(123);
+    /// let node_id = NodeId::new(123).unwrap();
     /// index.remove(node_id)?;
     /// # Ok(())
     /// # }
@@ -289,7 +289,7 @@ pub trait VectorIndex: Send + Sync {
     /// # use std::collections::HashSet;
     /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
-    /// let allowed = HashSet::from([NodeId::new(1), NodeId::new(5), NodeId::new(10)]);
+    /// let allowed = HashSet::from([NodeId::new(1).unwrap(), NodeId::new(5).unwrap(), NodeId::new(10).unwrap()]);
     ///
     /// // Only search within allowed nodes
     /// let results = index.search_with_filter(&query, 5, |id| allowed.contains(id))?;

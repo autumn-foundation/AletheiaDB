@@ -171,7 +171,12 @@ mod tests {
             .insert("age", 30i64)
             .build();
 
-        let node = Node::new(NodeId::new(1).unwrap(), label, props, VersionId::new(100).unwrap());
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(100).unwrap(),
+        );
 
         assert_eq!(node.id, NodeId::new(1).unwrap());
         assert_eq!(node.label, label);

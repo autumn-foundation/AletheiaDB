@@ -4,9 +4,9 @@
 //! mix-ups at compile time. For example, you cannot accidentally pass a `NodeId` where
 //! an `EdgeId` is expected.
 
+use crate::utils::error::StorageError;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::utils::error::StorageError;
 
 /// Maximum valid ID value. Values above this are reserved.
 ///
@@ -419,8 +419,8 @@ mod tests {
         assert_eq!(MAX_VALID_ID, u64::MAX - 1000);
 
         // Verify it leaves room for reserved values
-        assert!(MAX_VALID_ID < u64::MAX);
-        assert!(u64::MAX - MAX_VALID_ID >= 1000);
+        const { assert!(MAX_VALID_ID < u64::MAX) };
+        const { assert!(u64::MAX - MAX_VALID_ID >= 1000) };
     }
 
     #[test]
@@ -471,7 +471,9 @@ mod tests {
         // Test generator starting near the limit
         let generator = IdGenerator::with_start(MAX_VALID_ID - 10);
         for _ in 0..10 {
-            let id = generator.next().expect("Generator near limit should produce valid ID");
+            let id = generator
+                .next()
+                .expect("Generator near limit should produce valid ID");
             assert!(
                 NodeId::new(id).is_ok(),
                 "Generator near limit produced invalid ID: {}",
@@ -493,7 +495,13 @@ mod tests {
 
         // Verify error type
         let err = generator.next().unwrap_err();
-        assert!(matches!(err, StorageError::InvalidId { id_type: "generated", .. }));
+        assert!(matches!(
+            err,
+            StorageError::InvalidId {
+                id_type: "generated",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -520,9 +528,20 @@ mod tests {
 
         // Print results for manual inspection (not asserted in test)
         println!("\nID Validation Performance (1M iterations):");
-        println!("  Validated:  {:?} ({} ns/op)", validated_duration, validated_duration.as_nanos() / iterations as u128);
-        println!("  Unchecked:  {:?} ({} ns/op)", unchecked_duration, unchecked_duration.as_nanos() / iterations as u128);
-        println!("  Overhead:   {:?}", validated_duration.saturating_sub(unchecked_duration));
+        println!(
+            "  Validated:  {:?} ({} ns/op)",
+            validated_duration,
+            validated_duration.as_nanos() / iterations as u128
+        );
+        println!(
+            "  Unchecked:  {:?} ({} ns/op)",
+            unchecked_duration,
+            unchecked_duration.as_nanos() / iterations as u128
+        );
+        println!(
+            "  Overhead:   {:?}",
+            validated_duration.saturating_sub(unchecked_duration)
+        );
 
         // Validation should add minimal overhead (< 2ns per operation on modern hardware)
         // We don't assert this in the test since it's hardware-dependent
@@ -530,9 +549,9 @@ mod tests {
 
     #[test]
     fn test_id_generator_concurrent_near_limit() {
+        use std::collections::HashSet;
         use std::sync::Arc;
         use std::thread;
-        use std::collections::HashSet;
 
         // Start generator 20 IDs before the limit
         let ids_before_limit = 20u64;
@@ -571,14 +590,24 @@ mod tests {
             match result {
                 Ok(id) => {
                     // Verify ID is valid
-                    assert!(id <= MAX_VALID_ID, "Generated ID {} exceeds MAX_VALID_ID", id);
+                    assert!(
+                        id <= MAX_VALID_ID,
+                        "Generated ID {} exceeds MAX_VALID_ID",
+                        id
+                    );
                     // Verify no duplicates (critical for concurrency correctness)
                     assert!(successful_ids.insert(id), "Duplicate ID generated: {}", id);
                 }
                 Err(e) => {
                     // Verify error is the expected overflow error
                     assert!(
-                        matches!(e, StorageError::InvalidId { id_type: "generated", .. }),
+                        matches!(
+                            e,
+                            StorageError::InvalidId {
+                                id_type: "generated",
+                                ..
+                            }
+                        ),
                         "Unexpected error type: {:?}",
                         e
                     );
@@ -619,7 +648,8 @@ mod tests {
         println!("  Total attempts: {}", total_attempts);
         println!("  Successful: {} (no duplicates)", successful_ids.len());
         println!("  Errors: {}", error_count);
-        println!("  ID range: {} - {}",
+        println!(
+            "  ID range: {} - {}",
             successful_ids.iter().min().unwrap(),
             successful_ids.iter().max().unwrap()
         );

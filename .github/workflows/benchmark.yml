@@ -10,6 +10,12 @@ on:
     - cron: '0 0 * * 1'
   workflow_dispatch: # Allow manual trigger
 
+# Auto-cancel old runs when new commits are pushed to the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+
 env:
   CARGO_TERM_COLOR: always
 
