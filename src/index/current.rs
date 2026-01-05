@@ -9,6 +9,7 @@ use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
 use crate::utils::lock::RwLockExt;
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
 
@@ -27,24 +28,25 @@ use std::sync::{Arc, RwLock};
 /// This prevents the race condition where edges inserted during a rebuild
 /// could be lost from the adjacency indexes.
 ///
-/// # Lock Recovery Safety
+/// # Lock-Free Adjacency Reads
 ///
-/// This struct uses `read_or_recover()`/`write_or_recover()` for adjacency index
-/// access. This is safe because:
+/// Adjacency indexes use `ArcSwap` for **lock-free reads** on the hot path:
+/// - **Read operations** (`get_outgoing`, `get_incoming`): Lock-free atomic pointer load
+/// - **Write operations** (`rebuild_adjacency`): Atomic pointer swap after rebuild
+/// - **Performance**: Eliminates 20-100ns lock acquisition overhead per traversal
+/// - **Zero contention**: Readers never block readers or writers
 ///
-/// - **AdjacencyIndex**: Contains `Vec<AdjacencyEntry>` with no complex invariants
-/// - **Worst case**: An adjacency list may be incomplete after a panic
-/// - **Recovery**: `rebuild_adjacency()` can always reconstruct correct state from edges
-/// - **Hot path**: Recovery avoids cascade panics on the performance-critical traversal path
+/// The `rebuild_lock` still coordinates edge modifications with rebuilds,
+/// but adjacency **reads** are now completely lock-free.
 pub struct CurrentIndexes {
     /// Node ID → Node (O(1) lookup)
     nodes: DashMap<NodeId, Node>,
     /// Edge ID → Edge (O(1) lookup)
     edges: DashMap<EdgeId, Edge>,
-    /// Outgoing edges: source node → adjacency list (RwLock for rebuild)
-    outgoing: Arc<RwLock<AdjacencyIndex>>,
-    /// Incoming edges: target node → adjacency list (RwLock for rebuild)
-    incoming: Arc<RwLock<AdjacencyIndex>>,
+    /// Outgoing edges: source node → adjacency list (lock-free reads via ArcSwap)
+    outgoing: ArcSwap<AdjacencyIndex>,
+    /// Incoming edges: target node → adjacency list (lock-free reads via ArcSwap)
+    incoming: ArcSwap<AdjacencyIndex>,
     /// Coordinates edge modifications with adjacency rebuilds.
     /// Edge ops hold read lock; rebuild holds write lock.
     rebuild_lock: RwLock<()>,
@@ -56,8 +58,8 @@ impl CurrentIndexes {
         CurrentIndexes {
             nodes: DashMap::new(),
             edges: DashMap::new(),
-            outgoing: Arc::new(RwLock::new(AdjacencyIndex::new())),
-            incoming: Arc::new(RwLock::new(AdjacencyIndex::new())),
+            outgoing: ArcSwap::from_pointee(AdjacencyIndex::new()),
+            incoming: ArcSwap::from_pointee(AdjacencyIndex::new()),
             rebuild_lock: RwLock::new(()),
         }
     }
@@ -130,28 +132,34 @@ impl CurrentIndexes {
     /// Get outgoing edges for a node.
     ///
     /// Returns a copy of the adjacency list for traversal.
+    ///
+    /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
     #[inline]
     pub fn get_outgoing(&self, source: NodeId) -> Vec<AdjacencyEntry> {
-        let outgoing = self.outgoing.read_or_recover();
+        let outgoing = self.outgoing.load();
         outgoing.get_adjacency(source).to_vec()
     }
 
     /// Get incoming edges for a node.
     ///
     /// Returns a copy of the adjacency list for reverse traversal.
+    ///
+    /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
     #[inline]
     pub fn get_incoming(&self, target: NodeId) -> Vec<AdjacencyEntry> {
-        let incoming = self.incoming.read_or_recover();
+        let incoming = self.incoming.load();
         incoming.get_adjacency(target).to_vec()
     }
 
     /// Get outgoing edges with a specific label.
+    ///
+    /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
     pub fn get_outgoing_with_label(
         &self,
         source: NodeId,
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
-        let outgoing = self.outgoing.read_or_recover();
+        let outgoing = self.outgoing.load();
         outgoing
             .get_adjacency_with_label(source, label)
             .copied()
@@ -159,12 +167,14 @@ impl CurrentIndexes {
     }
 
     /// Get incoming edges with a specific label.
+    ///
+    /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
     pub fn get_incoming_with_label(
         &self,
         target: NodeId,
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
-        let incoming = self.incoming.read_or_recover();
+        let incoming = self.incoming.load();
         incoming
             .get_adjacency_with_label(target, label)
             .copied()
@@ -172,16 +182,20 @@ impl CurrentIndexes {
     }
 
     /// Get the out-degree of a node (number of outgoing edges).
+    ///
+    /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
     #[inline]
     pub fn out_degree(&self, node: NodeId) -> usize {
-        let outgoing = self.outgoing.read_or_recover();
+        let outgoing = self.outgoing.load();
         outgoing.degree(node)
     }
 
     /// Get the in-degree of a node (number of incoming edges).
+    ///
+    /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
     #[inline]
     pub fn in_degree(&self, node: NodeId) -> usize {
-        let incoming = self.incoming.read_or_recover();
+        let incoming = self.incoming.load();
         incoming.degree(node)
     }
 
@@ -197,12 +211,17 @@ impl CurrentIndexes {
     /// condition where edges inserted during iteration would be lost when
     /// the rebuilt indexes replace the old ones.
     ///
+    /// **Lock-free for readers**: The new indexes are built separately, then
+    /// atomically swapped in via `ArcSwap::store()`. Concurrent readers accessing
+    /// adjacency lists (`get_outgoing`, `get_incoming`, etc.) are never blocked.
+    ///
     /// # Performance
     ///
     /// **Current Implementation:**
     /// - Complexity: O(E log E) where E is total edges
     /// - Always rebuilds complete index from scratch
-    /// - Acquires write lock, blocking concurrent edge modifications
+    /// - Blocks concurrent edge modifications, but NOT adjacency reads (lock-free!)
+    /// - Atomic swap eliminates reader blocking
     ///
     /// **Future Optimization Opportunities:**
     ///
@@ -212,13 +231,7 @@ impl CurrentIndexes {
     ///    - Potential speedup: 10-100x for localized changes
     ///    - Trade-off: Memory overhead for tracking dirty set
     ///
-    /// 2. **Concurrent Rebuild with RCU:**
-    ///    - Build new index while readers use old index
-    ///    - Atomic pointer swap when complete
-    ///    - Eliminates read blocking during rebuild
-    ///    - Trade-off: Double memory usage during rebuild
-    ///
-    /// 3. **Lock-Free Adjacency Updates:**
+    /// 2. **Lock-Free Adjacency Updates:**
     ///    - Use lock-free CSR representation
     ///    - Incremental updates without global rebuild
     ///    - Potential speedup: 100-1000x for small batches
@@ -242,9 +255,9 @@ impl CurrentIndexes {
             incoming_edges.push((edge.target, edge.source, edge.id, edge.label));
         }
 
-        // Rebuild indexes with write locks
-        *self.outgoing.write_or_recover() = AdjacencyIndex::build(outgoing_edges);
-        *self.incoming.write_or_recover() = AdjacencyIndex::build(incoming_edges);
+        // Rebuild indexes and atomically swap them in (lock-free for readers!)
+        self.outgoing.store(Arc::new(AdjacencyIndex::build(outgoing_edges)));
+        self.incoming.store(Arc::new(AdjacencyIndex::build(incoming_edges)));
     }
 
     /// Iterate over all nodes.
