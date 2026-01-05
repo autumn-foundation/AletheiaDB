@@ -400,6 +400,30 @@ mod tests {
     }
 
     #[test]
+    fn test_config_debug_redacts_api_key() {
+        let config = OpenAIConfig::new(
+            "sk-secret-key-12345".to_string(),
+            OpenAIModel::TextEmbedding3Small,
+        );
+
+        let debug_output = format!("{:?}", config);
+
+        // API key should be redacted in debug output
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("sk-secret-key-12345"));
+        // Other fields should still be visible
+        assert!(debug_output.contains("TextEmbedding3Small"));
+    }
+
+    #[test]
+    fn test_api_key_getter() {
+        let config = OpenAIConfig::new("test-key".to_string(), OpenAIModel::Ada002);
+
+        // Internal getter should return the key
+        assert_eq!(config.api_key(), "test-key");
+    }
+
+    #[test]
     fn test_provider_creation() {
         let config = OpenAIConfig::new("test-key".to_string(), OpenAIModel::TextEmbedding3Small);
         let provider = OpenAIProvider::new(config);

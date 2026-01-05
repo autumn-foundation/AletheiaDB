@@ -383,6 +383,32 @@ mod tests {
     }
 
     #[test]
+    fn test_config_debug_redacts_api_token() {
+        let config = HuggingFaceConfig::new(
+            "hf_secret_token_12345".to_string(),
+            "test-model".to_string(),
+            384,
+        );
+
+        let debug_output = format!("{:?}", config);
+
+        // API token should be redacted in debug output
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("hf_secret_token_12345"));
+        // Other fields should still be visible
+        assert!(debug_output.contains("test-model"));
+    }
+
+    #[test]
+    fn test_api_token_getter() {
+        let config =
+            HuggingFaceConfig::new("test-token".to_string(), "test-model".to_string(), 384);
+
+        // Internal getter should return the token
+        assert_eq!(config.api_token(), "test-token");
+    }
+
+    #[test]
     fn test_provider_creation() {
         let config = HuggingFaceConfig::new(
             "test-token".to_string(),
