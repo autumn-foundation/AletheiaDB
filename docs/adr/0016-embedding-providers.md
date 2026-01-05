@@ -1,7 +1,7 @@
 # ADR 0016: Plugin-Based Embedding Generation System
 
 **Status**: Implemented
-**Date**: 2026-01-04
+**Date**: 2025-01-04
 **Authors**: Claude Sonnet 4.5, Mark M.
 **Related**: [EMBEDDINGS.md](../EMBEDDINGS.md), [VECTOR_SEARCH_DESIGN.md](../VECTOR_SEARCH_DESIGN.md)
 
@@ -241,16 +241,20 @@ match service.embed(text).await {
 
 **API**:
 ```rust
-let service = EmbeddingService::new(provider)
-    .with_normalization(true);   // Force normalization
-    .with_normalization(false);  // Trust provider
-    .with_normalization(None);   // Auto (default)
+// Default behavior (auto-normalization based on provider)
+let service_auto = EmbeddingService::new(provider);
+
+// Force normalization on
+let service_on = EmbeddingService::new(provider).with_normalization(true);
+
+// Force normalization off
+let service_off = EmbeddingService::new(provider).with_normalization(false);
 ```
 
 **Behavior**:
+- Default (no `with_normalization` call): Normalize only if `!provider.normalized_by_default()`
 - `with_normalization(true)`: Always normalize embeddings (even if provider does)
 - `with_normalization(false)`: Never normalize (trust provider's output)
-- `with_normalization(None)`: Normalize only if `!provider.normalized_by_default()`
 
 **Rationale**:
 - **Flexibility**: Different distance metrics have different normalization requirements

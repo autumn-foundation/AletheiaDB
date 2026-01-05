@@ -194,7 +194,10 @@ impl EmbeddingProvider for OpenAIProvider {
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         let results = self.embed_batch(&[text]).await?;
-        Ok(results.into_iter().next().unwrap())
+        Ok(results
+            .into_iter()
+            .next()
+            .expect("batch with one element always returns one result"))
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
@@ -305,6 +308,11 @@ impl EmbeddingProvider for OpenAIProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    lazy_static::lazy_static! {
+        static ref ENV_MUTEX: Mutex<()> = Mutex::new(());
+    }
 
     #[test]
     fn test_model_dimensions() {
@@ -328,9 +336,13 @@ mod tests {
 
     #[test]
     fn test_config_from_missing_env() {
+        let _guard = ENV_MUTEX.lock().unwrap(); // Lock before manipulating env
+        let original_var = std::env::var("OPENAI_API_KEY").ok();
+
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");
         }
+
         let result = OpenAIConfig::from_env(OpenAIModel::Ada002);
         assert!(result.is_err());
         match result {
@@ -339,7 +351,14 @@ mod tests {
             }
             _ => panic!("Expected ConfigError"),
         }
-    }
+
+        // Restore original value
+        if let Some(val) = original_var {
+            unsafe {
+                std::env::set_var("OPENAI_API_KEY", val);
+            }
+        }
+    } // Mutex is unlocked when _guard goes out of scope
 
     #[test]
     fn test_config_builder() {

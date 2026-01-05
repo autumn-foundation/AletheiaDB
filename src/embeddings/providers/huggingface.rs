@@ -307,12 +307,21 @@ impl EmbeddingProvider for HuggingFaceProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    lazy_static::lazy_static! {
+        static ref ENV_MUTEX: Mutex<()> = Mutex::new(());
+    }
 
     #[test]
     fn test_config_from_missing_env() {
+        let _guard = ENV_MUTEX.lock().unwrap(); // Lock before manipulating env
+        let original_var = std::env::var("HF_TOKEN").ok();
+
         unsafe {
             std::env::remove_var("HF_TOKEN");
         }
+
         let result = HuggingFaceConfig::from_env("test-model".to_string(), 384);
         assert!(result.is_err());
         match result {
@@ -321,7 +330,14 @@ mod tests {
             }
             _ => panic!("Expected ConfigError"),
         }
-    }
+
+        // Restore original value
+        if let Some(val) = original_var {
+            unsafe {
+                std::env::set_var("HF_TOKEN", val);
+            }
+        }
+    } // Mutex is unlocked when _guard goes out of scope
 
     #[test]
     fn test_config_builder() {

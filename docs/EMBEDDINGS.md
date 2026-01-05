@@ -437,6 +437,8 @@ let embeddings = service.embed_batch(&documents).await?;
 ### 3. Handle Errors Gracefully
 
 ```rust
+use std::time::Duration;
+
 // Retry with exponential backoff for rate limits
 let mut retries = 0;
 let embedding = loop {
@@ -458,19 +460,23 @@ let embedding = loop {
 
 ```rust
 use std::collections::HashMap;
+use std::sync::Arc;
 
 struct EmbeddingCache {
     service: EmbeddingService,
-    cache: HashMap<String, Vec<f32>>,
+    cache: HashMap<String, Arc<Vec<f32>>>,
 }
 
 impl EmbeddingCache {
-    async fn embed(&mut self, text: &str) -> Result<&Vec<f32>> {
-        if !self.cache.contains_key(text) {
-            let embedding = self.service.embed(text).await?;
-            self.cache.insert(text.to_string(), embedding);
+    async fn embed(&mut self, text: &str) -> Result<Arc<Vec<f32>>, EmbeddingError> {
+        if let Some(embedding) = self.cache.get(text) {
+            return Ok(Arc::clone(embedding));
         }
-        Ok(self.cache.get(text).unwrap())
+
+        let embedding = self.service.embed(text).await?;
+        let arc_embedding = Arc::new(embedding);
+        self.cache.insert(text.to_string(), Arc::clone(&arc_embedding));
+        Ok(arc_embedding)
     }
 }
 ```
@@ -478,6 +484,8 @@ impl EmbeddingCache {
 ### 5. Monitor Costs
 
 ```rust
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 struct CostTracker {
     service: EmbeddingService,
     requests: AtomicUsize,
