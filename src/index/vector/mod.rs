@@ -469,5 +469,11 @@ mod tests {
 // HNSW implementation
 pub mod hnsw;
 
+// Temporal vector index (Phase 3)
+pub mod temporal;
+
 // Re-export HNSW types for convenience
 pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};
+
+// Re-export temporal types for convenience
+pub use temporal::{SnapshotInfo, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex};
