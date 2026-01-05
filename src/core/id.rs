@@ -746,12 +746,9 @@ mod tests {
         sorted_ids.sort_unstable();
         for (i, id) in sorted_ids.iter().enumerate() {
             assert_eq!(
-                *id,
-                i as u64,
+                *id, i as u64,
                 "Expected ID {} at position {} but found {}",
-                i,
-                i,
-                id
+                i, i, id
             );
         }
 

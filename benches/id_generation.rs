@@ -9,7 +9,7 @@
 //! - ~5-10% overhead from SeqCst vs AcqRel is acceptable
 //! - Correctness is prioritized over micro-optimizations
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::id::IdGenerator;
 use std::sync::Arc;
 use std::thread;
