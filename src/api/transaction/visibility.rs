@@ -147,7 +147,11 @@ impl TxVisibilityManager {
     ///
     /// # Returns
     /// A `TransactionSnapshot` capturing the current visibility state
-    pub fn capture_snapshot(&self, snapshot_timestamp: Timestamp, tx_id: TxId) -> TransactionSnapshot {
+    pub fn capture_snapshot(
+        &self,
+        snapshot_timestamp: Timestamp,
+        tx_id: TxId,
+    ) -> TransactionSnapshot {
         let active = self.active.lock_or_recover();
 
         // Register snapshot for watermark tracking

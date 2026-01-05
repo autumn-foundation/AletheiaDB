@@ -42,7 +42,10 @@ fn test_read_transactions_drop_cleanly() {
     for _ in 0..1000 {
         let tx = db.read_transaction().unwrap();
         let node = tx.get_node(node_id).unwrap();
-        assert_eq!(node.get_property("value").and_then(|v| v.as_int()), Some(42));
+        assert_eq!(
+            node.get_property("value").and_then(|v| v.as_int()),
+            Some(42)
+        );
         // tx dropped here - should call register_abort via Drop impl
     }
 
@@ -59,9 +62,7 @@ fn test_many_transactions_with_varied_patterns() {
     // Create initial nodes
     let mut node_ids = Vec::new();
     for i in 0..10 {
-        let props = PropertyMapBuilder::new()
-            .insert("value", i as i64)
-            .build();
+        let props = PropertyMapBuilder::new().insert("value", i as i64).build();
         node_ids.push(db.create_node("Test", props).unwrap());
     }
 
@@ -70,9 +71,7 @@ fn test_many_transactions_with_varied_patterns() {
         match i % 4 {
             0 => {
                 // Create new node
-                let props = PropertyMapBuilder::new()
-                    .insert("value", i as i64)
-                    .build();
+                let props = PropertyMapBuilder::new().insert("value", i as i64).build();
                 node_ids.push(db.create_node("Test", props).unwrap());
             }
             1 => {
