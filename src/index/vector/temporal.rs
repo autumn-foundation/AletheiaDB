@@ -516,21 +516,59 @@ impl TemporalVectorIndex {
 
     /// Checks if a snapshot should be created and creates it if needed.
     ///
-    /// CRITICAL: Holds write lock throughout check-and-create to prevent race conditions.
-    /// Between releasing read lock and acquiring write lock, another thread could create
-    /// a duplicate snapshot. We must check again after acquiring write lock.
+    /// Uses double-checked locking to avoid race conditions while minimizing lock contention.
+    ///
+    /// # Race Condition Prevention
+    ///
+    /// **Step 1:** Quick read-lock check - avoids expensive snapshot building if not needed
+    /// **Step 2:** Build snapshot OUTSIDE locks - expensive O(n log n) operation
+    /// **Step 3:** Write-lock check-and-insert - atomic operation with double-check
+    ///
+    /// If another thread creates a snapshot between Step 1 and Step 3, we detect it in the
+    /// final check and discard our snapshot. This is safe because snapshots are immutable
+    /// and the usearch Index will be dropped cleanly.
     fn check_and_create_snapshot(&self, current_time: Timestamp) -> Result<()> {
-        // Acquire write lock first to prevent TOCTOU race
-        let metadata = self.metadata.write();
+        // Step 1: Quick check with read lock (avoid building snapshot if not needed)
+        let should_snapshot = {
+            let metadata = self.metadata.read();
+            self.should_create_snapshot(&metadata, current_time)?
+        };
 
-        // Check if snapshot needed (while holding write lock)
-        let should_snapshot = self.should_create_snapshot(&metadata, current_time)?;
+        if !should_snapshot {
+            return Ok(());
+        }
 
-        if should_snapshot {
-            // Create snapshot while still holding write lock
-            // This prevents another thread from creating duplicate snapshot
-            drop(metadata); // Release metadata lock before snapshot creation
-            self.create_snapshot(current_time)?;
+        // Step 2: Build snapshot outside locks (expensive O(n log n) operation)
+        let snapshot = HnswIndex::new(self.config.hnsw_config.clone())?;
+        for entry in self.vectors.iter() {
+            let node_id = *entry.key();
+            let vector = entry.value();
+            snapshot.add(node_id, vector.as_ref())?;
+        }
+
+        // Step 3: Acquire both locks and perform final check before inserting
+        {
+            let mut metadata = self.metadata.write();
+
+            // Double-check: another thread may have created snapshot while we were building
+            if !self.should_create_snapshot(&metadata, current_time)? {
+                return Ok(()); // Another thread beat us to it, discard our snapshot
+            }
+
+            // Get stable ID and insert snapshot
+            let stable_id = metadata.total_snapshots;
+            let mut snapshots = self.snapshots.write();
+            snapshots.insert(current_time, (stable_id, Arc::new(snapshot)));
+
+            // Update metadata
+            metadata.reset(current_time);
+
+            // Enforce snapshot limit while holding both locks
+            while snapshots.len() > self.config.max_snapshots {
+                if let Some(oldest_key) = snapshots.keys().next().copied() {
+                    snapshots.remove(&oldest_key);
+                }
+            }
         }
 
         Ok(())
@@ -615,38 +653,30 @@ impl TemporalVectorIndex {
             snapshot.add(node_id, vector.as_ref())?;
         }
 
-        // Store immutable snapshot
-        // Get stable ID from metadata before inserting
-        let stable_id = {
-            let metadata = self.metadata.read();
-            metadata.total_snapshots
-        };
-        self.snapshots
-            .write()
-            .insert(timestamp, (stable_id, Arc::new(snapshot)));
+        // Store immutable snapshot atomically with metadata update
+        // Acquire both locks to prevent race conditions
+        {
+            let mut metadata = self.metadata.write();
+            let mut snapshots = self.snapshots.write();
 
-        // Update metadata
-        self.metadata.write().reset(timestamp);
+            // Get stable ID and insert
+            let stable_id = metadata.total_snapshots;
+            snapshots.insert(timestamp, (stable_id, Arc::new(snapshot)));
 
-        // Enforce max snapshots limit
-        self.enforce_snapshot_limit()?;
+            // Update metadata
+            metadata.reset(timestamp);
 
-        Ok(())
-    }
-
-    /// Removes oldest snapshots if max_snapshots is exceeded.
-    fn enforce_snapshot_limit(&self) -> Result<()> {
-        let mut snapshots = self.snapshots.write();
-
-        while snapshots.len() > self.config.max_snapshots {
-            // Remove oldest snapshot (first key in BTreeMap)
-            if let Some(oldest_key) = snapshots.keys().next().copied() {
-                snapshots.remove(&oldest_key);
+            // Enforce snapshot limit while holding both locks
+            while snapshots.len() > self.config.max_snapshots {
+                if let Some(oldest_key) = snapshots.keys().next().copied() {
+                    snapshots.remove(&oldest_key);
+                }
             }
         }
 
         Ok(())
     }
+
 
     /// Manually creates a snapshot at the current time.
     ///
