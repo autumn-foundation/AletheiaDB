@@ -1095,6 +1095,251 @@ let config = HnswConfig::new(dimensions, metric)
     .with_expansion_search(64);        // ef search parameter (default: 64)
 ```
 
+## Embedding Generation (Optional)
+
+GallifreyDB provides an **optional plugin-based system** for generating embeddings from text before storing them in the database. This complements the "bring your own embeddings" workflow with convenient helpers for common embedding providers.
+
+**Key Principle**: Embedding generation is completely separate from the database layer. Users call the embedding service first, then store the resulting vectors using the standard DB API.
+
+### Why Separate?
+
+- **Zero Coupling**: DB layer remains lightweight and focused on storage/indexing
+- **Flexibility**: Easy to swap providers without changing DB code
+- **Testability**: Embedding service can be tested independently
+- **Optional**: Zero runtime overhead when features are disabled (via feature flags)
+
+### Quick Start
+
+Enable embedding features in `Cargo.toml`:
+
+```toml
+[dependencies]
+gallifreydb = { version = "0.1", features = ["embedding-openai"] }
+```
+
+Generate and store embeddings:
+
+```rust
+use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Create embedding service
+    let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
+    let provider = Arc::new(OpenAIProvider::new(config)?);
+    let service = EmbeddingService::new(provider);
+
+    // 2. Generate embedding
+    let text = "GallifreyDB is a bi-temporal graph database";
+    let embedding = service.embed(text).await?;
+
+    // 3. Store in database
+    let db = GallifreyDB::new();
+    let node_id = db.create_node(
+        "Document",
+        PropertyMapBuilder::new()
+            .insert("content", text)
+            .insert_vector("embedding", &embedding)
+            .build(),
+    )?;
+
+    Ok(())
+}
+```
+
+### Available Providers
+
+GallifreyDB includes 4 built-in providers:
+
+| Provider | Type | Latency | Cost | Privacy | Feature Flag |
+|----------|------|---------|------|---------|--------------|
+| **OpenAI** | API | ~100-200ms | $$$ | ❌ Cloud | `embedding-openai` |
+| **HuggingFace** | API | ~200-500ms | $ (free tier) | ❌ Cloud | `embedding-huggingface` |
+| **Ollama** | Local | ~20-50ms | Free | ✅ Local | `embedding-ollama` |
+| **ONNX** | Local | ~1-10ms* | Free | ✅ Local | `embedding-onnx` |
+
+*ONNX is currently a placeholder implementation
+
+**Feature Flags**:
+- `embeddings`: Core trait and error types (required for all providers)
+- `embedding-openai`: OpenAI provider
+- `embedding-huggingface`: HuggingFace Inference API
+- `embedding-ollama`: Ollama local models
+- `embedding-onnx`: ONNX local inference (placeholder)
+- `embedding-all`: Enable all providers
+
+### Provider Examples
+
+**OpenAI** (Best quality, API-based):
+```rust
+let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
+let provider = Arc::new(OpenAIProvider::new(config)?);
+let service = EmbeddingService::new(provider);
+```
+
+**HuggingFace** (Open-source models):
+```rust
+let config = HuggingFaceConfig::all_minilm_l6_v2()?;  // 384 dims
+let provider = Arc::new(HuggingFaceProvider::new(config)?);
+let service = EmbeddingService::new(provider);
+```
+
+**Ollama** (Local, privacy-focused):
+```rust
+let config = OllamaConfig::nomic_embed_text();  // 768 dims
+let provider = Arc::new(OllamaProvider::new(config)?);
+let service = EmbeddingService::new(provider);
+```
+
+### Batch Processing
+
+All providers support efficient batch embedding:
+
+```rust
+let documents = vec![
+    "First document",
+    "Second document",
+    "Third document",
+];
+
+// Generate all embeddings in a batch (more efficient)
+let embeddings = service.embed_batch(&documents).await?;
+
+// Store in transaction
+let mut tx = db.write_transaction()?;
+for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
+    tx.create_node(
+        "Document",
+        PropertyMapBuilder::new()
+            .insert("content", *doc)
+            .insert_vector("embedding", embedding)
+            .build(),
+    )?;
+}
+tx.commit()?;
+```
+
+### Custom Providers
+
+Implement the `EmbeddingProvider` trait to add custom providers:
+
+```rust
+use gallifreydb::embeddings::{EmbeddingProvider, EmbeddingError};
+use async_trait::async_trait;
+
+pub struct CustomProvider {
+    dimensions: usize,
+}
+
+#[async_trait]
+impl EmbeddingProvider for CustomProvider {
+    fn dimensions(&self) -> usize { self.dimensions }
+    fn name(&self) -> &str { "custom" }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        // Your embedding logic here
+        Ok(vec![0.0; self.dimensions])
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        // Batch implementation
+        let mut results = Vec::with_capacity(texts.len());
+        for text in texts {
+            results.push(self.embed(text).await?);
+        }
+        Ok(results)
+    }
+
+    fn normalized_by_default(&self) -> bool { true }
+    fn max_text_length(&self) -> Option<usize> { Some(8192) }
+}
+```
+
+### Error Handling
+
+The embedding system provides comprehensive error types:
+
+```rust
+use gallifreydb::embeddings::EmbeddingError;
+
+match service.embed(text).await {
+    Ok(embedding) => {
+        // Use embedding
+    }
+    Err(EmbeddingError::AuthenticationFailed { provider, reason }) => {
+        eprintln!("{} auth failed: {}", provider, reason);
+    }
+    Err(EmbeddingError::RateLimitExceeded { provider, retry_after }) => {
+        eprintln!("{} rate limited", provider);
+        if let Some(duration) = retry_after {
+            tokio::time::sleep(duration).await;
+            // Retry logic
+        }
+    }
+    Err(EmbeddingError::NetworkError(msg)) => {
+        eprintln!("Network error: {}", msg);
+    }
+    Err(e) => {
+        eprintln!("Other error: {}", e);
+    }
+}
+```
+
+### Best Practices
+
+1. **Always Use Batching**: Batch operations are more efficient for all providers
+2. **Handle Rate Limits**: Implement exponential backoff for API providers
+3. **Cache Embeddings**: Avoid re-embedding duplicate content
+4. **Choose the Right Provider**:
+   - Development: Ollama (fast, free, local)
+   - Production: OpenAI (best quality) or Ollama (privacy)
+   - Cost-sensitive: HuggingFace free tier or Ollama
+5. **Pre-normalize When Possible**: Skip normalization if provider already normalizes
+
+### Documentation
+
+For complete documentation on embedding providers:
+- **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)**: Comprehensive user guide
+- **[docs/adr/0016-embedding-providers.md](docs/adr/0016-embedding-providers.md)**: Architecture decision record
+- **[examples/](examples/)**: 5 runnable examples for each provider
+
+### Integration with Vector Search
+
+Embedding generation complements the vector search capabilities:
+
+```rust
+// 1. Generate embeddings (Embedding System)
+let embedding1 = service.embed("First document").await?;
+let embedding2 = service.embed("Second document").await?;
+
+// 2. Store with vectors (Vector Storage - Phase 1)
+let doc1 = db.create_node("Document",
+    PropertyMapBuilder::new()
+        .insert_vector("embedding", &embedding1)
+        .build()
+)?;
+
+let doc2 = db.create_node("Document",
+    PropertyMapBuilder::new()
+        .insert_vector("embedding", &embedding2)
+        .build()
+)?;
+
+// 3. Enable vector index (HNSW Index - Phase 2)
+let config = HnswConfig::new(384, DistanceMetric::Cosine);
+db.enable_vector_index("embedding", config)?;
+
+// 4. Perform similarity search (Phase 2)
+let similar = db.find_similar(doc1, 10)?;
+```
+
+**Future Integration** (Phase 3+):
+- Temporal embedding queries: `db.as_of(timestamp).embed_and_search(text, k)`
+- Semantic time-travel: Track how document meanings evolved
+- Hybrid graph+vector queries with auto-embedding
+
 ## Future Considerations
 
 ### Vector Search (SUPERRAG) - Remaining Phases
