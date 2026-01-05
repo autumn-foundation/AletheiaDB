@@ -256,8 +256,10 @@ impl CurrentIndexes {
         }
 
         // Rebuild indexes and atomically swap them in (lock-free for readers!)
-        self.outgoing.store(Arc::new(AdjacencyIndex::build(outgoing_edges)));
-        self.incoming.store(Arc::new(AdjacencyIndex::build(incoming_edges)));
+        self.outgoing
+            .store(Arc::new(AdjacencyIndex::build(outgoing_edges)));
+        self.incoming
+            .store(Arc::new(AdjacencyIndex::build(incoming_edges)));
     }
 
     /// Iterate over all nodes.

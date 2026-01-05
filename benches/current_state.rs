@@ -247,7 +247,9 @@ fn bench_concurrent_reads(c: &mut Criterion) {
     let storage = Arc::new(create_test_graph(1000, 10));
     // Wrap node_ids in Arc to avoid cloning the Vec for each thread
     let node_ids: Arc<Vec<_>> = Arc::new(
-        (0..100).map(|i| gallifreydb::NodeId::new(i).unwrap()).collect()
+        (0..100)
+            .map(|i| gallifreydb::NodeId::new(i).unwrap())
+            .collect(),
     );
 
     c.bench_function("concurrent_reads_4_threads", |b| {
