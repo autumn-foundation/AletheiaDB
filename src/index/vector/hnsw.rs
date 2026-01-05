@@ -432,6 +432,7 @@ impl HnswIndexBuilder {
             ef_search: Arc::new(RwLock::new(self.ef_search)),
             next_data_id: Arc::new(RwLock::new(0)),
             id_mapping: Arc::new(DashMap::new()),
+            reverse_id_mapping: Arc::new(DashMap::new()),
             deleted_ids: Arc::new(DashMap::new()),
         })
     }
@@ -472,6 +473,8 @@ pub struct HnswIndex {
     next_data_id: Arc<RwLock<usize>>,
     /// Mapping from NodeId to DataId
     id_mapping: Arc<DashMap<NodeId, usize>>,
+    /// Reverse mapping from DataId to NodeId (for O(1) lookups during search)
+    reverse_id_mapping: Arc<DashMap<usize, NodeId>>,
     /// Soft-deleted NodeIds
     deleted_ids: Arc<DashMap<NodeId, ()>>,
 }
@@ -501,6 +504,7 @@ impl VectorIndex for HnswIndex {
             *next_id += 1;
             drop(next_id);
             self.id_mapping.insert(id, data_id);
+            self.reverse_id_mapping.insert(data_id, id);
             data_id
         };
 
@@ -560,14 +564,10 @@ impl VectorIndex for HnswIndex {
         for neighbor in results {
             let data_id = neighbor.d_id;
 
-            // Find NodeId for this DataId
-            let node_id = self
-                .id_mapping
-                .iter()
-                .find(|entry| *entry.value() == data_id)
-                .map(|entry| *entry.key());
+            // Lookup NodeId for this DataId (O(1) using reverse mapping)
+            if let Some(node_id_ref) = self.reverse_id_mapping.get(&data_id) {
+                let node_id = *node_id_ref.value();
 
-            if let Some(node_id) = node_id {
                 // Skip if deleted
                 if self.deleted_ids.contains_key(&node_id) {
                     continue;
