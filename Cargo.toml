@@ -18,10 +18,27 @@ usearch = "2.22"
 # Optional Tracy profiling support
 tracy-client = { version = "0.17", optional = true, default-features = false }
 
+# Embedding generation dependencies (all optional via feature flags)
+# Async runtime for API-based embedding providers
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
+async-trait = { version = "0.1", optional = true }
+
+# HTTP client for API-based providers (OpenAI, HuggingFace, Ollama)
+reqwest = { version = "0.11", features = ["json"], optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+
+# ONNX runtime for local model inference
+ort = { version = "2.0.0-rc.0", optional = true }
+tokenizers = { version = "0.15", optional = true }
+num_cpus = { version = "1.16", optional = true }
+
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1.4"
 tempfile = "3.8"
+# Tokio for async tests
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util"] }
 
 [features]
 # Enable Tracy profiling (use with: cargo build --release --features tracy)
@@ -29,6 +46,22 @@ tracy = ["tracy-client/enable"]
 
 # Default features
 default = []
+# Embedding generation features
+embeddings = ["dep:tokio", "dep:async-trait", "dep:serde", "dep:serde_json"]
+
+# Individual provider features (each implies 'embeddings')
+embedding-openai = ["embeddings", "dep:reqwest"]
+embedding-huggingface = ["embeddings", "dep:reqwest"]
+embedding-onnx = ["embeddings", "dep:ort", "dep:tokenizers", "dep:num_cpus"]
+embedding-ollama = ["embeddings", "dep:reqwest"]
+
+# Enable all embedding providers
+embedding-all = [
+    "embedding-openai",
+    "embedding-huggingface",
+    "embedding-onnx",
+    "embedding-ollama"
+]
 
 [profile.dev]
 # Fast compilation for development
@@ -76,20 +109,3 @@ harness = false
 path = "benches/gallifreydb.rs"
 required-features = []
 
-[[bench]]
-name = "persistence"
-harness = false
-path = "benches/persistence.rs"
-required-features = []
-
-[[bench]]
-name = "transactions"
-harness = false
-path = "benches/transactions.rs"
-required-features = []
-
-[[bench]]
-name = "vector_similarity"
-harness = false
-path = "benches/vector_similarity.rs"
-required-features = []
