@@ -204,9 +204,15 @@ impl OnnxProvider {
     /// 5. Apply pooling (mean pooling for sentence-transformers)
     /// 6. Normalize if needed
     fn run_inference(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        // PLACEHOLDER: Return mock embedding
-        // In production, this would perform actual ONNX inference
-        Ok(vec![0.1; self.dimensions])
+        // CRITICAL: This is a placeholder implementation
+        // Return an error to prevent users from accidentally using non-functional code
+        Err(EmbeddingError::ModelLoadError {
+            model: self.name.clone(),
+            reason: "ONNX provider is a placeholder implementation. \
+                    Full implementation requires ONNX model loading, tokenization, \
+                    and tensor processing. See docs/EMBEDDINGS.md for details."
+                .to_string(),
+        })
     }
 }
 

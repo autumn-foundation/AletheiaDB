@@ -163,7 +163,7 @@ impl EmbeddingService {
     pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         // Validate all text lengths
         if let Some(max_len) = self.provider.max_text_length() {
-            for (_i, text) in texts.iter().enumerate() {
+            for text in texts.iter() {
                 if text.len() > max_len {
                     return Err(EmbeddingError::TextTooLong {
                         length: text.len(),
@@ -193,7 +193,11 @@ impl EmbeddingService {
             })?;
         }
 
-        // Normalize if configured
+        // Apply normalization based on configuration
+        // Three-state logic:
+        // 1. normalize = Some(true):  Always normalize (even if provider already does)
+        // 2. normalize = Some(false): Never normalize (trust provider output)
+        // 3. normalize = None:        Auto-detect (normalize only if provider doesn't)
         let should_normalize = self
             .normalize
             .unwrap_or_else(|| !self.provider.normalized_by_default());

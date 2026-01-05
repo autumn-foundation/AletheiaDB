@@ -109,3 +109,21 @@ harness = false
 path = "benches/gallifreydb.rs"
 required-features = []
 
+[[bench]]
+name = "persistence"
+harness = false
+path = "benches/persistence.rs"
+required-features = []
+
+[[bench]]
+name = "transactions"
+harness = false
+path = "benches/transactions.rs"
+required-features = []
+
+[[bench]]
+name = "vector_similarity"
+harness = false
+path = "benches/vector_similarity.rs"
+required-features = []
+
