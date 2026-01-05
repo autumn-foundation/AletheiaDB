@@ -19,6 +19,51 @@ use crate::storage::version::{
 use crate::utils::error::{Result, StorageError, TemporalError};
 use std::collections::HashMap;
 
+/// Default maximum number of versions per entity (DoS protection)
+pub const DEFAULT_MAX_VERSIONS_PER_ENTITY: usize = 1_000;
+
+/// Default maximum age for versions in milliseconds (365 days)
+pub const DEFAULT_MAX_VERSION_AGE_MS: i64 = 365 * 24 * 60 * 60 * 1000;
+
+/// Retention policy for version history (DoS protection).
+///
+/// Controls how many versions are kept and for how long to prevent
+/// unbounded memory growth from malicious or buggy clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    /// Maximum number of versions to keep per entity
+    pub max_versions_per_entity: usize,
+    /// Maximum age of versions in milliseconds (older versions are pruned)
+    pub max_age_ms: i64,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        RetentionPolicy {
+            max_versions_per_entity: DEFAULT_MAX_VERSIONS_PER_ENTITY,
+            max_age_ms: DEFAULT_MAX_VERSION_AGE_MS,
+        }
+    }
+}
+
+impl RetentionPolicy {
+    /// Create a new retention policy with custom limits
+    pub fn new(max_versions_per_entity: usize, max_age_ms: i64) -> Self {
+        RetentionPolicy {
+            max_versions_per_entity,
+            max_age_ms,
+        }
+    }
+
+    /// Create a policy with no retention limits (unbounded)
+    pub fn unbounded() -> Self {
+        RetentionPolicy {
+            max_versions_per_entity: usize::MAX,
+            max_age_ms: i64::MAX,
+        }
+    }
+}
+
 /// Historical storage for versioned nodes and edges.
 ///
 /// This storage engine maintains version chains for all temporal data,
@@ -26,6 +71,8 @@ use std::collections::HashMap;
 pub struct HistoricalStorage {
     /// Configuration for anchor creation strategy
     config: AnchorConfig,
+    /// Retention policy for version pruning (DoS protection)
+    retention_policy: RetentionPolicy,
     /// All node versions, indexed by version ID
     node_versions: HashMap<VersionId, NodeVersion>,
     /// All edge versions, indexed by version ID
@@ -34,6 +81,10 @@ pub struct HistoricalStorage {
     node_version_heads: HashMap<NodeId, VersionId>,
     /// Head version ID for each edge (most recent)
     edge_version_heads: HashMap<EdgeId, VersionId>,
+    /// Cached version counts per node (for O(1) capacity checks)
+    node_version_counts: HashMap<NodeId, usize>,
+    /// Cached version counts per edge (for O(1) capacity checks)
+    edge_version_counts: HashMap<EdgeId, usize>,
 }
 
 impl HistoricalStorage {
@@ -44,12 +95,23 @@ impl HistoricalStorage {
 
     /// Create a new historical storage with custom configuration.
     pub fn with_config(config: AnchorConfig) -> Self {
+        Self::with_config_and_retention(config, RetentionPolicy::default())
+    }
+
+    /// Create a new historical storage with custom configuration and retention policy.
+    pub fn with_config_and_retention(
+        config: AnchorConfig,
+        retention_policy: RetentionPolicy,
+    ) -> Self {
         HistoricalStorage {
             config,
+            retention_policy,
             node_versions: HashMap::new(),
             edge_versions: HashMap::new(),
             node_version_heads: HashMap::new(),
             edge_version_heads: HashMap::new(),
+            node_version_counts: HashMap::new(),
+            edge_version_counts: HashMap::new(),
         }
     }
 
@@ -57,6 +119,7 @@ impl HistoricalStorage {
     ///
     /// This will automatically determine whether to create an anchor or delta
     /// based on the version chain length.
+    /// Returns an error if the version limit for this entity is exceeded (DoS protection).
     pub fn add_node_version(
         &mut self,
         node_id: NodeId,
@@ -65,6 +128,17 @@ impl HistoricalStorage {
         label: InternedString,
         properties: PropertyMap,
     ) -> Result<()> {
+        // Check capacity limit using cached count (O(1) operation, DoS protection)
+        let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
+        if version_count >= self.retention_policy.max_versions_per_entity {
+            return Err(StorageError::CapacityExceeded {
+                resource: format!("node {} versions", node_id),
+                current: version_count,
+                limit: self.retention_policy.max_versions_per_entity,
+            }
+            .into());
+        }
+
         // Check if this node already has versions
         let prev_version_id = self.node_version_heads.get(&node_id).copied();
 
@@ -111,10 +185,14 @@ impl HistoricalStorage {
         self.node_versions.insert(version_id, version);
         self.node_version_heads.insert(node_id, version_id);
 
+        // Increment cached version count (for O(1) capacity checks)
+        *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+
         Ok(())
     }
 
     /// Add a new version of an edge.
+    /// Returns an error if the version limit for this entity is exceeded (DoS protection).
     #[allow(clippy::too_many_arguments)]
     pub fn add_edge_version(
         &mut self,
@@ -126,6 +204,17 @@ impl HistoricalStorage {
         target: NodeId,
         properties: PropertyMap,
     ) -> Result<()> {
+        // Check capacity limit using cached count (O(1) operation, DoS protection)
+        let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
+        if version_count >= self.retention_policy.max_versions_per_entity {
+            return Err(StorageError::CapacityExceeded {
+                resource: format!("edge {} versions", edge_id),
+                current: version_count,
+                limit: self.retention_policy.max_versions_per_entity,
+            }
+            .into());
+        }
+
         let prev_version_id = self.edge_version_heads.get(&edge_id).copied();
 
         let version = if let Some(prev_id) = prev_version_id {
@@ -168,6 +257,9 @@ impl HistoricalStorage {
 
         self.edge_versions.insert(version_id, version);
         self.edge_version_heads.insert(edge_id, version_id);
+
+        // Increment cached version count (for O(1) capacity checks)
+        *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
 
         Ok(())
     }
@@ -644,6 +736,108 @@ mod tests {
             storage.find_node_version_at_time(node_id, 2500, 100),
             Some(v3)
         );
+    }
+
+    #[test]
+    fn test_retention_policy_node_limit() {
+        // Create storage with small retention limit
+        let mut storage = HistoricalStorage::with_config_and_retention(
+            AnchorConfig::default(),
+            RetentionPolicy::new(3, i64::MAX), // Max 3 versions per entity
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test");
+
+        // Add 3 versions - should succeed
+        for i in 0..3 {
+            storage
+                .add_node_version(
+                    node_id,
+                    VersionId::new(i).unwrap(),
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    PropertyMapBuilder::new().build(),
+                )
+                .unwrap();
+        }
+
+        // Try to add 4th version - should fail
+        let result = storage.add_node_version(
+            node_id,
+            VersionId::new(3).unwrap(),
+            BiTemporalInterval::current(1300),
+            label,
+            PropertyMapBuilder::new().build(),
+        );
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::utils::error::Error::Storage(StorageError::CapacityExceeded {
+                resource,
+                current,
+                limit,
+            }) => {
+                assert!(resource.contains("node"));
+                assert_eq!(current, 3);
+                assert_eq!(limit, 3);
+            }
+            _ => panic!("Expected CapacityExceeded error"),
+        }
+    }
+
+    #[test]
+    fn test_retention_policy_edge_limit() {
+        // Create storage with small retention limit
+        let mut storage = HistoricalStorage::with_config_and_retention(
+            AnchorConfig::default(),
+            RetentionPolicy::new(2, i64::MAX), // Max 2 versions per entity
+        );
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS");
+
+        // Add 2 versions - should succeed
+        for i in 0..2 {
+            storage
+                .add_edge_version(
+                    edge_id,
+                    VersionId::new(i).unwrap(),
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    source,
+                    target,
+                    PropertyMapBuilder::new().build(),
+                )
+                .unwrap();
+        }
+
+        // Try to add 3rd version - should fail
+        let result = storage.add_edge_version(
+            edge_id,
+            VersionId::new(2).unwrap(),
+            BiTemporalInterval::current(1200),
+            label,
+            source,
+            target,
+            PropertyMapBuilder::new().build(),
+        );
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::utils::error::Error::Storage(StorageError::CapacityExceeded {
+                resource,
+                current,
+                limit,
+            }) => {
+                assert!(resource.contains("edge"));
+                assert_eq!(current, 2);
+                assert_eq!(limit, 2);
+            }
+            _ => panic!("Expected CapacityExceeded error"),
+        }
     }
 
     #[test]

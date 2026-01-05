@@ -14,6 +14,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// Default maximum number of interned strings (DoS protection)
+pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
+
 /// A small, copyable handle to an interned string.
 ///
 /// This is just a u32 ID that can be used to look up the original string
@@ -58,15 +61,23 @@ pub struct StringInterner {
     id_to_string: DashMap<InternedString, Arc<str>>,
     /// Next ID to assign.
     next_id: AtomicU32,
+    /// Maximum number of strings to intern (DoS protection)
+    max_capacity: usize,
 }
 
 impl StringInterner {
-    /// Create a new empty string interner.
+    /// Create a new empty string interner with default capacity limit.
     pub fn new() -> Self {
+        Self::with_max_capacity(DEFAULT_MAX_INTERNED_STRINGS)
+    }
+
+    /// Create a new string interner with a custom maximum capacity.
+    pub fn with_max_capacity(max_capacity: usize) -> Self {
         StringInterner {
             string_to_id: DashMap::new(),
             id_to_string: DashMap::new(),
             next_id: AtomicU32::new(0),
+            max_capacity,
         }
     }
 
@@ -76,12 +87,26 @@ impl StringInterner {
     /// Otherwise, assigns a new ID and stores the string.
     ///
     /// This method is thread-safe and lock-free.
+    ///
+    /// # Panics
+    /// Panics if the maximum capacity is exceeded (DoS protection).
+    /// This is intentional to prevent unbounded memory growth.
     pub fn intern<S: AsRef<str>>(&self, string: S) -> InternedString {
         let string = string.as_ref();
 
         // Fast path: check if already interned
         if let Some(id) = self.string_to_id.get(string) {
             return *id;
+        }
+
+        // Check capacity before interning (DoS protection)
+        let current_count = self.string_to_id.len();
+        if current_count >= self.max_capacity {
+            panic!(
+                "String interner capacity exceeded: current={}, limit={} (DoS protection). \
+                 This prevents unbounded memory growth from malicious or buggy clients.",
+                current_count, self.max_capacity
+            );
         }
 
         // Slow path: need to intern a new string

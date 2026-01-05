@@ -157,6 +157,15 @@ pub enum StorageError {
         /// The type of ID (node/edge/version)
         id_type: &'static str,
     },
+    /// Capacity limit exceeded (DoS protection).
+    CapacityExceeded {
+        /// The resource that exceeded capacity
+        resource: String,
+        /// Current count
+        current: usize,
+        /// Maximum allowed
+        limit: usize,
+    },
 }
 
 impl fmt::Display for StorageError {
@@ -199,6 +208,17 @@ impl fmt::Display for StorageError {
                     id_type,
                     id,
                     crate::core::id::MAX_VALID_ID
+                )
+            }
+            StorageError::CapacityExceeded {
+                resource,
+                current,
+                limit,
+            } => {
+                write!(
+                    f,
+                    "Capacity exceeded for {}: current={}, limit={} (DoS protection)",
+                    resource, current, limit
                 )
             }
         }
