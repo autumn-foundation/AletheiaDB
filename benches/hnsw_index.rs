@@ -11,6 +11,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use gallifreydb::core::id::NodeId;
 use gallifreydb::index::vector::hnsw::{HnswConfig, HnswIndex};
 use gallifreydb::index::vector::{DistanceMetric, VectorIndex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 // ============================================================================
@@ -85,7 +87,9 @@ fn bench_index_creation(c: &mut Criterion) {
 
 fn bench_vector_addition_single(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_addition_single");
-    group.sample_size(50); // Reduce sample size for slower operations
+    // Reduced sample size (50) due to slower insertion operations (~8-12µs each)
+    // to keep total benchmark time reasonable while maintaining statistical significance
+    group.sample_size(50);
 
     for &dimensions in &[128, 384, 768] {
         let config = HnswConfig::new(dimensions, DistanceMetric::Cosine).with_capacity(1000);
@@ -98,15 +102,17 @@ fn bench_vector_addition_single(c: &mut Criterion) {
             index.add(node_id, &vector).expect("Failed to add vector");
         }
 
-        let mut next_id = 100u64;
+        // Use atomic counter to avoid benchmark contamination from shared mutable state
+        let next_id = Arc::new(AtomicU64::new(100));
 
         group.bench_with_input(
             BenchmarkId::new("dimensions", dimensions),
             &dimensions,
             |b, &dims| {
+                let next_id = Arc::clone(&next_id);
                 b.iter(|| {
-                    let node_id = NodeId::new(next_id).expect("Valid node ID");
-                    next_id += 1;
+                    let id = next_id.fetch_add(1, Ordering::Relaxed);
+                    let node_id = NodeId::new(id).expect("Valid node ID");
                     let vector = generate_random_vector(dims);
                     index.add(black_box(node_id), black_box(&vector))
                 });
@@ -123,7 +129,9 @@ fn bench_vector_addition_single(c: &mut Criterion) {
 
 fn bench_vector_addition_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_addition_batch");
-    group.sample_size(20); // Reduce for batch operations
+    // Reduced sample size (20) for batch operations which are significantly slower
+    // (100+ vectors per iteration) to keep total runtime manageable
+    group.sample_size(20);
 
     for &batch_size in &[10, 50, 100, 500] {
         let dimensions = 384;
@@ -182,6 +190,8 @@ fn bench_knn_search(c: &mut Criterion) {
 
 fn bench_knn_search_index_size(c: &mut Criterion) {
     let mut group = c.benchmark_group("knn_search_index_size");
+    // Reduced sample size (30) due to index creation overhead for large datasets
+    // (creating 10k-vector index takes significant time)
     group.sample_size(30);
 
     let dimensions = 384;
@@ -209,6 +219,8 @@ fn bench_knn_search_index_size(c: &mut Criterion) {
 
 fn bench_hnsw_parameter_m(c: &mut Criterion) {
     let mut group = c.benchmark_group("hnsw_param_m");
+    // Reduced sample size (20) due to index creation overhead
+    // (building 1000-vector index multiple times for different M values)
     group.sample_size(20);
 
     let dimensions = 384;
@@ -233,6 +245,8 @@ fn bench_hnsw_parameter_m(c: &mut Criterion) {
 
 fn bench_hnsw_parameter_ef_construction(c: &mut Criterion) {
     let mut group = c.benchmark_group("hnsw_param_ef_construction");
+    // Very reduced sample size (10) for extremely slow operations
+    // (building full index with different ef_construction values, extended measurement time)
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(15));
 
