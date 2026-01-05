@@ -578,10 +578,19 @@ fn print_node_details(demo: &DemoData, name: &str) -> Result<()> {
 
         // Sort properties for consistent display
         let mut props: Vec<_> = node.properties.iter().collect();
-        props.sort_by_key(|(k, _)| k.as_str());
+        props.sort_by_key(|(k, _)| {
+            GLOBAL_INTERNER
+                .resolve(**k)
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        });
 
         for (key, value) in props {
-            println!("  {}: {}", key, format_value(value));
+            let key_str = GLOBAL_INTERNER
+                .resolve(*key)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{:?}", key));
+            println!("  {}: {}", key_str, format_value(value));
         }
 
         // Show relationships
