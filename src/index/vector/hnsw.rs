@@ -374,7 +374,6 @@ impl HnswConfig {
     ///
     /// Reads 41 bytes in little-endian format and reconstructs the HnswConfig.
     pub fn deserialize_from<R: std::io::Read>(reader: &mut R) -> crate::utils::Result<Self> {
-
         let mut buf_u64 = [0u8; 8];
         let mut buf_u8 = [0u8; 1];
 

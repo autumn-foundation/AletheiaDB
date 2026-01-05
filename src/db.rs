@@ -106,10 +106,8 @@ impl GallifreyDB {
         if let Some(ref vector_config) = checkpoint.metadata.vector_index_config
             && vector_config.enabled
         {
-            db.current.enable_vector_index(
-                &vector_config.property_name,
-                vector_config.config.clone(),
-            )?;
+            db.current
+                .enable_vector_index(&vector_config.property_name, vector_config.config.clone())?;
         }
 
         Ok(db)
