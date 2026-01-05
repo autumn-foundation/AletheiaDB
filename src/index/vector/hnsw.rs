@@ -440,6 +440,7 @@ impl HnswIndexBuilder {
             id_mapping: Arc::new(DashMap::new()),
             reverse_id_mapping: Arc::new(DashMap::new()),
             deleted_ids: Arc::new(DashMap::new()),
+            vector_cache: Arc::new(DashMap::new()),
         })
     }
 }
@@ -483,6 +484,9 @@ pub struct HnswIndex {
     reverse_id_mapping: Arc<DashMap<usize, NodeId>>,
     /// Soft-deleted NodeIds
     deleted_ids: Arc<DashMap<NodeId, ()>>,
+    /// Vector cache for brute-force search on small graphs
+    /// Maps NodeId -> Vector. Enables exact search when HNSW is unreliable (<100 nodes)
+    vector_cache: Arc<DashMap<NodeId, Arc<Vec<f32>>>>,
 }
 
 impl VectorIndex for HnswIndex {
@@ -514,6 +518,9 @@ impl VectorIndex for HnswIndex {
             data_id
         };
 
+        // Cache vector for brute-force search on small graphs
+        self.vector_cache.insert(id, Arc::new(vector.to_vec()));
+
         // Insert into index
         let mut inner = self.inner.write();
         match &mut *inner {
@@ -534,6 +541,8 @@ impl VectorIndex for HnswIndex {
     fn remove(&self, id: NodeId) -> Result<()> {
         // Soft delete: mark as deleted
         // We don't remove from id_mapping to preserve DataId allocation
+        // Remove from vector cache
+        self.vector_cache.remove(&id);
         self.deleted_ids.insert(id, ());
         Ok(())
     }
@@ -553,6 +562,15 @@ impl VectorIndex for HnswIndex {
         // Cap k to prevent DoS
         let k_capped = k.min(MAX_K);
 
+        // For very small graphs, use exact brute-force search for 100% recall
+        // HNSW's probabilistic structure is unreliable with <100 nodes
+        const BRUTE_FORCE_THRESHOLD: usize = 100;
+        let active_nodes = self.len();
+
+        if active_nodes > 0 && active_nodes < BRUTE_FORCE_THRESHOLD {
+            return self.brute_force_search(query, k_capped);
+        }
+
         // Fetch more results than k to account for soft-deleted items
         // Since some results will be filtered out, we need to fetch extra
         let deleted_count = self.deleted_ids.len();
@@ -570,7 +588,9 @@ impl VectorIndex for HnswIndex {
         // HNSW's probabilistic structure doesn't work well with very few nodes
         let configured_ef_search = *self.ef_search.read();
         let min_ef_for_small_graphs = 200;
-        let ef_search = configured_ef_search.max(fetch_k).max(min_ef_for_small_graphs);
+        let ef_search = configured_ef_search
+            .max(fetch_k)
+            .max(min_ef_for_small_graphs);
 
         // Perform search
         let inner = self.inner.read();
@@ -625,8 +645,18 @@ impl VectorIndex for HnswIndex {
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
         // For hnsw_rs, we'll do post-filtering since the FilterT trait is complex
-        // This is acceptable since filtering is done at search time in the results
-        let results = self.search(query, k * 2)?; // Fetch more to account for filtering
+        // For small graphs, fetch all nodes to ensure we don't miss filtered results
+        // For large graphs, use adaptive over-fetch heuristic
+        let total_nodes = self.len();
+        let candidates_to_fetch = if total_nodes < 100 {
+            // Small graph: fetch all nodes to guarantee finding k matches if they exist
+            total_nodes
+        } else {
+            // Large graph: use adaptive heuristic (same as current.rs)
+            (k * 10).max(k + 20).min(k + 1000)
+        };
+
+        let results = self.search(query, candidates_to_fetch)?;
 
         let filtered: Vec<(NodeId, f32)> = results
             .into_iter()
@@ -684,6 +714,48 @@ impl HnswIndex {
     pub fn m(&self) -> usize {
         self.m
     }
+
+    /// Brute-force exact k-NN search using cached vectors.
+    ///
+    /// Used for small graphs (<100 nodes) where HNSW's probabilistic structure
+    /// is unreliable. Computes exact distances to all non-deleted vectors.
+    fn brute_force_search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
+        use crate::core::vector::{cosine_similarity, dot_product, euclidean_distance};
+
+        let mut candidates: Vec<(NodeId, f32)> = Vec::new();
+
+        // Compute exact similarity for all non-deleted vectors
+        for entry in self.vector_cache.iter() {
+            let node_id = *entry.key();
+
+            // Skip deleted nodes
+            if self.deleted_ids.contains_key(&node_id) {
+                continue;
+            }
+
+            let vector = entry.value();
+
+            // Compute distance/similarity based on metric
+            let similarity = match self.metric {
+                DistanceMetric::Cosine => cosine_similarity(query, vector)?,
+                DistanceMetric::Euclidean => {
+                    // Return negative distance for consistent sorting (higher is better)
+                    -euclidean_distance(query, vector)?
+                }
+                DistanceMetric::DotProduct => dot_product(query, vector)?,
+            };
+
+            candidates.push((node_id, similarity));
+        }
+
+        // Sort by similarity descending (higher is better)
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Take top k
+        candidates.truncate(k);
+
+        Ok(candidates)
+    }
 }
 
 // SAFETY: HnswIndex is safe to send across threads and share between threads because:
@@ -694,6 +766,7 @@ impl HnswIndex {
 //    - next_data_id: Arc<RwLock<usize>> - synchronized ID counter
 //    - id_mapping, reverse_id_mapping: Arc<DashMap<...>> - lock-free concurrent hashmaps
 //    - deleted_ids: Arc<DashMap<...>> - lock-free concurrent hashmap
+//    - vector_cache: Arc<DashMap<NodeId, Arc<Vec<f32>>>> - lock-free concurrent hashmap with Arc-wrapped vectors
 // 3. Immutable fields (dimensions, metric, m, ef_construction) are safe to share
 // 4. hnsw_rs library guarantees thread-safety for all public APIs as documented in their crate
 unsafe impl Send for HnswIndex {}
