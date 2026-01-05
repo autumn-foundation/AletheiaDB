@@ -1031,14 +1031,6 @@ macro_rules! properties {
 mod tests {
     use super::*;
 
-    /// Test helper to clear the global interner before each test.
-    ///
-    /// This ensures test isolation when tests run in parallel, preventing
-    /// state from one test affecting another.
-    fn setup_test() {
-        GLOBAL_INTERNER.clear();
-    }
-
     #[test]
     fn test_property_value_types() {
         assert!(PropertyValue::Null.is_null());
