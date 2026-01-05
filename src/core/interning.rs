@@ -47,6 +47,25 @@ impl fmt::Display for InternedString {
     }
 }
 
+// Convenient From implementations for use as PropertyKey
+impl From<&str> for InternedString {
+    fn from(s: &str) -> Self {
+        GLOBAL_INTERNER.intern(s)
+    }
+}
+
+impl From<String> for InternedString {
+    fn from(s: String) -> Self {
+        GLOBAL_INTERNER.intern(s)
+    }
+}
+
+impl From<&String> for InternedString {
+    fn from(s: &String) -> Self {
+        GLOBAL_INTERNER.intern(s)
+    }
+}
+
 /// Thread-safe string interner.
 ///
 /// This interner maintains a bidirectional mapping between strings and IDs:

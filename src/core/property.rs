@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::core::interning::{InternedString, GLOBAL_INTERNER};
 use crate::utils::error::{Result, StorageError};
 
 // ============================================================================
@@ -50,9 +51,9 @@ pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 
 /// Property key type.
 ///
-/// TODO: Replace with InternedString once string interning is implemented.
-/// For now, using String directly.
-pub type PropertyKey = String;
+/// Uses interned strings for memory efficiency and O(1) equality comparisons.
+/// Common keys like "name", "age", and "id" are deduplicated in memory.
+pub type PropertyKey = InternedString;
 
 /// A value that can be stored as a property.
 ///
@@ -713,14 +714,38 @@ impl PropertyMap {
     }
 
     /// Get a property value by key.
+    ///
+    /// The key is automatically interned before lookup for efficient comparison.
     #[inline]
     pub fn get(&self, key: &str) -> Option<&PropertyValue> {
+        let interned_key = GLOBAL_INTERNER.intern(key);
+        self.get_by_interned_key(&interned_key)
+    }
+
+    /// Get a property value by an already-interned key.
+    ///
+    /// This is more efficient than `get()` when you already have an InternedString.
+    /// For internal use and performance-critical paths.
+    #[inline]
+    pub fn get_by_interned_key(&self, key: &PropertyKey) -> Option<&PropertyValue> {
         self.inner.get(key)
     }
 
     /// Check if a property exists.
+    ///
+    /// The key is automatically interned before lookup for efficient comparison.
     #[inline]
     pub fn contains_key(&self, key: &str) -> bool {
+        let interned_key = GLOBAL_INTERNER.intern(key);
+        self.contains_interned_key(&interned_key)
+    }
+
+    /// Check if a property exists by an already-interned key.
+    ///
+    /// This is more efficient than `contains_key()` when you already have an InternedString.
+    /// For internal use and performance-critical paths.
+    #[inline]
+    pub fn contains_interned_key(&self, key: &PropertyKey) -> bool {
         self.inner.contains_key(key)
     }
 
@@ -789,8 +814,11 @@ impl PropertyMap {
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         buffer.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
         for (key, value) in self.inner.iter() {
-            // Serialize key
-            let key_bytes = key.as_bytes();
+            // Serialize key: resolve InternedString to actual string
+            let key_str = GLOBAL_INTERNER
+                .resolve(*key)
+                .expect("PropertyKey should always resolve to a valid string");
+            let key_bytes = key_str.as_bytes();
             buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
             buffer.extend_from_slice(key_bytes);
             // Serialize value
@@ -833,11 +861,12 @@ impl PropertyMap {
                 )
                 .into());
             }
-            let key = std::str::from_utf8(&bytes[offset..offset + key_len])
+            let key_str = std::str::from_utf8(&bytes[offset..offset + key_len])
                 .map_err(|e| {
                     StorageError::CorruptedData(format!("Invalid UTF-8 in property key: {}", e))
-                })?
-                .to_string();
+                })?;
+            // Intern the key for efficient storage and comparison
+            let key = GLOBAL_INTERNER.intern(key_str);
             offset += key_len;
 
             // Read value
@@ -928,7 +957,18 @@ impl PropertyMapBuilder {
     }
 
     /// Remove a property.
-    pub fn remove(mut self, key: &str) -> Self {
+    ///
+    /// The key is automatically interned before removal.
+    pub fn remove(self, key: &str) -> Self {
+        let interned_key = GLOBAL_INTERNER.intern(key);
+        self.remove_by_key(&interned_key)
+    }
+
+    /// Remove a property by an already-interned key.
+    ///
+    /// This is more efficient than `remove()` when you already have an InternedString.
+    /// For internal use and performance-critical paths.
+    pub fn remove_by_key(mut self, key: &PropertyKey) -> Self {
         self.map.remove(key);
         self
     }
@@ -1053,9 +1093,9 @@ mod tests {
 
         let keys: Vec<_> = map.keys().cloned().collect();
         assert_eq!(keys.len(), 3);
-        assert!(keys.contains(&"a".to_string()));
-        assert!(keys.contains(&"b".to_string()));
-        assert!(keys.contains(&"c".to_string()));
+        assert!(keys.contains(&GLOBAL_INTERNER.intern("a")));
+        assert!(keys.contains(&GLOBAL_INTERNER.intern("b")));
+        assert!(keys.contains(&GLOBAL_INTERNER.intern("c")));
 
         let values: Vec<_> = map.values().cloned().collect();
         assert_eq!(values.len(), 3);
