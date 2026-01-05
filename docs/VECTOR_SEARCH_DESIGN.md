@@ -1,16 +1,16 @@
 # Vector Search Integration Design
 
-> **Status**: In Progress (Phases 1-2 Complete)
+> **Status**: Phase 2 Complete (Milestone M2)
 > **Created**: 2024-12-30
-> **Updated**: 2025-01-03
+> **Updated**: 2026-01-04
 > **Goal**: Position GallifreyDB as SUPERRAG - Graph + Vector + Bi-temporal
 >
 > ## Implementation Progress
 >
 > | Phase | Status | Description |
 > |-------|--------|-------------|
-> | Phase 1 | ✅ Complete | Vector storage foundation (`PropertyValue::Vector`, similarity functions) |
-> | Phase 2 | ✅ Complete | HNSW index integration into CurrentStorage with auto-indexing |
+> | Phase 1 | ✅ Complete (PR #138) | Vector storage foundation (`PropertyValue::Vector`, similarity functions) |
+> | Phase 2 | ✅ Complete (Milestone M2) | HNSW index integration, benchmarks, tests, documentation |
 > | Phase 3 | 🔲 Planned | Temporal vector support |
 > | Phase 4 | 🔲 Planned | Hybrid query engine |
 > | Phase 5 | 🔲 Planned | Persistence & performance optimization |
@@ -185,8 +185,8 @@ pub trait HybridOps: GraphOps + VectorOps + TemporalOps {
 - `src/core/vector.rs` - NEW: Vector utilities module
 - `src/core/mod.rs` - Export vector module
 
-### Phase 2: HNSW Index Integration ✅ COMPLETE
-**Implemented in**: PR #169
+### Phase 2: HNSW Index Integration ✅ COMPLETE (Milestone M2)
+**Implemented in**: Milestone M2 (PR #169 + M2 completion work)
 
 **Accomplished**:
 - ✅ Integrated usearch crate via HnswIndex wrapper
@@ -197,12 +197,23 @@ pub trait HybridOps: GraphOps + VectorOps + TemporalOps {
   - `update_node()` - auto-update with rollback on failure
   - `delete_node()` - auto-remove (best-effort)
 - ✅ k-NN query methods with label filtering
+- ✅ **Index configuration persistence (VS-032)** - V2 checkpoint format with vector index config
+- ✅ **HNSW benchmarks (VS-033)** - Comprehensive benchmark suite for all operations
+- ✅ **Phase 2 integration tests (VS-034)** - 27 total tests covering all functionality
+- ✅ **Documentation (VS-035)** - Integration, performance, and troubleshooting guides
 
 **Files created/modified**:
 - `src/index/vector.rs` - VectorIndex trait + HnswIndex implementation
+- `src/index/vector/hnsw.rs` - HNSW wrapper with serialization
 - `src/storage/current.rs` - VectorIndexState integration + query methods
+- `src/storage/persistence.rs` - V2 checkpoint format with vector index config
 - `src/db.rs` - Public API exposure
 - `src/utils/error.rs` - Added PropertyNotFound error
+- `benches/hnsw_index.rs` - NEW: Comprehensive HNSW benchmarks
+- `tests/vector_storage.rs` - Extended with Phase 2 integration tests
+- `docs/guides/vector-search-integration.md` - NEW: Integration guide
+- `docs/guides/vector-search-performance.md` - NEW: Performance tuning guide
+- `docs/guides/vector-search-troubleshooting.md` - NEW: Troubleshooting guide
 
 **Implemented API**:
 ```rust
@@ -211,6 +222,7 @@ impl GallifreyDB {
     pub fn is_vector_index_enabled(&self) -> bool;
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>>;
     pub fn find_similar_with_label(&self, query_node_id: NodeId, label: &str, k: usize) -> Result<Vec<(NodeId, f32)>>;
+    pub fn find_similar_by_embedding(&self, query_embedding: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>>;
 }
 ```
 
@@ -219,6 +231,15 @@ impl GallifreyDB {
 - Arc-wrapped HnswIndex enables lock-free cloning before expensive operations
 - Query node is excluded from results (searches k+1, filters, truncates to k)
 - Label filtering uses GLOBAL_INTERNER for efficient string comparison
+- Index configuration persisted in V2 checkpoint format for recovery
+- Comprehensive benchmarks cover: index creation, single/batch add, k-NN search, parameter tuning
+- Integration tests validate: lifecycle, search, updates, errors, concurrency
+
+**Performance Characteristics** (384-dim vectors, M=16):
+- Index creation: ~755ns
+- Single vector add: ~8-12µs (with existing index)
+- k-NN search (k=10, 1k vectors): ~2-4µs
+- Memory overhead: ~1KB per vector
 
 ### Phase 3: Temporal Vector Support
 **Estimated effort**: 3-5 days

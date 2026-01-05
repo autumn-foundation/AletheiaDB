@@ -13,6 +13,7 @@
 //! - Store complete current state + metadata for historical storage
 
 use crate::core::temporal::{Timestamp, time};
+use crate::index::vector::HnswConfig;
 use crate::storage::{
     current::CurrentStorage,
     historical::HistoricalStorage,
@@ -48,6 +49,86 @@ impl Default for CheckpointConfig {
     }
 }
 
+/// Vector index configuration data for checkpoint persistence
+#[derive(Debug, Clone)]
+pub struct VectorIndexCheckpointData {
+    /// Whether vector indexing is enabled
+    pub enabled: bool,
+    /// Property name that is indexed (empty string if not enabled)
+    pub property_name: String,
+    /// HNSW index configuration
+    pub config: HnswConfig,
+}
+
+impl VectorIndexCheckpointData {
+    /// Create checkpoint data for disabled vector index
+    pub fn disabled() -> Self {
+        VectorIndexCheckpointData {
+            enabled: false,
+            property_name: String::new(),
+            config: HnswConfig::default(),
+        }
+    }
+
+    /// Create checkpoint data for enabled vector index
+    pub fn enabled(property_name: String, config: HnswConfig) -> Self {
+        VectorIndexCheckpointData {
+            enabled: true,
+            property_name,
+            config,
+        }
+    }
+
+    /// Serialize to writer in binary format
+    ///
+    /// Format:
+    /// - enabled: 1 byte (0 or 1)
+    /// - property_name_len: 4 bytes (u32 LE)
+    /// - property_name: variable bytes (UTF-8)
+    /// - config: 41 bytes (HnswConfig serialization)
+    pub fn serialize_into<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writer.write_all(&[if self.enabled { 1 } else { 0 }])?;
+
+        let name_bytes = self.property_name.as_bytes();
+        writer.write_all(&(name_bytes.len() as u32).to_le_bytes())?;
+        writer.write_all(name_bytes)?;
+
+        self.config.serialize_into(writer)?;
+
+        Ok(())
+    }
+
+    /// Deserialize from reader
+    pub fn deserialize_from<R: Read>(reader: &mut R) -> Result<Self> {
+        let mut buf_u8 = [0u8; 1];
+        let mut buf_u32 = [0u8; 4];
+
+        // Read enabled flag
+        reader.read_exact(&mut buf_u8)?;
+        let enabled = buf_u8[0] != 0;
+
+        // Read property name length
+        reader.read_exact(&mut buf_u32)?;
+        let name_len = u32::from_le_bytes(buf_u32) as usize;
+
+        // Read property name
+        let mut name_bytes = vec![0u8; name_len];
+        reader.read_exact(&mut name_bytes)?;
+        let property_name = String::from_utf8(name_bytes).map_err(|e| {
+            StorageError::CorruptedData(format!("Invalid UTF-8 in property name: {}", e))
+        })?;
+
+        // Read config
+        let config = HnswConfig::deserialize_from(reader)?;
+
+        Ok(VectorIndexCheckpointData {
+            enabled,
+            property_name,
+            config,
+        })
+    }
+}
+
 /// Metadata about a checkpoint
 #[derive(Debug, Clone)]
 pub struct CheckpointMetadata {
@@ -61,6 +142,8 @@ pub struct CheckpointMetadata {
     pub edge_count: usize,
     /// Number of historical versions
     pub version_count: usize,
+    /// Vector index configuration (None for V1 checkpoints)
+    pub vector_index_config: Option<VectorIndexCheckpointData>,
 }
 
 /// A database checkpoint containing full state
@@ -78,6 +161,7 @@ impl Checkpoint {
     pub fn new(lsn: LSN, current: &CurrentStorage, historical: &HistoricalStorage) -> Self {
         let stats = current.stats();
         let hist_stats = historical.stats();
+        let vector_config = current.get_vector_index_config();
 
         let metadata = CheckpointMetadata {
             lsn,
@@ -85,6 +169,7 @@ impl Checkpoint {
             node_count: stats.node_count,
             edge_count: stats.edge_count,
             version_count: hist_stats.total_node_versions + hist_stats.total_edge_versions,
+            vector_index_config: Some(vector_config),
         };
 
         // In production, would serialize current and historical state
@@ -129,8 +214,8 @@ impl Checkpoint {
             StorageError::IoError(format!("Failed to write checkpoint magic: {}", e))
         })?;
 
-        // Write version
-        writer.write_all(&1u32.to_le_bytes()).map_err(|e| {
+        // Write version 2 (adds vector index config)
+        writer.write_all(&2u32.to_le_bytes()).map_err(|e| {
             StorageError::IoError(format!("Failed to write checkpoint version: {}", e))
         })?;
 
@@ -154,6 +239,20 @@ impl Checkpoint {
         writer
             .write_all(&(self.metadata.version_count as u64).to_le_bytes())
             .map_err(|e| StorageError::IoError(format!("Failed to write version count: {}", e)))?;
+
+        // Write vector index config (V2 format)
+        if let Some(ref vector_config) = self.metadata.vector_index_config {
+            vector_config.serialize_into(writer).map_err(|e| {
+                StorageError::IoError(format!("Failed to write vector index config: {}", e))
+            })?;
+        } else {
+            // Write disabled config if None (for backward compatibility)
+            VectorIndexCheckpointData::disabled()
+                .serialize_into(writer)
+                .map_err(|e| {
+                    StorageError::IoError(format!("Failed to write vector index config: {}", e))
+                })?;
+        }
 
         Ok(())
     }
@@ -184,7 +283,7 @@ impl Checkpoint {
         })?;
         let version = u32::from_le_bytes(version_bytes);
 
-        if version != 1 {
+        if version != 1 && version != 2 {
             return Err(StorageError::CorruptedData(format!(
                 "Unsupported checkpoint version: {}",
                 version
@@ -192,16 +291,16 @@ impl Checkpoint {
             .into());
         }
 
-        // Read metadata
-        let metadata = Self::read_metadata(&mut reader)?;
+        // Read metadata (version-aware)
+        let metadata = Self::read_metadata(&mut reader, version)?;
 
         // In production, would deserialize full storage state
         // For now, just return metadata
         Ok(Checkpoint { metadata })
     }
 
-    /// Read checkpoint metadata
-    fn read_metadata<R: Read>(reader: &mut R) -> Result<CheckpointMetadata> {
+    /// Read checkpoint metadata (version-aware)
+    fn read_metadata<R: Read>(reader: &mut R, version: u32) -> Result<CheckpointMetadata> {
         let mut lsn_bytes = [0u8; 8];
         reader
             .read_exact(&mut lsn_bytes)
@@ -232,12 +331,24 @@ impl Checkpoint {
             .map_err(|e| StorageError::IoError(format!("Failed to read version count: {}", e)))?;
         let version_count = u64::from_le_bytes(version_count_bytes) as usize;
 
+        // Read vector index config if V2, otherwise None
+        let vector_index_config = if version >= 2 {
+            Some(
+                VectorIndexCheckpointData::deserialize_from(reader).map_err(|e| {
+                    StorageError::IoError(format!("Failed to read vector index config: {}", e))
+                })?,
+            )
+        } else {
+            None
+        };
+
         Ok(CheckpointMetadata {
             lsn,
             timestamp,
             node_count,
             edge_count,
             version_count,
+            vector_index_config,
         })
     }
 }
@@ -523,5 +634,190 @@ mod tests {
         // Should checkpoint when LSN threshold reached
         assert!(manager.should_checkpoint(LSN(150)));
         assert!(!manager.should_checkpoint(LSN(50)));
+    }
+
+    // V2 Checkpoint Serialization Tests
+
+    #[test]
+    fn test_hnsw_config_serialization_roundtrip() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use std::io::Cursor;
+
+        let config = HnswConfig::new(384, DistanceMetric::Cosine)
+            .with_m(32)
+            .with_ef_construction(200)
+            .with_ef_search(100)
+            .with_capacity(5000);
+
+        // Serialize
+        let mut buffer = Vec::new();
+        config.serialize_into(&mut buffer)?;
+
+        // Deserialize
+        let mut cursor = Cursor::new(buffer);
+        let loaded = HnswConfig::deserialize_from(&mut cursor)?;
+
+        assert_eq!(loaded.dimensions, 384);
+        assert_eq!(loaded.metric, DistanceMetric::Cosine);
+        assert_eq!(loaded.m, 32);
+        assert_eq!(loaded.ef_construction, 200);
+        assert_eq!(loaded.ef_search, 100);
+        assert_eq!(loaded.capacity, 5000);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_vector_index_checkpoint_data_disabled() -> Result<()> {
+        use std::io::Cursor;
+
+        let data = VectorIndexCheckpointData::disabled();
+
+        // Serialize
+        let mut buffer = Vec::new();
+        data.serialize_into(&mut buffer)?;
+
+        // Deserialize
+        let mut cursor = Cursor::new(buffer);
+        let loaded = VectorIndexCheckpointData::deserialize_from(&mut cursor)?;
+
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.property_name, "");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_vector_index_checkpoint_data_enabled() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use std::io::Cursor;
+
+        let config = HnswConfig::new(768, DistanceMetric::Euclidean);
+        let data = VectorIndexCheckpointData::enabled("embedding".to_string(), config.clone());
+
+        // Serialize
+        let mut buffer = Vec::new();
+        data.serialize_into(&mut buffer)?;
+
+        // Deserialize
+        let mut cursor = Cursor::new(buffer);
+        let loaded = VectorIndexCheckpointData::deserialize_from(&mut cursor)?;
+
+        assert!(loaded.enabled);
+        assert_eq!(loaded.property_name, "embedding");
+        assert_eq!(loaded.config.dimensions, 768);
+        assert_eq!(loaded.config.metric, DistanceMetric::Euclidean);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_v2_save_load_with_vector_config() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_path = temp_dir.path().join("test_v2_checkpoint.dat");
+
+        // Create storage with vector index enabled
+        let current = CurrentStorage::new();
+        let config = HnswConfig::new(384, DistanceMetric::Cosine);
+        current.enable_vector_index("embedding", config)?;
+
+        let historical = HistoricalStorage::new();
+
+        // Create and save checkpoint
+        let checkpoint = Checkpoint::new(LSN(123), &current, &historical);
+        checkpoint.save(&checkpoint_path)?;
+
+        // Load checkpoint
+        let loaded = Checkpoint::load(&checkpoint_path)?;
+
+        // Verify metadata
+        assert_eq!(loaded.metadata.lsn, LSN(123));
+
+        // Verify vector config was preserved
+        assert!(loaded.metadata.vector_index_config.is_some());
+        let vector_config = loaded.metadata.vector_index_config.unwrap();
+        assert!(vector_config.enabled);
+        assert_eq!(vector_config.property_name, "embedding");
+        assert_eq!(vector_config.config.dimensions, 384);
+        assert_eq!(vector_config.config.metric, DistanceMetric::Cosine);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_v2_save_load_without_vector_config() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_path = temp_dir.path().join("test_v2_no_vector.dat");
+
+        // Create storage without vector index
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        // Create and save checkpoint
+        let checkpoint = Checkpoint::new(LSN(456), &current, &historical);
+        checkpoint.save(&checkpoint_path)?;
+
+        // Load checkpoint
+        let loaded = Checkpoint::load(&checkpoint_path)?;
+
+        // Verify metadata
+        assert_eq!(loaded.metadata.lsn, LSN(456));
+
+        // Verify vector config exists but is disabled
+        assert!(loaded.metadata.vector_index_config.is_some());
+        let vector_config = loaded.metadata.vector_index_config.unwrap();
+        assert!(!vector_config.enabled);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_distance_metric_encoding() -> Result<()> {
+        use crate::index::vector::DistanceMetric;
+
+        // Test all variants
+        assert_eq!(DistanceMetric::Cosine.to_u8(), 0);
+        assert_eq!(DistanceMetric::Euclidean.to_u8(), 1);
+        assert_eq!(DistanceMetric::DotProduct.to_u8(), 2);
+
+        // Test roundtrip
+        assert_eq!(DistanceMetric::from_u8(0)?, DistanceMetric::Cosine);
+        assert_eq!(DistanceMetric::from_u8(1)?, DistanceMetric::Euclidean);
+        assert_eq!(DistanceMetric::from_u8(2)?, DistanceMetric::DotProduct);
+
+        // Test invalid value
+        assert!(DistanceMetric::from_u8(99).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_v2_binary_format_size() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_path = temp_dir.path().join("test_size.dat");
+
+        let current = CurrentStorage::new();
+        let config = HnswConfig::new(384, DistanceMetric::Cosine);
+        current.enable_vector_index("test_property", config)?;
+
+        let historical = HistoricalStorage::new();
+        let checkpoint = Checkpoint::new(LSN(1), &current, &historical);
+        checkpoint.save(&checkpoint_path)?;
+
+        // Verify file exists and has expected structure
+        let metadata = std::fs::metadata(&checkpoint_path)?;
+
+        // Expected size:
+        // - Magic (4) + Version (4) = 8
+        // - LSN (8) + Timestamp (8) + NodeCount (8) + EdgeCount (8) + VersionCount (8) = 40
+        // - Vector config: enabled (1) + name_len (4) + "test_property" (13) + HnswConfig (41) = 59
+        // Total = 107 bytes
+        assert_eq!(metadata.len(), 107);
+
+        Ok(())
     }
 }

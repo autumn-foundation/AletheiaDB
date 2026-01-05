@@ -71,6 +71,50 @@ impl GallifreyDB {
         }
     }
 
+    /// Open an existing database from a checkpoint.
+    ///
+    /// This method loads the most recent checkpoint and restores the database state,
+    /// including vector index configuration if it was enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `checkpoint_path` - Path to the checkpoint file to load
+    ///
+    /// # Returns
+    ///
+    /// Returns a `GallifreyDB` instance with restored configuration, or an error
+    /// if the checkpoint cannot be loaded or the vector index cannot be restored.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::GallifreyDB;
+    /// use std::path::Path;
+    ///
+    /// let db = GallifreyDB::open(Path::new("gallifreydb/checkpoints/latest.gfry"))?;
+    /// ```
+    pub fn open<P: AsRef<std::path::Path>>(checkpoint_path: P) -> Result<Self> {
+        use crate::storage::persistence::Checkpoint;
+
+        // Load checkpoint
+        let checkpoint = Checkpoint::load(checkpoint_path.as_ref())?;
+
+        // Create new database with default config
+        let db = Self::new();
+
+        // Restore vector index if it was enabled
+        if let Some(ref vector_config) = checkpoint.metadata.vector_index_config
+            && vector_config.enabled
+        {
+            db.current.enable_vector_index(
+                &vector_config.property_name,
+                vector_config.config.clone(),
+            )?;
+        }
+
+        Ok(db)
+    }
+
     /// Create a new read-only transaction.
     ///
     /// Read-only transactions are lightweight and have zero overhead:

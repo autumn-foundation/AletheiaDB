@@ -107,6 +107,60 @@ pub enum DistanceMetric {
     /// Dot product: inner product of vectors, range (-∞, ∞)
     DotProduct,
 }
+impl DistanceMetric {
+    /// Encode distance metric as a byte for serialization.
+    ///
+    /// Encoding:
+    /// - 0 = Cosine
+    /// - 1 = Euclidean
+    /// - 2 = DotProduct
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gallifreydb::index::vector::DistanceMetric;
+    ///
+    /// assert_eq!(DistanceMetric::Cosine.to_u8(), 0);
+    /// assert_eq!(DistanceMetric::Euclidean.to_u8(), 1);
+    /// assert_eq!(DistanceMetric::DotProduct.to_u8(), 2);
+    /// ```
+    pub fn to_u8(self) -> u8 {
+        match self {
+            DistanceMetric::Cosine => 0,
+            DistanceMetric::Euclidean => 1,
+            DistanceMetric::DotProduct => 2,
+        }
+    }
+
+    /// Decode distance metric from a byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the byte value is not a valid metric encoding.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gallifreydb::index::vector::DistanceMetric;
+    ///
+    /// assert_eq!(DistanceMetric::from_u8(0).unwrap(), DistanceMetric::Cosine);
+    /// assert_eq!(DistanceMetric::from_u8(1).unwrap(), DistanceMetric::Euclidean);
+    /// assert_eq!(DistanceMetric::from_u8(2).unwrap(), DistanceMetric::DotProduct);
+    /// assert!(DistanceMetric::from_u8(3).is_err());
+    /// ```
+    pub fn from_u8(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(DistanceMetric::Cosine),
+            1 => Ok(DistanceMetric::Euclidean),
+            2 => Ok(DistanceMetric::DotProduct),
+            _ => Err(crate::utils::error::StorageError::CorruptedData(format!(
+                "Invalid distance metric encoding: {}",
+                value
+            ))
+            .into()),
+        }
+    }
+}
 
 /// Trait for vector indexes supporting approximate k-nearest neighbor search.
 ///

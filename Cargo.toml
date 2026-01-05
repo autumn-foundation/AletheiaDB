@@ -21,6 +21,7 @@ tracy-client = { version = "0.17", optional = true, default-features = false }
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1.4"
+rand = "0.8"
 tempfile = "3.8"
 
 [features]
@@ -92,4 +93,10 @@ required-features = []
 name = "vector_similarity"
 harness = false
 path = "benches/vector_similarity.rs"
+required-features = []
+
+[[bench]]
+name = "hnsw_index"
+harness = false
+path = "benches/hnsw_index.rs"
 required-features = []

@@ -1095,6 +1095,14 @@ let config = HnswConfig::new(dimensions, metric)
     .with_expansion_search(64);        // ef search parameter (default: 64)
 ```
 
+**Comprehensive Documentation:**
+
+For detailed information on vector search integration, see:
+- **[Integration Guide](docs/guides/vector-search-integration.md)** - Complete integration examples and API reference
+- **[Performance Guide](docs/guides/vector-search-performance.md)** - Tuning parameters and optimization strategies
+- **[Troubleshooting Guide](docs/guides/vector-search-troubleshooting.md)** - Common issues and solutions
+- **[Design Document](docs/VECTOR_SEARCH_DESIGN.md)** - Architecture and roadmap
+
 ## Future Considerations
 
 ### Vector Search (SUPERRAG) - Remaining Phases
