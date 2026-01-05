@@ -326,12 +326,15 @@ impl CurrentStorage {
 
     /// Insert a node directly (used by WriteTransaction).
     /// Does not generate IDs - caller must provide them.
-    pub fn insert_node_direct(&self, node: Node) -> Result<()> {
+    pub fn insert_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
         // we have not modified any graph state, so we can safely return error without rollback.
         // This prevents the VS-030 bug where transaction-created nodes bypassed indexing,
         // causing them to be missing from HNSW index and invisible to find_similar queries.
         self.try_index_vector(node.id, &node.properties)?;
+
+        // Index in temporal vector index if enabled
+        self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
 
         // Vector indexing succeeded, now insert the node into the main indexes.
         self.indexes.insert_node(node);
@@ -347,7 +350,7 @@ impl CurrentStorage {
     }
 
     /// Update a node directly (used by WriteTransaction).
-    pub fn update_node_direct(&self, node: Node) -> Result<()> {
+    pub fn update_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // Save old node for potential rollback
         let old_node = self.indexes.get_node(node.id);
 
@@ -363,6 +366,9 @@ impl CurrentStorage {
             return Err(e);
         }
 
+        // Update temporal vector index if enabled
+        self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
+
         Ok(())
     }
 
@@ -374,13 +380,16 @@ impl CurrentStorage {
     }
 
     /// Delete a node directly (used by WriteTransaction).
-    pub fn delete_node_direct(&self, id: NodeId) -> Result<()> {
+    pub fn delete_node_direct(&self, id: NodeId, timestamp: Timestamp) -> Result<()> {
         self.indexes
             .remove_node(id)
             .ok_or(StorageError::NodeNotFound(id))?;
 
         // Best-effort vector index removal (ignore errors)
         let _ = self.try_remove_from_index(id);
+
+        // Remove from temporal vector index if enabled
+        let _ = self.try_remove_temporal_vector(id, timestamp);
 
         Ok(())
     }

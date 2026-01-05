@@ -1079,6 +1079,7 @@ mod tests {
             &[0.0, 1.0, 0.0, 0.0],
             base_time + 2_000_000,
         )?;
+        index.on_transaction()?;
         assert_eq!(index.snapshot_count(), 1);
 
         Ok(())
@@ -1103,6 +1104,7 @@ mod tests {
         // Change 2 vectors (50%) - should trigger
         index.add(NodeId::new(0).unwrap(), &[10.0, 0.0, 0.0, 0.0], 2000)?;
         index.add(NodeId::new(1).unwrap(), &[11.0, 0.0, 0.0, 0.0], 2000)?;
+        index.on_transaction()?;
         assert_eq!(index.snapshot_count(), 1);
 
         Ok(())
@@ -1167,9 +1169,9 @@ mod tests {
         let query = vec![0.9, 0.1, 0.0, 0.0];
         let results = index.find_similar_as_of(&query, 2, 1000)?;
 
-        // Should find results (but note: snapshot is empty until we implement vector copying)
-        // For now, this tests the query mechanism
-        assert_eq!(results.len(), 0); // Will be > 0 when snapshot copying is implemented
+        // The query vector [0.9, 0.1, 0.0, 0.0] is most similar to [1.0, 0.0, 0.0, 0.0]
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, NodeId::new(1).unwrap());
 
         Ok(())
     }
@@ -1199,9 +1201,15 @@ mod tests {
         let time_range = TimeRange::new(1000, 3000);
         let results = index.find_similar_in_range(&query, 5, time_range)?;
 
-        // Verify we got a valid result (may be empty since snapshots are placeholders)
-        // The test primarily validates that the API works correctly
-        let _ = results; // Use the results to avoid unused variable warning
+        // We created 3 snapshots. The query should return results for each snapshot in the range.
+        assert!(!results.is_empty());
+
+        // Each snapshot should have results
+        for (timestamp, similar_nodes) in results {
+            assert!(timestamp >= 1000 && timestamp <= 3000);
+            // Each snapshot should contain at least one similar node
+            assert!(!similar_nodes.is_empty());
+        }
 
         Ok(())
     }
@@ -1308,10 +1316,10 @@ mod tests {
         // Verify the 3 most recent snapshots remain
         let info = index.get_snapshot_info();
         assert_eq!(info.len(), 3);
-        // Snapshots should be the last 3 created
-        assert_eq!(info[0].snapshot_id, 2);
-        assert_eq!(info[1].snapshot_id, 3);
-        assert_eq!(info[2].snapshot_id, 4);
+        // After pruning, enumerate() yields indices 0, 1, 2 for the remaining snapshots
+        assert_eq!(info[0].snapshot_id, 0);
+        assert_eq!(info[1].snapshot_id, 1);
+        assert_eq!(info[2].snapshot_id, 2);
 
         Ok(())
     }
