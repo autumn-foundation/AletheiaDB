@@ -1650,4 +1650,129 @@ mod tests {
         // Should find doc2 but not doc_no_vector
         assert_eq!(results.len(), 1); // Only doc2 (doc1 is excluded as query node)
     }
+
+    #[test]
+    fn test_enable_temporal_vector_index() {
+        use crate::index::vector::{DistanceMetric, HnswConfig, TemporalVectorConfig};
+
+        let db = GallifreyDB::new();
+
+        // Create temporal vector index config
+        let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine);
+        let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+
+        // Enable temporal vector index
+        assert!(
+            db.enable_temporal_vector_index("embedding", temporal_config)
+                .is_ok()
+        );
+
+        // Should fail if trying to enable again
+        let hnsw_config2 = HnswConfig::new(3, DistanceMetric::Cosine);
+        let temporal_config2 = TemporalVectorConfig::default_with_hnsw(hnsw_config2);
+        assert!(
+            db.enable_temporal_vector_index("embedding", temporal_config2)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_is_temporal_vector_index_enabled() {
+        use crate::index::vector::{DistanceMetric, HnswConfig, TemporalVectorConfig};
+
+        let db = GallifreyDB::new();
+
+        // Initially disabled
+        assert!(!db.is_temporal_vector_index_enabled());
+
+        // Enable temporal vector index
+        let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine);
+        let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+        db.enable_temporal_vector_index("embedding", temporal_config)
+            .unwrap();
+
+        // Now enabled
+        assert!(db.is_temporal_vector_index_enabled());
+    }
+
+    #[test]
+    fn test_find_similar_as_of_api() -> crate::utils::Result<()> {
+        use crate::index::vector::{
+            DistanceMetric, HnswConfig, TemporalVectorConfig, temporal::SnapshotStrategy,
+        };
+
+        let db = GallifreyDB::new();
+
+        // Enable temporal vector index with frequent snapshots
+        let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine);
+        let mut temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+        temporal_config.snapshot_strategy = SnapshotStrategy::TransactionInterval(1);
+        db.enable_temporal_vector_index("embedding", temporal_config)?;
+
+        // Create nodes with vectors at different times
+        let _node1 = db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                .build(),
+        )?;
+
+        let _node2 = db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                .build(),
+        )?;
+
+        // Query as of current time
+        let query = [1.0f32, 0.0, 0.0];
+        let timestamp = crate::core::temporal::time::now();
+        let _results = db.find_similar_as_of(&query, 10, timestamp)?;
+
+        // Should complete successfully (exact count depends on snapshot timing)
+        // Just verify no panic occurred
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_similar_in_range_api() -> crate::utils::Result<()> {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::{
+            DistanceMetric, HnswConfig, TemporalVectorConfig, temporal::SnapshotStrategy,
+        };
+
+        let db = GallifreyDB::new();
+
+        // Enable temporal vector index with frequent snapshots
+        let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine);
+        let mut temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+        temporal_config.snapshot_strategy = SnapshotStrategy::TransactionInterval(1);
+        db.enable_temporal_vector_index("embedding", temporal_config)?;
+
+        // Create nodes with vectors
+        let _node1 = db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
+                .build(),
+        )?;
+
+        let _node2 = db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
+                .build(),
+        )?;
+
+        // Query over time range
+        let query = [1.0f32, 0.0, 0.0];
+        let time_range = TimeRange::between(0, crate::core::temporal::time::now());
+        let _results = db.find_similar_in_range(&query, 5, time_range)?;
+
+        // Should complete successfully (exact results depend on snapshot timing)
+        // Just verify no panic occurred
+
+        Ok(())
+    }
 }
