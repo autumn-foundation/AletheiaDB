@@ -81,6 +81,10 @@ pub struct HistoricalStorage {
     node_version_heads: HashMap<NodeId, VersionId>,
     /// Head version ID for each edge (most recent)
     edge_version_heads: HashMap<EdgeId, VersionId>,
+    /// Cached version counts per node (for O(1) capacity checks)
+    node_version_counts: HashMap<NodeId, usize>,
+    /// Cached version counts per edge (for O(1) capacity checks)
+    edge_version_counts: HashMap<EdgeId, usize>,
 }
 
 impl HistoricalStorage {
@@ -106,6 +110,8 @@ impl HistoricalStorage {
             edge_versions: HashMap::new(),
             node_version_heads: HashMap::new(),
             edge_version_heads: HashMap::new(),
+            node_version_counts: HashMap::new(),
+            edge_version_counts: HashMap::new(),
         }
     }
 
@@ -122,8 +128,8 @@ impl HistoricalStorage {
         label: InternedString,
         properties: PropertyMap,
     ) -> Result<()> {
-        // Check capacity limit (DoS protection)
-        let version_count = self.count_node_versions(node_id);
+        // Check capacity limit using cached count (O(1) operation, DoS protection)
+        let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
         if version_count >= self.retention_policy.max_versions_per_entity {
             return Err(StorageError::CapacityExceeded {
                 resource: format!("node {} versions", node_id),
@@ -179,6 +185,9 @@ impl HistoricalStorage {
         self.node_versions.insert(version_id, version);
         self.node_version_heads.insert(node_id, version_id);
 
+        // Increment cached version count (for O(1) capacity checks)
+        *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+
         Ok(())
     }
 
@@ -195,8 +204,8 @@ impl HistoricalStorage {
         target: NodeId,
         properties: PropertyMap,
     ) -> Result<()> {
-        // Check capacity limit (DoS protection)
-        let version_count = self.count_edge_versions(edge_id);
+        // Check capacity limit using cached count (O(1) operation, DoS protection)
+        let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
         if version_count >= self.retention_policy.max_versions_per_entity {
             return Err(StorageError::CapacityExceeded {
                 resource: format!("edge {} versions", edge_id),
@@ -248,6 +257,9 @@ impl HistoricalStorage {
 
         self.edge_versions.insert(version_id, version);
         self.edge_version_heads.insert(edge_id, version_id);
+
+        // Increment cached version count (for O(1) capacity checks)
+        *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
 
         Ok(())
     }
@@ -462,40 +474,6 @@ impl HistoricalStorage {
                 return count;
             }
         }
-    }
-
-    /// Count the number of versions for a specific node.
-    fn count_node_versions(&self, node_id: NodeId) -> usize {
-        let mut count = 0;
-        let mut current_id = self.node_version_heads.get(&node_id).copied();
-
-        while let Some(version_id) = current_id {
-            count += 1;
-            if let Some(version) = self.node_versions.get(&version_id) {
-                current_id = version.prev_version;
-            } else {
-                break;
-            }
-        }
-
-        count
-    }
-
-    /// Count the number of versions for a specific edge.
-    fn count_edge_versions(&self, edge_id: EdgeId) -> usize {
-        let mut count = 0;
-        let mut current_id = self.edge_version_heads.get(&edge_id).copied();
-
-        while let Some(version_id) = current_id {
-            count += 1;
-            if let Some(version) = self.edge_versions.get(&version_id) {
-                current_id = version.prev_version;
-            } else {
-                break;
-            }
-        }
-
-        count
     }
 
     /// Get statistics about the storage.

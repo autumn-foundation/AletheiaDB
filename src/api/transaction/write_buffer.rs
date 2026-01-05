@@ -125,12 +125,15 @@ impl WriteBuffer {
     }
 
     /// Create a write buffer with pre-allocated capacity
+    ///
+    /// Sets max_operations to the requested capacity to avoid confusing behavior
+    /// where the buffer is pre-allocated but still enforces the default limit.
     pub fn with_capacity(capacity: usize) -> Self {
         WriteBuffer {
             operations: Vec::with_capacity(capacity),
             modified_nodes: HashMap::with_capacity(capacity / 2),
             modified_edges: HashMap::with_capacity(capacity / 2),
-            max_operations: DEFAULT_MAX_OPERATIONS,
+            max_operations: capacity,
         }
     }
 
