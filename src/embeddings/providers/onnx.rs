@@ -227,9 +227,9 @@ impl EmbeddingProvider for OnnxProvider {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        // ONNX is sync, but we wrap in async for trait consistency
-        // Use block_in_place to avoid blocking the async runtime
-        tokio::task::block_in_place(|| self.run_inference(text))
+        // Placeholder implementation returns error immediately
+        // No need for block_in_place since there's no actual blocking work
+        self.run_inference(text)
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
