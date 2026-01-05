@@ -90,7 +90,11 @@
 //! See [`docs/VECTOR_SEARCH_DESIGN.md`](../../docs/VECTOR_SEARCH_DESIGN.md) for complete architecture.
 
 use crate::core::id::NodeId;
+use crate::core::temporal::Timestamp;
 use crate::utils::Result;
+
+/// Type alias for temporal search results: Vec<(timestamp, Vec<(node_id, similarity)>)>
+pub type TemporalSearchResults = Vec<(Timestamp, Vec<(NodeId, f32)>)>;
 
 /// Distance metric used for similarity computation.
 ///
@@ -469,5 +473,13 @@ mod tests {
 // HNSW implementation
 pub mod hnsw;
 
+// Temporal vector index (Phase 3)
+pub mod temporal;
+
 // Re-export HNSW types for convenience
 pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};
+
+// Re-export temporal types for convenience
+pub use temporal::{
+    RetentionPolicy, SnapshotInfo, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
+};

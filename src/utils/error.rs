@@ -26,6 +26,13 @@ pub enum Error {
     Vector(VectorError),
     /// I/O errors.
     Io(io::Error),
+    /// Feature not yet implemented.
+    NotImplemented {
+        /// The feature that is not implemented
+        feature: String,
+        /// Why it's not implemented (e.g., "Phase 4 feature")
+        reason: String,
+    },
     /// Other errors.
     Other(String),
 }
@@ -34,6 +41,14 @@ impl Error {
     /// Create a new error from a message.
     pub fn other<S: Into<String>>(msg: S) -> Self {
         Error::Other(msg.into())
+    }
+
+    /// Create a new NotImplemented error.
+    pub fn not_implemented<S: Into<String>, R: Into<String>>(feature: S, reason: R) -> Self {
+        Error::NotImplemented {
+            feature: feature.into(),
+            reason: reason.into(),
+        }
     }
 }
 
@@ -46,6 +61,9 @@ impl fmt::Display for Error {
             Error::Transaction(e) => write!(f, "Transaction error: {}", e),
             Error::Vector(e) => write!(f, "Vector error: {}", e),
             Error::Io(e) => write!(f, "I/O error: {}", e),
+            Error::NotImplemented { feature, reason } => {
+                write!(f, "Feature not implemented: {} ({})", feature, reason)
+            }
             Error::Other(msg) => write!(f, "{}", msg),
         }
     }

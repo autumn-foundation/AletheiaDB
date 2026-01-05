@@ -1,0 +1,327 @@
+//! Benchmarks for temporal vector operations (Phase 3).
+//!
+//! Measures performance of:
+//! - Snapshot creation with different strategies
+//! - Point-in-time vector queries
+//! - Time-range vector queries
+//! - Snapshot pruning
+//! - Temporal vector index overhead vs current-only index
+
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use gallifreydb::core::id::NodeId;
+use gallifreydb::core::temporal::TimeRange;
+use gallifreydb::index::vector::temporal::{
+    RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
+};
+use gallifreydb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndex};
+use std::sync::Arc;
+
+/// Helper to create a test temporal index
+fn create_temporal_index(dimensions: usize) -> TemporalVectorIndex {
+    let hnsw_config = HnswConfig::new(dimensions, DistanceMetric::Cosine);
+    let config = TemporalVectorConfig {
+        snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
+        retention_policy: RetentionPolicy::KeepN(100),
+        max_snapshots: 100,
+        hnsw_config,
+    };
+    TemporalVectorIndex::new(config).unwrap()
+}
+
+/// Benchmark snapshot creation with different strategies
+fn bench_snapshot_creation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("snapshot_creation");
+
+    for strategy in [
+        (
+            "transaction_interval_10",
+            SnapshotStrategy::TransactionInterval(10),
+        ),
+        (
+            "transaction_interval_100",
+            SnapshotStrategy::TransactionInterval(100),
+        ),
+        ("time_interval_1s", SnapshotStrategy::TimeInterval(1)),
+    ] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(strategy.0),
+            &strategy.1,
+            |b, snapshot_strategy| {
+                let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
+                let config = TemporalVectorConfig {
+                    snapshot_strategy: snapshot_strategy.clone(),
+                    retention_policy: RetentionPolicy::KeepN(10),
+                    max_snapshots: 100,
+                    hnsw_config,
+                };
+                let index = TemporalVectorIndex::new(config).unwrap();
+
+                // Populate index with some vectors
+                for i in 0..100 {
+                    let node_id = NodeId::new(i).unwrap();
+                    let vector: Vec<f32> = (0..384).map(|j| (i + j) as f32 / 1000.0).collect();
+                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                }
+
+                b.iter(|| {
+                    let _ = index.on_transaction();
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark point-in-time vector queries
+fn bench_point_in_time_queries(c: &mut Criterion) {
+    let mut group = c.benchmark_group("point_in_time_queries");
+
+    for size in [100, 1000, 10000] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}vectors", size)),
+            &size,
+            |b, &size| {
+                let index = create_temporal_index(128);
+
+                // Populate index and create snapshots
+                for i in 0..size {
+                    let node_id = NodeId::new(i).unwrap();
+                    let vector: Vec<f32> = (0..128).map(|j| (i + j) as f32 / 1000.0).collect();
+                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+
+                    if i % 100 == 0 {
+                        let _ = index.on_transaction();
+                        let _ = index.on_transaction();
+                    }
+                }
+
+                let query_vector: Vec<f32> = (0..128).map(|i| i as f32 / 1000.0).collect();
+                let query_timestamp = (size / 2) as i64 * 1000;
+
+                b.iter(|| {
+                    let _ = index.find_similar_as_of(
+                        black_box(&query_vector),
+                        black_box(10),
+                        black_box(query_timestamp),
+                    );
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark time-range vector queries
+fn bench_time_range_queries(c: &mut Criterion) {
+    let mut group = c.benchmark_group("time_range_queries");
+    group.throughput(Throughput::Elements(1));
+
+    for snapshot_count in [5, 10, 20] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}snapshots", snapshot_count)),
+            &snapshot_count,
+            |b, &snapshot_count| {
+                let index = create_temporal_index(128);
+
+                // Create multiple snapshots
+                let vectors_per_snapshot = 100;
+                for snapshot_idx in 0..snapshot_count {
+                    for i in 0..vectors_per_snapshot {
+                        let node_id =
+                            NodeId::new((snapshot_idx * vectors_per_snapshot + i) as u64).unwrap();
+                        let vector: Vec<f32> = (0..128)
+                            .map(|j| (snapshot_idx + i + j) as f32 / 1000.0)
+                            .collect();
+                        let timestamp = (snapshot_idx * 10000 + i * 100) as i64;
+                        let _ = index.add(node_id, &vector, timestamp);
+                    }
+                    let _ = index.on_transaction();
+                    let _ = index.on_transaction();
+                }
+
+                let query_vector: Vec<f32> = (0..128).map(|i| i as f32 / 1000.0).collect();
+                let time_range = TimeRange::between(0, (snapshot_count * 10000) as i64);
+
+                b.iter(|| {
+                    let _ = index.find_similar_in_range(
+                        black_box(&query_vector),
+                        black_box(10),
+                        black_box(time_range),
+                    );
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark snapshot pruning
+fn bench_snapshot_pruning(c: &mut Criterion) {
+    let mut group = c.benchmark_group("snapshot_pruning");
+
+    for snapshot_count in [10, 50, 100] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}snapshots", snapshot_count)),
+            &snapshot_count,
+            |b, &snapshot_count| {
+                b.iter_batched(
+                    || {
+                        // Setup: create index with many snapshots
+                        let hnsw_config = HnswConfig::new(128, DistanceMetric::Cosine);
+                        let config = TemporalVectorConfig {
+                            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                            retention_policy: RetentionPolicy::KeepN(snapshot_count / 2),
+                            max_snapshots: snapshot_count * 2,
+                            hnsw_config,
+                        };
+                        let index = TemporalVectorIndex::new(config).unwrap();
+
+                        // Create snapshots
+                        for i in 0..snapshot_count {
+                            let node_id = NodeId::new(i as u64).unwrap();
+                            let vector: Vec<f32> =
+                                (0..128).map(|j| (i + j) as f32 / 1000.0).collect();
+                            let _ = index.add(node_id, &vector, i as i64 * 1000);
+                            let _ = index.on_transaction();
+                        }
+
+                        index
+                    },
+                    |index| {
+                        // Measure pruning
+                        let _ = index.prune_snapshots();
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Compare overhead of temporal index vs current-only index
+fn bench_temporal_vs_current_overhead(c: &mut Criterion) {
+    let mut group = c.benchmark_group("temporal_vs_current_overhead");
+    group.throughput(Throughput::Elements(1));
+
+    // Benchmark current-only HNSW index (baseline)
+    group.bench_function("current_only_add", |b| {
+        let index = HnswIndex::new(HnswConfig::new(128, DistanceMetric::Cosine)).unwrap();
+
+        let mut counter = 0u64;
+        b.iter(|| {
+            let node_id = NodeId::new(counter).unwrap();
+            let vector: Vec<f32> = (0..128).map(|i| (counter + i) as f32 / 1000.0).collect();
+            let _ = index.add(black_box(node_id), black_box(&vector));
+            counter += 1;
+        });
+    });
+
+    // Benchmark temporal index add (with overhead)
+    group.bench_function("temporal_add", |b| {
+        let index = create_temporal_index(128);
+
+        let mut counter = 0i64;
+        b.iter(|| {
+            let node_id = NodeId::new(counter as u64).unwrap();
+            let vector: Vec<f32> = (0..128).map(|i| (counter + i) as f32 / 1000.0).collect();
+            let _ = index.add(
+                black_box(node_id),
+                black_box(&vector),
+                black_box(counter * 1000),
+            );
+            counter += 1;
+        });
+    });
+
+    // Benchmark current-only search
+    group.bench_function("current_only_search", |b| {
+        let index = Arc::new(HnswIndex::new(HnswConfig::new(128, DistanceMetric::Cosine)).unwrap());
+
+        // Populate index
+        for i in 0..1000 {
+            let node_id = NodeId::new(i).unwrap();
+            let vector: Vec<f32> = (0..128).map(|j| (i + j) as f32 / 1000.0).collect();
+            let _ = index.add(node_id, &vector);
+        }
+
+        let query_vector: Vec<f32> = (0..128).map(|i| i as f32 / 1000.0).collect();
+
+        b.iter(|| {
+            let _ = index.search(black_box(&query_vector), black_box(10));
+        });
+    });
+
+    // Benchmark temporal index search (current state)
+    group.bench_function("temporal_search_current", |b| {
+        let index = create_temporal_index(128);
+
+        // Populate index
+        for i in 0..1000 {
+            let node_id = NodeId::new(i).unwrap();
+            let vector: Vec<f32> = (0..128).map(|j| (i + j) as f32 / 1000.0).collect();
+            let _ = index.add(node_id, &vector, i as i64 * 1000);
+        }
+
+        let query_vector: Vec<f32> = (0..128).map(|i| i as f32 / 1000.0).collect();
+
+        b.iter(|| {
+            let _ = index
+                .current_index()
+                .search(black_box(&query_vector), black_box(10));
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark snapshot creation with different vector counts
+fn bench_snapshot_creation_by_size(c: &mut Criterion) {
+    let mut group = c.benchmark_group("snapshot_creation_by_size");
+
+    for vector_count in [100, 500, 1000, 5000] {
+        group.throughput(Throughput::Elements(vector_count as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}vectors", vector_count)),
+            &vector_count,
+            |b, &vector_count| {
+                b.iter_batched(
+                    || {
+                        // Setup: create index with vectors
+                        let index = create_temporal_index(128);
+                        for i in 0..vector_count {
+                            let node_id = NodeId::new(i as u64).unwrap();
+                            let vector: Vec<f32> =
+                                (0..128).map(|j| (i + j) as f32 / 1000.0).collect();
+                            let _ = index.add(node_id, &vector, i as i64 * 1000);
+                        }
+                        index
+                    },
+                    |index| {
+                        // Measure manual snapshot creation
+                        let _ = index.create_manual_snapshot();
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_snapshot_creation,
+    bench_point_in_time_queries,
+    bench_time_range_queries,
+    bench_snapshot_pruning,
+    bench_temporal_vs_current_overhead,
+    bench_snapshot_creation_by_size,
+);
+criterion_main!(benches);
