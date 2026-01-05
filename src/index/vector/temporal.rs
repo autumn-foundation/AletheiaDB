@@ -24,7 +24,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig, SnapshotStrategy};
+//! use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig, SnapshotStrategy, RetentionPolicy};
 //! use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
 //! use gallifreydb::core::id::NodeId;
 //! use gallifreydb::core::temporal::TimeRange;
