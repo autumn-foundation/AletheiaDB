@@ -34,8 +34,8 @@ use serde::Serialize;
 /// Configuration for HuggingFace Inference API.
 #[derive(Clone)]
 pub struct HuggingFaceConfig {
-    /// API token (from HF_TOKEN environment variable or direct)
-    pub api_token: String,
+    /// API token (from HF_TOKEN environment variable or direct) - kept private for security
+    api_token: String,
     /// Model ID (e.g., "sentence-transformers/all-MiniLM-L6-v2")
     pub model_id: String,
     /// Expected dimensions (must match model)
@@ -44,6 +44,18 @@ pub struct HuggingFaceConfig {
     pub base_url: Option<String>,
     /// Request timeout
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for HuggingFaceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HuggingFaceConfig")
+            .field("api_token", &"<redacted>")
+            .field("model_id", &self.model_id)
+            .field("dimensions", &self.dimensions)
+            .field("base_url", &self.base_url)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl HuggingFaceConfig {
@@ -113,6 +125,13 @@ impl HuggingFaceConfig {
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;
         self
+    }
+
+    /// Get the API token (internal use only).
+    ///
+    /// This is intentionally not public to prevent accidental exposure.
+    pub(crate) fn api_token(&self) -> &str {
+        &self.api_token
     }
 
     /// Create a config for the popular all-MiniLM-L6-v2 model (384 dimensions).
@@ -196,7 +215,14 @@ impl EmbeddingProvider for HuggingFaceProvider {
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         let results = self.embed_batch(&[text]).await?;
-        Ok(results.into_iter().next().unwrap())
+        results
+            .into_iter()
+            .next()
+            .ok_or_else(|| EmbeddingError::ProviderError {
+                provider: "HuggingFace".to_string(),
+                message: "Empty response from API".to_string(),
+                status_code: None,
+            })
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
@@ -221,7 +247,10 @@ impl EmbeddingProvider for HuggingFaceProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_token))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.api_token()),
+            )
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
@@ -346,7 +375,7 @@ mod tests {
                 .with_base_url("https://custom.api".to_string())
                 .with_timeout(120);
 
-        assert_eq!(config.api_token, "test-token");
+        // API token is private for security - test other fields
         assert_eq!(config.model_id, "test-model");
         assert_eq!(config.dimensions, 384);
         assert_eq!(config.base_url, Some("https://custom.api".to_string()));

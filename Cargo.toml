@@ -54,6 +54,7 @@ embeddings = ["dep:tokio", "dep:async-trait", "dep:serde", "dep:serde_json"]
 # Individual provider features (each implies 'embeddings')
 embedding-openai = ["embeddings", "dep:reqwest"]
 embedding-huggingface = ["embeddings", "dep:reqwest"]
+# IMPORTANT: ONNX provider is currently a PLACEHOLDER - returns errors, not functional
 embedding-onnx = ["embeddings", "dep:ort", "dep:tokenizers", "dep:num_cpus"]
 embedding-ollama = ["embeddings", "dep:reqwest"]
 

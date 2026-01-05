@@ -65,14 +65,25 @@ impl OpenAIModel {
 /// Configuration for OpenAI provider.
 #[derive(Clone)]
 pub struct OpenAIConfig {
-    /// API key (from environment or direct)
-    pub api_key: String,
+    /// API key (from environment or direct) - kept private for security
+    api_key: String,
     /// Model to use
     pub model: OpenAIModel,
     /// API base URL (default: https://api.openai.com/v1)
     pub base_url: Option<String>,
     /// Request timeout in seconds
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for OpenAIConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIConfig")
+            .field("api_key", &"<redacted>")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl OpenAIConfig {
@@ -131,6 +142,13 @@ impl OpenAIConfig {
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;
         self
+    }
+
+    /// Get the API key (internal use only).
+    ///
+    /// This is intentionally not public to prevent accidental exposure.
+    pub(crate) fn api_key(&self) -> &str {
+        &self.api_key
     }
 }
 
@@ -194,10 +212,14 @@ impl EmbeddingProvider for OpenAIProvider {
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         let results = self.embed_batch(&[text]).await?;
-        Ok(results
+        results
             .into_iter()
             .next()
-            .expect("batch with one element always returns one result"))
+            .ok_or_else(|| EmbeddingError::ProviderError {
+                provider: "OpenAI".to_string(),
+                message: "Empty response from API".to_string(),
+                status_code: None,
+            })
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
@@ -220,7 +242,7 @@ impl EmbeddingProvider for OpenAIProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Authorization", format!("Bearer {}", self.config.api_key()))
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
@@ -300,7 +322,12 @@ impl EmbeddingProvider for OpenAIProvider {
 
     fn max_text_length(&self) -> Option<usize> {
         // OpenAI's token limit is 8191 tokens
-        // Approximate as 4 characters per token for safety
+        // APPROXIMATION: We estimate 4 characters per token for safety margin.
+        // This is a rough estimate and may be inaccurate for:
+        // - Non-English text (different tokenization)
+        // - Code or technical content (more tokens per character)
+        // - Languages with different character sets
+        // For accurate token counting, consider using tiktoken-rs or similar
         Some(8191 * 4)
     }
 }
@@ -366,7 +393,7 @@ mod tests {
             .with_base_url("https://custom.api".to_string())
             .with_timeout(60);
 
-        assert_eq!(config.api_key, "test-key");
+        // API key is private for security - test other fields
         assert_eq!(config.model, OpenAIModel::TextEmbedding3Small);
         assert_eq!(config.base_url, Some("https://custom.api".to_string()));
         assert_eq!(config.timeout_secs, 60);
