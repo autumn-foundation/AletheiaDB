@@ -931,7 +931,7 @@ impl WriteOps for WriteTransaction {
         // Generate IDs
         let node_id = NodeId::new_unchecked(self.node_id_gen.lock_or_err()?.next()?);
         let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
-        let label_interned = GLOBAL_INTERNER.intern(label);
+        let label_interned = GLOBAL_INTERNER.intern(label)?;
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;
@@ -968,7 +968,7 @@ impl WriteOps for WriteTransaction {
         // Generate IDs
         let edge_id = EdgeId::new_unchecked(self.edge_id_gen.lock_or_err()?.next()?);
         let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
-        let label_interned = GLOBAL_INTERNER.intern(label);
+        let label_interned = GLOBAL_INTERNER.intern(label)?;
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;

@@ -289,7 +289,7 @@ mod tests {
     pub(super) fn create_test_node(id: u64, label: &str) -> Node {
         Node::new(
             NodeId::new(id).unwrap(),
-            GLOBAL_INTERNER.intern(label),
+            GLOBAL_INTERNER.intern(label).unwrap(),
             PropertyMapBuilder::new().build(),
             VersionId::new(1).unwrap(),
         )
@@ -298,7 +298,7 @@ mod tests {
     pub(super) fn create_test_edge(id: u64, source: u64, target: u64, label: &str) -> Edge {
         Edge::new(
             EdgeId::new(id).unwrap(),
-            GLOBAL_INTERNER.intern(label),
+            GLOBAL_INTERNER.intern(label).unwrap(),
             NodeId::new(source).unwrap(),
             NodeId::new(target).unwrap(),
             PropertyMapBuilder::new().build(),
@@ -390,8 +390,8 @@ mod tests {
     fn test_labeled_traversal() {
         let indexes = CurrentIndexes::new();
 
-        let knows = GLOBAL_INTERNER.intern("KNOWS");
-        let follows = GLOBAL_INTERNER.intern("FOLLOWS");
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let follows = GLOBAL_INTERNER.intern("FOLLOWS").unwrap();
 
         // Add edges with different labels
         indexes.insert_edge(create_test_edge(0, 0, 1, "KNOWS"));

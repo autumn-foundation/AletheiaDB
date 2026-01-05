@@ -11,7 +11,7 @@
 use crate::api::transaction::types::TxId;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
-use crate::core::property::{PropertyMap, PropertyValue};
+use crate::core::property::{PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
 
@@ -107,9 +107,9 @@ impl Default for AnchorConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDelta {
     /// Properties that were added or modified
-    pub changed: HashMap<String, PropertyValue>,
+    pub changed: HashMap<PropertyKey, PropertyValue>,
     /// Properties that were removed
-    pub removed: HashSet<String>,
+    pub removed: HashSet<PropertyKey>,
 }
 
 impl PropertyDelta {
@@ -129,21 +129,21 @@ impl PropertyDelta {
 
         // Find added and modified properties
         for (key, new_value) in new.iter() {
-            match old.get(key) {
+            match old.get_by_interned_key(key) {
                 Some(old_value) if old_value == new_value => {
                     // Unchanged, skip
                 }
                 _ => {
                     // Added or modified
-                    delta.changed.insert(key.clone(), new_value.clone());
+                    delta.changed.insert(*key, new_value.clone());
                 }
             }
         }
 
         // Find removed properties
         for key in old.keys() {
-            if !new.contains_key(key) {
-                delta.removed.insert(key.clone());
+            if !new.contains_interned_key(key) {
+                delta.removed.insert(*key);
             }
         }
 
@@ -157,12 +157,12 @@ impl PropertyDelta {
 
         // Apply changes
         for (key, value) in &self.changed {
-            builder = builder.insert(key.clone(), value.clone());
+            builder = builder.insert_by_key(*key, value.clone());
         }
 
         // Apply removals
         for key in &self.removed {
-            builder = builder.remove(key);
+            builder = builder.remove_by_key(key);
         }
 
         builder.build()
@@ -401,6 +401,7 @@ impl TemporalVersion for EdgeVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
 
     #[test]
@@ -422,7 +423,11 @@ mod tests {
 
         assert_eq!(delta.changed.len(), 2); // age modified, country added
         assert_eq!(delta.removed.len(), 1); // city removed
-        assert!(delta.removed.contains("city"));
+        assert!(
+            delta
+                .removed
+                .contains(&GLOBAL_INTERNER.intern("city").unwrap())
+        );
     }
 
     #[test]
@@ -433,12 +438,14 @@ mod tests {
             .build();
 
         let mut delta = PropertyDelta::new();
-        delta
-            .changed
-            .insert("age".to_string(), PropertyValue::Int(31));
-        delta
-            .changed
-            .insert("city".to_string(), PropertyValue::string("NYC"));
+        delta.changed.insert(
+            GLOBAL_INTERNER.intern("age").unwrap(),
+            PropertyValue::Int(31),
+        );
+        delta.changed.insert(
+            GLOBAL_INTERNER.intern("city").unwrap(),
+            PropertyValue::string("NYC"),
+        );
 
         let result = delta.apply(&base);
 
@@ -465,7 +472,9 @@ mod tests {
             VersionId::new(1).unwrap(),
             NodeId::new(10).unwrap(),
             temporal,
-            crate::core::interning::GLOBAL_INTERNER.intern("Person"),
+            crate::core::interning::GLOBAL_INTERNER
+                .intern("Person")
+                .unwrap(),
             props,
         );
 
@@ -486,7 +495,9 @@ mod tests {
             VersionId::new(2).unwrap(),
             EdgeId::new(20).unwrap(),
             temporal,
-            crate::core::interning::GLOBAL_INTERNER.intern("KNOWS"),
+            crate::core::interning::GLOBAL_INTERNER
+                .intern("KNOWS")
+                .unwrap(),
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
             &old_props,

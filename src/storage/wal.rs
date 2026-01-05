@@ -441,7 +441,7 @@ impl WriteAheadLog {
                 buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
                 buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer);
+                properties.serialize_into(&mut buffer)?;
                 temporal.serialize_into(&mut buffer);
             }
             WalOperation::CreateEdge {
@@ -458,7 +458,7 @@ impl WriteAheadLog {
                 buffer.extend_from_slice(&target.as_u64().to_le_bytes());
                 buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer);
+                properties.serialize_into(&mut buffer)?;
                 temporal.serialize_into(&mut buffer);
             }
             WalOperation::UpdateNode {
@@ -473,7 +473,7 @@ impl WriteAheadLog {
                 buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
                 buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer);
+                properties.serialize_into(&mut buffer)?;
                 temporal.serialize_into(&mut buffer);
             }
             WalOperation::UpdateEdge {
@@ -488,7 +488,7 @@ impl WriteAheadLog {
                 buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
                 buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer);
+                properties.serialize_into(&mut buffer)?;
                 temporal.serialize_into(&mut buffer);
             }
             WalOperation::DeleteNode { node_id, temporal } => {

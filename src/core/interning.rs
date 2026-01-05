@@ -88,44 +88,83 @@ impl StringInterner {
     ///
     /// This method is thread-safe and lock-free.
     ///
-    /// # Panics
-    /// Panics if the maximum capacity is exceeded (DoS protection).
-    /// This is intentional to prevent unbounded memory growth.
-    pub fn intern<S: AsRef<str>>(&self, string: S) -> InternedString {
+    /// # Errors
+    /// Returns `Error::Storage(StorageError::CapacityExceeded)` if the maximum
+    /// capacity is exceeded (DoS protection). This prevents unbounded memory growth.
+    pub fn intern<S: AsRef<str>>(
+        &self,
+        string: S,
+    ) -> std::result::Result<InternedString, crate::utils::error::Error> {
+        let string = string.as_ref();
+
+        // Fast path: check if already interned (avoids Arc allocation)
+        if let Some(id) = self.get_id(string) {
+            return Ok(id);
+        }
+
+        // Slow path: need to intern the string
+        // Use entry API for atomic check-and-insert
+        // This prevents race conditions where two threads could assign different IDs
+        // to the same string
+        let arc_str: Arc<str> = Arc::from(string);
+
+        self.string_to_id
+            .entry(arc_str.clone())
+            .or_try_insert_with(|| {
+                // Atomically reserve an ID first to prevent capacity check race
+                let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
+
+                // Check if we exceeded capacity AFTER reserving ID
+                if id_value >= self.max_capacity as u32 {
+                    // Best effort: undo the reservation
+                    self.next_id.fetch_sub(1, Ordering::Relaxed);
+
+                    return Err(crate::utils::error::Error::Storage(
+                        crate::utils::error::StorageError::CapacityExceeded {
+                            resource: "string interner".to_string(),
+                            current: id_value as usize,
+                            limit: self.max_capacity,
+                        },
+                    ));
+                }
+
+                let id = InternedString(id_value);
+
+                // Store the reverse mapping
+                self.id_to_string.insert(id, arc_str.clone());
+
+                Ok(id)
+            })
+            .map(|r| *r)
+    }
+
+    /// Intern a string without capacity checks.
+    ///
+    /// # Safety
+    /// This method bypasses capacity limits. It should only be used in trusted
+    /// internal contexts where the string is known to be valid and necessary,
+    /// such as WAL recovery or deserialization of known-good data.
+    ///
+    /// Using this method with untrusted input could lead to unbounded memory growth.
+    #[inline]
+    #[allow(dead_code)] // Available for internal use (WAL recovery, etc.)
+    pub(crate) fn intern_unchecked<S: AsRef<str>>(&self, string: S) -> InternedString {
         let string = string.as_ref();
 
         // Fast path: check if already interned
-        if let Some(id) = self.string_to_id.get(string) {
-            return *id;
+        if let Some(id) = self.get_id(string) {
+            return id;
         }
 
-        // Check capacity before interning (DoS protection)
-        let current_count = self.string_to_id.len();
-        if current_count >= self.max_capacity {
-            panic!(
-                "String interner capacity exceeded: current={}, limit={} (DoS protection). \
-                 This prevents unbounded memory growth from malicious or buggy clients.",
-                current_count, self.max_capacity
-            );
-        }
-
-        // Slow path: need to intern a new string
+        // Slow path: intern without capacity check
         let arc_str: Arc<str> = Arc::from(string);
 
-        // Double-check to handle race conditions
-        // Another thread might have interned it while we were creating the Arc
-        if let Some(id) = self.string_to_id.get(arc_str.as_ref()) {
-            return *id;
-        }
-
-        // Assign a new ID
-        let id = InternedString(self.next_id.fetch_add(1, Ordering::Relaxed));
-
-        // Store in both directions
-        self.string_to_id.insert(Arc::clone(&arc_str), id);
-        self.id_to_string.insert(id, arc_str);
-
-        id
+        *self.string_to_id.entry(arc_str.clone()).or_insert_with(|| {
+            let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let id = InternedString(id_value);
+            self.id_to_string.insert(id, arc_str.clone());
+            id
+        })
     }
 
     /// Resolve an interned string ID back to the original string.
@@ -195,8 +234,8 @@ impl Default for StringInterner {
 /// ```ignore
 /// use gallifreydb::core::interning::GLOBAL_INTERNER;
 ///
-/// let id1 = GLOBAL_INTERNER.intern("Person");
-/// let id2 = GLOBAL_INTERNER.intern("Person");
+/// let id1 = GLOBAL_INTERNER.intern("Person").unwrap();
+/// let id2 = GLOBAL_INTERNER.intern("Person").unwrap();
 /// assert_eq!(id1, id2); // Same string gets same ID
 ///
 /// let string = GLOBAL_INTERNER.resolve(id1).unwrap();
@@ -218,8 +257,8 @@ mod tests {
     fn test_intern_same_string() {
         let interner = StringInterner::new();
 
-        let id1 = interner.intern("hello");
-        let id2 = interner.intern("hello");
+        let id1 = interner.intern("hello").unwrap();
+        let id2 = interner.intern("hello").unwrap();
 
         assert_eq!(id1, id2, "Same string should get same ID");
     }
@@ -228,8 +267,8 @@ mod tests {
     fn test_intern_different_strings() {
         let interner = StringInterner::new();
 
-        let id1 = interner.intern("hello");
-        let id2 = interner.intern("world");
+        let id1 = interner.intern("hello").unwrap();
+        let id2 = interner.intern("world").unwrap();
 
         assert_ne!(id1, id2, "Different strings should get different IDs");
     }
@@ -238,7 +277,7 @@ mod tests {
     fn test_resolve() {
         let interner = StringInterner::new();
 
-        let id = interner.intern("test");
+        let id = interner.intern("test").unwrap();
         let resolved = interner.resolve(id).expect("Should resolve");
 
         assert_eq!(resolved.as_ref(), "test");
@@ -258,7 +297,7 @@ mod tests {
 
         assert!(!interner.contains("test"));
 
-        interner.intern("test");
+        interner.intern("test").unwrap();
 
         assert!(interner.contains("test"));
         assert!(!interner.contains("other"));
@@ -270,7 +309,7 @@ mod tests {
 
         assert_eq!(interner.get_id("test"), None);
 
-        let id = interner.intern("test");
+        let id = interner.intern("test").unwrap();
 
         assert_eq!(interner.get_id("test"), Some(id));
     }
@@ -282,9 +321,9 @@ mod tests {
         assert_eq!(interner.len(), 0);
         assert!(interner.is_empty());
 
-        interner.intern("a");
-        interner.intern("b");
-        interner.intern("a"); // Duplicate, shouldn't increase count
+        interner.intern("a").unwrap();
+        interner.intern("b").unwrap();
+        interner.intern("a").unwrap(); // Duplicate, shouldn't increase count
 
         assert_eq!(interner.len(), 2);
         assert!(!interner.is_empty());
@@ -294,7 +333,7 @@ mod tests {
     fn test_clear() {
         let interner = StringInterner::new();
 
-        let id = interner.intern("test");
+        let id = interner.intern("test").unwrap();
         assert!(interner.resolve(id).is_some());
 
         interner.clear();
@@ -314,8 +353,8 @@ mod tests {
         for _ in 0..10 {
             let interner_clone = Arc::clone(&interner);
             let handle = thread::spawn(move || {
-                let id1 = interner_clone.intern("concurrent");
-                let id2 = interner_clone.intern("test");
+                let id1 = interner_clone.intern("concurrent").unwrap();
+                let id2 = interner_clone.intern("test").unwrap();
                 (id1, id2)
             });
             handles.push(handle);
@@ -352,11 +391,8 @@ mod tests {
 
     #[test]
     fn test_global_interner() {
-        // Clear to ensure clean state
-        GLOBAL_INTERNER.clear();
-
-        let id1 = GLOBAL_INTERNER.intern("global");
-        let id2 = GLOBAL_INTERNER.intern("global");
+        let id1 = GLOBAL_INTERNER.intern("global").unwrap();
+        let id2 = GLOBAL_INTERNER.intern("global").unwrap();
 
         assert_eq!(id1, id2);
 

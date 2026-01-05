@@ -202,7 +202,7 @@ impl CurrentStorage {
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         let node_id = NodeId::new_unchecked(self.node_id_gen.next()?);
         let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
-        let label_interned = GLOBAL_INTERNER.intern(label);
+        let label_interned = GLOBAL_INTERNER.intern(label)?;
 
         let node = Node::new(node_id, label_interned, properties.clone(), version_id);
         self.indexes.insert_node(node.clone());
@@ -237,7 +237,7 @@ impl CurrentStorage {
 
         let edge_id = EdgeId::new_unchecked(self.edge_id_gen.next()?);
         let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
-        let label_interned = GLOBAL_INTERNER.intern(label);
+        let label_interned = GLOBAL_INTERNER.intern(label)?;
 
         let edge = Edge::new(
             edge_id,
@@ -535,7 +535,7 @@ impl CurrentStorage {
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
         let (index, query_vector) = self.prepare_vector_search(query_node_id)?;
-        let label_id = GLOBAL_INTERNER.intern(label);
+        let label_id = GLOBAL_INTERNER.intern(label)?;
 
         // Fetch a multiple of k candidates to increase the chance of finding enough matches.
         // Cap the over-fetch to prevent excessive memory usage with large k.
@@ -612,7 +612,7 @@ impl CurrentStorage {
         let index = self.prepare_vector_search_raw(embedding)?;
 
         // Intern the label for efficient comparison
-        let label_id = GLOBAL_INTERNER.intern(label);
+        let label_id = GLOBAL_INTERNER.intern(label)?;
 
         // Use adaptive over-fetch heuristic for filtered search
         let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::utils::error::{Result, StorageError};
 
 // ============================================================================
@@ -50,9 +51,9 @@ pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 
 /// Property key type.
 ///
-/// TODO: Replace with InternedString once string interning is implemented.
-/// For now, using String directly.
-pub type PropertyKey = String;
+/// Uses interned strings for memory efficiency and O(1) equality comparisons.
+/// Common keys like "name", "age", and "id" are deduplicated in memory.
+pub type PropertyKey = InternedString;
 
 /// A value that can be stored as a property.
 ///
@@ -713,14 +714,42 @@ impl PropertyMap {
     }
 
     /// Get a property value by key.
+    ///
+    /// The key is automatically interned before lookup for efficient comparison.
+    /// Returns None if the key is not found or if interning fails.
     #[inline]
     pub fn get(&self, key: &str) -> Option<&PropertyValue> {
+        let interned_key = GLOBAL_INTERNER.intern(key).ok()?;
+        self.get_by_interned_key(&interned_key)
+    }
+
+    /// Get a property value by an already-interned key.
+    ///
+    /// This is more efficient than `get()` when you already have an InternedString.
+    /// For internal use and performance-critical paths.
+    #[inline]
+    pub fn get_by_interned_key(&self, key: &PropertyKey) -> Option<&PropertyValue> {
         self.inner.get(key)
     }
 
     /// Check if a property exists.
+    ///
+    /// The key is automatically interned before lookup for efficient comparison.
+    /// Returns false if interning fails (key cannot exist if it can't be interned).
     #[inline]
     pub fn contains_key(&self, key: &str) -> bool {
+        let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
+            return false;
+        };
+        self.contains_interned_key(&interned_key)
+    }
+
+    /// Check if a property exists by an already-interned key.
+    ///
+    /// This is more efficient than `contains_key()` when you already have an InternedString.
+    /// For internal use and performance-critical paths.
+    #[inline]
+    pub fn contains_interned_key(&self, key: &PropertyKey) -> bool {
         self.inner.contains_key(key)
     }
 
@@ -779,23 +808,43 @@ impl PropertyMap {
     /// Note: HashMap ordering is not guaranteed, so serialization order
     /// may vary. This is acceptable for correctness but may affect
     /// byte-for-byte reproducibility.
-    pub fn serialize(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any PropertyKey cannot be resolved from the interner.
+    /// This should never happen in practice as all keys are created via interning.
+    pub fn serialize(&self) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
-        self.serialize_into(&mut buffer);
-        buffer
+        self.serialize_into(&mut buffer)?;
+        Ok(buffer)
     }
 
     /// Serialize this PropertyMap into an existing buffer.
-    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError::InconsistentState` if any PropertyKey cannot be
+    /// resolved from the interner, indicating data corruption.
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<()> {
         buffer.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
         for (key, value) in self.inner.iter() {
-            // Serialize key
-            let key_bytes = key.as_bytes();
+            // Serialize key: resolve InternedString to actual string
+            let key_str =
+                GLOBAL_INTERNER
+                    .resolve(*key)
+                    .ok_or_else(|| StorageError::InconsistentState {
+                        reason: format!(
+                            "PropertyKey {} not found in interner - data corruption detected",
+                            key.as_u32()
+                        ),
+                    })?;
+            let key_bytes = key_str.as_bytes();
             buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
             buffer.extend_from_slice(key_bytes);
             // Serialize value
             value.serialize_into(buffer);
         }
+        Ok(())
     }
 
     /// Deserialize a PropertyMap from bytes.
@@ -833,11 +882,11 @@ impl PropertyMap {
                 )
                 .into());
             }
-            let key = std::str::from_utf8(&bytes[offset..offset + key_len])
-                .map_err(|e| {
-                    StorageError::CorruptedData(format!("Invalid UTF-8 in property key: {}", e))
-                })?
-                .to_string();
+            let key_str = std::str::from_utf8(&bytes[offset..offset + key_len]).map_err(|e| {
+                StorageError::CorruptedData(format!("Invalid UTF-8 in property key: {}", e))
+            })?;
+            // Intern the key for efficient storage and comparison
+            let key = GLOBAL_INTERNER.intern(key_str)?;
             offset += key_len;
 
             // Read value
@@ -893,12 +942,23 @@ impl PropertyMapBuilder {
     }
 
     /// Insert a property.
-    pub fn insert<K: Into<PropertyKey>, V: Into<PropertyValue>>(
-        mut self,
-        key: K,
-        value: V,
-    ) -> Self {
-        self.map.insert(key.into(), value.into());
+    ///
+    /// The key is automatically interned. If interning fails (capacity exceeded),
+    /// returns self unchanged.
+    pub fn insert<V: Into<PropertyValue>>(mut self, key: &str, value: V) -> Self {
+        let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
+            return self;
+        };
+        self.map.insert(interned_key, value.into());
+        self
+    }
+
+    /// Insert a property with an already-interned key.
+    ///
+    /// This is more efficient than `insert()` when you already have a PropertyKey.
+    /// For internal use and performance-critical paths.
+    pub fn insert_by_key(mut self, key: PropertyKey, value: PropertyValue) -> Self {
+        self.map.insert(key, value);
         self
     }
 
@@ -923,12 +983,26 @@ impl PropertyMapBuilder {
     ///     Some(&embedding[..])
     /// );
     /// ```
-    pub fn insert_vector<K: Into<PropertyKey>>(self, key: K, vector: &[f32]) -> Self {
+    pub fn insert_vector(self, key: &str, vector: &[f32]) -> Self {
         self.insert(key, PropertyValue::vector(vector))
     }
 
     /// Remove a property.
-    pub fn remove(mut self, key: &str) -> Self {
+    ///
+    /// The key is automatically interned before removal.
+    /// If interning fails (capacity exceeded), returns self unchanged.
+    pub fn remove(self, key: &str) -> Self {
+        let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
+            return self;
+        };
+        self.remove_by_key(&interned_key)
+    }
+
+    /// Remove a property by an already-interned key.
+    ///
+    /// This is more efficient than `remove()` when you already have an InternedString.
+    /// For internal use and performance-critical paths.
+    pub fn remove_by_key(mut self, key: &PropertyKey) -> Self {
         self.map.remove(key);
         self
     }
@@ -1053,9 +1127,9 @@ mod tests {
 
         let keys: Vec<_> = map.keys().cloned().collect();
         assert_eq!(keys.len(), 3);
-        assert!(keys.contains(&"a".to_string()));
-        assert!(keys.contains(&"b".to_string()));
-        assert!(keys.contains(&"c".to_string()));
+        assert!(keys.contains(&GLOBAL_INTERNER.intern("a").unwrap()));
+        assert!(keys.contains(&GLOBAL_INTERNER.intern("b").unwrap()));
+        assert!(keys.contains(&GLOBAL_INTERNER.intern("c").unwrap()));
 
         let values: Vec<_> = map.values().cloned().collect();
         assert_eq!(values.len(), 3);
@@ -1469,7 +1543,7 @@ mod tests {
     #[test]
     fn test_serialize_property_map_empty() {
         let map = PropertyMap::new();
-        let bytes = map.serialize();
+        let bytes = map.serialize().expect("Serialization should succeed");
 
         // Empty map: just count (4 bytes) = [0, 0, 0, 0]
         assert_eq!(bytes, vec![0, 0, 0, 0]);
@@ -1488,7 +1562,7 @@ mod tests {
             .insert("score", 98.5)
             .build();
 
-        let bytes = map.serialize();
+        let bytes = map.serialize().expect("Serialization should succeed");
         let (deserialized, _) = PropertyMap::deserialize(&bytes).unwrap();
 
         // Check all values match
@@ -1516,7 +1590,7 @@ mod tests {
             .insert("embedding", PropertyValue::vector(&embedding))
             .build();
 
-        let bytes = map.serialize();
+        let bytes = map.serialize().expect("Serialization should succeed");
         let (deserialized, _) = PropertyMap::deserialize(&bytes).unwrap();
 
         assert_eq!(deserialized.len(), 2);
@@ -1542,7 +1616,7 @@ mod tests {
             )
             .build();
 
-        let bytes = map.serialize();
+        let bytes = map.serialize().expect("Serialization should succeed");
         let (deserialized, _) = PropertyMap::deserialize(&bytes).unwrap();
 
         let tags = deserialized.get("tags").and_then(|v| v.as_array()).unwrap();
@@ -1646,5 +1720,192 @@ mod tests {
         assert_eq!(bytes[6], 0x03);
         assert_eq!(bytes[7], 0x02);
         assert_eq!(bytes[8], 0x01);
+    }
+
+    // ========================================================================
+    // PropertyKey Interning Tests (Issue #16)
+    // ========================================================================
+
+    #[test]
+    fn test_property_key_interning_serialization_round_trip() {
+        // Create a property map with interned keys
+        let map = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("active", true)
+            .build();
+
+        // Serialize
+        let bytes = map.serialize().expect("Serialization should succeed");
+
+        // Deserialize
+        let (deserialized, _) =
+            PropertyMap::deserialize(&bytes).expect("Deserialization should succeed");
+
+        // Verify all values match
+        assert_eq!(
+            deserialized.get("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(deserialized.get("age").and_then(|v| v.as_int()), Some(30));
+        assert_eq!(
+            deserialized.get("active").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        // Verify keys are interned (same ID as original)
+        let original_keys: Vec<_> = map.keys().cloned().collect();
+        let deserialized_keys: Vec<_> = deserialized.keys().cloned().collect();
+
+        assert_eq!(original_keys.len(), deserialized_keys.len());
+        for key in &original_keys {
+            assert!(
+                deserialized_keys.contains(key),
+                "Key should be interned with same ID"
+            );
+        }
+    }
+
+    #[test]
+    fn test_property_key_memory_efficiency() {
+        use std::mem::size_of;
+
+        // Verify InternedString is indeed smaller than String
+        assert_eq!(
+            size_of::<InternedString>(),
+            4,
+            "InternedString should be 4 bytes"
+        );
+        assert_eq!(size_of::<String>(), 24, "String should be 24 bytes");
+
+        // Create multiple maps with the same keys
+        let maps: Vec<_> = (0..100)
+            .map(|i| {
+                PropertyMapBuilder::new()
+                    .insert("test_mem_name", format!("Person{}", i))
+                    .insert("test_mem_age", i as i64)
+                    .insert("test_mem_id", i as i64)
+                    .build()
+            })
+            .collect();
+
+        // Verify all maps use the same interned key IDs (order may vary)
+        use std::collections::HashSet;
+        let first_keys: HashSet<_> = maps[0].keys().cloned().collect();
+        for map in &maps[1..] {
+            let map_keys: HashSet<_> = map.keys().cloned().collect();
+            assert_eq!(
+                first_keys, map_keys,
+                "All maps should share the same interned key IDs"
+            );
+        }
+
+        // Verify we have exactly 3 unique keys across all maps
+        assert_eq!(first_keys.len(), 3, "Should have exactly 3 unique keys");
+
+        // Verify the specific keys exist and can be resolved
+        let expected_keys = ["test_mem_name", "test_mem_age", "test_mem_id"];
+        for key_str in &expected_keys {
+            let exists = first_keys.iter().any(|key| {
+                GLOBAL_INTERNER
+                    .resolve(*key)
+                    .map(|s| s.as_ref() == *key_str)
+                    .unwrap_or(false)
+            });
+            assert!(
+                exists,
+                "Key '{}' should exist in the property maps",
+                key_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_invalid_interned_string_serialization() {
+        // Create an InternedString with a raw ID that doesn't exist in the interner
+        let invalid_key = InternedString::from_raw(999999);
+
+        // Create a property map and manually insert with invalid key
+        let mut inner_map = HashMap::new();
+        inner_map.insert(invalid_key, PropertyValue::Int(42));
+        let map = PropertyMap {
+            inner: Arc::new(inner_map),
+        };
+
+        // Serialization should return an error, not panic
+        let result = map.serialize();
+        assert!(
+            result.is_err(),
+            "Serialization should fail for invalid InternedString"
+        );
+
+        match result {
+            Err(crate::utils::error::Error::Storage(StorageError::InconsistentState {
+                reason,
+            })) => {
+                assert!(
+                    reason.contains("not found in interner"),
+                    "Error message should indicate missing key in interner"
+                );
+            }
+            _ => panic!("Expected StorageError::InconsistentState"),
+        }
+    }
+
+    #[test]
+    fn test_concurrent_property_key_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Create a property map
+        let map = Arc::new(
+            PropertyMapBuilder::new()
+                .insert("shared_key", "value")
+                .insert("count", 0i64)
+                .build(),
+        );
+
+        // Spawn multiple threads accessing the same property keys
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let map_clone = Arc::clone(&map);
+                thread::spawn(move || {
+                    // Each thread accesses properties multiple times
+                    for _ in 0..100 {
+                        assert_eq!(
+                            map_clone.get("shared_key").and_then(|v| v.as_str()),
+                            Some("value")
+                        );
+                        assert!(map_clone.contains_key("count"));
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should complete successfully");
+        }
+    }
+
+    #[test]
+    fn test_property_key_get_efficiency() {
+        // Pre-populate interner with a key
+        let interned_key = GLOBAL_INTERNER.intern("test_key").unwrap();
+
+        let map = PropertyMapBuilder::new()
+            .insert("test_key", "value")
+            .build();
+
+        // get() should auto-intern the key
+        let value1 = map.get("test_key");
+        assert_eq!(value1.and_then(|v| v.as_str()), Some("value"));
+
+        // get_by_interned_key() should be more efficient for repeated lookups
+        let value2 = map.get_by_interned_key(&interned_key);
+        assert_eq!(value2.and_then(|v| v.as_str()), Some("value"));
+
+        // Both methods should return the same result
+        assert_eq!(value1, value2);
     }
 }

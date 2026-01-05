@@ -241,7 +241,9 @@ mod tests {
         let mut buffer = WriteBuffer::new();
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(1).unwrap();
-        let label = crate::core::interning::GLOBAL_INTERNER.intern("Person");
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
 
@@ -268,7 +270,9 @@ mod tests {
         let version_id = VersionId::new(1).unwrap();
         let source = NodeId::new(1).unwrap();
         let target = NodeId::new(2).unwrap();
-        let label = crate::core::interning::GLOBAL_INTERNER.intern("KNOWS");
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
 
@@ -295,7 +299,9 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let edge_id = EdgeId::new(1).unwrap();
         let version_id = VersionId::new(1).unwrap();
-        let label = crate::core::interning::GLOBAL_INTERNER.intern("Test");
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Test")
+            .unwrap();
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
 
@@ -333,7 +339,9 @@ mod tests {
         let mut buffer = WriteBuffer::new();
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(1).unwrap();
-        let label = crate::core::interning::GLOBAL_INTERNER.intern("Test");
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Test")
+            .unwrap();
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
 
@@ -362,7 +370,9 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let version_id_1 = VersionId::new(1).unwrap();
         let version_id_2 = VersionId::new(2).unwrap();
-        let label = crate::core::interning::GLOBAL_INTERNER.intern("Test");
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Test")
+            .unwrap();
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
 
@@ -400,7 +410,9 @@ mod tests {
     fn test_capacity_exceeded() {
         // Create buffer with small capacity
         let mut buffer = WriteBuffer::with_max_operations(2);
-        let label = crate::core::interning::GLOBAL_INTERNER.intern("Test");
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Test")
+            .unwrap();
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
 
