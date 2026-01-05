@@ -109,6 +109,26 @@ impl CurrentStorage {
         self.vector_index_state.read().is_enabled()
     }
 
+    /// Get vector index configuration for checkpoint persistence.
+    ///
+    /// Returns the current vector index configuration if enabled, or disabled
+    /// checkpoint data if no index is active.
+    pub fn get_vector_index_config(
+        &self,
+    ) -> crate::storage::persistence::VectorIndexCheckpointData {
+        use crate::storage::persistence::VectorIndexCheckpointData;
+
+        let state = self.vector_index_state.read();
+
+        if let (Some(config), Some(property_name)) =
+            (state.config.clone(), state.property_name.clone())
+        {
+            VectorIndexCheckpointData::enabled(property_name, config)
+        } else {
+            VectorIndexCheckpointData::disabled()
+        }
+    }
+
     /// Try to add a node's vector to the index.
     /// Returns Ok(true) if indexed, Ok(false) if not applicable, Err on failure.
     fn try_index_vector(&self, node_id: NodeId, properties: &PropertyMap) -> Result<bool> {

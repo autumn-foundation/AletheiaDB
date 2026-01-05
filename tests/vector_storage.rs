@@ -689,3 +689,361 @@ fn test_graph_with_mixed_properties_and_vectors() {
         Some(&[0.1f32, 0.2, 0.3][..])
     );
 }
+
+// ============================================================
+// Phase 2: HNSW Vector Index Integration Tests
+// ============================================================
+
+/// Helper function to create a database with vector index enabled.
+fn setup_indexed_db(dimensions: usize) -> GallifreyDB {
+    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = GallifreyDB::new();
+    let config = HnswConfig::new(dimensions, DistanceMetric::Cosine).with_capacity(100);
+    db.enable_vector_index("embedding", config)
+        .expect("Failed to enable vector index");
+    db
+}
+
+// ============================================================
+// Index Lifecycle Tests
+// ============================================================
+
+#[test]
+fn test_enable_vector_index() {
+    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = GallifreyDB::new();
+
+    // Index should not be enabled initially
+    assert!(!db.is_vector_index_enabled());
+
+    // Enable index
+    let config = HnswConfig::new(384, DistanceMetric::Cosine);
+    db.enable_vector_index("embedding", config).unwrap();
+
+    // Index should now be enabled
+    assert!(db.is_vector_index_enabled());
+}
+
+#[test]
+fn test_double_enable_vector_index_fails() {
+    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+
+    let db = GallifreyDB::new();
+
+    // Enable index once
+    let config = HnswConfig::new(384, DistanceMetric::Cosine);
+    db.enable_vector_index("embedding", config.clone()).unwrap();
+
+    // Attempt to enable again should fail
+    let result = db.enable_vector_index("embedding", config);
+    assert!(result.is_err());
+}
+
+// ============================================================
+// Search Tests
+// ============================================================
+
+#[test]
+fn test_find_similar_by_node_id() {
+    let db = setup_indexed_db(384);
+
+    // Create nodes with embeddings
+    let emb1 = generate_embedding(384, 1.0);
+    let emb2 = generate_embedding(384, 1.1); // Very similar to emb1
+    let emb3 = generate_embedding(384, 10.0); // Very different
+
+    let node1 = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Doc 1")
+                .insert_vector("embedding", &emb1)
+                .build(),
+        )
+        .unwrap();
+
+    let node2 = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Doc 2")
+                .insert_vector("embedding", &emb2)
+                .build(),
+        )
+        .unwrap();
+
+    let node3 = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Doc 3")
+                .insert_vector("embedding", &emb3)
+                .build(),
+        )
+        .unwrap();
+
+    // Search for similar nodes to node1
+    let results = db.find_similar(node1, 2).unwrap();
+
+    // Should return node2 (most similar) and node3
+    assert_eq!(results.len(), 2);
+    // First result should be node2 (more similar)
+    assert_eq!(results[0].0, node2);
+    // Second result should be node3 (less similar)
+    assert_eq!(results[1].0, node3);
+}
+
+#[test]
+fn test_find_similar_by_embedding() {
+    let db = setup_indexed_db(384);
+
+    // Create nodes
+    let emb1 = generate_embedding(384, 1.0);
+    let emb2 = generate_embedding(384, 1.1);
+
+    db.create_node(
+        "Document",
+        PropertyMapBuilder::new()
+            .insert_vector("embedding", &emb1)
+            .build(),
+    )
+    .unwrap();
+
+    db.create_node(
+        "Document",
+        PropertyMapBuilder::new()
+            .insert_vector("embedding", &emb2)
+            .build(),
+    )
+    .unwrap();
+
+    // Search with a query embedding
+    let query = generate_embedding(384, 1.05);
+    let results = db.find_similar_by_embedding(&query, 2).unwrap();
+
+    // Should return 2 results
+    assert_eq!(results.len(), 2);
+    // Results should have similarity scores
+    assert!(results[0].1 > 0.0);
+    assert!(results[1].1 > 0.0);
+}
+
+#[test]
+fn test_find_similar_with_label_filter() {
+    let db = setup_indexed_db(128);
+
+    let emb = generate_embedding(128, 1.0);
+
+    // Create nodes with different labels
+    let doc1 = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    let doc2 = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    let _image = db
+        .create_node(
+            "Image",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    // Search with label filter - should only return Documents
+    let results = db.find_similar_with_label(doc1, "Document", 10).unwrap();
+
+    // Should only return doc2 (not the Image node)
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, doc2);
+}
+
+// ============================================================
+// Update Semantics Tests
+// ============================================================
+
+#[test]
+fn test_update_node_updates_index() {
+    let db = setup_indexed_db(128);
+
+    let emb1 = generate_embedding(128, 1.0);
+    let emb2 = generate_embedding(128, 10.0); // Very different
+
+    // Create node with initial embedding
+    let node_id = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &emb1)
+                .build(),
+        )
+        .unwrap();
+
+    // Update the embedding
+    let mut tx = db.write_transaction().unwrap();
+    tx.update_node(
+        node_id,
+        PropertyMapBuilder::new()
+            .insert_vector("embedding", &emb2)
+            .build(),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    // Search should reflect the updated embedding
+    let results = db.find_similar_by_embedding(&emb2, 1).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, node_id);
+}
+
+// Note: test_delete_node_removes_from_index skipped - delete_node not yet implemented
+// TODO: Add this test when delete_node is implemented in GallifreyDB
+
+#[test]
+fn test_node_without_vector_property_not_indexed() {
+    let db = setup_indexed_db(128);
+
+    // Create node without embedding property
+    let _node_no_emb = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "No Embedding")
+                .build(),
+        )
+        .unwrap();
+
+    // Create node with embedding
+    let emb = generate_embedding(128, 1.0);
+    let node_with_emb = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &emb)
+                .build(),
+        )
+        .unwrap();
+
+    // Search should only return the node with embedding
+    let results = db.find_similar_by_embedding(&emb, 10).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, node_with_emb);
+}
+
+// ============================================================
+// Error Handling Tests
+// ============================================================
+
+#[test]
+fn test_find_similar_on_non_indexed_db_fails() {
+    use gallifreydb::core::id::NodeId;
+
+    let db = GallifreyDB::new(); // No index enabled
+
+    let node_id = NodeId::new(1).unwrap();
+    let result = db.find_similar(node_id, 10);
+
+    // Should return an error
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_find_similar_with_invalid_node_id_fails() {
+    use gallifreydb::core::id::NodeId;
+
+    let db = setup_indexed_db(128);
+
+    // Non-existent node ID
+    let fake_id = NodeId::new(99999).unwrap();
+    let result = db.find_similar(fake_id, 10);
+
+    // Should return an error
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_dimension_mismatch_in_indexed_property() {
+    let db = setup_indexed_db(128);
+
+    // Create node with correct dimensions
+    let emb128 = generate_embedding(128, 1.0);
+    db.create_node(
+        "Document",
+        PropertyMapBuilder::new()
+            .insert_vector("embedding", &emb128)
+            .build(),
+    )
+    .unwrap();
+
+    // Attempt to create node with wrong dimensions
+    let emb256 = generate_embedding(256, 1.0);
+    let result = db.create_node(
+        "Document",
+        PropertyMapBuilder::new()
+            .insert_vector("embedding", &emb256)
+            .build(),
+    );
+
+    // Should fail due to dimension mismatch
+    assert!(result.is_err());
+}
+
+// ============================================================
+// Concurrent Operations Test
+// ============================================================
+
+#[test]
+fn test_concurrent_index_operations() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let db = Arc::new(setup_indexed_db(64));
+    let num_threads = 4;
+    let nodes_per_thread = 10;
+
+    // Spawn threads to concurrently add nodes
+    let handles: Vec<_> = (0..num_threads)
+        .map(|thread_id| {
+            let db_clone = Arc::clone(&db);
+            thread::spawn(move || {
+                for i in 0..nodes_per_thread {
+                    let emb = generate_embedding(64, (thread_id * 100 + i) as f32);
+                    db_clone
+                        .create_node(
+                            "Document",
+                            PropertyMapBuilder::new()
+                                .insert_vector("embedding", &emb)
+                                .build(),
+                        )
+                        .unwrap();
+                }
+            })
+        })
+        .collect();
+
+    // Wait for all threads
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // Verify all nodes were indexed
+    let query = generate_embedding(64, 0.0);
+    let results = db.find_similar_by_embedding(&query, 100).unwrap();
+
+    // Should have all nodes indexed
+    assert_eq!(results.len(), (num_threads * nodes_per_thread) as usize);
+}

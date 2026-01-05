@@ -347,6 +347,69 @@ impl HnswConfig {
         self.capacity = capacity;
         self
     }
+
+    /// Serialize configuration to a writer in little-endian binary format.
+    ///
+    /// Format:
+    /// - dimensions: 8 bytes (u64 LE)
+    /// - metric: 1 byte (DistanceMetric::to_u8())
+    /// - m: 8 bytes (u64 LE)
+    /// - ef_construction: 8 bytes (u64 LE)
+    /// - ef_search: 8 bytes (u64 LE)
+    /// - capacity: 8 bytes (u64 LE)
+    ///
+    /// Total: 41 bytes
+    pub fn serialize_into<W: std::io::Write>(&self, writer: &mut W) -> crate::utils::Result<()> {
+        writer.write_all(&(self.dimensions as u64).to_le_bytes())?;
+        writer.write_all(&[self.metric.to_u8()])?;
+        writer.write_all(&(self.m as u64).to_le_bytes())?;
+        writer.write_all(&(self.ef_construction as u64).to_le_bytes())?;
+        writer.write_all(&(self.ef_search as u64).to_le_bytes())?;
+        writer.write_all(&(self.capacity as u64).to_le_bytes())?;
+
+        Ok(())
+    }
+
+    /// Deserialize configuration from a reader.
+    ///
+    /// Reads 41 bytes in little-endian format and reconstructs the HnswConfig.
+    pub fn deserialize_from<R: std::io::Read>(reader: &mut R) -> crate::utils::Result<Self> {
+        let mut buf_u64 = [0u8; 8];
+        let mut buf_u8 = [0u8; 1];
+
+        // Read dimensions
+        reader.read_exact(&mut buf_u64)?;
+        let dimensions = u64::from_le_bytes(buf_u64) as usize;
+
+        // Read metric
+        reader.read_exact(&mut buf_u8)?;
+        let metric = DistanceMetric::from_u8(buf_u8[0])?;
+
+        // Read m
+        reader.read_exact(&mut buf_u64)?;
+        let m = u64::from_le_bytes(buf_u64) as usize;
+
+        // Read ef_construction
+        reader.read_exact(&mut buf_u64)?;
+        let ef_construction = u64::from_le_bytes(buf_u64) as usize;
+
+        // Read ef_search
+        reader.read_exact(&mut buf_u64)?;
+        let ef_search = u64::from_le_bytes(buf_u64) as usize;
+
+        // Read capacity
+        reader.read_exact(&mut buf_u64)?;
+        let capacity = u64::from_le_bytes(buf_u64) as usize;
+
+        Ok(HnswConfig {
+            dimensions,
+            metric,
+            m,
+            ef_construction,
+            ef_search,
+            capacity,
+        })
+    }
 }
 
 /// Builder for configuring and creating an `HnswIndex`.

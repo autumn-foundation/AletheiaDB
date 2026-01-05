@@ -36,6 +36,7 @@ num_cpus = { version = "1.16", optional = true }
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1.4"
+rand = "0.8"
 tempfile = "3.8"
 # Tokio for async tests
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util"] }
@@ -130,3 +131,8 @@ harness = false
 path = "benches/vector_similarity.rs"
 required-features = []
 
+[[bench]]
+name = "hnsw_index"
+harness = false
+path = "benches/hnsw_index.rs"
+required-features = []
