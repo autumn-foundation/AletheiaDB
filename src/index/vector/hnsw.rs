@@ -762,4 +762,51 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_distance_to_similarity_conversion() -> Result<()> {
+        // Test Cosine similarity conversion
+        let cosine_index = HnswIndexBuilder::new(3, DistanceMetric::Cosine).build()?;
+
+        let n1 = NodeId::new(1).unwrap();
+        let n2 = NodeId::new(2).unwrap();
+        let n3 = NodeId::new(3).unwrap();
+
+        cosine_index.add(n1, &[1.0, 0.0, 0.0])?; // Identical to query
+        cosine_index.add(n2, &[0.9, 0.1, 0.0])?; // Very similar
+        cosine_index.add(n3, &[0.0, 1.0, 0.0])?; // Orthogonal
+
+        let results = cosine_index.search(&[1.0, 0.0, 0.0], 3)?;
+
+        // Verify similarity values (not distances)
+        assert_eq!(results[0].0, n1);
+        assert!(results[0].1 > 0.99); // Identical: similarity ≈ 1.0
+
+        assert_eq!(results[1].0, n2);
+        assert!(results[1].1 > 0.9); // Very similar: similarity > 0.9
+
+        assert_eq!(results[2].0, n3);
+        assert!(results[2].1 < 0.1 && results[2].1 > -0.1); // Orthogonal: similarity ≈ 0.0
+
+        // Test Euclidean distance conversion
+        let euclidean_index = HnswIndexBuilder::new(3, DistanceMetric::Euclidean).build()?;
+
+        euclidean_index.add(n1, &[1.0, 0.0, 0.0])?;
+        euclidean_index.add(n2, &[1.1, 0.0, 0.0])?; // Close
+        euclidean_index.add(n3, &[10.0, 0.0, 0.0])?; // Far
+
+        let results = euclidean_index.search(&[1.0, 0.0, 0.0], 3)?;
+
+        // For Euclidean, we return -distance, so smaller distances = less negative = higher similarity
+        assert_eq!(results[0].0, n1);
+        assert!(results[0].1 > -0.01); // Identical: similarity ≈ 0.0
+
+        assert_eq!(results[1].0, n2);
+        assert!(results[1].1 < -0.05 && results[1].1 > -0.2); // Close: small negative
+
+        assert_eq!(results[2].0, n3);
+        assert!(results[2].1 < -8.0); // Far: large negative
+
+        Ok(())
+    }
 }
