@@ -140,7 +140,9 @@ impl GallifreyDB {
         self.visibility_manager.register_active(tx_id);
 
         // Capture snapshot
-        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+        let snapshot = self
+            .visibility_manager
+            .capture_snapshot(snapshot_timestamp, tx_id);
 
         Ok(ReadTransaction::new(
             tx_id,
@@ -199,7 +201,9 @@ impl GallifreyDB {
         self.visibility_manager.register_active(tx_id);
 
         // Capture snapshot
-        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+        let snapshot = self
+            .visibility_manager
+            .capture_snapshot(snapshot_timestamp, tx_id);
 
         Ok(WriteTransaction::new(
             tx_id,

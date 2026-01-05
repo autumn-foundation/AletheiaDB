@@ -125,6 +125,14 @@ impl ReadOps for ReadTransaction {
     }
 }
 
+impl Drop for ReadTransaction {
+    fn drop(&mut self) {
+        // Register abort to remove from active set
+        // This prevents memory leak in active transactions set
+        self.visibility_manager.register_abort(self.tx_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +294,42 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
+    }
+
+    #[test]
+    fn test_read_transaction_drop_cleanup() {
+        // Test that ReadTransaction properly cleans up when dropped
+        let current = Arc::new(CurrentStorage::new());
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+
+        let tx_id = TxId::new(42);
+
+        // Register transaction as active
+        visibility_manager.register_active(tx_id);
+        assert_eq!(visibility_manager.active_count(), 1);
+
+        {
+            // Create read transaction
+            let snapshot = TransactionSnapshot {
+                snapshot_timestamp: time::now(),
+                active_transactions: HashSet::new(),
+            };
+            let _tx = ReadTransaction::new(
+                tx_id,
+                snapshot,
+                Arc::clone(&current),
+                Arc::clone(&visibility_manager),
+            );
+
+            // Transaction should still be active while in scope
+            assert_eq!(visibility_manager.active_count(), 1);
+        } // tx dropped here - should call register_abort
+
+        // After drop, transaction should be removed from active set
+        assert_eq!(
+            visibility_manager.active_count(),
+            0,
+            "ReadTransaction should remove itself from active set on drop"
+        );
     }
 }
