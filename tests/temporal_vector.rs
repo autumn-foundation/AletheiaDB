@@ -225,11 +225,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
 
     // Add another vector 2 seconds later (should trigger snapshot)
     let later_time = base_time + 2_000_000; // 2 seconds later
-    time_interval_index.add(
-        NodeId::new(2).unwrap(),
-        &[0.0, 1.0, 0.0, 0.0],
-        later_time,
-    )?;
+    time_interval_index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], later_time)?;
     time_interval_index.on_transaction_at(later_time)?;
 
     assert_eq!(time_interval_index.snapshot_count(), 1);

@@ -128,9 +128,9 @@ use crate::index::vector::{DistanceMetric, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
 use dashmap::DashMap;
 use hnsw_rs::prelude::*;
+use parking_lot::RwLock;
 use std::io::{Read, Write};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// Maximum number of results that can be requested in a search.
 ///
@@ -400,27 +400,33 @@ impl HnswIndexBuilder {
 
         // Create the inner index based on metric
         let inner = match self.metric {
-            DistanceMetric::Cosine => HnswIndexInner::Cosine(Hnsw::<'static, f32, DistCosine>::new(
-                self.m,
-                capacity,
-                MAX_LAYER,
-                self.ef_construction,
-                DistCosine {},
-            )),
-            DistanceMetric::Euclidean => HnswIndexInner::Euclidean(Hnsw::<'static, f32, DistL2>::new(
-                self.m,
-                capacity,
-                MAX_LAYER,
-                self.ef_construction,
-                DistL2 {},
-            )),
-            DistanceMetric::DotProduct => HnswIndexInner::DotProduct(Hnsw::<'static, f32, DistDot>::new(
-                self.m,
-                capacity,
-                MAX_LAYER,
-                self.ef_construction,
-                DistDot {},
-            )),
+            DistanceMetric::Cosine => {
+                HnswIndexInner::Cosine(Hnsw::<'static, f32, DistCosine>::new(
+                    self.m,
+                    capacity,
+                    MAX_LAYER,
+                    self.ef_construction,
+                    DistCosine {},
+                ))
+            }
+            DistanceMetric::Euclidean => {
+                HnswIndexInner::Euclidean(Hnsw::<'static, f32, DistL2>::new(
+                    self.m,
+                    capacity,
+                    MAX_LAYER,
+                    self.ef_construction,
+                    DistL2 {},
+                ))
+            }
+            DistanceMetric::DotProduct => {
+                HnswIndexInner::DotProduct(Hnsw::<'static, f32, DistDot>::new(
+                    self.m,
+                    capacity,
+                    MAX_LAYER,
+                    self.ef_construction,
+                    DistDot {},
+                ))
+            }
         };
 
         Ok(HnswIndex {
@@ -733,9 +739,8 @@ mod tests {
         index.add(node3, &[0.8, 0.2, 0.0, 0.0])?;
 
         // Filter to only even node IDs
-        let results = index.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 3, |id| {
-            id.as_u64() % 2 == 0
-        })?;
+        let results =
+            index.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 3, |id| id.as_u64() % 2 == 0)?;
 
         // Should only return node2
         assert_eq!(results.len(), 1);

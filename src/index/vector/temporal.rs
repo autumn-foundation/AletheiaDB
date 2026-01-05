@@ -699,7 +699,6 @@ impl TemporalVectorIndex {
         Ok(())
     }
 
-
     /// Manually creates a snapshot at the current time.
     ///
     /// Useful for creating snapshots at critical timestamps regardless of strategy.

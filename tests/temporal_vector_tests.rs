@@ -1,7 +1,7 @@
-use gallifreydb::index::vector::temporal::*;
-use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-use gallifreydb::index::VectorIndex;
 use gallifreydb::core::id::NodeId;
+use gallifreydb::index::VectorIndex;
+use gallifreydb::index::vector::temporal::*;
+use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
 use gallifreydb::utils::Result;
 
 fn create_test_index() -> Result<TemporalVectorIndex> {
