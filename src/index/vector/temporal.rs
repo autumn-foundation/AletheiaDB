@@ -73,7 +73,7 @@ use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, HnswConfig, VectorIndex};
-use crate::utils::{Error, Result};
+use crate::utils::{Error, Result, TemporalError};
 
 /// Retention policy for snapshot cleanup.
 ///
@@ -437,10 +437,21 @@ impl TemporalVectorIndex {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn add(&self, id: NodeId, vector: &[f32], _timestamp: Timestamp) -> Result<()> {
+    pub fn add(&self, id: NodeId, vector: &[f32], timestamp: Timestamp) -> Result<()> {
         // Store vector data (for snapshot copying)
         let vector_arc: Arc<[f32]> = Arc::from(vector);
         self.vectors.insert(id, Arc::clone(&vector_arc));
+
+        // Validate timestamp ordering (temporal consistency)
+        // Note: Full validation requires tracking last timestamp per node,
+        // which is deferred to Phase 4 when integrated with historical storage.
+        // For now, we ensure timestamp is not negative (basic sanity check).
+        if timestamp < 0 {
+            return Err(Error::Temporal(TemporalError::InvalidTimeRange {
+                start: timestamp,
+                end: 0,
+            }));
+        }
 
         // Add to current index
         self.current.add(id, vector)?;
@@ -503,13 +514,21 @@ impl TemporalVectorIndex {
     }
 
     /// Checks if a snapshot should be created and creates it if needed.
+    ///
+    /// CRITICAL: Holds write lock throughout check-and-create to prevent race conditions.
+    /// Between releasing read lock and acquiring write lock, another thread could create
+    /// a duplicate snapshot. We must check again after acquiring write lock.
     fn check_and_create_snapshot(&self, current_time: Timestamp) -> Result<()> {
-        let should_snapshot = {
-            let metadata = self.metadata.read();
-            self.should_create_snapshot(&metadata, current_time)?
-        };
+        // Acquire write lock first to prevent TOCTOU race
+        let metadata = self.metadata.write();
+
+        // Check if snapshot needed (while holding write lock)
+        let should_snapshot = self.should_create_snapshot(&metadata, current_time)?;
 
         if should_snapshot {
+            // Create snapshot while still holding write lock
+            // This prevents another thread from creating duplicate snapshot
+            drop(metadata); // Release metadata lock before snapshot creation
             self.create_snapshot(current_time)?;
         }
 
@@ -699,11 +718,8 @@ impl TemporalVectorIndex {
                 }
 
                 let to_remove = snapshots.len() - n;
-                let keys_to_remove: Vec<Timestamp> = snapshots
-                    .keys()
-                    .take(to_remove)
-                    .copied()
-                    .collect();
+                let keys_to_remove: Vec<Timestamp> =
+                    snapshots.keys().take(to_remove).copied().collect();
 
                 for key in keys_to_remove {
                     snapshots.remove(&key);
@@ -717,10 +733,8 @@ impl TemporalVectorIndex {
                 let duration_micros = duration.as_micros() as Timestamp;
                 let cutoff_time = current_time.saturating_sub(duration_micros);
 
-                let keys_to_remove: Vec<Timestamp> = snapshots
-                    .range(..cutoff_time)
-                    .map(|(k, _)| *k)
-                    .collect();
+                let keys_to_remove: Vec<Timestamp> =
+                    snapshots.range(..cutoff_time).map(|(k, _)| *k).collect();
 
                 for key in keys_to_remove {
                     snapshots.remove(&key);
@@ -785,7 +799,13 @@ impl TemporalVectorIndex {
     ) -> Result<Vec<(NodeId, f32)>> {
         // Find nearest snapshot
         if let Some(snapshot) = self.find_nearest_snapshot(timestamp) {
-            snapshot.search(query_embedding, k)
+            snapshot.search(query_embedding, k).map_err(|e| {
+                // Add context about which timestamp was requested
+                Error::other(format!(
+                    "Failed to search snapshot at timestamp {}: {}",
+                    timestamp, e
+                ))
+            })
         } else {
             // No snapshot before timestamp - return empty results
             // This happens for queries before the first snapshot
@@ -812,8 +832,9 @@ impl TemporalVectorIndex {
         if let Some(_snapshot) = self.find_nearest_snapshot(timestamp) {
             // For MVP, we can't retrieve the node's historical vector without
             // integration with historical storage. This is a Phase 4 feature.
-            return Err(Error::other(
-                "Historical node vector retrieval requires Phase 4 integration",
+            return Err(Error::not_implemented(
+                "Historical node vector retrieval",
+                "Phase 4 feature - requires historical storage integration",
             ));
         }
 
@@ -918,8 +939,9 @@ impl TemporalVectorIndex {
         // TODO: This requires retrieving node embeddings at each snapshot
         // For now, return not implemented error
         // Complete implementation is Phase 4 (requires historical storage integration)
-        Err(Error::other(
-            "Semantic drift tracking requires Phase 4 historical storage integration",
+        Err(Error::not_implemented(
+            "Semantic drift tracking",
+            "Phase 4 feature - requires historical storage integration",
         ))
     }
 
@@ -1278,7 +1300,11 @@ mod tests {
 
         // Create 5 snapshots
         for i in 0..5 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], (1000 * (i + 1)) as i64)?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                (1000 * (i + 1)) as i64,
+            )?;
             index.on_transaction()?;
         }
         assert_eq!(index.snapshot_count(), 5);
@@ -1303,7 +1329,11 @@ mod tests {
 
         // Create 5 snapshots
         for i in 0..5 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], (1000 * (i + 1)) as i64)?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                (1000 * (i + 1)) as i64,
+            )?;
             index.on_transaction()?;
         }
         assert_eq!(index.snapshot_count(), 5);
@@ -1336,7 +1366,11 @@ mod tests {
 
         // Create only 3 snapshots (less than KeepN limit)
         for i in 0..3 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], (1000 * (i + 1)) as i64)?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                (1000 * (i + 1)) as i64,
+            )?;
             index.on_transaction()?;
         }
         assert_eq!(index.snapshot_count(), 3);

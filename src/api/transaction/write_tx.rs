@@ -698,7 +698,8 @@ impl WriteTransaction {
                     );
 
                     // Delete from current storage
-                    self.current.delete_node_direct(*node_id, commit_timestamp)?;
+                    self.current
+                        .delete_node_direct(*node_id, commit_timestamp)?;
                 }
                 super::BufferedWrite::DeleteEdge { edge_id } => {
                     // Get the edge before deleting

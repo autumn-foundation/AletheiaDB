@@ -97,9 +97,7 @@ impl CurrentStorage {
             edge_id_gen: IdGenerator::new(),
             version_id_gen: IdGenerator::new(),
             vector_index_state: Arc::new(RwLock::new(VectorIndexState::new())),
-            temporal_vector_index_state: Arc::new(RwLock::new(
-                TemporalVectorIndexState::new(),
-            )),
+            temporal_vector_index_state: Arc::new(RwLock::new(TemporalVectorIndexState::new())),
         }
     }
 
@@ -1186,7 +1184,7 @@ mod tests {
             .build();
         node.properties = new_props;
 
-        storage.update_node_direct(node).unwrap();
+        storage.update_node_direct(node, 1000).unwrap();
 
         // Verify update
         let updated_node = storage.get_node(node_id).unwrap();
@@ -1540,7 +1538,7 @@ mod tests {
         node1_obj.properties = PropertyMapBuilder::new()
             .insert_vector("embedding", &v1_updated)
             .build();
-        storage.update_node_direct(node1_obj).unwrap();
+        storage.update_node_direct(node1_obj, 2000).unwrap();
 
         let results = storage.find_similar(node2, 1).unwrap();
         assert_eq!(results.len(), 1);
@@ -1575,7 +1573,7 @@ mod tests {
             )
             .unwrap();
 
-        storage.delete_node_direct(node2).unwrap();
+        storage.delete_node_direct(node2, 3000).unwrap();
 
         let results = storage.find_similar(node1, 2).unwrap();
         assert_eq!(results.len(), 0);

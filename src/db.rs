@@ -645,8 +645,7 @@ impl GallifreyDB {
         k: usize,
         time_range: crate::core::temporal::TimeRange,
     ) -> Result<Vec<(Timestamp, Vec<(NodeId, f32)>)>> {
-        self.current
-            .find_similar_in_range(embedding, k, time_range)
+        self.current.find_similar_in_range(embedding, k, time_range)
     }
 
     /// Get the number of nodes in the current state.

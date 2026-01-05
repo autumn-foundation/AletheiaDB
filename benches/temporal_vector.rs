@@ -7,7 +7,7 @@
 //! - Snapshot pruning
 //! - Temporal vector index overhead vs current-only index
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::core::id::NodeId;
 use gallifreydb::core::temporal::TimeRange;
 use gallifreydb::index::vector::temporal::{
@@ -33,8 +33,14 @@ fn bench_snapshot_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("snapshot_creation");
 
     for strategy in [
-        ("transaction_interval_10", SnapshotStrategy::TransactionInterval(10)),
-        ("transaction_interval_100", SnapshotStrategy::TransactionInterval(100)),
+        (
+            "transaction_interval_10",
+            SnapshotStrategy::TransactionInterval(10),
+        ),
+        (
+            "transaction_interval_100",
+            SnapshotStrategy::TransactionInterval(100),
+        ),
         ("time_interval_1s", SnapshotStrategy::TimeInterval(1)),
     ] {
         group.bench_with_input(
@@ -124,7 +130,8 @@ fn bench_time_range_queries(c: &mut Criterion) {
                 let vectors_per_snapshot = 100;
                 for snapshot_idx in 0..snapshot_count {
                     for i in 0..vectors_per_snapshot {
-                        let node_id = NodeId::new((snapshot_idx * vectors_per_snapshot + i) as u64).unwrap();
+                        let node_id =
+                            NodeId::new((snapshot_idx * vectors_per_snapshot + i) as u64).unwrap();
                         let vector: Vec<f32> = (0..128)
                             .map(|j| (snapshot_idx + i + j) as f32 / 1000.0)
                             .collect();
@@ -176,7 +183,8 @@ fn bench_snapshot_pruning(c: &mut Criterion) {
                         // Create snapshots
                         for i in 0..snapshot_count {
                             let node_id = NodeId::new(i as u64).unwrap();
-                            let vector: Vec<f32> = (0..128).map(|j| (i + j) as f32 / 1000.0).collect();
+                            let vector: Vec<f32> =
+                                (0..128).map(|j| (i + j) as f32 / 1000.0).collect();
                             let _ = index.add(node_id, &vector, i as i64 * 1000);
                             let _ = index.on_transaction();
                         }
@@ -222,7 +230,11 @@ fn bench_temporal_vs_current_overhead(c: &mut Criterion) {
         b.iter(|| {
             let node_id = NodeId::new(counter as u64).unwrap();
             let vector: Vec<f32> = (0..128).map(|i| (counter + i) as f32 / 1000.0).collect();
-            let _ = index.add(black_box(node_id), black_box(&vector), black_box(counter * 1000));
+            let _ = index.add(
+                black_box(node_id),
+                black_box(&vector),
+                black_box(counter * 1000),
+            );
             counter += 1;
         });
     });
@@ -259,7 +271,9 @@ fn bench_temporal_vs_current_overhead(c: &mut Criterion) {
         let query_vector: Vec<f32> = (0..128).map(|i| i as f32 / 1000.0).collect();
 
         b.iter(|| {
-            let _ = index.current_index().search(black_box(&query_vector), black_box(10));
+            let _ = index
+                .current_index()
+                .search(black_box(&query_vector), black_box(10));
         });
     });
 
@@ -282,7 +296,8 @@ fn bench_snapshot_creation_by_size(c: &mut Criterion) {
                         let index = create_temporal_index(128);
                         for i in 0..vector_count {
                             let node_id = NodeId::new(i as u64).unwrap();
-                            let vector: Vec<f32> = (0..128).map(|j| (i + j) as f32 / 1000.0).collect();
+                            let vector: Vec<f32> =
+                                (0..128).map(|j| (i + j) as f32 / 1000.0).collect();
                             let _ = index.add(node_id, &vector, i as i64 * 1000);
                         }
                         index
