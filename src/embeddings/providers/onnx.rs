@@ -328,8 +328,20 @@ mod tests {
         let config = OnnxConfig::default();
         let provider = OnnxProvider::new(config).unwrap();
 
-        // Test that placeholder returns correct dimensions
-        let embedding = provider.embed("test text").await.unwrap();
-        assert_eq!(embedding.len(), 384);
+        // Test that placeholder returns an error (not implemented)
+        let result = provider.embed("test text").await;
+        assert!(result.is_err());
+
+        // Verify it's a ModelLoadError with the expected message
+        match result {
+            Err(EmbeddingError::ModelLoadError { model, reason }) => {
+                assert_eq!(model, "all-MiniLM-L6-v2");
+                assert!(reason.contains("placeholder implementation"));
+            }
+            _ => panic!("Expected ModelLoadError"),
+        }
+
+        // Verify dimensions are correct even though inference isn't implemented
+        assert_eq!(provider.dimensions(), 384);
     }
 }
