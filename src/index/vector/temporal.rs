@@ -341,8 +341,9 @@ pub struct TemporalVectorIndex {
 
     /// Historical HNSW snapshots at anchor timestamps
     /// Key: Timestamp when snapshot was created
-    /// Value: Immutable HNSW index snapshot
-    snapshots: RwLock<BTreeMap<Timestamp, Arc<HnswIndex>>>,
+    /// Value: (Stable snapshot ID, Immutable HNSW index snapshot)
+    /// Stable ID is from SnapshotMetadata::total_snapshots at creation time
+    snapshots: RwLock<BTreeMap<Timestamp, (usize, Arc<HnswIndex>)>>,
 
     /// Configuration
     config: TemporalVectorConfig,
@@ -440,7 +441,7 @@ impl TemporalVectorIndex {
     pub fn add(&self, id: NodeId, vector: &[f32], timestamp: Timestamp) -> Result<()> {
         // Store vector data (for snapshot copying)
         let vector_arc: Arc<[f32]> = Arc::from(vector);
-        self.vectors.insert(id, Arc::clone(&vector_arc));
+        self.vectors.insert(id, vector_arc);
 
         // Validate timestamp ordering (temporal consistency)
         // Note: Full validation requires tracking last timestamp per node,
@@ -615,7 +616,14 @@ impl TemporalVectorIndex {
         }
 
         // Store immutable snapshot
-        self.snapshots.write().insert(timestamp, Arc::new(snapshot));
+        // Get stable ID from metadata before inserting
+        let stable_id = {
+            let metadata = self.metadata.read();
+            metadata.total_snapshots
+        };
+        self.snapshots
+            .write()
+            .insert(timestamp, (stable_id, Arc::new(snapshot)));
 
         // Update metadata
         self.metadata.write().reset(timestamp);
@@ -756,7 +764,7 @@ impl TemporalVectorIndex {
         snapshots
             .range(..=timestamp)
             .next_back()
-            .map(|(_, snapshot)| Arc::clone(snapshot))
+            .map(|(_, (_id, snapshot))| Arc::clone(snapshot))
     }
 
     /// Finds k-nearest neighbors at a specific point in time.
@@ -886,7 +894,8 @@ impl TemporalVectorIndex {
         let mut results = Vec::new();
 
         // Find all snapshots in range
-        for (&timestamp, snapshot) in snapshots.range(time_range.start()..=time_range.end()) {
+        for (&timestamp, (_id, snapshot)) in snapshots.range(time_range.start()..=time_range.end())
+        {
             let snapshot_results = snapshot.search(query_embedding, k)?;
             results.push((timestamp, snapshot_results));
         }
@@ -953,13 +962,12 @@ impl TemporalVectorIndex {
 
         snapshots
             .iter()
-            .enumerate()
-            .map(|(idx, (&timestamp, snapshot))| {
+            .map(|(&timestamp, (stable_id, snapshot))| {
                 let current_time = Self::current_timestamp();
                 let age_micros = current_time - timestamp;
 
                 SnapshotInfo {
-                    snapshot_id: idx,
+                    snapshot_id: *stable_id, // Use stable ID that doesn't change on pruning
                     timestamp,
                     vector_count: snapshot.len(),
                     // Size estimation: rough approximation
