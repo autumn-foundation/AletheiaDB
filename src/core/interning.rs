@@ -371,9 +371,6 @@ mod tests {
 
     #[test]
     fn test_global_interner() {
-        // Clear to ensure clean state
-        GLOBAL_INTERNER.clear();
-
         let id1 = GLOBAL_INTERNER.intern("global");
         let id2 = GLOBAL_INTERNER.intern("global");
 
