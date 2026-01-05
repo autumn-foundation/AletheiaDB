@@ -65,6 +65,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use parking_lot::RwLock;
 
 use crate::core::id::NodeId;
@@ -304,6 +305,10 @@ pub struct TemporalVectorIndex {
     /// Current (live) HNSW index - always up-to-date
     current: Arc<HnswIndex>,
 
+    /// Current vector storage - maintains actual vector data for snapshot copying
+    /// Maps NodeId to the vector embedding
+    vectors: Arc<DashMap<NodeId, Arc<[f32]>>>,
+
     /// Historical HNSW snapshots at anchor timestamps
     /// Key: Timestamp when snapshot was created
     /// Value: Immutable HNSW index snapshot
@@ -346,11 +351,15 @@ impl TemporalVectorIndex {
         // Create current HNSW index
         let current = Arc::new(HnswIndex::new(config.hnsw_config.clone())?);
 
+        // Create vector storage
+        let vectors = Arc::new(DashMap::new());
+
         // Initialize with current time (or epoch 0 for deterministic testing)
         let initial_time = Self::current_timestamp();
 
         Ok(TemporalVectorIndex {
             current,
+            vectors,
             snapshots: RwLock::new(BTreeMap::new()),
             config,
             metadata: RwLock::new(SnapshotMetadata::new(initial_time)),
@@ -399,6 +408,10 @@ impl TemporalVectorIndex {
     /// # }
     /// ```
     pub fn add(&self, id: NodeId, vector: &[f32], _timestamp: Timestamp) -> Result<()> {
+        // Store vector data (for snapshot copying)
+        let vector_arc: Arc<[f32]> = Arc::from(vector);
+        self.vectors.insert(id, Arc::clone(&vector_arc));
+
         // Add to current index
         self.current.add(id, vector)?;
 
@@ -415,6 +428,9 @@ impl TemporalVectorIndex {
     ///
     /// Note: Historical snapshots are immutable and retain the vector.
     pub fn remove(&self, id: NodeId, _timestamp: Timestamp) -> Result<()> {
+        // Remove from vector storage
+        self.vectors.remove(&id);
+
         // Remove from current index
         self.current.remove(id)?;
 
@@ -526,27 +542,31 @@ impl TemporalVectorIndex {
     /// The snapshot is stored with the given timestamp as the key.
     /// Old snapshots are pruned if max_snapshots is exceeded.
     ///
-    /// # Note
+    /// # Implementation
     ///
-    /// Current implementation creates an empty snapshot placeholder.
-    /// Full vector copying will be implemented in Phase 5 with persistence.
-    /// For now, snapshots track timestamps but don't contain actual data.
+    /// Creates a new HNSW index and copies all current vectors into it.
+    /// This creates an immutable snapshot that can be queried independently.
+    ///
+    /// # Concurrency
+    ///
+    /// Thread-safe: Uses DashMap for lock-free iteration over current vectors.
+    /// Snapshot creation may take O(n log n) time for n vectors.
     fn create_snapshot(&self, timestamp: Timestamp) -> Result<()> {
-        // TODO(Phase 5): Implement full snapshot copying
-        // For MVP, we create a placeholder snapshot that tracks the timestamp
-        // but doesn't actually copy vectors. This is sufficient for testing
-        // the snapshot management logic (creation, pruning, querying).
-        //
-        // Full implementation will use usearch's save/load serialization:
-        // 1. Create new index with same config
-        // 2. Iterate through current index vectors
-        // 3. Copy each (node_id, vector) pair to snapshot
-        // OR use usearch's native serialization to disk then load
+        // Create new HNSW index with same configuration
+        let snapshot = HnswIndex::new(self.config.hnsw_config.clone())?;
 
-        let snapshot = Arc::new(HnswIndex::new(self.config.hnsw_config.clone())?);
+        // Copy all current vectors into the snapshot
+        // This is O(n * log n) where n = number of vectors
+        for entry in self.vectors.iter() {
+            let node_id = *entry.key();
+            let vector = entry.value();
 
-        // Store placeholder snapshot
-        self.snapshots.write().insert(timestamp, snapshot);
+            // Add vector to snapshot index
+            snapshot.add(node_id, vector.as_ref())?;
+        }
+
+        // Store immutable snapshot
+        self.snapshots.write().insert(timestamp, Arc::new(snapshot));
 
         // Update metadata
         self.metadata.write().reset(timestamp);
