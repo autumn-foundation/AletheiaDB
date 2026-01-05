@@ -631,13 +631,14 @@ impl HnswIndexBuilder {
             multi: false,
         };
 
-        // Create the index
-        let index = usearch::Index::new(&options).map_err(|e| {
+        // Create the index directly on heap to ensure stable address from the start
+        // This prevents ANY moves of the usearch::Index C++ object
+        let index = Box::pin(usearch::Index::new(&options).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to create HNSW index: {}",
                 e
             )))
-        })?;
+        })?);
 
         // Reserve capacity if specified
         if let Some(capacity) = self.initial_capacity {
@@ -681,8 +682,15 @@ impl HnswIndexBuilder {
 /// Total struct size: ~48 bytes + usearch index size
 #[allow(dead_code)]
 pub struct HnswIndex {
-    /// Underlying usearch index
-    index: usearch::Index,
+    /// Underlying usearch index (pinned to prevent FFI issues)
+    ///
+    /// CRITICAL: The usearch::Index C++ object MUST be pinned via Pin<Box<>>.
+    /// When embedded directly in the struct, Rust's move semantics cause the
+    /// C++ object to be memcpy'd, which invalidates internal pointers (this pointer,
+    /// mutex pointers, data pointers). This causes segfaults on the first operation
+    /// after a move. Pin<Box<>> ensures the C++ object stays at a stable heap address
+    /// and cannot be moved, even accidentally.
+    index: std::pin::Pin<Box<usearch::Index>>,
     /// Cached dimensions for O(1) access
     dimensions: usize,
     /// Cached metric for O(1) access
