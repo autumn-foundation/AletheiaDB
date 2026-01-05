@@ -30,7 +30,7 @@ use std::time::Instant;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔬 Embedding Provider Comparison\n");
-    println!("=".repeat(60));
+    println!("{}", "=".repeat(60));
 
     let test_text = "GallifreyDB is a high-performance bi-temporal graph database";
 
