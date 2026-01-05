@@ -553,18 +553,29 @@ impl VectorIndex for HnswIndex {
         // Cap k to prevent DoS
         let k_capped = k.min(MAX_K);
 
+        // Fetch more results than k to account for soft-deleted items
+        // Since some results will be filtered out, we need to fetch extra
+        let deleted_count = self.deleted_ids.len();
+        let fetch_k = if deleted_count == 0 {
+            k_capped
+        } else {
+            // Fetch extra to account for deletions
+            // Add deleted_count to ensure we get enough results after filtering
+            (k_capped + deleted_count).min(MAX_K)
+        };
+
         // Get ef_search parameter
         let ef_search = *self.ef_search.read();
 
         // Perform search
         let inner = self.inner.read();
         let results = match &*inner {
-            HnswIndexInner::Cosine(hnsw) => hnsw.search(query, k_capped, ef_search),
-            HnswIndexInner::Euclidean(hnsw) => hnsw.search(query, k_capped, ef_search),
-            HnswIndexInner::DotProduct(hnsw) => hnsw.search(query, k_capped, ef_search),
+            HnswIndexInner::Cosine(hnsw) => hnsw.search(query, fetch_k, ef_search),
+            HnswIndexInner::Euclidean(hnsw) => hnsw.search(query, fetch_k, ef_search),
+            HnswIndexInner::DotProduct(hnsw) => hnsw.search(query, fetch_k, ef_search),
         };
 
-        // Convert results to (NodeId, similarity) format
+        // Convert results to (NodeId, similarity) format, filtering out deleted items
         let mut output: Vec<(NodeId, f32)> = Vec::new();
 
         for neighbor in results {
@@ -592,6 +603,9 @@ impl VectorIndex for HnswIndex {
 
         // Sort by similarity descending
         output.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Truncate to k results
+        output.truncate(k_capped);
 
         Ok(output)
     }
