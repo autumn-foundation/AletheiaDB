@@ -228,13 +228,15 @@ impl EmbeddingProvider for OllamaProvider {
         }
 
         // Parse response
-        let ollama_response: OllamaResponse = response.json().await.map_err(|e| {
-            EmbeddingError::ProviderError {
-                provider: "Ollama".to_string(),
-                message: format!("Failed to parse response: {}", e),
-                status_code: None,
-            }
-        })?;
+        let ollama_response: OllamaResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| EmbeddingError::ProviderError {
+                    provider: "Ollama".to_string(),
+                    message: format!("Failed to parse response: {}", e),
+                    status_code: None,
+                })?;
 
         // Validate dimensions
         if ollama_response.embedding.len() != self.config.dimensions {

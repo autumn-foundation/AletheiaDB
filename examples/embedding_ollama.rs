@@ -14,8 +14,8 @@
 //! cargo run --example embedding_ollama --features embedding-ollama
 //! ```
 
-use gallifreydb::embeddings::providers::ollama::*;
 use gallifreydb::embeddings::EmbeddingService;
+use gallifreydb::embeddings::providers::ollama::*;
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 use std::sync::Arc;
 
@@ -46,7 +46,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let duration = start.elapsed();
 
     println!("✅ Generated {} embeddings", embeddings.len());
-    println!("⏱️  Time: {:?} ({:.1}ms per doc)\n", duration, duration.as_millis() as f64 / documents.len() as f64);
+    println!(
+        "⏱️  Time: {:?} ({:.1}ms per doc)\n",
+        duration,
+        duration.as_millis() as f64 / documents.len() as f64
+    );
 
     // 3. Store in GallifreyDB
     println!("💾 Storing in GallifreyDB...");

@@ -14,8 +14,8 @@
 //! cargo run --example embedding_onnx --features embedding-onnx
 //! ```
 
-use gallifreydb::embeddings::providers::onnx::*;
 use gallifreydb::embeddings::EmbeddingService;
+use gallifreydb::embeddings::providers::onnx::*;
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 use std::sync::Arc;
 

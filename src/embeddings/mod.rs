@@ -36,7 +36,6 @@
 #[cfg(feature = "embeddings")]
 use async_trait::async_trait;
 #[cfg(feature = "embeddings")]
-
 pub mod service;
 
 #[cfg(any(

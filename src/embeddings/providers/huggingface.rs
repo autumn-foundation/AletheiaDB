@@ -29,7 +29,7 @@
 
 use super::super::{EmbeddingError, EmbeddingProvider};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Configuration for HuggingFace Inference API.
 #[derive(Clone)]
@@ -221,10 +221,7 @@ impl EmbeddingProvider for HuggingFaceProvider {
         let response = self
             .client
             .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.config.api_token),
-            )
+            .header("Authorization", format!("Bearer {}", self.config.api_token))
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
@@ -271,13 +268,15 @@ impl EmbeddingProvider for HuggingFaceProvider {
         }
 
         // Parse response - HuggingFace returns a flat array of embeddings
-        let embeddings: Vec<Vec<f32>> = response.json().await.map_err(|e| {
-            EmbeddingError::ProviderError {
-                provider: "HuggingFace".to_string(),
-                message: format!("Failed to parse response: {}", e),
-                status_code: None,
-            }
-        })?;
+        let embeddings: Vec<Vec<f32>> =
+            response
+                .json()
+                .await
+                .map_err(|e| EmbeddingError::ProviderError {
+                    provider: "HuggingFace".to_string(),
+                    message: format!("Failed to parse response: {}", e),
+                    status_code: None,
+                })?;
 
         // Validate dimensions
         let expected_dims = self.dimensions();
@@ -326,13 +325,10 @@ mod tests {
 
     #[test]
     fn test_config_builder() {
-        let config = HuggingFaceConfig::new(
-            "test-token".to_string(),
-            "test-model".to_string(),
-            384,
-        )
-        .with_base_url("https://custom.api".to_string())
-        .with_timeout(120);
+        let config =
+            HuggingFaceConfig::new("test-token".to_string(), "test-model".to_string(), 384)
+                .with_base_url("https://custom.api".to_string())
+                .with_timeout(120);
 
         assert_eq!(config.api_token, "test-token");
         assert_eq!(config.model_id, "test-model");

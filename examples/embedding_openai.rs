@@ -19,8 +19,8 @@
 //! cargo run --example embedding_openai --features embedding-openai
 //! ```
 
-use gallifreydb::embeddings::providers::openai::*;
 use gallifreydb::embeddings::EmbeddingService;
+use gallifreydb::embeddings::providers::openai::*;
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 use std::sync::Arc;
 

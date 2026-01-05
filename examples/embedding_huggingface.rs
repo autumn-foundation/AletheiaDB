@@ -15,8 +15,8 @@
 //! cargo run --example embedding_huggingface --features embedding-huggingface
 //! ```
 
-use gallifreydb::embeddings::providers::huggingface::*;
 use gallifreydb::embeddings::EmbeddingService;
+use gallifreydb::embeddings::providers::huggingface::*;
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 use std::sync::Arc;
 

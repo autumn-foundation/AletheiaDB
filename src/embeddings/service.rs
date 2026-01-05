@@ -115,12 +115,10 @@ impl EmbeddingService {
         }
 
         // Validate no NaN/Inf values
-        validate_vector(&embedding).map_err(|e| {
-            EmbeddingError::ProviderError {
-                provider: self.provider.name().to_string(),
-                message: format!("Invalid embedding returned: {}", e),
-                status_code: None,
-            }
+        validate_vector(&embedding).map_err(|e| EmbeddingError::ProviderError {
+            provider: self.provider.name().to_string(),
+            message: format!("Invalid embedding returned: {}", e),
+            status_code: None,
         })?;
 
         // Normalize if configured

@@ -89,9 +89,7 @@ impl OpenAIConfig {
     /// ```
     pub fn from_env(model: OpenAIModel) -> Result<Self, EmbeddingError> {
         let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            EmbeddingError::ConfigError(
-                "OPENAI_API_KEY environment variable not set".to_string(),
-            )
+            EmbeddingError::ConfigError("OPENAI_API_KEY environment variable not set".to_string())
         })?;
 
         Ok(Self {
@@ -265,13 +263,15 @@ impl EmbeddingProvider for OpenAIProvider {
         }
 
         // Parse response
-        let embedding_response: EmbeddingResponse = response.json().await.map_err(|e| {
-            EmbeddingError::ProviderError {
-                provider: "OpenAI".to_string(),
-                message: format!("Failed to parse response: {}", e),
-                status_code: None,
-            }
-        })?;
+        let embedding_response: EmbeddingResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| EmbeddingError::ProviderError {
+                    provider: "OpenAI".to_string(),
+                    message: format!("Failed to parse response: {}", e),
+                    status_code: None,
+                })?;
 
         // Sort by index to maintain input order
         let mut embeddings = embedding_response.data;
@@ -328,7 +328,9 @@ mod tests {
 
     #[test]
     fn test_config_from_missing_env() {
-        unsafe { std::env::remove_var("OPENAI_API_KEY"); }
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
         let result = OpenAIConfig::from_env(OpenAIModel::Ada002);
         assert!(result.is_err());
         match result {

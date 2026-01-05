@@ -22,17 +22,15 @@
 //! cargo run --example embedding_comparison --features embedding-all
 //! ```
 
-use gallifreydb::embeddings::providers::{
-    huggingface::*, ollama::*, openai::*, onnx::*
-};
 use gallifreydb::embeddings::EmbeddingService;
+use gallifreydb::embeddings::providers::{huggingface::*, ollama::*, onnx::*, openai::*};
 use std::sync::Arc;
 use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔬 Embedding Provider Comparison\n");
-    println!("=" .repeat(60));
+    println!("=".repeat(60));
 
     let test_text = "GallifreyDB is a high-performance bi-temporal graph database";
 
@@ -95,7 +93,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn test_provider_openai(text: &str) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
+async fn test_provider_openai(
+    text: &str,
+) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
     let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
     let provider = Arc::new(OpenAIProvider::new(config)?);
     let service = EmbeddingService::new(provider);
@@ -107,7 +107,9 @@ async fn test_provider_openai(text: &str) -> Result<(std::time::Duration, usize)
     Ok((latency, embedding.len()))
 }
 
-async fn test_provider_huggingface(text: &str) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
+async fn test_provider_huggingface(
+    text: &str,
+) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
     let config = HuggingFaceConfig::all_minilm_l6_v2()?;
     let provider = Arc::new(HuggingFaceProvider::new(config)?);
     let service = EmbeddingService::new(provider);
@@ -119,7 +121,9 @@ async fn test_provider_huggingface(text: &str) -> Result<(std::time::Duration, u
     Ok((latency, embedding.len()))
 }
 
-async fn test_provider_ollama(text: &str) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
+async fn test_provider_ollama(
+    text: &str,
+) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
     let config = OllamaConfig::nomic_embed_text();
     let provider = Arc::new(OllamaProvider::new(config)?);
     let service = EmbeddingService::new(provider);
@@ -131,7 +135,9 @@ async fn test_provider_ollama(text: &str) -> Result<(std::time::Duration, usize)
     Ok((latency, embedding.len()))
 }
 
-async fn test_provider_onnx(text: &str) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
+async fn test_provider_onnx(
+    text: &str,
+) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
     let config = OnnxConfig::default();
     let provider = Arc::new(OnnxProvider::new(config)?);
     let service = EmbeddingService::new(provider);
