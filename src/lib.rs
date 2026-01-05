@@ -4,6 +4,8 @@
 //! **transaction time** (when facts were recorded in the database). This enables
 //! powerful time-traveling queries and historical analysis.
 //!
+//! **📊 [View Performance Benchmarks](../dev/bench/index.html)**
+//!
 //! # Architecture
 //!
 //! - **Hybrid Storage**: Separate current state (fast path) from historical data (temporal path)
