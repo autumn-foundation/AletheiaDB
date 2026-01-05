@@ -661,7 +661,16 @@ impl HnswIndex {
     }
 }
 
-// Implement Send + Sync (safe since hnsw_rs is thread-safe)
+// SAFETY: HnswIndex is safe to send across threads and share between threads because:
+// 1. hnsw_rs::Hnsw uses internal Arc/RwLock for all mutable state, making it thread-safe
+// 2. All our fields use thread-safe wrappers:
+//    - inner: Arc<RwLock<HnswIndexInner>> - provides synchronized access to the HNSW index
+//    - ef_search: Arc<RwLock<usize>> - synchronized mutable parameter
+//    - next_data_id: Arc<RwLock<usize>> - synchronized ID counter
+//    - id_mapping, reverse_id_mapping: Arc<DashMap<...>> - lock-free concurrent hashmaps
+//    - deleted_ids: Arc<DashMap<...>> - lock-free concurrent hashmap
+// 3. Immutable fields (dimensions, metric, m, ef_construction) are safe to share
+// 4. hnsw_rs library guarantees thread-safety for all public APIs as documented in their crate
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
 

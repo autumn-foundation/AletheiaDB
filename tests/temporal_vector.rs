@@ -217,18 +217,20 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
         max_snapshots: 100,
         hnsw_config: hnsw_config.clone(),
     };
-    let time_interval_index = TemporalVectorIndex::new(config)?;
 
     let base_time = 1_000_000_000; // 1 second in microseconds
+    let time_interval_index = TemporalVectorIndex::new_at(config, base_time)?;
+
     time_interval_index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], base_time)?;
 
     // Add another vector 2 seconds later (should trigger snapshot)
+    let later_time = base_time + 2_000_000; // 2 seconds later
     time_interval_index.add(
         NodeId::new(2).unwrap(),
         &[0.0, 1.0, 0.0, 0.0],
-        base_time + 2_000_000,
+        later_time,
     )?;
-    time_interval_index.on_transaction()?;
+    time_interval_index.on_transaction_at(later_time)?;
 
     assert_eq!(time_interval_index.snapshot_count(), 1);
 
@@ -239,7 +241,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
         max_snapshots: 100,
         hnsw_config,
     };
-    let change_threshold_index = TemporalVectorIndex::new(config)?;
+    let change_threshold_index = TemporalVectorIndex::new_at(config, 1000)?;
 
     // Add 4 vectors (initial)
     for i in 0..4 {
@@ -249,7 +251,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
     // Change 2 vectors (50% change should trigger snapshot)
     change_threshold_index.add(NodeId::new(0).unwrap(), &[10.0, 0.0, 0.0, 0.0], 2000)?;
     change_threshold_index.add(NodeId::new(1).unwrap(), &[11.0, 0.0, 0.0, 0.0], 2000)?;
-    change_threshold_index.on_transaction()?;
+    change_threshold_index.on_transaction_at(2000)?;
 
     assert!(change_threshold_index.snapshot_count() >= 1);
 
