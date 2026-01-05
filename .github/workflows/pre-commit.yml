@@ -59,6 +59,8 @@ jobs:
           GIT_CONFIG_COUNT: '1'
           GIT_CONFIG_KEY_0: 'credential.helper'
           GIT_CONFIG_VALUE_0: ''
+          # Skip commitizen hook which requires git auth for repo fetching
+          SKIP: commitizen
         with:
           # Only run pre-commit stage hooks (skip commit-msg which needs git auth in CI)
           extra_args: --all-files --verbose --hook-stage pre-commit
