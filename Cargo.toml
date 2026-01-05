@@ -136,3 +136,9 @@ name = "hnsw_index"
 harness = false
 path = "benches/hnsw_index.rs"
 required-features = []
+
+[[bench]]
+name = "id_generation"
+harness = false
+path = "benches/id_generation.rs"
+required-features = []
