@@ -525,6 +525,130 @@ impl GallifreyDB {
             .find_similar_by_embedding_with_label(embedding, label, k)
     }
 
+    // ========================================================================
+    // Temporal Vector Search (Phase 3)
+    // ========================================================================
+
+    /// Enable temporal vector indexing for a specific property.
+    ///
+    /// Once enabled, vector changes will be tracked over time using snapshot-based
+    /// indexing, enabling point-in-time vector queries and semantic drift tracking.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - Name of the property containing vectors
+    /// * `config` - Temporal vector index configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if temporal vector indexing is already enabled.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
+    /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    ///
+    /// let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
+    /// let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+    /// db.enable_temporal_vector_index("embedding", temporal_config)?;
+    /// ```
+    pub fn enable_temporal_vector_index(
+        &self,
+        property_name: &str,
+        config: crate::index::vector::temporal::TemporalVectorConfig,
+    ) -> Result<()> {
+        self.current
+            .enable_temporal_vector_index(property_name, config)
+    }
+
+    /// Check if temporal vector indexing is enabled.
+    pub fn is_temporal_vector_index_enabled(&self) -> bool {
+        self.current.is_temporal_vector_index_enabled()
+    }
+
+    /// Find k most similar nodes at a specific point in time.
+    ///
+    /// Returns nodes similar to the query embedding as they existed at the given timestamp.
+    /// This enables "semantic time travel" - understanding what was semantically similar
+    /// at different points in the database's history.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - Query vector
+    /// * `k` - Number of results
+    /// * `timestamp` - Point in time to query
+    ///
+    /// # Returns
+    ///
+    /// Vector of (NodeId, similarity) pairs sorted by similarity (descending).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - No snapshot exists at or before the timestamp
+    /// - Embedding dimensions don't match the indexed property
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find similar documents as they existed in the past
+    /// let query_embedding = vec![0.1; 384];
+    /// let timestamp = 1234567890000000; // microseconds since epoch
+    /// let results = db.find_similar_as_of(&query_embedding, 10, timestamp)?;
+    /// for (node_id, similarity) in results {
+    ///     println!("Historical similarity: {:?} -> {}", node_id, similarity);
+    /// }
+    /// ```
+    pub fn find_similar_as_of(
+        &self,
+        embedding: &[f32],
+        k: usize,
+        timestamp: Timestamp,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        self.current.find_similar_as_of(embedding, k, timestamp)
+    }
+
+    /// Find k most similar nodes across a time range.
+    ///
+    /// Returns results for each snapshot within the time range, showing how
+    /// semantic similarity evolved over time. This is useful for semantic drift
+    /// tracking and understanding how the meaning of concepts changed.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - Query vector
+    /// * `k` - Number of results per snapshot
+    /// * `time_range` - Time range to query
+    ///
+    /// # Returns
+    ///
+    /// Vector of (timestamp, results) pairs where results are Vec<(NodeId, similarity)>.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::temporal::TimeRange;
+    ///
+    /// // Track how similar documents changed over time
+    /// let query = vec![0.1; 384];
+    /// let time_range = TimeRange::between(start_ts, end_ts);
+    /// let results = db.find_similar_in_range(&query, 10, time_range)?;
+    /// for (timestamp, similar_nodes) in results {
+    ///     println!("At {}: found {} similar nodes", timestamp, similar_nodes.len());
+    /// }
+    /// ```
+    pub fn find_similar_in_range(
+        &self,
+        embedding: &[f32],
+        k: usize,
+        time_range: crate::core::temporal::TimeRange,
+    ) -> Result<Vec<(Timestamp, Vec<(NodeId, f32)>)>> {
+        self.current
+            .find_similar_in_range(embedding, k, time_range)
+    }
+
     /// Get the number of nodes in the current state.
     #[inline]
     pub fn node_count(&self) -> usize {

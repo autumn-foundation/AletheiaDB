@@ -8,9 +8,11 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::property::PropertyMap;
+use crate::core::temporal::Timestamp;
 use crate::index::current::CurrentIndexes;
 use crate::index::vector::VectorIndex;
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
+use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::utils::error::{Result, StorageError};
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -45,6 +47,27 @@ impl VectorIndexState {
     }
 }
 
+/// Internal state for temporal vector indexing.
+struct TemporalVectorIndexState {
+    index: Option<Arc<TemporalVectorIndex>>,
+    property_name: Option<String>,
+    config: Option<TemporalVectorConfig>,
+}
+
+impl TemporalVectorIndexState {
+    fn new() -> Self {
+        TemporalVectorIndexState {
+            index: None,
+            property_name: None,
+            config: None,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.index.is_some()
+    }
+}
+
 /// Current-state storage engine.
 ///
 /// This storage engine maintains the current version of all nodes and edges,
@@ -61,6 +84,8 @@ pub struct CurrentStorage {
     version_id_gen: IdGenerator,
     /// Vector index state
     vector_index_state: Arc<RwLock<VectorIndexState>>,
+    /// Temporal vector index state (Phase 3)
+    temporal_vector_index_state: Arc<RwLock<TemporalVectorIndexState>>,
 }
 
 impl CurrentStorage {
@@ -72,6 +97,9 @@ impl CurrentStorage {
             edge_id_gen: IdGenerator::new(),
             version_id_gen: IdGenerator::new(),
             vector_index_state: Arc::new(RwLock::new(VectorIndexState::new())),
+            temporal_vector_index_state: Arc::new(RwLock::new(
+                TemporalVectorIndexState::new(),
+            )),
         }
     }
 
@@ -654,6 +682,191 @@ impl CurrentStorage {
         drop(state);
 
         Ok(index)
+    }
+
+    // ========================================================================
+    // Temporal Vector Indexing (Phase 3)
+    // ========================================================================
+
+    /// Enable temporal vector indexing for a specific property.
+    ///
+    /// Once enabled, vector changes will be tracked over time using snapshot-based
+    /// indexing, enabling point-in-time vector queries and semantic drift tracking.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - Name of the property containing vectors
+    /// * `config` - Temporal vector index configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if temporal vector indexing is already enabled.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
+    /// use gallifreydb::index::vector::HnswConfig;
+    ///
+    /// let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
+    /// let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+    /// storage.enable_temporal_vector_index("embedding", temporal_config)?;
+    /// ```
+    pub fn enable_temporal_vector_index(
+        &self,
+        property_name: &str,
+        config: TemporalVectorConfig,
+    ) -> Result<()> {
+        let mut state = self.temporal_vector_index_state.write();
+        if state.is_enabled() {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError(
+                    "Temporal vector index is already enabled".to_string(),
+                ),
+            ));
+        }
+
+        let index = TemporalVectorIndex::new(config.clone())?;
+        state.index = Some(Arc::new(index));
+        state.property_name = Some(property_name.to_string());
+        state.config = Some(config);
+
+        Ok(())
+    }
+
+    /// Check if temporal vector indexing is enabled.
+    pub fn is_temporal_vector_index_enabled(&self) -> bool {
+        self.temporal_vector_index_state.read().is_enabled()
+    }
+
+    /// Find k most similar nodes at a specific point in time.
+    ///
+    /// Returns nodes similar to the query embedding as they existed at the given timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - Query vector
+    /// * `k` - Number of results
+    /// * `timestamp` - Point in time to query
+    ///
+    /// # Returns
+    ///
+    /// Vector of (NodeId, similarity) pairs sorted by similarity (descending).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - No snapshot exists at or before the timestamp
+    /// - Embedding dimensions don't match the indexed property
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find similar documents as they existed in the past
+    /// let query_embedding = vec![0.1; 384];
+    /// let timestamp = 1234567890000000; // microseconds since epoch
+    /// let results = storage.find_similar_as_of(&query_embedding, 10, timestamp)?;
+    /// ```
+    pub fn find_similar_as_of(
+        &self,
+        embedding: &[f32],
+        k: usize,
+        timestamp: Timestamp,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        let state = self.temporal_vector_index_state.read();
+        let index = state.index.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
+                    .to_string(),
+            ))
+        })?;
+
+        index.find_similar_as_of(embedding, k, timestamp)
+    }
+
+    /// Find k most similar nodes across a time range.
+    ///
+    /// Returns results for each snapshot within the time range, showing how
+    /// semantic similarity evolved over time.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - Query vector
+    /// * `k` - Number of results per snapshot
+    /// * `time_range` - Time range to query
+    ///
+    /// # Returns
+    ///
+    /// Vector of (timestamp, results) pairs where results are Vec<(NodeId, similarity)>.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::temporal::TimeRange;
+    ///
+    /// // Track how similar documents changed over time
+    /// let query = vec![0.1; 384];
+    /// let time_range = TimeRange::between(start_ts, end_ts);
+    /// let results = storage.find_similar_in_range(&query, 10, time_range)?;
+    /// for (timestamp, similar_nodes) in results {
+    ///     println!("At timestamp {}: {} similar nodes", timestamp, similar_nodes.len());
+    /// }
+    /// ```
+    pub fn find_similar_in_range(
+        &self,
+        embedding: &[f32],
+        k: usize,
+        time_range: crate::core::temporal::TimeRange,
+    ) -> Result<Vec<(Timestamp, Vec<(NodeId, f32)>)>> {
+        let state = self.temporal_vector_index_state.read();
+        let index = state.index.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
+                    .to_string(),
+            ))
+        })?;
+
+        index.find_similar_in_range(embedding, k, time_range)
+    }
+
+    /// Notify the temporal vector index of a transaction.
+    ///
+    /// This should be called after committing a transaction to trigger snapshot
+    /// creation based on the configured strategy.
+    pub fn on_temporal_vector_transaction(&self) -> Result<()> {
+        let state = self.temporal_vector_index_state.read();
+        if let Some(index) = &state.index {
+            index.on_transaction()?;
+        }
+        Ok(())
+    }
+
+    /// Helper to index a vector in the temporal index.
+    fn try_index_temporal_vector(
+        &self,
+        node_id: NodeId,
+        properties: &PropertyMap,
+        timestamp: Timestamp,
+    ) -> Result<()> {
+        let state = self.temporal_vector_index_state.read();
+        if let Some(index) = &state.index {
+            if let Some(prop_name) = &state.property_name {
+                if let Some(vector) = properties.get(prop_name).and_then(|v| v.as_vector()) {
+                    index.add(node_id, vector, timestamp)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Helper to remove a vector from the temporal index.
+    fn try_remove_temporal_vector(&self, node_id: NodeId, timestamp: Timestamp) -> Result<()> {
+        let state = self.temporal_vector_index_state.read();
+        if let Some(index) = &state.index {
+            index.remove(node_id, timestamp)?;
+        }
+        Ok(())
     }
 
     /// Get statistics about the current storage
