@@ -4,6 +4,7 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::BiTemporalInterval;
+use crate::utils::error::{Result, StorageError};
 use std::collections::HashMap;
 
 /// Buffered write operation
@@ -84,6 +85,9 @@ pub enum BufferedWrite {
     },
 }
 
+/// Default maximum number of operations per transaction (DoS protection)
+pub const DEFAULT_MAX_OPERATIONS: usize = 10_000;
+
 /// Write buffer for collecting uncommitted changes
 ///
 /// Buffers all write operations in a transaction until commit time,
@@ -99,15 +103,24 @@ pub struct WriteBuffer {
     /// Quick lookup: which edges have been written to
     /// Maps EdgeId → index in operations vector
     modified_edges: HashMap<EdgeId, usize>,
+
+    /// Maximum number of operations allowed (DoS protection)
+    max_operations: usize,
 }
 
 impl WriteBuffer {
-    /// Create a new empty write buffer
+    /// Create a new empty write buffer with default capacity limit
     pub fn new() -> Self {
+        Self::with_max_operations(DEFAULT_MAX_OPERATIONS)
+    }
+
+    /// Create a write buffer with a custom maximum operations limit
+    pub fn with_max_operations(max_operations: usize) -> Self {
         WriteBuffer {
             operations: Vec::new(),
             modified_nodes: HashMap::new(),
             modified_edges: HashMap::new(),
+            max_operations,
         }
     }
 
@@ -117,11 +130,24 @@ impl WriteBuffer {
             operations: Vec::with_capacity(capacity),
             modified_nodes: HashMap::with_capacity(capacity / 2),
             modified_edges: HashMap::with_capacity(capacity / 2),
+            max_operations: DEFAULT_MAX_OPERATIONS,
         }
     }
 
     /// Add a write operation to the buffer
-    pub fn add(&mut self, write: BufferedWrite) {
+    ///
+    /// Returns an error if the maximum number of operations is exceeded (DoS protection).
+    pub fn add(&mut self, write: BufferedWrite) -> Result<()> {
+        // Check capacity limit (DoS protection)
+        if self.operations.len() >= self.max_operations {
+            return Err(StorageError::CapacityExceeded {
+                resource: "transaction operations".to_string(),
+                current: self.operations.len(),
+                limit: self.max_operations,
+            }
+            .into());
+        }
+
         let index = self.operations.len();
 
         // Track which entities are modified for conflict detection
@@ -139,6 +165,7 @@ impl WriteBuffer {
         }
 
         self.operations.push(write);
+        Ok(())
     }
 
     /// Get all operations in order
@@ -215,13 +242,15 @@ mod tests {
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
 
-        buffer.add(BufferedWrite::CreateNode {
-            node_id,
-            version_id,
-            label,
-            properties,
-            temporal,
-        });
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties,
+                temporal,
+            })
+            .unwrap();
 
         assert_eq!(buffer.len(), 1);
         assert!(!buffer.is_empty());
@@ -240,15 +269,17 @@ mod tests {
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
 
-        buffer.add(BufferedWrite::CreateEdge {
-            edge_id,
-            version_id,
-            source,
-            target,
-            label,
-            properties,
-            temporal,
-        });
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties,
+                temporal,
+            })
+            .unwrap();
 
         assert_eq!(buffer.len(), 1);
         assert!(buffer.has_modified_edge(edge_id));
@@ -266,24 +297,28 @@ mod tests {
         let temporal = BiTemporalInterval::current(time::now());
 
         // Add node
-        buffer.add(BufferedWrite::CreateNode {
-            node_id,
-            version_id,
-            label,
-            properties: properties.clone(),
-            temporal,
-        });
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties: properties.clone(),
+                temporal,
+            })
+            .unwrap();
 
         // Add edge
-        buffer.add(BufferedWrite::CreateEdge {
-            edge_id,
-            version_id,
-            source: node_id,
-            target: NodeId::new(2).unwrap(),
-            label,
-            properties,
-            temporal,
-        });
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source: node_id,
+                target: NodeId::new(2).unwrap(),
+                label,
+                properties,
+                temporal,
+            })
+            .unwrap();
 
         assert_eq!(buffer.len(), 2);
         assert!(buffer.has_modified_node(node_id));
@@ -299,13 +334,15 @@ mod tests {
         let properties = PropertyMap::new();
         let temporal = BiTemporalInterval::current(time::now());
 
-        buffer.add(BufferedWrite::CreateNode {
-            node_id,
-            version_id,
-            label,
-            properties,
-            temporal,
-        });
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties,
+                temporal,
+            })
+            .unwrap();
 
         assert_eq!(buffer.len(), 1);
 
@@ -327,22 +364,26 @@ mod tests {
         let temporal = BiTemporalInterval::current(time::now());
 
         // Create node
-        buffer.add(BufferedWrite::CreateNode {
-            node_id,
-            version_id: version_id_1,
-            label,
-            properties: properties.clone(),
-            temporal,
-        });
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id: version_id_1,
+                label,
+                properties: properties.clone(),
+                temporal,
+            })
+            .unwrap();
 
         // Update same node
-        buffer.add(BufferedWrite::UpdateNode {
-            node_id,
-            version_id: version_id_2,
-            label,
-            properties,
-            temporal,
-        });
+        buffer
+            .add(BufferedWrite::UpdateNode {
+                node_id,
+                version_id: version_id_2,
+                label,
+                properties,
+                temporal,
+            })
+            .unwrap();
 
         // Should have 2 operations, but node appears once in modified_nodes
         assert_eq!(buffer.len(), 2);
@@ -350,6 +391,60 @@ mod tests {
 
         // The most recent operation index should be stored
         assert_eq!(buffer.modified_nodes.get(&node_id), Some(&1));
+    }
+
+    #[test]
+    fn test_capacity_exceeded() {
+        // Create buffer with small capacity
+        let mut buffer = WriteBuffer::with_max_operations(2);
+        let label = crate::core::interning::GLOBAL_INTERNER.intern("Test");
+        let properties = PropertyMap::new();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Add first operation - should succeed
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id: NodeId::new(1).unwrap(),
+                version_id: VersionId::new(1).unwrap(),
+                label,
+                properties: properties.clone(),
+                temporal,
+            })
+            .unwrap();
+
+        // Add second operation - should succeed
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id: NodeId::new(2).unwrap(),
+                version_id: VersionId::new(2).unwrap(),
+                label,
+                properties: properties.clone(),
+                temporal,
+            })
+            .unwrap();
+
+        // Add third operation - should fail (exceeds capacity)
+        let result = buffer.add(BufferedWrite::CreateNode {
+            node_id: NodeId::new(3).unwrap(),
+            version_id: VersionId::new(3).unwrap(),
+            label,
+            properties,
+            temporal,
+        });
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::utils::error::Error::Storage(StorageError::CapacityExceeded {
+                resource,
+                current,
+                limit,
+            }) => {
+                assert_eq!(resource, "transaction operations");
+                assert_eq!(current, 2);
+                assert_eq!(limit, 2);
+            }
+            _ => panic!("Expected CapacityExceeded error"),
+        }
     }
 
     #[test]

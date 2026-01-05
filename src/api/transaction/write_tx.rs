@@ -944,7 +944,7 @@ impl WriteOps for WriteTransaction {
             label: label_interned,
             properties,
             temporal,
-        });
+        })?;
 
         Ok(node_id)
     }
@@ -983,7 +983,7 @@ impl WriteOps for WriteTransaction {
             label: label_interned,
             properties,
             temporal,
-        });
+        })?;
 
         Ok(edge_id)
     }
@@ -1013,7 +1013,7 @@ impl WriteOps for WriteTransaction {
             label: node.label,
             properties,
             temporal,
-        });
+        })?;
 
         Ok(())
     }
@@ -1045,7 +1045,7 @@ impl WriteOps for WriteTransaction {
             label: edge.label,
             properties,
             temporal,
-        });
+        })?;
 
         Ok(())
     }
@@ -1065,7 +1065,7 @@ impl WriteOps for WriteTransaction {
 
         // Buffer the write
         self.buffer
-            .add(super::BufferedWrite::DeleteNode { node_id });
+            .add(super::BufferedWrite::DeleteNode { node_id })?;
 
         Ok(())
     }
@@ -1085,7 +1085,7 @@ impl WriteOps for WriteTransaction {
 
         // Buffer the write
         self.buffer
-            .add(super::BufferedWrite::DeleteEdge { edge_id });
+            .add(super::BufferedWrite::DeleteEdge { edge_id })?;
 
         Ok(())
     }
