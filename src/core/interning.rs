@@ -113,38 +113,30 @@ impl StringInterner {
     pub fn intern<S: AsRef<str>>(&self, string: S) -> InternedString {
         let string = string.as_ref();
 
-        // Fast path: check if already interned
-        if let Some(id) = self.string_to_id.get(string) {
-            return *id;
-        }
-
-        // Check capacity before interning (DoS protection)
-        let current_count = self.string_to_id.len();
-        if current_count >= self.max_capacity {
-            panic!(
-                "String interner capacity exceeded: current={}, limit={} (DoS protection). \
-                 This prevents unbounded memory growth from malicious or buggy clients.",
-                current_count, self.max_capacity
-            );
-        }
-
-        // Slow path: need to intern a new string
+        // Use entry API for atomic check-and-insert
+        // This prevents race conditions where two threads could assign different IDs
+        // to the same string
         let arc_str: Arc<str> = Arc::from(string);
 
-        // Double-check to handle race conditions
-        // Another thread might have interned it while we were creating the Arc
-        if let Some(id) = self.string_to_id.get(arc_str.as_ref()) {
-            return *id;
-        }
+        *self.string_to_id.entry(arc_str.clone()).or_insert_with(|| {
+            // Check capacity before interning (DoS protection)
+            let current_count = self.string_to_id.len();
+            if current_count >= self.max_capacity {
+                panic!(
+                    "String interner capacity exceeded: current={}, limit={} (DoS protection). \
+                     This prevents unbounded memory growth from malicious or buggy clients.",
+                    current_count, self.max_capacity
+                );
+            }
 
-        // Assign a new ID
-        let id = InternedString(self.next_id.fetch_add(1, Ordering::Relaxed));
+            // Assign a new ID atomically
+            let id = InternedString(self.next_id.fetch_add(1, Ordering::Relaxed));
 
-        // Store in both directions
-        self.string_to_id.insert(Arc::clone(&arc_str), id);
-        self.id_to_string.insert(id, arc_str);
+            // Store the reverse mapping
+            self.id_to_string.insert(id, arc_str.clone());
 
-        id
+            id
+        })
     }
 
     /// Resolve an interned string ID back to the original string.
