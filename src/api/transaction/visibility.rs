@@ -191,7 +191,7 @@ impl TxVisibilityManager {
         let count = self
             .commit_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count % self.cleanup_interval == 0 {
+        if count.is_multiple_of(self.cleanup_interval) {
             self.cleanup_old_committed();
         }
     }
