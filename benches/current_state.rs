@@ -237,39 +237,46 @@ fn bench_find_neighbors(c: &mut Criterion) {
 ///
 /// This benchmark demonstrates the benefit of lock-free adjacency reads
 /// by measuring throughput with multiple concurrent readers.
+///
+/// Uses scoped threads to avoid thread creation/destruction overhead,
+/// which would mask the nanosecond-scale improvements from lock-free reads.
 fn bench_concurrent_reads(c: &mut Criterion) {
     use std::sync::Arc;
     use std::thread;
 
     let storage = Arc::new(create_test_graph(1000, 10));
-    let node_ids: Vec<_> = (0..100).map(|i| gallifreydb::NodeId::new(i).unwrap()).collect();
+    // Wrap node_ids in Arc to avoid cloning the Vec for each thread
+    let node_ids: Arc<Vec<_>> = Arc::new(
+        (0..100).map(|i| gallifreydb::NodeId::new(i).unwrap()).collect()
+    );
 
     c.bench_function("concurrent_reads_4_threads", |b| {
         b.iter(|| {
-            let mut handles = vec![];
+            // Use scoped threads to avoid thread spawn/join overhead
+            thread::scope(|s| {
+                let handles: Vec<_> = (0..4)
+                    .map(|_| {
+                        let storage_clone = Arc::clone(&storage);
+                        let nodes = Arc::clone(&node_ids);
 
-            // Spawn 4 concurrent reader threads
-            for _ in 0..4 {
-                let storage_clone = Arc::clone(&storage);
-                let nodes = node_ids.clone();
+                        s.spawn(move || {
+                            let mut total_edges = 0;
+                            // 25 iterations per thread = 100 total per benchmark iteration
+                            for _ in 0..25 {
+                                for node_id in &*nodes {
+                                    let edges = storage_clone.get_outgoing_edges(*node_id);
+                                    total_edges += edges.len();
+                                }
+                            }
+                            total_edges
+                        })
+                    })
+                    .collect();
 
-                let handle = thread::spawn(move || {
-                    let mut total_edges = 0;
-                    for _ in 0..25 {  // 25 iterations per thread = 100 total per benchmark iteration
-                        for node_id in &nodes {
-                            let edges = storage_clone.get_outgoing_edges(*node_id);
-                            total_edges += edges.len();
-                        }
-                    }
-                    total_edges
-                });
-
-                handles.push(handle);
-            }
-
-            // Wait for all threads and sum results
-            let total: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
-            black_box(total)
+                // Wait for all threads and sum results
+                let total: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+                black_box(total)
+            })
         });
     });
 }
