@@ -280,7 +280,7 @@ impl EmbeddingProvider for HuggingFaceProvider {
 
         // Validate dimensions
         let expected_dims = self.dimensions();
-        for (_i, emb) in embeddings.iter().enumerate() {
+        for emb in &embeddings {
             if emb.len() != expected_dims {
                 return Err(EmbeddingError::DimensionMismatch {
                     expected: expected_dims,

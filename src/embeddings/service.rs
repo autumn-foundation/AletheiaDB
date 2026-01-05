@@ -93,13 +93,13 @@ impl EmbeddingService {
     /// ```
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         // Validate text length
-        if let Some(max_len) = self.provider.max_text_length() {
-            if text.len() > max_len {
-                return Err(EmbeddingError::TextTooLong {
-                    length: text.len(),
-                    max_length: max_len,
-                });
-            }
+        if let Some(max_len) = self.provider.max_text_length()
+            && text.len() > max_len
+        {
+            return Err(EmbeddingError::TextTooLong {
+                length: text.len(),
+                max_length: max_len,
+            });
         }
 
         // Generate embedding from provider

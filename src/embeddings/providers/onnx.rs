@@ -149,6 +149,7 @@ impl OnnxConfig {
 /// The current implementation demonstrates the interface and can be used
 /// for testing the embedding pipeline without actual model inference.
 pub struct OnnxProvider {
+    #[allow(dead_code)] // Will be used in full implementation
     config: OnnxConfig,
     dimensions: usize,
     name: String,

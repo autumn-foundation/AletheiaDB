@@ -282,7 +282,7 @@ impl EmbeddingProvider for OpenAIProvider {
 
         // Validate dimensions
         let expected_dims = self.dimensions();
-        for (_i, emb) in embeddings.iter().enumerate() {
+        for emb in &embeddings {
             if emb.embedding.len() != expected_dims {
                 return Err(EmbeddingError::DimensionMismatch {
                     expected: expected_dims,
