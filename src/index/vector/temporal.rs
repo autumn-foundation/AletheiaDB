@@ -379,14 +379,25 @@ impl TemporalVectorIndex {
     /// # }
     /// ```
     pub fn new(config: TemporalVectorConfig) -> Result<Self> {
+        Self::new_at(config, Self::current_timestamp())
+    }
+
+    /// Creates a new temporal vector index with an explicit initial timestamp (for testing).
+    ///
+    /// This method is primarily for testing scenarios where you need to control
+    /// the initial timestamp (e.g., simulating time-based snapshot triggers).
+    /// In production code, use `new()` which uses the current system time.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Temporal vector index configuration
+    /// * `initial_time` - Initial timestamp in microseconds since epoch
+    pub fn new_at(config: TemporalVectorConfig, initial_time: Timestamp) -> Result<Self> {
         // Create current HNSW index
         let current = Arc::new(HnswIndex::new(config.hnsw_config.clone())?);
 
         // Create vector storage
         let vectors = Arc::new(DashMap::new());
-
-        // Initialize with current time (or epoch 0 for deterministic testing)
-        let initial_time = Self::current_timestamp();
 
         Ok(TemporalVectorIndex {
             current,
@@ -503,8 +514,19 @@ impl TemporalVectorIndex {
     /// # }
     /// ```
     pub fn on_transaction(&self) -> Result<()> {
-        let timestamp = Self::current_timestamp();
+        self.on_transaction_at(Self::current_timestamp())
+    }
 
+    /// Records a transaction at a specific timestamp (for testing).
+    ///
+    /// This method is primarily for testing scenarios where you need to control
+    /// the timestamp explicitly (e.g., simulating time-based snapshot triggers).
+    /// In production code, use `on_transaction()` which uses the current system time.
+    ///
+    /// # Arguments
+    ///
+    /// * `timestamp` - The timestamp to use for this transaction
+    pub fn on_transaction_at(&self, timestamp: Timestamp) -> Result<()> {
         // Record transaction
         self.metadata.write().record_transaction();
 
@@ -1119,15 +1141,15 @@ mod tests {
 
     #[test]
     fn test_snapshot_creation_time_interval() -> Result<()> {
+        let base_time = 1000000000; // 1 second in microseconds (initial time)
+
         let config = TemporalVectorConfig {
             snapshot_strategy: SnapshotStrategy::TimeInterval(1), // 1 second
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
-        let index = TemporalVectorIndex::new(config)?;
-
-        let base_time = 1000000000; // 1 second in microseconds
+        let index = TemporalVectorIndex::new_at(config, base_time)?;
 
         // Add vector at time 0
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], base_time)?;
@@ -1139,7 +1161,7 @@ mod tests {
             &[0.0, 1.0, 0.0, 0.0],
             base_time + 2_000_000,
         )?;
-        index.on_transaction()?;
+        index.on_transaction_at(base_time + 2_000_000)?;
         assert_eq!(index.snapshot_count(), 1);
 
         Ok(())
@@ -1223,7 +1245,7 @@ mod tests {
         // Add vectors and create snapshot
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
         index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 1000)?;
-        index.on_transaction()?; // Trigger snapshot
+        index.on_transaction_at(1000)?; // Trigger snapshot at timestamp 1000
 
         // Query at snapshot time
         let query = vec![0.9, 0.1, 0.0, 0.0];
@@ -1248,13 +1270,13 @@ mod tests {
 
         // Create multiple snapshots
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction()?;
+        index.on_transaction_at(1000)?;
 
         index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 2000)?;
-        index.on_transaction()?;
+        index.on_transaction_at(2000)?;
 
         index.add(NodeId::new(3).unwrap(), &[0.0, 0.0, 1.0, 0.0], 3000)?;
-        index.on_transaction()?;
+        index.on_transaction_at(3000)?;
 
         // Query range
         let query = vec![1.0, 0.0, 0.0, 0.0];
@@ -1319,7 +1341,7 @@ mod tests {
         // Test transaction trigger
         for i in 0..10 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
-            index.on_transaction()?;
+            index.on_transaction_at(1000)?;
         }
         assert_eq!(index.snapshot_count(), 1);
 
@@ -1338,12 +1360,13 @@ mod tests {
 
         // Create 5 snapshots
         for i in 0..5 {
+            let timestamp = (1000 * (i + 1)) as i64;
             index.add(
                 NodeId::new(i).unwrap(),
                 &[i as f32, 0.0, 0.0, 0.0],
-                (1000 * (i + 1)) as i64,
+                timestamp,
             )?;
-            index.on_transaction()?;
+            index.on_transaction_at(timestamp)?;
         }
         assert_eq!(index.snapshot_count(), 5);
 
@@ -1363,16 +1386,17 @@ mod tests {
             max_snapshots: 100,
             hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
-        let index = TemporalVectorIndex::new(config)?;
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
 
         // Create 5 snapshots
         for i in 0..5 {
+            let timestamp = (1000 * (i + 1)) as i64;
             index.add(
                 NodeId::new(i).unwrap(),
                 &[i as f32, 0.0, 0.0, 0.0],
-                (1000 * (i + 1)) as i64,
+                timestamp,
             )?;
-            index.on_transaction()?;
+            index.on_transaction_at(timestamp)?;
         }
         assert_eq!(index.snapshot_count(), 5);
 
@@ -1384,10 +1408,11 @@ mod tests {
         // Verify the 3 most recent snapshots remain
         let info = index.get_snapshot_info();
         assert_eq!(info.len(), 3);
-        // After pruning, enumerate() yields indices 0, 1, 2 for the remaining snapshots
-        assert_eq!(info[0].snapshot_id, 0);
-        assert_eq!(info[1].snapshot_id, 1);
-        assert_eq!(info[2].snapshot_id, 2);
+        // After pruning, the oldest 2 snapshots (IDs 0, 1) are removed
+        // The remaining snapshots retain their original stable IDs (2, 3, 4)
+        assert_eq!(info[0].snapshot_id, 2);
+        assert_eq!(info[1].snapshot_id, 3);
+        assert_eq!(info[2].snapshot_id, 4);
 
         Ok(())
     }
@@ -1404,12 +1429,13 @@ mod tests {
 
         // Create only 3 snapshots (less than KeepN limit)
         for i in 0..3 {
+            let timestamp = (1000 * (i + 1)) as i64;
             index.add(
                 NodeId::new(i).unwrap(),
                 &[i as f32, 0.0, 0.0, 0.0],
-                (1000 * (i + 1)) as i64,
+                timestamp,
             )?;
-            index.on_transaction()?;
+            index.on_transaction_at(timestamp)?;
         }
         assert_eq!(index.snapshot_count(), 3);
 
