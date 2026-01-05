@@ -228,6 +228,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
         &[0.0, 1.0, 0.0, 0.0],
         base_time + 2_000_000,
     )?;
+    time_interval_index.on_transaction()?;
 
     assert_eq!(time_interval_index.snapshot_count(), 1);
 
@@ -248,6 +249,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
     // Change 2 vectors (50% change should trigger snapshot)
     change_threshold_index.add(NodeId::new(0).unwrap(), &[10.0, 0.0, 0.0, 0.0], 2000)?;
     change_threshold_index.add(NodeId::new(1).unwrap(), &[11.0, 0.0, 0.0, 0.0], 2000)?;
+    change_threshold_index.on_transaction()?;
 
     assert!(change_threshold_index.snapshot_count() >= 1);
 

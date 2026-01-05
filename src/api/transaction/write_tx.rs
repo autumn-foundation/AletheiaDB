@@ -202,6 +202,9 @@ impl WriteTransaction {
         // Apply all changes atomically
         self.apply_changes(commit_timestamp)?;
 
+        // Notify temporal vector index of transaction completion (for snapshot creation)
+        self.current.on_temporal_vector_transaction()?;
+
         // Register commit with visibility manager
         self.visibility_manager
             .register_commit(self.tx_id, commit_timestamp);
@@ -518,7 +521,7 @@ impl WriteTransaction {
                         *version_id,
                         metadata,
                     );
-                    self.current.insert_node_direct(node)?;
+                    self.current.insert_node_direct(node, commit_timestamp)?;
 
                     // Store in historical storage
                     self.historical.lock_or_err()?.add_node_version(
@@ -592,7 +595,7 @@ impl WriteTransaction {
                         *version_id,
                         metadata,
                     );
-                    self.current.update_node_direct(node)?;
+                    self.current.update_node_direct(node, commit_timestamp)?;
 
                     // Add new version to historical storage
                     self.historical.lock_or_err()?.add_node_version(
@@ -695,7 +698,7 @@ impl WriteTransaction {
                     );
 
                     // Delete from current storage
-                    self.current.delete_node_direct(*node_id)?;
+                    self.current.delete_node_direct(*node_id, commit_timestamp)?;
                 }
                 super::BufferedWrite::DeleteEdge { edge_id } => {
                     // Get the edge before deleting
