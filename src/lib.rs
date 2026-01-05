@@ -53,6 +53,9 @@ pub mod db;
 pub mod index;
 pub mod storage;
 pub mod utils;
+// Optional embedding generation module
+#[cfg(feature = "embeddings")]
+pub mod embeddings;
 
 // Re-export commonly used types at the crate root
 pub use core::{

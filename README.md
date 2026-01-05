@@ -214,6 +214,55 @@ db.write(|tx| {
 })?;
 ```
 
+### Vector Embeddings (Optional)
+
+GallifreyDB includes an optional embedding generation system for semantic search:
+
+```rust
+use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use gallifreydb::embeddings::{EmbeddingService, providers::openai::*};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Enable in Cargo.toml: features = ["embedding-openai"]
+
+    // 1. Create embedding service
+    let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
+    let provider = Arc::new(OpenAIProvider::new(config)?);
+    let service = EmbeddingService::new(provider);
+
+    // 2. Generate embeddings
+    let documents = vec![
+        "GallifreyDB is a bi-temporal graph database",
+        "It tracks both valid time and transaction time",
+    ];
+    let embeddings = service.embed_batch(&documents).await?;
+
+    // 3. Store with vectors
+    let db = GallifreyDB::new();
+    for (text, embedding) in documents.iter().zip(embeddings.iter()) {
+        db.create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("content", *text)
+                .insert_vector("embedding", embedding)
+                .build(),
+        )?;
+    }
+
+    Ok(())
+}
+```
+
+**Available Providers**:
+- **OpenAI**: Best quality, API-based (~100-200ms)
+- **HuggingFace**: Open-source models, free tier (~200-500ms)
+- **Ollama**: Local inference, privacy-focused (~20-50ms)
+- **ONNX**: Ultra-fast local, requires setup (~1-10ms)
+
+See **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** for complete documentation.
+
 ## Performance
 
 | Operation | Target | Achieved |
@@ -232,6 +281,8 @@ Run benchmarks with `just bench` to verify on your hardware.
 - **[TESTING.md](TESTING.md)** - Testing, coverage, and profiling guide
 - **[WORKTREE_WORKFLOW.md](WORKTREE_WORKFLOW.md)** - Parallel development workflow
 - **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture
+- **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide (optional)
+- **[docs/adr/0016-embedding-providers.md](docs/adr/0016-embedding-providers.md)** - Embedding architecture decisions
 - **[justfile](justfile)** - Available development commands
 
 ## Use Cases
