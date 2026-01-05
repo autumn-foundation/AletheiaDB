@@ -1109,8 +1109,6 @@ mod tests {
 
     #[test]
     fn test_property_map_iteration() {
-        setup_test();
-
         let map = PropertyMapBuilder::new()
             .insert("a", 1i64)
             .insert("b", 2i64)
@@ -1720,8 +1718,6 @@ mod tests {
 
     #[test]
     fn test_property_key_interning_serialization_round_trip() {
-        setup_test();
-
         // Create a property map with interned keys
         let map = PropertyMapBuilder::new()
             .insert("name", "Alice")
@@ -1802,8 +1798,6 @@ mod tests {
 
     #[test]
     fn test_invalid_interned_string_serialization() {
-        setup_test();
-
         // Create an InternedString with a raw ID that doesn't exist in the interner
         let invalid_key = InternedString::from_raw(999999);
 
@@ -1834,8 +1828,6 @@ mod tests {
 
     #[test]
     fn test_concurrent_property_key_access() {
-        setup_test();
-
         use std::sync::Arc;
         use std::thread;
 
@@ -1872,8 +1864,6 @@ mod tests {
 
     #[test]
     fn test_property_key_get_efficiency() {
-        setup_test();
-
         // Pre-populate interner with a key
         let interned_key = GLOBAL_INTERNER.intern("test_key");
 
