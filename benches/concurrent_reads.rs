@@ -1,7 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use gallifreydb::GallifreyDB;
 use gallifreydb::api::transaction::WriteOps;
 use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::GallifreyDB;
 use std::sync::Arc;
 use std::thread;
 
@@ -31,14 +31,13 @@ fn bench_concurrent_time_travel_reads(c: &mut Criterion) {
                         let handle = thread::spawn(move || {
                             // Each thread performs 100 time-travel queries
                             for i in 0..100 {
-                                let node_id = gallifreydb::core::id::NodeId::new((i % 100) as u64 + 1).unwrap();
+                                let node_id =
+                                    gallifreydb::core::id::NodeId::new((i % 100) as u64 + 1)
+                                        .unwrap();
                                 let timestamp = 1000 + (i as i64 * 100);
 
-                                let result = db_clone.get_node_at_time(
-                                    node_id,
-                                    timestamp,
-                                    timestamp,
-                                );
+                                let result =
+                                    db_clone.get_node_at_time(node_id, timestamp, timestamp);
 
                                 // Force the result to be used
                                 black_box(result);
@@ -122,7 +121,8 @@ fn setup_database_with_versions() -> GallifreyDB {
             db.write(|tx| {
                 tx.update_node(node_id, updated_props.clone())?;
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
         }
     }
 

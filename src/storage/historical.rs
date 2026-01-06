@@ -574,7 +574,14 @@ impl HistoricalStorage {
     pub fn extract_edge_version_data(
         &self,
         version_id: VersionId,
-    ) -> Result<(VersionId, EdgeId, InternedString, NodeId, NodeId, VersionData)> {
+    ) -> Result<(
+        VersionId,
+        EdgeId,
+        InternedString,
+        NodeId,
+        NodeId,
+        VersionData,
+    )> {
         let version = self
             .edge_versions
             .get(&version_id)
