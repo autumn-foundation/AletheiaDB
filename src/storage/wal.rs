@@ -41,6 +41,7 @@ const WAL_HEADER_SIZE: usize = 5;
 const LSN_SIZE: usize = 8;
 const TIMESTAMP_SIZE: usize = 8;
 const CHECKSUM_SIZE: usize = 4;
+#[cfg_attr(not(test), allow(dead_code))]
 const OP_TYPE_SIZE: usize = 1;
 
 /// Offset to checksum field within an entry (after LSN + timestamp)
@@ -1573,7 +1574,14 @@ fn parse_wal_entries_versioned(
         };
 
         // Verify checksum integrity
-        verify_entry_checksum(&buffer, entry_start, offset, stored_checksum, lsn, "migration")?;
+        verify_entry_checksum(
+            buffer,
+            entry_start,
+            offset,
+            stored_checksum,
+            lsn,
+            "migration",
+        )?;
 
         if lsn >= start_lsn {
             entries.push(WalEntry {
@@ -2402,7 +2410,8 @@ mod tests {
             file.read_to_end(&mut buffer).unwrap();
 
             // Calculate offset to operation data using constants
-            let payload_start = WAL_HEADER_SIZE + LSN_SIZE + TIMESTAMP_SIZE + CHECKSUM_SIZE + OP_TYPE_SIZE;
+            let payload_start =
+                WAL_HEADER_SIZE + LSN_SIZE + TIMESTAMP_SIZE + CHECKSUM_SIZE + OP_TYPE_SIZE;
             let corruption_offset = payload_start + 4; // Corrupt inside the NodeId field
 
             if buffer.len() > corruption_offset {
@@ -2509,8 +2518,10 @@ mod tests {
                 let original = buffer[corruption_offset];
                 buffer[corruption_offset] ^= 0xFF;
 
-                eprintln!("Corrupted byte at offset {} (changed {:02x} to {:02x})",
-                    corruption_offset, original, buffer[corruption_offset]);
+                eprintln!(
+                    "Corrupted byte at offset {} (changed {:02x} to {:02x})",
+                    corruption_offset, original, buffer[corruption_offset]
+                );
 
                 file.seek(std::io::SeekFrom::Start(0)).unwrap();
                 file.write_all(&buffer).unwrap();
@@ -2529,7 +2540,10 @@ mod tests {
             let result = wal.read_from(LSN::initial());
 
             // Should fail with checksum error
-            assert!(result.is_err(), "Expected error when reading corrupted multi-entry WAL");
+            assert!(
+                result.is_err(),
+                "Expected error when reading corrupted multi-entry WAL"
+            );
             match result.unwrap_err() {
                 Error::Storage(StorageError::CorruptedData(msg)) => {
                     assert!(
@@ -2537,7 +2551,10 @@ mod tests {
                         "Error message should mention checksum mismatch, but was: {}",
                         msg
                     );
-                    eprintln!("✓ Successfully detected corruption in multi-entry segment: {}", msg);
+                    eprintln!(
+                        "✓ Successfully detected corruption in multi-entry segment: {}",
+                        msg
+                    );
                 }
                 err => panic!("Expected StorageError::CorruptedData, but got {:?}", err),
             }
