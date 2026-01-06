@@ -24,8 +24,8 @@ use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::{WalOperation, WriteAheadLog};
 use crate::utils::error::{Result, StorageError, TransactionError};
-use crate::utils::lock::MutexExt;
-use std::sync::{Arc, Mutex};
+use crate::utils::lock::{MutexExt, RwLockExt};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Write transaction with full ACID guarantees.
 ///
@@ -53,8 +53,8 @@ pub struct WriteTransaction {
 
     // Shared references to storage (Arc for zero-copy sharing)
     current: Arc<CurrentStorage>,
-    historical: Arc<Mutex<HistoricalStorage>>,
-    temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    temporal_indexes: Arc<RwLock<TemporalIndexes>>,
     wal: Arc<Mutex<WriteAheadLog>>,
     current_timestamp: Arc<Mutex<Timestamp>>,
     visibility_manager: Arc<TxVisibilityManager>,
@@ -72,8 +72,8 @@ impl WriteTransaction {
         tx_id: TxId,
         snapshot: TransactionSnapshot,
         current: Arc<CurrentStorage>,
-        historical: Arc<Mutex<HistoricalStorage>>,
-        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -534,8 +534,8 @@ impl WriteTransaction {
 
         // Acquire locks once before processing all operations.
         // This reduces lock overhead from 2N acquisitions (per operation) to just 2 (total).
-        let mut historical = self.historical.lock_or_err()?;
-        let mut temporal_indexes = self.temporal_indexes.lock_or_err()?;
+        let mut historical = self.historical.write_or_err()?;
+        let mut temporal_indexes = self.temporal_indexes.write_or_err()?;
 
         // Pre-generate all tombstone version IDs at once to reduce lock contention
         // on the ID generator. Count delete operations and generate IDs in batch.
@@ -1188,8 +1188,8 @@ mod tests {
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
         let current = Arc::new(CurrentStorage::new());
-        let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
@@ -1568,7 +1568,7 @@ mod tests {
         assert!(current.get_node(node_id).is_err());
 
         // Verify tombstone version was created in historical storage
-        let historical = historical.lock().unwrap();
+        let historical = historical.read().unwrap();
         let stats = historical.stats();
         assert!(
             stats.total_node_versions > 0,
@@ -1608,7 +1608,7 @@ mod tests {
         assert!(current.get_edge(edge_id).is_err());
 
         // Verify tombstone version was created in historical storage
-        let historical = historical.lock().unwrap();
+        let historical = historical.read().unwrap();
         let stats = historical.stats();
         assert!(
             stats.total_edge_versions > 0,
@@ -1687,8 +1687,8 @@ mod tests {
     #[test]
     fn test_interleaved_create_update_delete_operations() {
         let current = Arc::new(CurrentStorage::new());
-        let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
@@ -1923,8 +1923,8 @@ mod conflict_detection_tests {
     /// transactions for testing write-write conflict detection.
     struct TestHarness {
         current: Arc<CurrentStorage>,
-        historical: Arc<Mutex<HistoricalStorage>>,
-        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -1939,8 +1939,8 @@ mod conflict_detection_tests {
         /// Create a new test harness with all shared infrastructure.
         fn new() -> Self {
             let current = Arc::new(CurrentStorage::new());
-            let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-            let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
@@ -2366,8 +2366,8 @@ mod timestamp_ordering_tests {
     /// Test harness for timestamp ordering tests.
     struct TestHarness {
         current: Arc<CurrentStorage>,
-        historical: Arc<Mutex<HistoricalStorage>>,
-        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -2381,8 +2381,8 @@ mod timestamp_ordering_tests {
     impl TestHarness {
         fn new() -> Self {
             let current = Arc::new(CurrentStorage::new());
-            let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-            let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {

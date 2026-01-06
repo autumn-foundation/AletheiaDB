@@ -18,8 +18,8 @@ use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
 use crate::storage::wal::{WalConfig, WriteAheadLog};
 use crate::utils::error::{Result, StorageError};
-use crate::utils::lock::MutexExt;
-use std::sync::{Arc, Mutex};
+use crate::utils::lock::{MutexExt, RwLockExt};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Main GallifreyDB database.
 ///
@@ -29,10 +29,10 @@ use std::sync::{Arc, Mutex};
 pub struct GallifreyDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
     current: Arc<CurrentStorage>,
-    /// Historical version storage (temporal path) - Mutex-protected for write safety
-    historical: Arc<Mutex<HistoricalStorage>>,
-    /// Temporal indexes for efficient time-based queries - Mutex-protected for write safety
-    temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+    /// Historical version storage (temporal path) - RwLock-protected for concurrent reads
+    historical: Arc<RwLock<HistoricalStorage>>,
+    /// Temporal indexes for efficient time-based queries - RwLock-protected for concurrent reads
+    temporal_indexes: Arc<RwLock<TemporalIndexes>>,
     /// Write-Ahead Log for durability - Mutex-protected for write safety
     wal: Arc<Mutex<WriteAheadLog>>,
     /// Current logical timestamp for transaction time - Mutex-protected for thread-safe increment
@@ -60,8 +60,8 @@ impl GallifreyDB {
 
         GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
-            historical: Arc::new(Mutex::new(HistoricalStorage::with_config(config))),
-            temporal_indexes: Arc::new(Mutex::new(TemporalIndexes::new())),
+            historical: Arc::new(RwLock::new(HistoricalStorage::with_config(config))),
+            temporal_indexes: Arc::new(RwLock::new(TemporalIndexes::new())),
             wal: Arc::new(Mutex::new(wal)),
             current_timestamp: Arc::new(Mutex::new(time::now())),
             tx_id_gen: Arc::new(TxIdGenerator::new()),
@@ -299,7 +299,7 @@ impl GallifreyDB {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Node> {
-        let historical = self.historical.lock_or_err()?;
+        let historical = self.historical.read_or_err()?;
 
         // Find the version valid at this time
         let version_id = historical
@@ -330,7 +330,7 @@ impl GallifreyDB {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Edge> {
-        let historical = self.historical.lock_or_err()?;
+        let historical = self.historical.read_or_err()?;
 
         let version_id = historical
             .find_edge_version_at_time(edge_id, valid_time, transaction_time)
@@ -679,7 +679,7 @@ impl GallifreyDB {
     ///
     /// Returns an error if the historical storage lock is poisoned.
     pub fn historical_stats(&self) -> Result<crate::storage::historical::HistoricalStats> {
-        Ok(self.historical.lock_or_err()?.stats())
+        Ok(self.historical.read_or_err()?.stats())
     }
 }
 
