@@ -1,5 +1,5 @@
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 use gallifreydb::api::transaction::{ReadOps, WriteOps};
+use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -50,7 +50,9 @@ fn test_phantom_delete_violation() {
         );
 
         let node = result.unwrap();
-        let name_prop = node.get_property("name").expect("name property should exist");
+        let name_prop = node
+            .get_property("name")
+            .expect("name property should exist");
         let name = name_prop.as_str().expect("name should be a string");
 
         assert_eq!(

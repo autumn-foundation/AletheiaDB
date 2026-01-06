@@ -104,8 +104,8 @@ impl ReadTransaction {
                 // NOTE: Historical versions don't track created_by_tx, so we use TxId(0)
                 // The commit_timestamp is extracted from transaction_time.start
                 let metadata = VersionMetadata::new(
-                    super::TxId::new(0),                          // Historical versions don't track creating tx
-                    version.temporal.transaction_time().start(),  // Extract commit timestamp
+                    super::TxId::new(0), // Historical versions don't track creating tx
+                    version.temporal.transaction_time().start(), // Extract commit timestamp
                 );
 
                 // Build Node from historical version
@@ -172,8 +172,8 @@ impl ReadTransaction {
                 // NOTE: Historical versions don't track created_by_tx, so we use TxId(0)
                 // The commit_timestamp is extracted from transaction_time.start
                 let metadata = VersionMetadata::new(
-                    super::TxId::new(0),                          // Historical versions don't track creating tx
-                    version.temporal.transaction_time().start(),  // Extract commit timestamp
+                    super::TxId::new(0), // Historical versions don't track creating tx
+                    version.temporal.transaction_time().start(), // Extract commit timestamp
                 );
 
                 // Build Edge from historical version
