@@ -15,6 +15,7 @@ crc32fast = "1.4"
 parking_lot = "0.12"
 hnsw_rs = "0.3"
 arc-swap = "1.7"
+quick_cache = "0.6"
 
 # Optional Tracy profiling support
 tracy-client = { version = "0.17", optional = true, default-features = false }
@@ -154,4 +155,10 @@ required-features = []
 name = "temporal_vector"
 harness = false
 path = "benches/temporal_vector.rs"
+required-features = []
+
+[[bench]]
+name = "concurrent_reads"
+harness = false
+path = "benches/concurrent_reads.rs"
 required-features = []

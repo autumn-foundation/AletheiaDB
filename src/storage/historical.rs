@@ -8,6 +8,7 @@
 //! - Anchors are created every N versions (configurable)
 //! - Deltas store only changed properties
 //! - Reconstruction walks backward to nearest anchor and applies deltas forward
+//! - TinyLFU cache reduces redundant delta chain traversals for concurrent reads
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
@@ -17,7 +18,9 @@ use crate::storage::version::{
     AnchorConfig, EdgeVersion, NodeVersion, TemporalVersion, VersionData,
 };
 use crate::utils::error::{Result, StorageError, TemporalError};
+use quick_cache::sync::Cache;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Default maximum number of versions per entity (DoS protection)
 pub const DEFAULT_MAX_VERSIONS_PER_ENTITY: usize = 1_000;
@@ -64,10 +67,14 @@ impl RetentionPolicy {
     }
 }
 
+/// Default cache size for reconstructed properties (10,000 entries)
+const DEFAULT_RECONSTRUCTION_CACHE_SIZE: usize = 10_000;
+
 /// Historical storage for versioned nodes and edges.
 ///
 /// This storage engine maintains version chains for all temporal data,
 /// using anchor+delta compression to minimize storage overhead.
+/// A TinyLFU cache reduces redundant delta chain traversals for concurrent reads.
 pub struct HistoricalStorage {
     /// Configuration for anchor creation strategy
     config: AnchorConfig,
@@ -85,6 +92,10 @@ pub struct HistoricalStorage {
     node_version_counts: HashMap<NodeId, usize>,
     /// Cached version counts per edge (for O(1) capacity checks)
     edge_version_counts: HashMap<EdgeId, usize>,
+    /// TinyLFU cache for reconstructed node properties (reduces lock contention)
+    node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// TinyLFU cache for reconstructed edge properties
+    edge_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
 }
 
 impl HistoricalStorage {
@@ -112,6 +123,8 @@ impl HistoricalStorage {
             edge_version_heads: HashMap::new(),
             node_version_counts: HashMap::new(),
             edge_version_counts: HashMap::new(),
+            node_property_cache: Arc::new(Cache::new(DEFAULT_RECONSTRUCTION_CACHE_SIZE)),
+            edge_property_cache: Arc::new(Cache::new(DEFAULT_RECONSTRUCTION_CACHE_SIZE)),
         }
     }
 
@@ -269,13 +282,19 @@ impl HistoricalStorage {
     /// This walks backward to find the nearest anchor, then applies all deltas
     /// forward to reconstruct the full property state.
     pub fn reconstruct_node_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
+        // Check cache first (fast path for concurrent reads)
+        if let Some(cached) = self.node_property_cache.get(&version_id) {
+            return Ok((*cached).clone());
+        }
+
+        // Cache miss - reconstruct properties
         let version = self
             .node_versions
             .get(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        match &version.data {
-            VersionData::Anchor { properties } => Ok(properties.clone()),
+        let properties = match &version.data {
+            VersionData::Anchor { properties } => properties.clone(),
             VersionData::Delta { delta } => {
                 // Find the previous version
                 let prev_id = version
@@ -285,24 +304,36 @@ impl HistoricalStorage {
                         reason: "Delta version has no previous version".to_string(),
                     })?;
 
-                // Recursively reconstruct previous version
+                // Recursively reconstruct previous version (may hit cache)
                 let base_properties = self.reconstruct_node_properties(prev_id)?;
 
                 // Apply this delta
-                Ok(delta.apply(&base_properties))
+                delta.apply(&base_properties)
             }
-        }
+        };
+
+        // Populate cache for future reads
+        self.node_property_cache
+            .insert(version_id, Arc::new(properties.clone()));
+
+        Ok(properties)
     }
 
     /// Reconstruct the properties of an edge version.
     pub fn reconstruct_edge_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
+        // Check cache first (fast path for concurrent reads)
+        if let Some(cached) = self.edge_property_cache.get(&version_id) {
+            return Ok((*cached).clone());
+        }
+
+        // Cache miss - reconstruct properties
         let version = self
             .edge_versions
             .get(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        match &version.data {
-            VersionData::Anchor { properties } => Ok(properties.clone()),
+        let properties = match &version.data {
+            VersionData::Anchor { properties } => properties.clone(),
             VersionData::Delta { delta } => {
                 let prev_id = version
                     .prev_version
@@ -311,10 +342,17 @@ impl HistoricalStorage {
                         reason: "Delta version has no previous version".to_string(),
                     })?;
 
+                // Recursively reconstruct previous version (may hit cache)
                 let base_properties = self.reconstruct_edge_properties(prev_id)?;
-                Ok(delta.apply(&base_properties))
+                delta.apply(&base_properties)
             }
-        }
+        };
+
+        // Populate cache for future reads
+        self.edge_property_cache
+            .insert(version_id, Arc::new(properties.clone()));
+
+        Ok(properties)
     }
 
     /// Get a node version by ID.
@@ -474,6 +512,50 @@ impl HistoricalStorage {
                 return count;
             }
         }
+    }
+
+    /// Extract version metadata and data for copy-out reconstruction (nodes).
+    ///
+    /// This method copies the necessary version chain data while holding the lock,
+    /// allowing reconstruction to proceed outside the lock.
+    ///
+    /// Returns (version metadata, label, data) that can be used for lock-free reconstruction.
+    pub fn extract_node_version_data(
+        &self,
+        version_id: VersionId,
+    ) -> Result<(VersionId, NodeId, InternedString, VersionData)> {
+        let version = self
+            .node_versions
+            .get(&version_id)
+            .ok_or(StorageError::VersionNotFound(version_id))?;
+
+        // Clone the version data - these are cheap copies (Arc-based)
+        Ok((
+            version.id,
+            version.node_id,
+            version.label,
+            version.data.clone(),
+        ))
+    }
+
+    /// Extract version metadata and data for copy-out reconstruction (edges).
+    pub fn extract_edge_version_data(
+        &self,
+        version_id: VersionId,
+    ) -> Result<(VersionId, EdgeId, InternedString, NodeId, NodeId, VersionData)> {
+        let version = self
+            .edge_versions
+            .get(&version_id)
+            .ok_or(StorageError::VersionNotFound(version_id))?;
+
+        Ok((
+            version.id,
+            version.edge_id,
+            version.label,
+            version.source,
+            version.target,
+            version.data.clone(),
+        ))
     }
 
     /// Get statistics about the storage.
