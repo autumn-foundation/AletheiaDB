@@ -261,6 +261,21 @@ struct SnapshotData {
     /// Historical vector values at each snapshot
     /// Key: Timestamp when snapshot was created
     /// Value: Immutable map of NodeId -> Vector for that snapshot
+    ///
+    /// # Memory Overhead
+    ///
+    /// This enables semantic evolution tracking and drift analysis but doubles
+    /// the memory overhead of snapshots. For a graph with N nodes and D dimensions,
+    /// each snapshot requires approximately:
+    /// - HNSW index: N × D × 4 bytes (vectors) + N × M × 8 bytes (graph structure)
+    /// - Vector history: N × D × 4 bytes (raw vectors) + N × 24 bytes (HashMap overhead)
+    ///
+    /// Example: 1M nodes × 384 dimensions × 100 snapshots:
+    /// - Vector history alone: ~153 GB (1M × 384 × 4 bytes × 100)
+    /// - Total with HNSW: ~300+ GB
+    ///
+    /// **Memory Management**: Use `retention_policy` and `max_snapshots` to control
+    /// memory usage. The default configuration keeps 100 snapshots maximum.
     vector_history: BTreeMap<Timestamp, Arc<HashMap<NodeId, Arc<[f32]>>>>,
 }
 

@@ -149,3 +149,9 @@ name = "string_interning"
 harness = false
 path = "benches/string_interning.rs"
 required-features = []
+
+[[bench]]
+name = "temporal_vector"
+harness = false
+path = "benches/temporal_vector.rs"
+required-features = []
