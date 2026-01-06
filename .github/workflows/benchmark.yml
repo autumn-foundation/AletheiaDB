@@ -62,23 +62,16 @@ jobs:
       - name: Run all benchmarks once
         run: |
           echo "Running all benchmarks..."
-          # Run once - Criterion generates JSON files AND outputs bencher format
-          cargo bench --all-features -- --output-format bencher | tee all_benchmarks.txt
-
-      - name: Verify Criterion output
-        run: |
-          echo "Checking for Criterion output..."
-          ls -la target/ || echo "No target dir"
-          ls -la target/criterion/ || echo "No criterion dir"
-          find target/criterion -name "estimates.json" | head -5 || echo "No estimates.json files found"
+          # Run benchmarks - Criterion automatically generates JSON in target/criterion/
+          cargo bench --all-features
 
       - name: Store historical benchmark results
         uses: benchmark-action/github-action-benchmark@v1
         if: github.event_name != 'pull_request'
         with:
           name: GallifreyDB Benchmarks
-          tool: 'cargo'
-          output-file-path: all_benchmarks.txt
+          tool: 'criterion'
+          output-file-path: target/criterion/
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
           # Show alert with commit comment on detecting possible performance regression
