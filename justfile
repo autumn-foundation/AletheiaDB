@@ -18,9 +18,16 @@ test-verbose:
 test-one TEST:
     cargo test {{TEST}} -- --nocapture
 
-# Run benchmarks (when implemented)
+# Run benchmarks
 bench:
     cargo bench
+
+# Run benchmarks and generate HTML tables
+bench-tables:
+    cargo bench --all-features
+    python scripts/generate_benchmark_tables.py
+    @echo "✓ Benchmark tables generated in benchmark-results/"
+    @echo "  Open benchmark-results/index.html to view results"
 
 # Build the project
 build:

@@ -54,33 +54,48 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run current_state benchmarks
-        run: cargo bench --bench current_state -- --output-format bencher | tee current_state_output.txt
-
-      - name: Run gallifreydb benchmarks
-        run: cargo bench --bench gallifreydb -- --output-format bencher | tee gallifreydb_output.txt
-
-      - name: Store benchmark results
-        uses: benchmark-action/github-action-benchmark@v1
-        if: github.event_name != 'pull_request'
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          name: GallifreyDB Benchmarks
-          tool: 'cargo'
-          output-file-path: gallifreydb_output.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
-          # Show alert with commit comment on detecting possible performance regression
-          alert-threshold: '150%'
-          comment-on-alert: true
-          fail-on-alert: false
+          python-version: '3.11'
+
+      - name: Run all benchmarks
+        run: |
+          echo "Running all benchmarks..."
+          cargo bench --all-features
+
+      - name: Generate benchmark HTML tables
+        run: |
+          echo "Generating benchmark HTML tables..."
+          python scripts/generate_benchmark_tables.py \
+            --input target/criterion \
+            --output benchmark-results
+
+      - name: Prepare GitHub Pages deployment
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p gh-pages
+          # Copy our generated index and tables
+          cp -r benchmark-results/* gh-pages/
+          # Copy Criterion's detailed HTML reports
+          mkdir -p gh-pages/criterion
+          cp -r target/criterion/report/* gh-pages/criterion/ || echo "No Criterion report found"
+
+      - name: Deploy to GitHub Pages
+        if: github.event_name != 'pull_request'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gh-pages
+          publish_branch: gh-pages
+          destination_dir: benchmarks
 
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: |
-            current_state_output.txt
-            gallifreydb_output.txt
+            benchmark-results/
             target/criterion/
 
   benchmark-pr:
@@ -94,35 +109,79 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run benchmarks on PR
+      - name: Run all benchmarks
+        run: |
+          echo "Running benchmarks for PR..."
+          cargo bench --all-features
+
+      - name: Generate benchmark summary for PR
+        run: |
+          python scripts/generate_benchmark_tables.py \
+            --input target/criterion \
+            --output benchmark-results
+
+      - name: Create PR comment with results
         run: |
           echo "## 🚀 Benchmark Results" > benchmark_results.md
           echo "" >> benchmark_results.md
-          echo "### Current State Benchmarks" >> benchmark_results.md
-          echo '```' >> benchmark_results.md
-          cargo bench --bench current_state 2>&1 | grep -E "(test|time:|ns/iter)" | head -n 50 >> benchmark_results.md || echo "No benchmark output captured" >> benchmark_results.md
-          echo '```' >> benchmark_results.md
+          echo "Benchmarks have been run for this PR. Key metrics:" >> benchmark_results.md
           echo "" >> benchmark_results.md
-          echo "### GallifreyDB Benchmarks" >> benchmark_results.md
-          echo '```' >> benchmark_results.md
-          cargo bench --bench gallifreydb 2>&1 | grep -E "(test|time:|ns/iter)" | head -n 50 >> benchmark_results.md || echo "No benchmark output captured" >> benchmark_results.md
-          echo '```' >> benchmark_results.md
+
+          # Extract some key benchmarks and format them nicely
+          echo "### Performance Summary" >> benchmark_results.md
+          echo "" >> benchmark_results.md
+          echo "| Benchmark | Mean | Std Dev |" >> benchmark_results.md
+          echo "|-----------|------|---------|" >> benchmark_results.md
+
+          # Parse a few key benchmarks from criterion output
+          for bench in "node_lookup" "single_hop" "3_hop_traversal"; do
+            if [ -f "target/criterion/${bench}/base/estimates.json" ]; then
+              python3 -c "
+import json
+import sys
+try:
+    with open('target/criterion/${bench}/base/estimates.json') as f:
+        data = json.load(f)
+    mean_ns = data['mean']['point_estimate']
+    std_ns = data['std_dev']['point_estimate']
+    if mean_ns < 1000:
+        mean_str = f'{mean_ns:.2f} ns'
+        std_str = f'{std_ns:.2f} ns'
+    elif mean_ns < 1000000:
+        mean_str = f'{mean_ns/1000:.2f} µs'
+        std_str = f'{std_ns/1000:.2f} µs'
+    else:
+        mean_str = f'{mean_ns/1000000:.2f} ms'
+        std_str = f'{std_ns/1000000:.2f} ms'
+    print(f'| ${bench} | {mean_str} | ± {std_str} |')
+except:
+    pass
+" >> benchmark_results.md || echo "| ${bench} | N/A | N/A |" >> benchmark_results.md
+            fi
+          done
+
           echo "" >> benchmark_results.md
           echo "---" >> benchmark_results.md
-          echo "*Benchmarks run on ubuntu-latest*" >> benchmark_results.md
+          echo "*Full benchmark results available in workflow artifacts*" >> benchmark_results.md
+          echo "" >> benchmark_results.md
+          echo "📊 [View detailed results](https://madmax983.github.io/GallifreyDB/benchmarks/)" >> benchmark_results.md
 
           # Also output to step summary
           cat benchmark_results.md >> $GITHUB_STEP_SUMMARY
 
       - name: Comment benchmark results on PR
         uses: actions/github-script@v7
-        if: github.event_name == 'pull_request'
         continue-on-error: true  # Don't fail the workflow if commenting fails (e.g., fork PRs)
         with:
           script: |
@@ -140,3 +199,11 @@ jobs:
               console.log('Could not post PR comment:', error.message);
               console.log('Benchmark results are available in the workflow summary above.');
             }
+
+      - name: Upload PR benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-benchmark-results
+          path: |
+            benchmark-results/
+            target/criterion/
