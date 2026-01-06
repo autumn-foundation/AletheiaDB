@@ -315,6 +315,180 @@ fn bench_snapshot_creation_by_size(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark semantic evolution queries (VS-045)
+fn bench_semantic_evolution(c: &mut Criterion) {
+    let mut group = c.benchmark_group("semantic_evolution");
+
+    for snapshot_count in [10, 50, 100] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}snapshots", snapshot_count)),
+            &snapshot_count,
+            |b, &snapshot_count| {
+                let index = create_temporal_index(384);
+
+                // Create multiple snapshots with evolving vectors
+                let node_id = NodeId::new(42).unwrap();
+                for i in 0..snapshot_count {
+                    let vector: Vec<f32> = (0..384).map(|j| (i + j) as f32 / 1000.0).collect();
+                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.on_transaction();
+                }
+
+                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
+
+                b.iter(|| {
+                    let _ = index.semantic_evolution(black_box(node_id), black_box(time_range));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark semantic drift tracking with reference vector (VS-045)
+fn bench_track_semantic_drift(c: &mut Criterion) {
+    let mut group = c.benchmark_group("track_semantic_drift");
+
+    for snapshot_count in [10, 50, 100] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}snapshots", snapshot_count)),
+            &snapshot_count,
+            |b, &snapshot_count| {
+                let index = create_temporal_index(384);
+
+                // Create snapshots with vectors drifting from reference
+                let node_id = NodeId::new(42).unwrap();
+                for i in 0..snapshot_count {
+                    let vector: Vec<f32> = (0..384)
+                        .map(|j| {
+                            let angle =
+                                (i as f32 / snapshot_count as f32) * std::f32::consts::PI / 4.0;
+                            if j == 0 {
+                                angle.cos()
+                            } else if j == 1 {
+                                angle.sin()
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.on_transaction();
+                }
+
+                let reference: Vec<f32> = {
+                    let mut v = vec![0.0f32; 384];
+                    v[0] = 1.0;
+                    v
+                };
+                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
+
+                b.iter(|| {
+                    let _ = index.track_semantic_drift(
+                        black_box(node_id),
+                        black_box(&reference),
+                        black_box(time_range),
+                    );
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark consecutive drift calculation (VS-045)
+fn bench_calculate_consecutive_drift(c: &mut Criterion) {
+    let mut group = c.benchmark_group("calculate_consecutive_drift");
+
+    for snapshot_count in [10, 50, 100] {
+        group.throughput(Throughput::Elements(snapshot_count as u64 - 1)); // N-1 pairs
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}snapshots", snapshot_count)),
+            &snapshot_count,
+            |b, &snapshot_count| {
+                let index = create_temporal_index(384);
+
+                // Create snapshots with gradual rotation
+                let node_id = NodeId::new(42).unwrap();
+                for i in 0..snapshot_count {
+                    let angle = (i as f32 / snapshot_count as f32) * std::f32::consts::PI;
+                    let vector: Vec<f32> = (0..384)
+                        .map(|j| {
+                            if j == 0 {
+                                angle.cos()
+                            } else if j == 1 {
+                                angle.sin()
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.on_transaction();
+                }
+
+                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
+
+                b.iter(|| {
+                    let _ = index
+                        .calculate_consecutive_drift(black_box(node_id), black_box(time_range));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark memory overhead of semantic evolution vs regular snapshots
+fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
+    let mut group = c.benchmark_group("semantic_evolution_memory_overhead");
+
+    for vector_count in [100, 500, 1000] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}vectors_10snapshots", vector_count)),
+            &vector_count,
+            |b, &vector_count| {
+                b.iter_batched(
+                    || {
+                        // Setup: create index with many vectors across multiple snapshots
+                        let index = create_temporal_index(384);
+
+                        // Create 10 snapshots
+                        for snapshot_idx in 0..10 {
+                            for i in 0..vector_count {
+                                let node_id =
+                                    NodeId::new((snapshot_idx * vector_count + i) as u64).unwrap();
+                                let vector: Vec<f32> = (0..384)
+                                    .map(|j| (snapshot_idx + i + j) as f32 / 1000.0)
+                                    .collect();
+                                let _ =
+                                    index.add(node_id, &vector, (snapshot_idx * 1000 + i) as i64);
+                            }
+                            let _ = index.on_transaction();
+                        }
+
+                        index
+                    },
+                    |index| {
+                        // Measure semantic evolution retrieval
+                        let node_id = NodeId::new(vector_count as u64 / 2).unwrap();
+                        let time_range = TimeRange::between(0, 10000);
+                        let _ = index.semantic_evolution(node_id, time_range);
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_snapshot_creation,
@@ -323,5 +497,9 @@ criterion_group!(
     bench_snapshot_pruning,
     bench_temporal_vs_current_overhead,
     bench_snapshot_creation_by_size,
+    bench_semantic_evolution,
+    bench_track_semantic_drift,
+    bench_calculate_consecutive_drift,
+    bench_semantic_evolution_memory_overhead,
 );
 criterion_main!(benches);

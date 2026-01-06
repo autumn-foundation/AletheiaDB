@@ -62,7 +62,7 @@
 //! - `docs/adr/0017-temporal-vector-strategy.md` - Design decisions
 //! - `docs/VECTOR_SEARCH_DESIGN.md` - Overall vector search architecture
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,9 +71,10 @@ use parking_lot::RwLock;
 
 use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
+use crate::core::vector::cosine_similarity;
 use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, HnswConfig, TemporalSearchResults, VectorIndex};
-use crate::utils::{Error, Result, TemporalError};
+use crate::utils::{Error, Result, TemporalError, VectorError};
 
 /// Retention policy for snapshot cleanup.
 ///
@@ -247,6 +248,81 @@ pub enum SnapshotStrategy {
     },
 }
 
+/// Type alias for vector snapshot: map of NodeId to vector data
+type VectorSnapshot = Arc<HashMap<NodeId, Arc<[f32]>>>;
+
+/// Snapshot data protected by a single lock.
+///
+/// Groups snapshots and vector history together to ensure atomic updates
+/// and prevent deadlocks from acquiring multiple locks sequentially.
+struct SnapshotData {
+    /// Historical HNSW snapshots at anchor timestamps
+    /// Key: Timestamp when snapshot was created
+    /// Value: (Stable snapshot ID, Immutable HNSW index snapshot)
+    snapshots: BTreeMap<Timestamp, (usize, Arc<HnswIndex>)>,
+
+    /// Historical vector values at each snapshot
+    /// Key: Timestamp when snapshot was created
+    /// Value: Immutable map of NodeId -> Vector for that snapshot
+    ///
+    /// # Memory Overhead
+    ///
+    /// This enables semantic evolution tracking and drift analysis but doubles
+    /// the memory overhead of snapshots. For a graph with N nodes and D dimensions,
+    /// each snapshot requires approximately:
+    /// - HNSW index: N × D × 4 bytes (vectors) + N × M × 8 bytes (graph structure)
+    /// - Vector history: N × D × 4 bytes (raw vectors) + N × 24 bytes (HashMap overhead)
+    ///
+    /// Example: 1M nodes × 384 dimensions × 100 snapshots:
+    /// - Vector history alone: ~153 GB (1M × 384 × 4 bytes × 100)
+    /// - Total with HNSW: ~300+ GB
+    ///
+    /// **Memory Management**: Use `retention_policy` and `max_snapshots` to control
+    /// memory usage. The default configuration keeps 100 snapshots maximum.
+    ///
+    /// **WARNING**: For large graphs, this can quickly exceed available RAM. Monitor
+    /// memory usage in production and adjust `max_snapshots` accordingly. Consider
+    /// using `RetentionPolicy::KeepDuration` to automatically prune old snapshots.
+    vector_history: BTreeMap<Timestamp, VectorSnapshot>,
+}
+
+impl SnapshotData {
+    fn new() -> Self {
+        SnapshotData {
+            snapshots: BTreeMap::new(),
+            vector_history: BTreeMap::new(),
+        }
+    }
+
+    fn insert(
+        &mut self,
+        timestamp: Timestamp,
+        stable_id: usize,
+        snapshot: Arc<HnswIndex>,
+        vectors: VectorSnapshot,
+    ) {
+        self.snapshots.insert(timestamp, (stable_id, snapshot));
+        self.vector_history.insert(timestamp, vectors);
+    }
+
+    fn remove_oldest(&mut self) {
+        if let Some(oldest_key) = self.snapshots.keys().next().copied() {
+            self.snapshots.remove(&oldest_key);
+            self.vector_history.remove(&oldest_key);
+        }
+    }
+
+    fn len(&self) -> usize {
+        // Consistency check: snapshots and vector_history should always be in sync
+        debug_assert_eq!(
+            self.snapshots.len(),
+            self.vector_history.len(),
+            "SnapshotData inconsistency: snapshots and vector_history out of sync"
+        );
+        self.snapshots.len()
+    }
+}
+
 /// Metadata for snapshot management.
 ///
 /// Tracks state needed to determine when to create the next snapshot.
@@ -339,11 +415,9 @@ pub struct TemporalVectorIndex {
     /// Maps NodeId to the vector embedding
     vectors: Arc<DashMap<NodeId, Arc<[f32]>>>,
 
-    /// Historical HNSW snapshots at anchor timestamps
-    /// Key: Timestamp when snapshot was created
-    /// Value: (Stable snapshot ID, Immutable HNSW index snapshot)
-    /// Stable ID is from SnapshotMetadata::total_snapshots at creation time
-    snapshots: RwLock<BTreeMap<Timestamp, (usize, Arc<HnswIndex>)>>,
+    /// Historical snapshots and vector values protected by a single lock
+    /// This prevents deadlocks from acquiring multiple locks sequentially
+    snapshot_data: RwLock<SnapshotData>,
 
     /// Configuration
     config: TemporalVectorConfig,
@@ -402,7 +476,7 @@ impl TemporalVectorIndex {
         Ok(TemporalVectorIndex {
             current,
             vectors,
-            snapshots: RwLock::new(BTreeMap::new()),
+            snapshot_data: RwLock::new(SnapshotData::new()),
             config,
             metadata: RwLock::new(SnapshotMetadata::new(initial_time)),
         })
@@ -536,6 +610,38 @@ impl TemporalVectorIndex {
         Ok(())
     }
 
+    /// Builds a snapshot of the current vectors.
+    ///
+    /// Creates both an HNSW index snapshot and a raw vector map.
+    /// This is an expensive O(n log n) operation where n = number of vectors.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (HnswIndex snapshot, vector map)
+    ///
+    /// # Partial Build Failure
+    ///
+    /// If `snapshot.add()` fails partway through iteration, this function returns
+    /// `Err` but has already allocated memory for partial structures. This is
+    /// acceptable because:
+    /// - The partially built snapshot is immediately dropped and deallocated
+    /// - The error indicates invalid data (e.g., dimension mismatch) that would
+    ///   prevent snapshot creation anyway
+    /// - Pre-validating all vectors would require a full extra pass over the data
+    fn build_snapshot_data(&self) -> Result<(HnswIndex, VectorSnapshot)> {
+        let snapshot = HnswIndex::new(self.config.hnsw_config.clone())?;
+        let mut vector_snapshot = HashMap::with_capacity(self.vectors.len());
+
+        for entry in self.vectors.iter() {
+            let node_id = *entry.key();
+            let vector = entry.value().clone();
+            snapshot.add(node_id, vector.as_ref())?;
+            vector_snapshot.insert(node_id, vector);
+        }
+
+        Ok((snapshot, Arc::new(vector_snapshot)))
+    }
+
     /// Checks if a snapshot should be created and creates it if needed.
     ///
     /// Uses double-checked locking to avoid race conditions while minimizing lock contention.
@@ -561,35 +667,33 @@ impl TemporalVectorIndex {
         }
 
         // Step 2: Build snapshot outside locks (expensive O(n log n) operation)
-        let snapshot = HnswIndex::new(self.config.hnsw_config.clone())?;
-        for entry in self.vectors.iter() {
-            let node_id = *entry.key();
-            let vector = entry.value();
-            snapshot.add(node_id, vector.as_ref())?;
-        }
+        let (snapshot, vector_snapshot) = self.build_snapshot_data()?;
 
-        // Step 3: Acquire both locks and perform final check before inserting
+        // Step 3: Acquire locks and perform final check before inserting
         {
             let mut metadata = self.metadata.write();
 
             // Double-check: another thread may have created snapshot while we were building
+            // MEMORY TRADE-OFF: If another thread won the race, we discard our fully-built
+            // snapshot here. For large graphs this wastes RAM temporarily, but it's a
+            // deliberate trade-off to avoid holding locks during expensive HNSW construction.
+            // The discarded snapshot is immediately dropped and deallocated.
             if !self.should_create_snapshot(&metadata, current_time)? {
                 return Ok(()); // Another thread beat us to it, discard our snapshot
             }
 
-            // Get stable ID and insert snapshot
+            // Get stable ID and insert snapshot atomically
             let stable_id = metadata.total_snapshots;
-            let mut snapshots = self.snapshots.write();
-            snapshots.insert(current_time, (stable_id, Arc::new(snapshot)));
+            let mut snapshot_data = self.snapshot_data.write();
+
+            snapshot_data.insert(current_time, stable_id, Arc::new(snapshot), vector_snapshot);
 
             // Update metadata
             metadata.reset(current_time);
 
-            // Enforce snapshot limit while holding both locks
-            while snapshots.len() > self.config.max_snapshots {
-                if let Some(oldest_key) = snapshots.keys().next().copied() {
-                    snapshots.remove(&oldest_key);
-                }
+            // Enforce snapshot limit
+            while snapshot_data.len() > self.config.max_snapshots {
+                snapshot_data.remove_oldest();
             }
         }
 
@@ -662,37 +766,24 @@ impl TemporalVectorIndex {
     /// Thread-safe: Uses DashMap for lock-free iteration over current vectors.
     /// Snapshot creation may take O(n log n) time for n vectors.
     fn create_snapshot(&self, timestamp: Timestamp) -> Result<()> {
-        // Create new HNSW index with same configuration
-        let snapshot = HnswIndex::new(self.config.hnsw_config.clone())?;
-
-        // Copy all current vectors into the snapshot
-        // This is O(n * log n) where n = number of vectors
-        for entry in self.vectors.iter() {
-            let node_id = *entry.key();
-            let vector = entry.value();
-
-            // Add vector to snapshot index
-            snapshot.add(node_id, vector.as_ref())?;
-        }
+        // Build snapshot outside lock (expensive O(n log n) operation)
+        let (snapshot, vector_snapshot) = self.build_snapshot_data()?;
 
         // Store immutable snapshot atomically with metadata update
-        // Acquire both locks to prevent race conditions
         {
             let mut metadata = self.metadata.write();
-            let mut snapshots = self.snapshots.write();
+            let mut snapshot_data = self.snapshot_data.write();
 
             // Get stable ID and insert
             let stable_id = metadata.total_snapshots;
-            snapshots.insert(timestamp, (stable_id, Arc::new(snapshot)));
+            snapshot_data.insert(timestamp, stable_id, Arc::new(snapshot), vector_snapshot);
 
             // Update metadata
             metadata.reset(timestamp);
 
-            // Enforce snapshot limit while holding both locks
-            while snapshots.len() > self.config.max_snapshots {
-                if let Some(oldest_key) = snapshots.keys().next().copied() {
-                    snapshots.remove(&oldest_key);
-                }
+            // Enforce snapshot limit
+            while snapshot_data.len() > self.config.max_snapshots {
+                snapshot_data.remove_oldest();
             }
         }
 
@@ -761,8 +852,8 @@ impl TemporalVectorIndex {
     /// # }
     /// ```
     pub fn prune_snapshots(&self) -> Result<usize> {
-        let mut snapshots = self.snapshots.write();
-        let initial_count = snapshots.len();
+        let mut snapshot_data = self.snapshot_data.write();
+        let initial_count = snapshot_data.len();
 
         match &self.config.retention_policy {
             RetentionPolicy::KeepAll => {
@@ -772,16 +863,21 @@ impl TemporalVectorIndex {
             RetentionPolicy::KeepN(n) => {
                 // Keep only the N most recent snapshots
                 let n = *n;
-                if snapshots.len() <= n {
+                if snapshot_data.snapshots.len() <= n {
                     return Ok(0);
                 }
 
-                let to_remove = snapshots.len() - n;
-                let keys_to_remove: Vec<Timestamp> =
-                    snapshots.keys().take(to_remove).copied().collect();
+                let to_remove = snapshot_data.snapshots.len() - n;
+                let keys_to_remove: Vec<Timestamp> = snapshot_data
+                    .snapshots
+                    .keys()
+                    .take(to_remove)
+                    .copied()
+                    .collect();
 
                 for key in keys_to_remove {
-                    snapshots.remove(&key);
+                    snapshot_data.snapshots.remove(&key);
+                    snapshot_data.vector_history.remove(&key);
                 }
 
                 Ok(to_remove)
@@ -792,14 +888,18 @@ impl TemporalVectorIndex {
                 let duration_micros = duration.as_micros() as Timestamp;
                 let cutoff_time = current_time.saturating_sub(duration_micros);
 
-                let keys_to_remove: Vec<Timestamp> =
-                    snapshots.range(..cutoff_time).map(|(k, _)| *k).collect();
+                let keys_to_remove: Vec<Timestamp> = snapshot_data
+                    .snapshots
+                    .range(..cutoff_time)
+                    .map(|(k, _)| *k)
+                    .collect();
 
                 for key in keys_to_remove {
-                    snapshots.remove(&key);
+                    snapshot_data.snapshots.remove(&key);
+                    snapshot_data.vector_history.remove(&key);
                 }
 
-                let removed = initial_count - snapshots.len();
+                let removed = initial_count - snapshot_data.len();
                 Ok(removed)
             }
         }
@@ -809,10 +909,11 @@ impl TemporalVectorIndex {
     ///
     /// Returns None if no snapshot exists before the timestamp.
     fn find_nearest_snapshot(&self, timestamp: Timestamp) -> Option<Arc<HnswIndex>> {
-        let snapshots = self.snapshots.read();
+        let snapshot_data = self.snapshot_data.read();
 
         // Binary search for nearest snapshot <= timestamp
-        snapshots
+        snapshot_data
+            .snapshots
             .range(..=timestamp)
             .next_back()
             .map(|(_, (_id, snapshot))| Arc::clone(snapshot))
@@ -940,18 +1041,86 @@ impl TemporalVectorIndex {
         k: usize,
         time_range: TimeRange,
     ) -> Result<TemporalSearchResults> {
-        let snapshots = self.snapshots.read();
+        let snapshot_data = self.snapshot_data.read();
 
         let mut results = Vec::new();
 
         // Find all snapshots in range
-        for (&timestamp, (_id, snapshot)) in snapshots.range(time_range.start()..=time_range.end())
+        for (&timestamp, (_id, snapshot)) in snapshot_data
+            .snapshots
+            .range(time_range.start()..=time_range.end())
         {
             let snapshot_results = snapshot.search(query_embedding, k)?;
             results.push((timestamp, snapshot_results));
         }
 
         Ok(results)
+    }
+
+    /// Retrieves the semantic evolution of a node over time.
+    ///
+    /// Returns a timeline of (timestamp, vector) pairs showing how the node's
+    /// embedding changed at each snapshot in the time range.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - Node to track
+    /// * `time_range` - Time range to analyze
+    ///
+    /// # Returns
+    ///
+    /// Vector of (Timestamp, Arc<[f32]>) pairs showing the node's vector at each
+    /// snapshot in the time range. If the node has no vector in any snapshot within
+    /// the range, an empty vector is returned.
+    ///
+    /// # Memory Warning
+    ///
+    /// **CAUTION**: This function collects all vectors in the time range into a `Vec`.
+    /// For very large time ranges (e.g., spanning thousands of snapshots), this can
+    /// allocate significant memory. Consider using narrower time ranges or implementing
+    /// a streaming iterator if you need to process large temporal datasets.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig};
+    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// # use gallifreydb::core::temporal::TimeRange;
+    /// # use gallifreydb::core::id::NodeId;
+    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// # let config = TemporalVectorConfig::default_with_hnsw(HnswConfig::new(4, DistanceMetric::Cosine));
+    /// # let index = TemporalVectorIndex::new(config)?;
+    /// let node_id = NodeId::new(42).unwrap();
+    /// let time_range = TimeRange::new(1000000, 2000000);
+    ///
+    /// let evolution = index.semantic_evolution(node_id, time_range)?;
+    /// for (timestamp, vector) in &evolution {
+    ///     println!("At {}: vector = {:?}", timestamp, &vector[..4]);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn semantic_evolution(
+        &self,
+        node_id: NodeId,
+        time_range: TimeRange,
+    ) -> Result<Vec<(Timestamp, Arc<[f32]>)>> {
+        let snapshot_data = self.snapshot_data.read();
+
+        let mut evolution = Vec::new();
+
+        // Iterate through all snapshots in the time range
+        for (&timestamp, snapshot_vectors) in snapshot_data
+            .vector_history
+            .range(time_range.start()..=time_range.end())
+        {
+            // Check if this node has a vector in this snapshot
+            if let Some(vector) = snapshot_vectors.get(&node_id) {
+                evolution.push((timestamp, Arc::clone(vector)));
+            }
+        }
+
+        Ok(evolution)
     }
 
     /// Tracks semantic drift: how a node's similarity to a reference changed over time.
@@ -992,26 +1161,106 @@ impl TemporalVectorIndex {
     /// ```
     pub fn track_semantic_drift(
         &self,
-        _node_id: NodeId,
-        _reference_embedding: &[f32],
-        _time_range: TimeRange,
+        node_id: NodeId,
+        reference_embedding: &[f32],
+        time_range: TimeRange,
     ) -> Result<Vec<(Timestamp, f32)>> {
-        // TODO: This requires retrieving node embeddings at each snapshot
-        // For now, return not implemented error
-        // Complete implementation is Phase 4 (requires historical storage integration)
-        Err(Error::not_implemented(
-            "Semantic drift tracking",
-            "Phase 4 feature - requires historical storage integration",
-        ))
+        // Validate reference embedding dimensions
+        if reference_embedding.len() != self.dimensions() {
+            return Err(VectorError::DimensionMismatch {
+                expected: self.dimensions(),
+                actual: reference_embedding.len(),
+            }
+            .into());
+        }
+
+        // Get the semantic evolution of this node
+        let evolution = self.semantic_evolution(node_id, time_range)?;
+
+        let mut drift = Vec::new();
+
+        // Calculate similarity to reference at each timestamp
+        for (timestamp, vector) in evolution {
+            let similarity = cosine_similarity(reference_embedding, &vector)?;
+            drift.push((timestamp, similarity));
+        }
+
+        Ok(drift)
+    }
+
+    /// Calculates semantic drift between consecutive embeddings.
+    ///
+    /// Measures how much a node's embedding changed between snapshots by computing
+    /// cosine similarity between consecutive vectors. Returns timestamps and drift
+    /// values (1.0 - similarity) where higher values indicate more drift.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - Node to track
+    /// * `time_range` - Time range to analyze
+    ///
+    /// # Returns
+    ///
+    /// Vector of (Timestamp, drift) pairs where drift is 1.0 - cosine_similarity
+    /// between consecutive embeddings. The timestamp is when the change occurred
+    /// (i.e., the timestamp of the second vector in each pair).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig};
+    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// # use gallifreydb::core::temporal::TimeRange;
+    /// # use gallifreydb::core::id::NodeId;
+    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// # let config = TemporalVectorConfig::default_with_hnsw(HnswConfig::new(4, DistanceMetric::Cosine));
+    /// # let index = TemporalVectorIndex::new(config)?;
+    /// let node_id = NodeId::new(42).unwrap();
+    /// let time_range = TimeRange::new(1000000, 2000000);
+    ///
+    /// let drift = index.calculate_consecutive_drift(node_id, time_range)?;
+    /// for (timestamp, drift_value) in drift {
+    ///     println!("At {}: drift = {:.3}", timestamp, drift_value);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn calculate_consecutive_drift(
+        &self,
+        node_id: NodeId,
+        time_range: TimeRange,
+    ) -> Result<Vec<(Timestamp, f32)>> {
+        let evolution = self.semantic_evolution(node_id, time_range)?;
+
+        if evolution.len() < 2 {
+            // Need at least 2 vectors to calculate drift
+            return Ok(Vec::new());
+        }
+
+        let mut drift = Vec::new();
+
+        // Calculate similarity between consecutive vectors using windows iterator
+        for window in evolution.windows(2) {
+            let (_prev_timestamp, prev_vector) = &window[0];
+            let (curr_timestamp, curr_vector) = &window[1];
+
+            let similarity = cosine_similarity(prev_vector, curr_vector)?;
+            let drift_value = 1.0 - similarity; // Higher value = more drift
+
+            drift.push((*curr_timestamp, drift_value));
+        }
+
+        Ok(drift)
     }
 
     /// Returns information about all snapshots.
     ///
     /// Useful for monitoring and debugging.
     pub fn get_snapshot_info(&self) -> Vec<SnapshotInfo> {
-        let snapshots = self.snapshots.read();
+        let snapshot_data = self.snapshot_data.read();
 
-        snapshots
+        snapshot_data
+            .snapshots
             .iter()
             .map(|(&timestamp, (stable_id, snapshot))| {
                 let current_time = Self::current_timestamp();
@@ -1033,7 +1282,7 @@ impl TemporalVectorIndex {
 
     /// Returns the number of snapshots currently stored.
     pub fn snapshot_count(&self) -> usize {
-        self.snapshots.read().len()
+        self.snapshot_data.read().snapshots.len()
     }
 
     /// Returns the current index (for current-state queries).
@@ -1519,5 +1768,350 @@ mod tests {
 
         // Verify default config has retention policy
         assert_eq!(config.retention_policy, RetentionPolicy::KeepN(100));
+    }
+
+    // ========================================================================
+    // Semantic Evolution and Drift Tracking Tests (VS-045)
+    // ========================================================================
+
+    #[test]
+    fn test_semantic_evolution_basic() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        let node_id = NodeId::new(42).unwrap();
+
+        // Add vector at timestamp 1000
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.on_transaction_at(1000)?;
+        assert_eq!(index.snapshot_count(), 1);
+
+        // Add updated vector at timestamp 2000
+        index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 2000)?;
+        index.on_transaction_at(2000)?;
+        assert_eq!(index.snapshot_count(), 2);
+
+        // Add another update at timestamp 3000
+        index.add(node_id, &[0.0, 0.0, 1.0, 0.0], 3000)?;
+        index.on_transaction_at(3000)?;
+        assert_eq!(index.snapshot_count(), 3);
+
+        // Get semantic evolution
+        let time_range = TimeRange::new(1000, 3000);
+        let evolution = index.semantic_evolution(node_id, time_range)?;
+
+        // Should have 3 versions
+        assert_eq!(evolution.len(), 3);
+
+        // Verify vectors at each timestamp
+        assert_eq!(evolution[0].1.as_ref(), &[1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(evolution[1].1.as_ref(), &[0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(evolution[2].1.as_ref(), &[0.0, 0.0, 1.0, 0.0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_semantic_evolution_partial_range() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        let node_id = NodeId::new(42).unwrap();
+
+        // Create multiple snapshots
+        for i in 1..=5 {
+            let timestamp = i * 1000;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
+            index.on_transaction_at(timestamp)?;
+        }
+
+        // Query only middle range
+        let time_range = TimeRange::new(2000, 4000);
+        let evolution = index.semantic_evolution(node_id, time_range)?;
+
+        // Should only have snapshots 2, 3, 4
+        assert_eq!(evolution.len(), 3);
+        assert_eq!(evolution[0].1.as_ref(), &[2.0, 0.0, 0.0, 0.0]);
+        assert_eq!(evolution[1].1.as_ref(), &[3.0, 0.0, 0.0, 0.0]);
+        assert_eq!(evolution[2].1.as_ref(), &[4.0, 0.0, 0.0, 0.0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_semantic_evolution_node_not_in_snapshots() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Add a different node to create snapshots
+        let other_node = NodeId::new(1).unwrap();
+        index.add(other_node, &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.on_transaction_at(1000)?;
+
+        // Query for a node that doesn't exist
+        let node_id = NodeId::new(42).unwrap();
+        let time_range = TimeRange::new(1000, 2000);
+        let evolution = index.semantic_evolution(node_id, time_range)?;
+
+        // Should return empty vector (no error, just no data)
+        assert_eq!(evolution.len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_track_semantic_drift() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        let node_id = NodeId::new(42).unwrap();
+
+        // Add vectors that drift from [1,0,0,0]
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.on_transaction_at(1000)?;
+
+        index.add(node_id, &[0.9, 0.1, 0.0, 0.0], 2000)?;
+        index.on_transaction_at(2000)?;
+
+        index.add(node_id, &[0.5, 0.5, 0.0, 0.0], 3000)?;
+        index.on_transaction_at(3000)?;
+
+        // Track drift relative to original vector
+        let reference = vec![1.0, 0.0, 0.0, 0.0];
+        let time_range = TimeRange::new(1000, 3000);
+        let drift = index.track_semantic_drift(node_id, &reference, time_range)?;
+
+        // Should have 3 drift measurements
+        assert_eq!(drift.len(), 3);
+
+        // First should be perfect similarity (1.0)
+        assert!((drift[0].1 - 1.0).abs() < 0.001);
+
+        // Second should be high similarity (> 0.99)
+        assert!(drift[1].1 > 0.99);
+
+        // Third should be lower similarity (< 0.9)
+        // [1,0,0,0] · [0.5,0.5,0,0] = 0.5 / (1.0 * 0.707) ≈ 0.707
+        assert!(drift[2].1 < 0.8);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_calculate_consecutive_drift() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        let node_id = NodeId::new(42).unwrap();
+
+        // Add identical vectors (no drift)
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.on_transaction_at(1000)?;
+
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 2000)?;
+        index.on_transaction_at(2000)?;
+
+        // Add 45° rotation (drift should be ~0.293)
+        // Normalized vector at 45° from [1,0,0,0] is approximately [0.707, 0.707, 0, 0]
+        index.add(node_id, &[0.707, 0.707, 0.0, 0.0], 3000)?;
+        index.on_transaction_at(3000)?;
+
+        // Add orthogonal vector (maximum drift)
+        index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 4000)?;
+        index.on_transaction_at(4000)?;
+
+        // Calculate consecutive drift
+        let time_range = TimeRange::new(1000, 4000);
+        let drift = index.calculate_consecutive_drift(node_id, time_range)?;
+
+        // Should have 3 drift measurements (4 vectors -> 3 pairs)
+        assert_eq!(drift.len(), 3);
+
+        // First drift should be 0 (identical vectors)
+        // cos(0°) = 1.0, drift = 1.0 - 1.0 = 0.0
+        assert!(
+            drift[0].1.abs() < 0.001,
+            "Expected drift ~0.0, got {}",
+            drift[0].1
+        );
+
+        // Second drift should be ~0.293 (45° rotation)
+        // cos(45°) ≈ 0.707, drift = 1.0 - 0.707 ≈ 0.293
+        assert!(
+            (drift[1].1 - 0.293).abs() < 0.01,
+            "Expected drift ~0.293 for 45° rotation, got {}",
+            drift[1].1
+        );
+
+        // Third drift should be ~0.5 (from 45° to 90°)
+        // [0.707,0.707,0,0] · [0,1,0,0] = 0.707, drift = 1.0 - 0.707 ≈ 0.293
+        // Actually, this is also ~0.293 since it's another 45° rotation
+        assert!(
+            (drift[2].1 - 0.293).abs() < 0.01,
+            "Expected drift ~0.293 for 45° rotation, got {}",
+            drift[2].1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_consecutive_drift_single_vector() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        let node_id = NodeId::new(42).unwrap();
+
+        // Add only one vector
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.on_transaction_at(1000)?;
+
+        // Calculate consecutive drift
+        let time_range = TimeRange::new(1000, 2000);
+        let drift = index.calculate_consecutive_drift(node_id, time_range)?;
+
+        // Should return empty (need at least 2 vectors)
+        assert_eq!(drift.len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_semantic_evolution_with_vector_updates() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        let node_id = NodeId::new(42).unwrap();
+
+        // Add initial vector
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.on_transaction_at(1000)?;
+
+        // Update the same node (should replace in current, but snapshot preserves old)
+        index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 2000)?;
+        index.on_transaction_at(2000)?;
+
+        // Get evolution
+        let time_range = TimeRange::new(1000, 2000);
+        let evolution = index.semantic_evolution(node_id, time_range)?;
+
+        // Should have both versions
+        assert_eq!(evolution.len(), 2);
+
+        // Verify first snapshot has original vector
+        assert_eq!(evolution[0].1.as_ref(), &[1.0, 0.0, 0.0, 0.0]);
+
+        // Verify second snapshot has updated vector
+        assert_eq!(evolution[1].1.as_ref(), &[0.0, 1.0, 0.0, 0.0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_vector_history_pruning() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(3),
+            max_snapshots: 3,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        let node_id = NodeId::new(42).unwrap();
+
+        // Create 5 snapshots
+        for i in 1..=5 {
+            let timestamp = i * 1000;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
+            index.on_transaction_at(timestamp)?;
+        }
+
+        // Should only have 3 snapshots (due to max_snapshots limit)
+        assert_eq!(index.snapshot_count(), 3);
+
+        // Query full range - should only get recent 3
+        let time_range = TimeRange::new(1000, 5000);
+        let evolution = index.semantic_evolution(node_id, time_range)?;
+
+        // Should only have 3 vectors (oldest 2 were pruned)
+        assert_eq!(evolution.len(), 3);
+
+        // Verify we have the most recent 3
+        assert_eq!(evolution[0].1.as_ref(), &[3.0, 0.0, 0.0, 0.0]);
+        assert_eq!(evolution[1].1.as_ref(), &[4.0, 0.0, 0.0, 0.0]);
+        assert_eq!(evolution[2].1.as_ref(), &[5.0, 0.0, 0.0, 0.0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_track_semantic_drift_dimension_mismatch() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        let node_id = NodeId::new(42).unwrap();
+
+        // Add a vector and create snapshot
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.on_transaction_at(1000)?;
+
+        // Try to track drift with wrong dimension
+        let wrong_dimension_ref = vec![1.0, 0.0, 0.0]; // 3D instead of 4D
+        let time_range = TimeRange::new(1000, 2000);
+
+        let result = index.track_semantic_drift(node_id, &wrong_dimension_ref, time_range);
+
+        // Should get dimension mismatch error
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Vector(VectorError::DimensionMismatch {
+                expected: 4,
+                actual: 3
+            })
+        ));
+
+        Ok(())
     }
 }
