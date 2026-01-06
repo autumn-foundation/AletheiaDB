@@ -2438,4 +2438,111 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_wal_replay_detects_corruption_in_middle_entry() -> Result<()> {
+        use std::io::{Read, Seek, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().to_path_buf();
+
+        // Create a WAL with THREE entries to test multi-entry checksum verification
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                sync_on_write: true,
+                segment_size: 1024 * 1024, // Large enough to hold all 3 entries
+                ..Default::default()
+            };
+            let mut wal = WriteAheadLog::new(config)?;
+
+            // Entry 1
+            wal.append(WalOperation::CreateNode {
+                node_id: NodeId::new(1).unwrap(),
+                label: "FirstNode".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            })?;
+
+            // Entry 2 (this will be corrupted)
+            wal.append(WalOperation::CreateNode {
+                node_id: NodeId::new(2).unwrap(),
+                label: "SecondNode".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            })?;
+
+            // Entry 3
+            wal.append(WalOperation::CreateNode {
+                node_id: NodeId::new(3).unwrap(),
+                label: "ThirdNode".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            })?;
+
+            wal.flush()?;
+        }
+
+        // Corrupt the SECOND entry (not first or last)
+        let segment_path = wal_dir.join("000001.log");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&segment_path)
+                .unwrap();
+
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer).unwrap();
+
+            // Find the second entry by skipping the first entry
+            // Each CreateNode entry has: LSN(8) + timestamp(8) + checksum(4) + op_type(1) + node_id(8) + label_len(4) + label + properties + temporal
+            // First entry starts at WAL_HEADER_SIZE (5)
+
+            // We'll corrupt a byte in the middle of the file, which should be in the second entry
+            // Calculate approximate position: header + (entry_size * 1.5)
+            let approx_entry_size = 60; // Rough estimate for our CreateNode entries
+            let corruption_offset = WAL_HEADER_SIZE + approx_entry_size + 20; // Middle of second entry
+
+            if buffer.len() > corruption_offset {
+                // Corrupt a byte in what should be the second entry
+                let original = buffer[corruption_offset];
+                buffer[corruption_offset] ^= 0xFF;
+
+                eprintln!("Corrupted byte at offset {} (changed {:02x} to {:02x})",
+                    corruption_offset, original, buffer[corruption_offset]);
+
+                file.seek(std::io::SeekFrom::Start(0)).unwrap();
+                file.write_all(&buffer).unwrap();
+                file.sync_all().unwrap();
+            }
+        }
+
+        // Try to read - should fail when it hits the corrupted second entry
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                ..Default::default()
+            };
+            let wal = WriteAheadLog::new(config)?;
+
+            let result = wal.read_from(LSN::initial());
+
+            // Should fail with checksum error
+            assert!(result.is_err(), "Expected error when reading corrupted multi-entry WAL");
+            match result.unwrap_err() {
+                Error::Storage(StorageError::CorruptedData(msg)) => {
+                    assert!(
+                        msg.contains("checksum mismatch"),
+                        "Error message should mention checksum mismatch, but was: {}",
+                        msg
+                    );
+                    eprintln!("✓ Successfully detected corruption in multi-entry segment: {}", msg);
+                }
+                err => panic!("Expected StorageError::CorruptedData, but got {:?}", err),
+            }
+        }
+
+        Ok(())
+    }
 }
