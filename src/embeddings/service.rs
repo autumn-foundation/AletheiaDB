@@ -335,4 +335,268 @@ mod tests {
 
         assert_eq!(service.provider_name(), "mock");
     }
+
+    // ========== New Error Path Tests ==========
+
+    /// Mock provider that returns invalid embeddings
+    struct InvalidProvider {
+        dimensions: usize,
+        return_wrong_dims: bool,
+        return_nan: bool,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for InvalidProvider {
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn name(&self) -> &str {
+            "invalid-provider"
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            if self.return_wrong_dims {
+                // Return wrong number of dimensions
+                Ok(vec![1.0; self.dimensions * 2])
+            } else if self.return_nan {
+                // Return embedding with NaN
+                Ok(vec![1.0, 2.0, f32::NAN, 4.0])
+            } else {
+                Ok(vec![0.5; self.dimensions])
+            }
+        }
+
+        fn normalized_by_default(&self) -> bool {
+            false
+        }
+    }
+
+    /// Mock provider with text length limit
+    struct LimitedProvider {
+        dimensions: usize,
+        max_text_length: usize,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for LimitedProvider {
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn name(&self) -> &str {
+            "limited-provider"
+        }
+
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            Ok(vec![text.len() as f32; self.dimensions])
+        }
+
+        fn max_text_length(&self) -> Option<usize> {
+            Some(self.max_text_length)
+        }
+
+        fn normalized_by_default(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn test_text_too_long_error() {
+        let provider = Arc::new(LimitedProvider {
+            dimensions: 384,
+            max_text_length: 100,
+        });
+        let service = EmbeddingService::new(provider);
+
+        // Text exceeds limit (101 chars)
+        let long_text = "a".repeat(101);
+        let result = service.embed(&long_text).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::TextTooLong { length, max_length } => {
+                assert_eq!(length, 101);
+                assert_eq!(max_length, 100);
+            }
+            e => panic!("Expected TextTooLong, got {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dimension_mismatch_error() {
+        let provider = Arc::new(InvalidProvider {
+            dimensions: 384,
+            return_wrong_dims: true,
+            return_nan: false,
+        });
+        let service = EmbeddingService::new(provider);
+
+        let result = service.embed("test").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::DimensionMismatch { expected, actual } => {
+                assert_eq!(expected, 384);
+                assert_eq!(actual, 768); // Provider returns 2x dimensions
+            }
+            e => panic!("Expected DimensionMismatch, got {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_embedding_nan_error() {
+        let provider = Arc::new(InvalidProvider {
+            dimensions: 4,
+            return_wrong_dims: false,
+            return_nan: true,
+        });
+        let service = EmbeddingService::new(provider);
+
+        let result = service.embed("test").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::ProviderError {
+                provider,
+                message,
+                status_code,
+            } => {
+                assert_eq!(provider, "invalid-provider");
+                assert!(message.contains("Invalid embedding"));
+                assert!(status_code.is_none());
+            }
+            e => panic!("Expected ProviderError, got {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_text_too_long_error() {
+        let provider = Arc::new(LimitedProvider {
+            dimensions: 128,
+            max_text_length: 50,
+        });
+        let service = EmbeddingService::new(provider);
+
+        let long_text = "a".repeat(51);
+        let texts = vec!["short", long_text.as_str(), "another short"];
+        let result = service.embed_batch(&texts).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::TextTooLong { length, max_length } => {
+                assert_eq!(length, 51);
+                assert_eq!(max_length, 50);
+            }
+            e => panic!("Expected TextTooLong, got {:?}", e),
+        }
+    }
+
+    /// Mock provider that returns wrong dimensions in batch
+    struct BatchInvalidProvider {
+        dimensions: usize,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for BatchInvalidProvider {
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn name(&self) -> &str {
+            "batch-invalid"
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            Ok(vec![1.0; self.dimensions])
+        }
+
+        async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            // Return first embedding with wrong dimensions
+            let mut results = Vec::new();
+            results.push(vec![1.0; self.dimensions * 2]); // WRONG!
+            for _ in 1..texts.len() {
+                results.push(vec![1.0; self.dimensions]);
+            }
+            Ok(results)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_dimension_mismatch_error() {
+        let provider = Arc::new(BatchInvalidProvider { dimensions: 256 });
+        let service = EmbeddingService::new(provider);
+
+        let texts = vec!["first", "second", "third"];
+        let result = service.embed_batch(&texts).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbeddingError::DimensionMismatch { expected, actual } => {
+                assert_eq!(expected, 256);
+                assert_eq!(actual, 512);
+            }
+            e => panic!("Expected DimensionMismatch, got {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_normalization_disabled() {
+        let provider = Arc::new(MockProvider {
+            dimensions: 10,
+            normalized: false,
+        });
+
+        // Disable normalization
+        let service = EmbeddingService::new(provider).with_normalization(false);
+
+        let embedding = service.embed("test").await.unwrap();
+
+        // Check that embedding is NOT normalized
+        let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        // Should be sqrt(10 * 0.04^2) = 0.126... not 1.0
+        assert!((magnitude - 1.0).abs() > 0.1);
+    }
+
+    #[tokio::test]
+    async fn test_auto_normalization_when_provider_normalized() {
+        let provider = Arc::new(MockProvider {
+            dimensions: 10,
+            normalized: true, // Provider says it normalizes
+        });
+
+        // No explicit normalization config - should trust provider
+        let service = EmbeddingService::new(provider);
+
+        let embedding = service.embed("test").await.unwrap();
+
+        // Service should not double-normalize, so the vector should remain un-normalized
+        // as returned by the mock provider (which doesn't actually normalize).
+        let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (magnitude - 1.0).abs() > 1e-6,
+            "Service should not normalize if provider claims to have already done so"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_normalization() {
+        let provider = Arc::new(MockProvider {
+            dimensions: 5,
+            normalized: false,
+        });
+
+        let service = EmbeddingService::new(provider).with_normalization(true);
+
+        let texts = vec!["a", "b", "c"];
+        let embeddings = service.embed_batch(&texts).await.unwrap();
+
+        assert_eq!(embeddings.len(), 3);
+
+        // All embeddings should be normalized
+        for embedding in embeddings {
+            let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((magnitude - 1.0).abs() < 1e-6);
+        }
+    }
 }
