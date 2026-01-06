@@ -713,10 +713,16 @@ impl WriteTransaction {
                     }
 
                     // Use pre-generated tombstone version ID (no lock needed)
+                    // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
                     let tombstone_version_id = VersionId::new_unchecked(
-                        tombstone_ids
-                            .next()
-                            .expect("pre-counted delete operations should have sufficient IDs"),
+                        tombstone_ids.next().ok_or_else(|| {
+                            StorageError::InconsistentState {
+                                reason: format!(
+                                    "Tombstone ID exhaustion for DeleteNode: expected {} deletes, iterator depleted at node_id {:?}",
+                                    num_deletes, node_id
+                                ),
+                            }
+                        })?,
                     );
 
                     // Create tombstone temporal interval
@@ -762,10 +768,16 @@ impl WriteTransaction {
                     }
 
                     // Use pre-generated tombstone version ID (no lock needed)
+                    // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
                     let tombstone_version_id = VersionId::new_unchecked(
-                        tombstone_ids
-                            .next()
-                            .expect("pre-counted delete operations should have sufficient IDs"),
+                        tombstone_ids.next().ok_or_else(|| {
+                            StorageError::InconsistentState {
+                                reason: format!(
+                                    "Tombstone ID exhaustion for DeleteEdge: expected {} deletes, iterator depleted at edge_id {:?}",
+                                    num_deletes, edge_id
+                                ),
+                            }
+                        })?,
                     );
 
                     // Create tombstone temporal interval
@@ -799,6 +811,14 @@ impl WriteTransaction {
                 }
             }
         }
+
+        // Safety check: verify all pre-generated tombstone IDs were consumed
+        // This detects count mismatches in development builds
+        debug_assert!(
+            tombstone_ids.next().is_none(),
+            "Tombstone ID surplus: expected {} deletes, but iterator has remaining IDs",
+            num_deletes
+        );
 
         // Explicitly drop locks before rebuilding adjacency to document lock release point
         drop(historical);
@@ -1777,6 +1797,69 @@ mod tests {
         assert_eq!(current.out_degree(node1), 2); // KNOWS and LIKES
         assert_eq!(current.out_degree(node2), 1); // FOLLOWS
         assert_eq!(current.in_degree(node3), 2); // receives FOLLOWS and LIKES
+    }
+
+    /// Test that tombstone ID pre-generation matches actual delete operations.
+    ///
+    /// This test verifies the critical invariant that the number of IDs generated
+    /// matches the number of delete operations, preventing iterator exhaustion.
+    #[test]
+    fn test_tombstone_id_count_matches_deletes() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create initial nodes and edges in current storage
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props.clone()).unwrap();
+        let node3 = current.create_node("Person", props.clone()).unwrap();
+        let node4 = current.create_node("Person", props.clone()).unwrap();
+
+        let edge1 = current
+            .create_edge(node1, node2, "KNOWS", props.clone())
+            .unwrap();
+        let edge2 = current
+            .create_edge(node2, node3, "KNOWS", props.clone())
+            .unwrap();
+        let edge3 = current
+            .create_edge(node3, node4, "KNOWS", props.clone())
+            .unwrap();
+
+        // Create a transaction with mixed operations:
+        // - Some creates
+        // - Some updates
+        // - MULTIPLE deletes (both nodes and edges)
+        let node5 = tx.create_node("Person", props.clone()).unwrap();
+        tx.create_edge(node1, node5, "FOLLOWS", props.clone())
+            .unwrap();
+
+        tx.update_node(node4, PropertyMapBuilder::new().insert("age", 30i64).build())
+            .unwrap();
+
+        // Delete operations: 2 nodes + 2 edges = 4 tombstones needed
+        tx.delete_node(node3).unwrap(); // This will also require tombstone for node
+        tx.delete_node(node4).unwrap(); // This will also require tombstone for node
+        tx.delete_edge(edge1).unwrap(); // Tombstone for edge
+        tx.delete_edge(edge2).unwrap(); // Tombstone for edge
+
+        // Commit should succeed without panicking on iterator exhaustion
+        let result = tx.commit();
+        assert!(
+            result.is_ok(),
+            "Commit should succeed with correct tombstone ID count"
+        );
+
+        // Verify deletes were applied
+        assert!(current.get_node(node3).is_err());
+        assert!(current.get_node(node4).is_err());
+        assert!(current.get_edge(edge1).is_err());
+        assert!(current.get_edge(edge2).is_err());
+
+        // Verify non-deleted entities still exist
+        assert!(current.get_node(node1).is_ok());
+        assert!(current.get_node(node2).is_ok());
+        assert!(current.get_node(node5).is_ok());
+        assert!(current.get_edge(edge3).is_ok());
     }
 
     #[test]
