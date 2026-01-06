@@ -316,3 +316,237 @@ fn test_vector_dimension_validation() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// Semantic Evolution and Drift Tracking Integration Tests (VS-045)
+// ============================================================================
+
+#[test]
+fn test_semantic_evolution_end_to_end() -> Result<()> {
+    let index = create_test_index()?;
+
+    let node_id = NodeId::new(100).unwrap();
+    let base_time = time::now();
+
+    // Create a timeline of vector changes
+    let vectors = vec![
+        vec![1.0, 0.0, 0.0, 0.0],
+        vec![0.9, 0.1, 0.0, 0.0],
+        vec![0.7, 0.3, 0.0, 0.0],
+        vec![0.5, 0.5, 0.0, 0.0],
+    ];
+
+    for (i, vector) in vectors.iter().enumerate() {
+        let timestamp = base_time + (i as i64 * 1000);
+        index.add(node_id, vector, timestamp)?;
+        index.on_transaction()?;
+        index.on_transaction()?; // Trigger snapshot with interval=2
+    }
+
+    // Get semantic evolution
+    // Use a very wide time range to capture all snapshots (which use real timestamps)
+    let time_range = TimeRange::between(0, i64::MAX);
+    let evolution = index.semantic_evolution(node_id, time_range)?;
+
+    // Verify we captured all changes
+    // Note: With transaction_interval=2, we should get a snapshot after every 2 transactions
+    // 4 adds * 2 on_transaction calls = 8 transactions = 4 snapshots
+    assert_eq!(evolution.len(), 4);
+
+    // Verify vectors match
+    for (i, (_, vector)) in evolution.iter().enumerate() {
+        let expected = &vectors[i];
+        let actual: &[f32] = vector.as_ref();
+        assert_eq!(actual, expected.as_slice());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_track_semantic_drift_over_time() -> Result<()> {
+    let index = create_test_index()?;
+
+    let node_id = NodeId::new(200).unwrap();
+    let base_time = time::now();
+
+    // Create vectors that progressively drift from [1,0,0,0]
+    index.add(node_id, &[1.0, 0.0, 0.0, 0.0], base_time)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    index.add(node_id, &[0.8, 0.2, 0.0, 0.0], base_time + 1000)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    index.add(node_id, &[0.5, 0.5, 0.0, 0.0], base_time + 2000)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    index.add(node_id, &[0.0, 1.0, 0.0, 0.0], base_time + 3000)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    // Track drift from original vector
+    let reference = vec![1.0, 0.0, 0.0, 0.0];
+    // Use wide time range to capture all snapshots
+    let time_range = TimeRange::between(0, i64::MAX);
+    let drift = index.track_semantic_drift(node_id, &reference, time_range)?;
+
+    // Should have 4 measurements
+    assert_eq!(drift.len(), 4);
+
+    // Verify drift increases over time (similarity decreases)
+    assert!(drift[0].1 > drift[1].1); // First should be more similar
+    assert!(drift[1].1 > drift[2].1); // Progressive drift
+    assert!(drift[2].1 > drift[3].1); // Maximum drift at end
+
+    Ok(())
+}
+
+#[test]
+fn test_calculate_consecutive_drift_end_to_end() -> Result<()> {
+    let index = create_test_index()?;
+
+    let node_id = NodeId::new(300).unwrap();
+    let base_time = time::now();
+
+    // Create a timeline: stable -> change -> stable -> big change
+    let vectors = vec![
+        vec![1.0, 0.0, 0.0, 0.0],
+        vec![1.0, 0.0, 0.0, 0.0], // Same as previous (no drift)
+        vec![0.9, 0.1, 0.0, 0.0], // Small drift
+        vec![0.0, 1.0, 0.0, 0.0], // Large drift
+    ];
+
+    for (i, vector) in vectors.iter().enumerate() {
+        let timestamp = base_time + (i as i64 * 1000);
+        index.add(node_id, vector, timestamp)?;
+        index.on_transaction()?;
+        index.on_transaction()?;
+    }
+
+    // Calculate consecutive drift
+    // Use wide time range to capture all snapshots
+    let time_range = TimeRange::between(0, i64::MAX);
+    let drift = index.calculate_consecutive_drift(node_id, time_range)?;
+
+    // Should have 3 drift measurements (4 vectors -> 3 pairs)
+    assert_eq!(drift.len(), 3);
+
+    // First drift should be very small (identical vectors)
+    assert!(drift[0].1 < 0.001);
+
+    // Second drift should be small but non-zero
+    assert!(drift[1].1 > 0.0 && drift[1].1 < 0.2);
+
+    // Third drift should be large (orthogonal vectors)
+    assert!(drift[2].1 > 0.8);
+
+    Ok(())
+}
+
+#[test]
+fn test_semantic_evolution_with_gaps() -> Result<()> {
+    let index = create_test_index()?;
+
+    let node1 = NodeId::new(400).unwrap();
+    let node2 = NodeId::new(401).unwrap();
+    let base_time = time::now();
+
+    // Add node1 at times 1000 and 3000
+    index.add(node1, &[1.0, 0.0, 0.0, 0.0], base_time)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    // Add node2 at time 2000 (different node)
+    index.add(node2, &[0.0, 1.0, 0.0, 0.0], base_time + 1000)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    // Add node1 again at time 3000
+    index.add(node1, &[0.0, 0.0, 1.0, 0.0], base_time + 2000)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    // Get evolution for node1
+    // Use wide time range to capture all snapshots
+    let time_range = TimeRange::between(0, i64::MAX);
+    let evolution = index.semantic_evolution(node1, time_range)?;
+
+    // Node1 appears in all 3 snapshots:
+    // 1. Initial add of node1 -> snapshot has {node1}
+    // 2. Add node2 -> snapshot still has {node1, node2} (node1 wasn't removed)
+    // 3. Update node1 -> snapshot has {node1 (updated), node2}
+    assert_eq!(evolution.len(), 3);
+    assert_eq!(evolution[0].1.as_ref(), &[1.0, 0.0, 0.0, 0.0]); // Initial
+    assert_eq!(evolution[1].1.as_ref(), &[1.0, 0.0, 0.0, 0.0]); // Same (not removed)
+    assert_eq!(evolution[2].1.as_ref(), &[0.0, 0.0, 1.0, 0.0]); // Updated
+
+    Ok(())
+}
+
+#[test]
+fn test_empty_evolution_for_nonexistent_node() -> Result<()> {
+    let index = create_test_index()?;
+
+    let base_time = time::now();
+
+    // Add some other node
+    index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], base_time)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    // Query for non-existent node
+    let nonexistent = NodeId::new(999).unwrap();
+    let time_range = TimeRange::between(base_time, base_time + 1000);
+    let evolution = index.semantic_evolution(nonexistent, time_range)?;
+
+    // Should return empty, not error
+    assert_eq!(evolution.len(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn test_drift_calculation_with_normalized_vectors() -> Result<()> {
+    use gallifreydb::core::vector::normalize;
+
+    let index = create_test_index()?;
+
+    let node_id = NodeId::new(500).unwrap();
+    let base_time = time::now();
+
+    // Use normalized vectors for more predictable cosine similarity
+    let v1 = normalize(&[1.0, 0.0, 0.0, 0.0]);
+    let v2 = normalize(&[0.707, 0.707, 0.0, 0.0]); // 45 degrees
+    let v3 = normalize(&[0.0, 1.0, 0.0, 0.0]); // 90 degrees
+
+    index.add(node_id, &v1, base_time)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    index.add(node_id, &v2, base_time + 1000)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    index.add(node_id, &v3, base_time + 2000)?;
+    index.on_transaction()?;
+    index.on_transaction()?;
+
+    // Calculate consecutive drift
+    // Use wide time range to capture all snapshots
+    let time_range = TimeRange::between(0, i64::MAX);
+    let drift = index.calculate_consecutive_drift(node_id, time_range)?;
+
+    // Should have 2 drift measurements
+    assert_eq!(drift.len(), 2);
+
+    // Drift from v1 to v2 should be less than v2 to v3
+    // because v1->v2 is 45 degrees, v2->v3 is also 45 degrees
+    // Both should be similar
+    assert!(drift[0].1 > 0.0);
+    assert!(drift[1].1 > 0.0);
+
+    Ok(())
+}
