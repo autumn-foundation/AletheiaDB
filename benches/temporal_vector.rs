@@ -22,6 +22,8 @@ fn create_temporal_index(dimensions: usize) -> TemporalVectorIndex {
     let config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
         retention_policy: RetentionPolicy::KeepN(100),
+        // Higher limit for benchmarks to measure performance under load
+        // Production default is 20 (see issue #230)
         max_snapshots: 100,
         hnsw_config,
     };
@@ -51,7 +53,7 @@ fn bench_snapshot_creation(c: &mut Criterion) {
                 let config = TemporalVectorConfig {
                     snapshot_strategy: snapshot_strategy.clone(),
                     retention_policy: RetentionPolicy::KeepN(10),
-                    max_snapshots: 100,
+                    max_snapshots: 100,  // Higher for benchmarking
                     hnsw_config,
                 };
                 let index = TemporalVectorIndex::new(config).unwrap();

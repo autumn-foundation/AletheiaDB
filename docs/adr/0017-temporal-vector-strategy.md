@@ -82,7 +82,9 @@ pub struct TemporalVectorConfig {
     pub snapshot_strategy: SnapshotStrategy,
 
     /// Maximum number of snapshots to retain
-    pub max_snapshots: usize,  // Default: 100
+    /// Default reduced from 100 to 20 (issue #230) to prevent excessive memory usage
+    /// Each snapshot creates full HNSW index copy (~200MB for 100K vectors, 384 dims)
+    pub max_snapshots: usize,  // Default: 20 (was 100)
 
     /// Base HNSW configuration
     pub hnsw_config: HnswConfig,
@@ -477,24 +479,34 @@ pub fn create_checkpoint(&self) -> Result<()> {
 
 ### Recommended Default Configuration
 
+**Updated 2024**: Default `max_snapshots` reduced from 100 to 20 due to memory concerns (see issue #230).
+
 ```rust
 pub fn default_temporal_vector_config() -> TemporalVectorConfig {
     TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(10),  // Mirror anchor interval
-        max_snapshots: 100,  // ~100 anchors for 1000 versions
+        max_snapshots: 20,  // Reduced from 100 to prevent OOM (issue #230)
         hnsw_config: HnswConfig::default(),
     }
 }
 ```
 
+**Note**: Each snapshot creates a full copy of the HNSW index. For 100K vectors at 384 dimensions, each snapshot uses ~200MB (150MB vectors + 50-100MB HNSW graph). With 20 snapshots, total memory = ~4GB. The old default of 100 snapshots used ~20GB, causing OOM issues.
+
 ### Memory Budget Analysis
 
-| Scenario | Vectors | Snapshots | Memory per Snapshot | Total Memory |
-|----------|---------|-----------|---------------------|--------------|
-| Small DB | 10K | 10 | ~10MB | ~100MB |
-| Medium DB | 100K | 50 | ~100MB | ~5GB |
-| Large DB | 1M | 100 | ~1GB | ~100GB |
-| Very Large | 10M | 100 | ~10GB | ~1TB |
+**Current Implementation** (Full Snapshot - Phase 3.1):
+
+| Scenario | Vectors | Dims | Snapshots | Memory/Snapshot | Total Memory | Recommendation |
+|----------|---------|------|-----------|-----------------|--------------|----------------|
+| Small DB | 10K | 384 | 20 | ~20MB | ~400MB | Default (20) |
+| Medium DB | 100K | 384 | 20 | ~200MB | ~4GB | Default (20) |
+| Large DB | 100K | 384 | 50 | ~200MB | ~10GB | Increase if RAM available |
+| Large DB | 1M | 384 | 10 | ~2GB | ~20GB | Reduce snapshots |
+
+**Future with Anchor+Delta** (Phase 3.2 - Planned):
+- Memory reduction: ~9X (20GB → ~2.2GB for 100 snapshots)
+- Enables higher `max_snapshots` without memory penalty
 
 **Mitigation strategies**:
 1. **Lazy loading**: Load snapshots on-demand, evict LRU
@@ -619,7 +631,7 @@ let config = TemporalVectorConfig {
         time_interval: Duration::from_secs(3600),  // Hourly
         change_threshold: 0.1,  // 10% changed
     },
-    max_snapshots: 100,
+    max_snapshots: 20,  // Conservative default (was 100, see issue #230)
     hnsw_config: HnswConfig::new(384, DistanceMetric::Cosine),
 };
 db.enable_temporal_vector_index("embedding", config)?;
@@ -692,6 +704,13 @@ for (timestamp, results) in history {
 - Temporal indexing is opt-in via `enable_temporal_vector_index()`
 - Databases without temporal indexing continue to work
 - Can enable temporal indexing on existing database (creates first snapshot)
+
+**Configuration Default Change (2024)**:
+- Default `max_snapshots` reduced from 100 to 20 (issue #230)
+- **Existing databases**: Configurations are stored per-database. Existing databases retain their configured `max_snapshots` value (likely 100 if created before this change)
+- **New databases**: Will use new default of 20 snapshots
+- **Migration**: Users with existing databases can manually reduce `max_snapshots` if experiencing memory pressure, or keep existing value if RAM is sufficient
+- **Rationale**: Each snapshot creates full HNSW index copy (~200MB for 100K vectors, 384 dims). Old default of 100 snapshots = ~20GB, causing OOM issues. New default of 20 = ~4GB, suitable for most deployments.
 
 ### Future Enhancements (Phase 4+)
 

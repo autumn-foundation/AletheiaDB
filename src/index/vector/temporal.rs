@@ -30,12 +30,13 @@
 //! use gallifreydb::core::temporal::TimeRange;
 //!
 //! # fn example() -> gallifreydb::utils::Result<()> {
-//! // Create temporal index configuration
+//! // Create temporal index configuration with defaults
+//! // Or use: TemporalVectorConfig::default_with_hnsw(hnsw_config)
 //! let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
 //! let config = TemporalVectorConfig {
 //!     snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
-//!     retention_policy: RetentionPolicy::KeepN(100),
-//!     max_snapshots: 100,
+//!     retention_policy: RetentionPolicy::KeepN(20),  // Conservative default
+//!     max_snapshots: 20,  // Reduced from 100, see issue #230
 //!     hnsw_config,
 //! };
 //!
@@ -92,7 +93,9 @@ pub enum RetentionPolicy {
 
 impl Default for RetentionPolicy {
     fn default() -> Self {
-        RetentionPolicy::KeepN(100)
+        // Reduced from 100 to 20 to prevent excessive memory usage (see issue #230)
+        // Each snapshot uses ~200MB for 100K vectors at 384 dimensions
+        RetentionPolicy::KeepN(20)
     }
 }
 
@@ -1526,9 +1529,9 @@ mod tests {
 
     #[test]
     fn test_retention_policy_default() {
-        // Verify RetentionPolicy has correct default
+        // Verify RetentionPolicy has correct default (reduced from 100 to 20, see issue #230)
         let default_policy = RetentionPolicy::default();
-        assert_eq!(default_policy, RetentionPolicy::KeepN(100));
+        assert_eq!(default_policy, RetentionPolicy::KeepN(20));
     }
 
     #[test]
