@@ -121,6 +121,15 @@ impl WriteTransaction {
     /// to the storage. If validation fails or any operation fails,
     /// the transaction is rolled back.
     pub fn commit(mut self) -> Result<()> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!(
+            "transaction_commit",
+            tx_id = %self.tx_id
+        ).entered();
+
+        #[cfg(feature = "observability")]
+        let commit_start = std::time::Instant::now();
+
         // Check transaction state
         if self.state != TxState::Active {
             return Err(TransactionError::InvalidState {
@@ -172,13 +181,23 @@ impl WriteTransaction {
         // - Conflict detection (commits after my snapshot must fail)
         // - Visibility (commits before my snapshot must be visible)
         let commit_timestamp = {
+            #[cfg(feature = "observability")]
+            let ts_lock_start = std::time::Instant::now();
+
             let mut ts = self
                 .current_timestamp
                 .lock()
                 .expect("timestamp lock poisoned - unrecoverable state");
+
+            #[cfg(feature = "observability")]
+            let ts_lock_acquired = std::time::Instant::now();
+
             *ts += 1; // Pre-increment for conflict detection
             let commit = *ts;
             *ts += 1; // Post-increment for visibility of this commit
+
+            #[cfg(feature = "observability")]
+            let wal_lock_start = std::time::Instant::now();
 
             // Acquire WAL lock once and hold through both logging and flush.
             // This prevents any race condition between operations.
@@ -187,13 +206,51 @@ impl WriteTransaction {
                 .lock()
                 .expect("WAL lock poisoned - unrecoverable state");
 
+            #[cfg(feature = "observability")]
+            let wal_lock_acquired = std::time::Instant::now();
+
             // Log operations to WAL while holding both locks.
             // This must happen BEFORE applying changes for durability.
             self.log_operations_to_wal(&mut wal, commit)?;
 
+            #[cfg(feature = "observability")]
+            let wal_logged = std::time::Instant::now();
+
             // Flush WAL to ensure durability while still holding both locks.
             // This guarantees that lower timestamps are durable before higher ones.
             wal.flush()?;
+
+            #[cfg(feature = "observability")]
+            {
+                let flush_completed = std::time::Instant::now();
+
+                // Record detailed breakdown for Honeycomb
+                let ts_lock_wait_us = ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
+                let wal_lock_wait_us = wal_lock_acquired.duration_since(wal_lock_start).as_micros() as u64;
+                let wal_log_us = wal_logged.duration_since(wal_lock_acquired).as_micros() as u64;
+                let wal_flush_us = flush_completed.duration_since(wal_logged).as_micros() as u64;
+                let total_locked_us = flush_completed.duration_since(ts_lock_start).as_micros() as u64;
+
+                tracing::info!(
+                    ts_lock_wait_us,
+                    wal_lock_wait_us,
+                    wal_log_us,
+                    wal_flush_us,
+                    total_locked_us,
+                    commit_ts = %commit,
+                    "Transaction commit breakdown"
+                );
+
+                // Warn if commit serialization exceeds threshold (known bottleneck from line 156-159)
+                if total_locked_us > 10000 {
+                    tracing::warn!(
+                        total_locked_us,
+                        wal_flush_us,
+                        tx_id = %self.tx_id,
+                        "Slow commit detected - serialization bottleneck (see write_tx.rs:156-159)"
+                    );
+                }
+            }
 
             commit
             // Both locks released here, after WAL is durable
@@ -211,6 +268,16 @@ impl WriteTransaction {
 
         // Mark as committed
         self.state = TxState::Committed;
+
+        #[cfg(feature = "observability")]
+        {
+            let total_commit_us = commit_start.elapsed().as_micros() as u64;
+            tracing::debug!(
+                total_commit_us,
+                tx_id = %self.tx_id,
+                "Transaction committed"
+            );
+        }
 
         Ok(())
     }
