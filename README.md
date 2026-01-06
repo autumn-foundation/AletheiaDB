@@ -85,7 +85,8 @@ See `justfile` for all available commands.
 
 GallifreyDB is designed for high performance with minimal temporal overhead. View live benchmark results:
 
-**[📊 View Benchmark Results](https://madmax983.github.io/GallifreyDB/benchmarks/)**
+- **[📊 Latest Benchmarks](https://madmax983.github.io/GallifreyDB/benchmarks/)** - Comprehensive tables with all metrics
+- **[📈 Historical Trends](https://madmax983.github.io/GallifreyDB/dev/bench/)** - Performance over time with regression tracking
 
 ### Current Performance
 

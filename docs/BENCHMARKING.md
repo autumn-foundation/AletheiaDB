@@ -60,13 +60,19 @@ The generated page includes:
 
 Benchmark results are automatically published to GitHub Pages on every push to `trunk`:
 
-**URL**: https://madmax983.github.io/GallifreyDB/benchmarks/
+**New HTML Tables**: https://madmax983.github.io/GallifreyDB/benchmarks/
+- Clean table-based overview of all benchmark suites
+- Performance targets comparison
+- Mean, std dev, and median for each benchmark
+- Links to detailed Criterion reports
 
-Features:
-- Automatically updated on each push to trunk
-- Historical trend tracking (via Criterion's built-in charts)
-- Clean table-based overview
-- Detailed statistical reports
+**Historical Trends**: https://madmax983.github.io/GallifreyDB/dev/bench/
+- Time-series charts showing benchmark trends over time
+- Regression detection and alerts
+- Comparison between commits
+- Powered by github-action-benchmark
+
+Both views are updated automatically on each push to trunk.
 
 ### CI/CD
 
