@@ -527,6 +527,182 @@ fn bench_sequential_visibility_checks(c: &mut Criterion) {
     });
 }
 
+/// Benchmark apply_changes with large transactions to measure lock consolidation impact.
+///
+/// This benchmark measures commit latency for transactions of varying sizes to verify
+/// the performance improvements from Issue #223 (lock consolidation in apply_changes).
+///
+/// Tests transaction sizes of 10, 100, and 1000 operations with different operation mixes:
+/// - Mixed operations (creates, updates, deletes)
+/// - Create-heavy (mostly creates)
+/// - Delete-heavy (tests tombstone ID pre-generation optimization)
+fn bench_apply_changes_large_tx(c: &mut Criterion) {
+    let mut group = c.benchmark_group("apply_changes_large_tx");
+
+    // Test different transaction sizes
+    for size in [10, 100, 1000] {
+        // Mixed operations: creates, updates, deletes
+        group.bench_function(format!("mixed_{}_ops", size), |b| {
+            b.iter_batched(
+                || {
+                    // Setup: create DB with some existing data for updates/deletes
+                    let db = GallifreyDB::new();
+                    let (nodes, edges) = db
+                        .write(|tx| {
+                            let mut nodes = Vec::new();
+                            let mut edges = Vec::new();
+
+                            // Create nodes for later updates/deletes
+                            for i in 0..size {
+                                let node = tx.create_node(
+                                    "Person",
+                                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                                )?;
+                                nodes.push(node);
+                            }
+
+                            // Create edges for later deletes
+                            for i in 0..(size / 2) {
+                                let edge = tx.create_edge(
+                                    nodes[i],
+                                    nodes[i + 1],
+                                    "KNOWS",
+                                    PropertyMapBuilder::new().build(),
+                                )?;
+                                edges.push(edge);
+                            }
+
+                            Ok((nodes, edges))
+                        })
+                        .unwrap();
+
+                    (db, nodes, edges)
+                },
+                |(db, nodes, edges)| {
+                    // Measure: mixed transaction with creates, updates, deletes
+                    db.write(|tx| {
+                        let ops_per_type = size / 4;
+
+                        // 25% creates
+                        for i in 0..ops_per_type {
+                            tx.create_node(
+                                "NewPerson",
+                                PropertyMapBuilder::new()
+                                    .insert("id", (i + 10000) as i64)
+                                    .build(),
+                            )?;
+                        }
+
+                        // 25% updates
+                        for i in 0..ops_per_type.min(nodes.len()) {
+                            tx.update_node(
+                                nodes[i],
+                                PropertyMapBuilder::new()
+                                    .insert("updated", true)
+                                    .insert("age", (i + 20) as i64)
+                                    .build(),
+                            )?;
+                        }
+
+                        // 25% node deletes (tests tombstone ID generation)
+                        for i in 0..ops_per_type.min(nodes.len() / 2) {
+                            tx.delete_node(nodes[nodes.len() - 1 - i])?;
+                        }
+
+                        // 25% edge deletes (tests tombstone ID generation)
+                        for i in 0..ops_per_type.min(edges.len()) {
+                            tx.delete_edge(edges[i])?;
+                        }
+
+                        Ok(())
+                    })
+                    .unwrap();
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+
+        // Create-heavy workload
+        group.bench_function(format!("creates_{}_ops", size), |b| {
+            b.iter(|| {
+                let db = GallifreyDB::new();
+                db.write(|tx| {
+                    for i in 0..size {
+                        tx.create_node(
+                            "Person",
+                            PropertyMapBuilder::new()
+                                .insert("id", i as i64)
+                                .insert("name", format!("Person{}", i))
+                                .build(),
+                        )?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            });
+        });
+
+        // Delete-heavy workload (tests tombstone ID pre-generation optimization)
+        group.bench_function(format!("deletes_{}_ops", size), |b| {
+            b.iter_batched(
+                || {
+                    // Setup: create DB with nodes and edges to delete
+                    let db = GallifreyDB::new();
+                    let (nodes, edges) = db
+                        .write(|tx| {
+                            let mut nodes = Vec::new();
+                            let mut edges = Vec::new();
+
+                            for i in 0..size {
+                                let node = tx.create_node(
+                                    "Person",
+                                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                                )?;
+                                nodes.push(node);
+                            }
+
+                            for i in 0..(size - 1) {
+                                let edge = tx.create_edge(
+                                    nodes[i],
+                                    nodes[i + 1],
+                                    "KNOWS",
+                                    PropertyMapBuilder::new().build(),
+                                )?;
+                                edges.push(edge);
+                            }
+
+                            Ok((nodes, edges))
+                        })
+                        .unwrap();
+
+                    (db, nodes, edges)
+                },
+                |(db, nodes, edges)| {
+                    // Measure: delete all nodes and edges
+                    // This heavily tests the tombstone ID pre-generation optimization
+                    db.write(|tx| {
+                        // Delete edges first (to avoid referential integrity issues)
+                        for edge in edges {
+                            tx.delete_edge(edge)?;
+                        }
+
+                        // Delete nodes
+                        for node in nodes {
+                            tx.delete_node(node)?;
+                        }
+
+                        Ok(())
+                    })
+                    .unwrap();
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_read_transaction_creation,
@@ -545,6 +721,7 @@ criterion_group!(
     bench_read_during_rebuild,
     bench_concurrent_visibility_checks,
     bench_sequential_visibility_checks,
+    bench_apply_changes_large_tx,
 );
 
 criterion_main!(benches);

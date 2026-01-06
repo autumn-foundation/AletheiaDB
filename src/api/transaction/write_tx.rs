@@ -1833,8 +1833,11 @@ mod tests {
         tx.create_edge(node1, node5, "FOLLOWS", props.clone())
             .unwrap();
 
-        tx.update_node(node4, PropertyMapBuilder::new().insert("age", 30i64).build())
-            .unwrap();
+        tx.update_node(
+            node4,
+            PropertyMapBuilder::new().insert("age", 30i64).build(),
+        )
+        .unwrap();
 
         // Delete operations: 2 nodes + 2 edges = 4 tombstones needed
         tx.delete_node(node3).unwrap(); // This will also require tombstone for node
