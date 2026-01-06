@@ -40,7 +40,7 @@ fn bench_concurrent_time_travel_reads(c: &mut Criterion) {
                                     db_clone.get_node_at_time(node_id, timestamp, timestamp);
 
                                 // Force the result to be used
-                                black_box(result);
+                                let _ = black_box(result);
                             }
                         });
                         handles.push(handle);
