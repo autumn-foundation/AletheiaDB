@@ -405,4 +405,29 @@ mod tests {
         assert_eq!(snapshot1.active_transactions.len(), 1);
         assert!(snapshot1.active_transactions.contains(&TxId::new(1)));
     }
+
+    #[test]
+    fn test_count_methods() {
+        let manager = TxVisibilityManager::new();
+
+        // Initially empty
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.committed_count(), 0);
+
+        // Add active transactions
+        manager.register_active(TxId::new(1));
+        manager.register_active(TxId::new(2));
+        assert_eq!(manager.active_count(), 2);
+        assert_eq!(manager.committed_count(), 0);
+
+        // Commit one
+        manager.register_commit(TxId::new(1), 100);
+        assert_eq!(manager.active_count(), 1);
+        assert_eq!(manager.committed_count(), 1);
+
+        // Abort the other
+        manager.register_abort(TxId::new(2));
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.committed_count(), 1);
+    }
 }
