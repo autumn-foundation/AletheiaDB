@@ -53,7 +53,7 @@ fn bench_snapshot_creation(c: &mut Criterion) {
                 let config = TemporalVectorConfig {
                     snapshot_strategy: snapshot_strategy.clone(),
                     retention_policy: RetentionPolicy::KeepN(10),
-                    max_snapshots: 100,  // Higher for benchmarking
+                    max_snapshots: 100, // Higher for benchmarking
                     hnsw_config,
                 };
                 let index = TemporalVectorIndex::new(config).unwrap();

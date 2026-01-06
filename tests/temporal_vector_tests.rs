@@ -9,7 +9,7 @@ fn create_test_index() -> Result<TemporalVectorIndex> {
     let config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1000),
         retention_policy: RetentionPolicy::KeepN(20),
-        max_snapshots: 20,  // Conservative default, see issue #230
+        max_snapshots: 20, // Conservative default, see issue #230
         hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
     };
     TemporalVectorIndex::new(config)

@@ -22,7 +22,7 @@ fn create_test_index() -> Result<TemporalVectorIndex> {
     let config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(2),
         retention_policy: RetentionPolicy::KeepN(10),
-        max_snapshots: 20,  // Conservative default, see issue #230
+        max_snapshots: 20, // Conservative default, see issue #230
         hnsw_config,
     };
     TemporalVectorIndex::new(config)
@@ -136,7 +136,7 @@ fn test_snapshot_pruning_with_keep_n() -> Result<()> {
     let config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
         retention_policy: RetentionPolicy::KeepN(3),
-        max_snapshots: 100,  // High limit to test retention policy enforcement
+        max_snapshots: 100, // High limit to test retention policy enforcement
         hnsw_config,
     };
     let index = TemporalVectorIndex::new(config)?;
@@ -164,7 +164,7 @@ fn test_snapshot_pruning_with_keep_duration() -> Result<()> {
     let config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
         retention_policy: RetentionPolicy::KeepDuration(Duration::from_secs(10)),
-        max_snapshots: 100,  // High limit to test retention policy enforcement
+        max_snapshots: 100, // High limit to test retention policy enforcement
         hnsw_config,
     };
     let index = TemporalVectorIndex::new(config)?;
@@ -214,7 +214,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
     let config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TimeInterval(1), // 1 second
         retention_policy: RetentionPolicy::KeepN(10),
-        max_snapshots: 20,  // Conservative default, see issue #230
+        max_snapshots: 20, // Conservative default, see issue #230
         hnsw_config: hnsw_config.clone(),
     };
 
@@ -234,7 +234,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
     let config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::ChangeThreshold(0.5), // 50% changed
         retention_policy: RetentionPolicy::KeepN(10),
-        max_snapshots: 20,  // Conservative default, see issue #230
+        max_snapshots: 20, // Conservative default, see issue #230
         hnsw_config,
     };
     let change_threshold_index = TemporalVectorIndex::new_at(config, 1000)?;
