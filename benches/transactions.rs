@@ -527,6 +527,49 @@ fn bench_sequential_visibility_checks(c: &mut Criterion) {
     });
 }
 
+/// Benchmark concurrent transaction creation with many active transactions.
+///
+/// This benchmark measures the overhead of `capture_snapshot` when there are many
+/// active transactions. Issue #221 identified that cloning the HashSet of active
+/// transactions creates O(N²) scaling: with N concurrent transactions, each new
+/// transaction clones a HashSet containing N elements.
+///
+/// This benchmark simulates the worst-case scenario where many long-running
+/// transactions are active while new transactions are being created.
+fn bench_concurrent_transaction_creation_with_active_txs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_tx_creation");
+
+    // Test with different numbers of concurrent active transactions
+    for active_count in [10, 50, 100] {
+        group.bench_function(format!("{}_active_txs", active_count), |b| {
+            b.iter_batched(
+                || {
+                    // Setup: create DB and start many active write transactions
+                    let db = Arc::new(GallifreyDB::new());
+                    let mut active_txs = Vec::new();
+
+                    for _ in 0..active_count {
+                        let tx = db.write_transaction().unwrap();
+                        active_txs.push(tx);
+                    }
+
+                    (db, active_txs)
+                },
+                |(db, _active_txs)| {
+                    // Measure: create new transactions while others are active
+                    // Each creation calls capture_snapshot which clones active tx set
+                    for _ in 0..10 {
+                        let _tx = db.write_transaction().unwrap();
+                    }
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
 /// Benchmark apply_changes with large transactions to measure lock consolidation impact.
 ///
 /// This benchmark measures commit latency for transactions of varying sizes to verify
@@ -721,6 +764,7 @@ criterion_group!(
     bench_read_during_rebuild,
     bench_concurrent_visibility_checks,
     bench_sequential_visibility_checks,
+    bench_concurrent_transaction_creation_with_active_txs,
     bench_apply_changes_large_tx,
 );
 

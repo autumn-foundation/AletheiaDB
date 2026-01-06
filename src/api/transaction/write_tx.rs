@@ -1210,7 +1210,7 @@ mod tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: std::collections::HashSet::new(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
         };
 
         let tx = WriteTransaction::new(
@@ -1711,7 +1711,7 @@ mod tests {
         // Create initial transaction to set up nodes and one edge
         let snapshot1 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: std::collections::HashSet::new(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
         };
         let mut tx1 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1743,7 +1743,7 @@ mod tests {
         // Create second transaction with interleaved operations
         let snapshot2 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: std::collections::HashSet::new(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
         };
         let mut tx2 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1976,7 +1976,7 @@ mod conflict_detection_tests {
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
-                active_transactions: std::collections::HashSet::new(),
+                active_transactions: Arc::new(std::collections::HashSet::new()),
             };
 
             WriteTransaction::new(
@@ -2417,7 +2417,7 @@ mod timestamp_ordering_tests {
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
-                active_transactions: std::collections::HashSet::new(),
+                active_transactions: Arc::new(std::collections::HashSet::new()),
             };
 
             WriteTransaction::new(

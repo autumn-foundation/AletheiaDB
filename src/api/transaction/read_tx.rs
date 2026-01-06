@@ -139,13 +139,14 @@ mod tests {
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     // Helper to create a test ReadTransaction with snapshot
     fn create_test_read_tx(tx_id: TxId, current: Arc<CurrentStorage>) -> ReadTransaction {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: HashSet::new(),
+            active_transactions: Arc::new(HashSet::new()),
         };
         ReadTransaction::new(tx_id, snapshot, current, visibility_manager)
     }
@@ -312,7 +313,7 @@ mod tests {
             // Create read transaction
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: time::now(),
-                active_transactions: HashSet::new(),
+                active_transactions: Arc::new(HashSet::new()),
             };
             let _tx = ReadTransaction::new(
                 tx_id,
