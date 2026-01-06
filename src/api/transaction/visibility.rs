@@ -219,7 +219,6 @@ impl TxVisibilityManager {
         let committed = self.committed.lock_or_recover();
         committed.len()
     }
-
 }
 
 impl Default for TxVisibilityManager {
@@ -406,5 +405,4 @@ mod tests {
         assert_eq!(snapshot1.active_transactions.len(), 1);
         assert!(snapshot1.active_transactions.contains(&TxId::new(1)));
     }
-
 }
