@@ -262,13 +262,14 @@ pub enum SnapshotStrategy {
 ///
 /// let metric = DriftMetric::default(); // Cosine
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DriftMetric {
     /// Cosine distance: 1.0 - cosine_similarity
     ///
     /// Range: [0, 2] for normalized vectors, typically [0, 1]
     /// Most interpretable for semantic embeddings.
     /// Value of 0 = identical meaning, 1 = orthogonal, 2 = opposite.
+    #[default]
     Cosine,
 
     /// Euclidean (L2) distance between vectors.
@@ -282,12 +283,6 @@ pub enum DriftMetric {
     /// Returns the geometric angle between vectors in radians.
     /// Range: [0, π] where 0 = identical, π/2 = orthogonal, π = opposite.
     Angular,
-}
-
-impl Default for DriftMetric {
-    fn default() -> Self {
-        DriftMetric::Cosine
-    }
 }
 
 /// Type alias for vector snapshot: map of NodeId to vector data
@@ -1380,42 +1375,6 @@ impl TemporalVectorIndex {
         Ok(results)
     }
 
-    /// Calculates the maximum consecutive drift for a single node.
-    ///
-    /// Returns the largest drift value between any two adjacent versions
-    /// of the node's embedding within the time range.
-    ///
-    /// # Returns
-    ///
-    /// - `Some(max_drift)` if the node has at least 2 versions in the range
-    /// - `None` if the node has fewer than 2 versions (no drift to measure)
-    fn calculate_max_drift(
-        &self,
-        node_id: NodeId,
-        time_range: TimeRange,
-        metric: DriftMetric,
-    ) -> Result<Option<f32>> {
-        let evolution = self.semantic_evolution(node_id, time_range)?;
-
-        if evolution.len() < 2 {
-            // Need at least 2 vectors to calculate drift
-            return Ok(None);
-        }
-
-        let mut max_drift = 0.0f32;
-
-        // Calculate drift between consecutive vectors
-        for window in evolution.windows(2) {
-            let (_prev_timestamp, prev_vector) = &window[0];
-            let (_curr_timestamp, curr_vector) = &window[1];
-
-            let drift = Self::compute_drift_distance(prev_vector, curr_vector, metric)?;
-            max_drift = max_drift.max(drift);
-        }
-
-        Ok(Some(max_drift))
-    }
-
     /// Computes the drift distance between two vectors using the specified metric.
     ///
     /// # Arguments
@@ -2346,9 +2305,17 @@ mod tests {
         index.on_transaction_at(ts)?;
         ts += 1000;
         index.remove(node3, ts)?;
-        index.add(node3, &[0.7071, 0.7071, 0.0, 0.0], ts)?; // 45 degree angle
+        index.add(
+            node3,
+            &[
+                std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2,
+                0.0,
+                0.0,
+            ],
+            ts,
+        )?; // 45 degree angle
         index.on_transaction_at(ts)?;
-        ts += 1000;
 
         let time_range = TimeRange::new(0, i64::MAX);
 
@@ -2404,9 +2371,17 @@ mod tests {
         index.on_transaction_at(ts)?;
         ts += 1000;
         index.remove(node3, ts)?;
-        index.add(node3, &[0.7071, 0.7071, 0.0, 0.0], ts)?;
+        index.add(
+            node3,
+            &[
+                std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2,
+                0.0,
+                0.0,
+            ],
+            ts,
+        )?;
         index.on_transaction_at(ts)?;
-        ts += 1000;
 
         let time_range = TimeRange::new(0, i64::MAX);
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
@@ -2449,7 +2424,6 @@ mod tests {
         index.remove(node2, ts)?;
         index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
-        ts += 1000;
 
         let time_range = TimeRange::new(0, i64::MAX);
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
@@ -2471,7 +2445,7 @@ mod tests {
         };
         let index = TemporalVectorIndex::new(config)?;
 
-        let mut ts = 10000i64;
+        let ts = 10000i64;
 
         let node1 = NodeId::new(1).unwrap();
         index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;

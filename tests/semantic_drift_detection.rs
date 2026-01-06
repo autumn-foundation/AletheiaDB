@@ -118,7 +118,6 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
     let embedding = normalize(&embedding);
     index.add(node10, &embedding, ts)?;
     index.on_transaction_at(ts)?;
-    ts += 1000;
 
     // Query with threshold 0.3 - should get docs 4-9
     let time_range = TimeRange::new(0, i64::MAX);
@@ -209,17 +208,17 @@ fn test_semantic_drift_with_multiple_snapshots() -> Result<()> {
     let node_id = NodeId::new(1).unwrap();
 
     // Create a timeline of embeddings showing gradual drift
-    let embeddings = vec![
+    let embeddings = [
         // t0: Initial state
-        normalize(&vec![1.0, 0.0, 0.0, 0.0]),
+        normalize(&[1.0, 0.0, 0.0, 0.0]),
         // t1: Small change
-        normalize(&vec![0.9, 0.1, 0.0, 0.0]),
+        normalize(&[0.9, 0.1, 0.0, 0.0]),
         // t2: Moderate change
-        normalize(&vec![0.7, 0.3, 0.0, 0.0]),
+        normalize(&[0.7, 0.3, 0.0, 0.0]),
         // t3: Large change (approaching orthogonal)
-        normalize(&vec![0.3, 0.7, 0.0, 0.0]),
+        normalize(&[0.3, 0.7, 0.0, 0.0]),
         // t4: Very large change (nearly orthogonal)
-        normalize(&vec![0.1, 0.9, 0.0, 0.0]),
+        normalize(&[0.1, 0.9, 0.0, 0.0]),
     ];
 
     for (i, embedding) in embeddings.iter().enumerate() {
@@ -238,7 +237,10 @@ fn test_semantic_drift_with_multiple_snapshots() -> Result<()> {
     let time_range = TimeRange::new(0, i64::MAX);
     let results = index.find_semantic_drift(0.05, time_range, DriftMetric::Cosine)?;
 
-    assert!(results.len() >= 1, "Should find at least one drifting node");
+    assert!(
+        !results.is_empty(),
+        "Should find at least one drifting node"
+    );
     assert!(
         results.iter().any(|(id, _)| *id == node_id),
         "Should find the test node"
@@ -291,7 +293,6 @@ fn test_semantic_drift_different_metrics() -> Result<()> {
     index.remove(node_id, ts)?;
     index.add(node_id, &embedding2, ts)?;
     index.on_transaction_at(ts)?;
-    ts += 1000;
 
     let time_range = TimeRange::new(0, i64::MAX);
 
