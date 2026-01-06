@@ -27,7 +27,7 @@
 //! cargo run --example observability_demo --features observability
 //! ```
 
-use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use gallifreydb::{GallifreyDB, PropertyMapBuilder, WriteOps};
 
 #[cfg(feature = "observability")]
 use gallifreydb::observability;
@@ -76,9 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create edge
     let edge_id = db.create_edge(
-        "KNOWS",
         alice_id,
         bob_id,
+        "KNOWS",
         PropertyMapBuilder::new()
             .insert("since", 2020)
             .build(),
