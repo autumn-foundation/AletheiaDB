@@ -107,6 +107,12 @@ pub struct Metrics {
     pub error_other_total: AtomicU64,
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Metrics {
     /// Create a new metrics instance with all counters initialized to zero.
     ///

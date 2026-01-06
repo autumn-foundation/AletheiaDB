@@ -62,7 +62,7 @@ impl<T> MutexExt<T> for Mutex<T> {
             use std::sync::atomic::{AtomicU64, Ordering};
             static LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
             let count = LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count % 10000 == 0 {
+            if count.is_multiple_of(10000) {
                 tracing::debug!(count, "Mutex lock acquisition count");
             }
         }
@@ -131,7 +131,7 @@ impl<T> RwLockExt<T> for RwLock<T> {
             use std::sync::atomic::{AtomicU64, Ordering};
             static READ_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
             let count = READ_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count % 10000 == 0 {
+            if count.is_multiple_of(10000) {
                 tracing::debug!(count, "RwLock read acquisition count");
             }
         }
@@ -162,7 +162,7 @@ impl<T> RwLockExt<T> for RwLock<T> {
             use std::sync::atomic::{AtomicU64, Ordering};
             static WRITE_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
             let count = WRITE_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count % 10000 == 0 {
+            if count.is_multiple_of(10000) {
                 tracing::debug!(count, "RwLock write acquisition count");
             }
         }
