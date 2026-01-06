@@ -186,6 +186,41 @@ impl StringInterner {
         })
     }
 
+    /// Access the interned string via a callback without cloning the Arc.
+    ///
+    /// This is more efficient than `resolve()` or `get()` when you only need
+    /// temporary read access to the string, as it avoids atomic reference
+    /// counting operations.
+    ///
+    /// This is particularly useful for:
+    /// - Display and logging operations
+    /// - Serialization
+    /// - String comparisons
+    /// - Any read-only operation that doesn't need to own the string
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gallifreydb::core::interning::StringInterner;
+    ///
+    /// let interner = StringInterner::new();
+    /// let id = interner.intern("hello").unwrap();
+    ///
+    /// // Efficient: no Arc clone
+    /// let len = interner.with_str(id, |s| s.len()).unwrap();
+    /// assert_eq!(len, 5);
+    ///
+    /// // Can return any type from the callback
+    /// let uppercase = interner.with_str(id, |s| s.to_uppercase()).unwrap();
+    /// assert_eq!(uppercase, "HELLO");
+    /// ```
+    pub fn with_str<F, R>(&self, id: InternedString, f: F) -> Option<R>
+    where
+        F: FnOnce(&str) -> R,
+    {
+        self.id_to_string.get(&id).map(|entry| f(entry.value().as_ref()))
+    }
+
     /// Check if a string has been interned.
     pub fn contains<S: AsRef<str>>(&self, string: S) -> bool {
         self.string_to_id.contains_key(string.as_ref())
@@ -398,5 +433,124 @@ mod tests {
 
         let resolved = GLOBAL_INTERNER.resolve(id1).unwrap();
         assert_eq!(resolved.as_ref(), "global");
+    }
+
+    #[test]
+    fn test_with_str_basic() {
+        let interner = StringInterner::new();
+        let id = interner.intern("hello").unwrap();
+
+        // Test basic access
+        let result = interner.with_str(id, |s| {
+            assert_eq!(s, "hello");
+            s.len()
+        });
+
+        assert_eq!(result, Some(5));
+    }
+
+    #[test]
+    fn test_with_str_invalid_id() {
+        let interner = StringInterner::new();
+        let invalid_id = InternedString::from_raw(999);
+
+        let result = interner.with_str(invalid_id, |s| s.len());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_with_str_return_types() {
+        let interner = StringInterner::new();
+        let id = interner.intern("test string").unwrap();
+
+        // Return usize
+        let len = interner.with_str(id, |s| s.len()).unwrap();
+        assert_eq!(len, 11);
+
+        // Return String
+        let uppercase = interner.with_str(id, |s| s.to_uppercase()).unwrap();
+        assert_eq!(uppercase, "TEST STRING");
+
+        // Return bool
+        let contains = interner.with_str(id, |s| s.contains("test")).unwrap();
+        assert!(contains);
+
+        // Return Vec (must own the data since it outlives the callback)
+        let words: Vec<String> = interner.with_str(id, |s| {
+            s.split_whitespace().map(|w| w.to_string()).collect()
+        }).unwrap();
+        assert_eq!(words, vec!["test", "string"]);
+    }
+
+    #[test]
+    fn test_with_str_no_arc_clone() {
+        let interner = StringInterner::new();
+        let id = interner.intern("performance test").unwrap();
+
+        // This test verifies that with_str works without cloning
+        // While we can't directly measure Arc refcounts in safe code,
+        // we can verify the behavior is correct
+        let mut call_count = 0;
+        let result = interner.with_str(id, |s| {
+            call_count += 1;
+            s.to_string()
+        });
+
+        assert_eq!(result, Some("performance test".to_string()));
+        assert_eq!(call_count, 1);
+    }
+
+    #[test]
+    fn test_with_str_concurrent() {
+        use std::thread;
+
+        let interner = Arc::new(StringInterner::new());
+        let id = interner.intern("concurrent").unwrap();
+
+        let mut handles = vec![];
+
+        // Spawn 10 threads, each accessing the same string via with_str
+        for i in 0..10 {
+            let interner_clone = Arc::clone(&interner);
+            let handle = thread::spawn(move || {
+                interner_clone.with_str(id, |s| {
+                    assert_eq!(s, "concurrent");
+                    format!("{}-{}", s, i)
+                }).unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Collect all results
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // Verify each thread got the correct result
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(result, &format!("concurrent-{}", i));
+        }
+    }
+
+    #[test]
+    fn test_with_str_vs_resolve_equivalence() {
+        let interner = StringInterner::new();
+        let id = interner.intern("equivalence test").unwrap();
+
+        // Both methods should give the same string content
+        let via_with_str = interner.with_str(id, |s| s.to_string()).unwrap();
+        let via_resolve = interner.resolve(id).unwrap();
+
+        assert_eq!(via_with_str, via_resolve.as_ref());
+    }
+
+    #[test]
+    fn test_with_str_empty_string() {
+        let interner = StringInterner::new();
+        let id = interner.intern("").unwrap();
+
+        let len = interner.with_str(id, |s| s.len()).unwrap();
+        assert_eq!(len, 0);
+
+        let is_empty = interner.with_str(id, |s| s.is_empty()).unwrap();
+        assert!(is_empty);
     }
 }
