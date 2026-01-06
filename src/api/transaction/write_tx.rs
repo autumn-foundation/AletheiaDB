@@ -24,8 +24,8 @@ use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::{WalOperation, WriteAheadLog};
 use crate::utils::error::{Result, StorageError, TransactionError};
-use crate::utils::lock::MutexExt;
-use std::sync::{Arc, Mutex};
+use crate::utils::lock::{MutexExt, RwLockExt};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Write transaction with full ACID guarantees.
 ///
@@ -53,8 +53,8 @@ pub struct WriteTransaction {
 
     // Shared references to storage (Arc for zero-copy sharing)
     current: Arc<CurrentStorage>,
-    historical: Arc<Mutex<HistoricalStorage>>,
-    temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    temporal_indexes: Arc<RwLock<TemporalIndexes>>,
     wal: Arc<Mutex<WriteAheadLog>>,
     current_timestamp: Arc<Mutex<Timestamp>>,
     visibility_manager: Arc<TxVisibilityManager>,
@@ -72,8 +72,8 @@ impl WriteTransaction {
         tx_id: TxId,
         snapshot: TransactionSnapshot,
         current: Arc<CurrentStorage>,
-        historical: Arc<Mutex<HistoricalStorage>>,
-        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -524,7 +524,7 @@ impl WriteTransaction {
                     self.current.insert_node_direct(node, commit_timestamp)?;
 
                     // Store in historical storage
-                    self.historical.lock_or_err()?.add_node_version(
+                    self.historical.write_or_err()?.add_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -533,7 +533,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_node_version(
+                    self.temporal_indexes.write_or_err()?.insert_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -562,7 +562,7 @@ impl WriteTransaction {
                     self.current.insert_edge_direct(edge)?;
 
                     // Store in historical storage
-                    self.historical.lock_or_err()?.add_edge_version(
+                    self.historical.write_or_err()?.add_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -573,7 +573,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
+                    self.temporal_indexes.write_or_err()?.insert_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -598,7 +598,7 @@ impl WriteTransaction {
                     self.current.update_node_direct(node, commit_timestamp)?;
 
                     // Add new version to historical storage
-                    self.historical.lock_or_err()?.add_node_version(
+                    self.historical.write_or_err()?.add_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -607,7 +607,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_node_version(
+                    self.temporal_indexes.write_or_err()?.insert_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -636,7 +636,7 @@ impl WriteTransaction {
                     self.current.update_edge_direct(edge)?;
 
                     // Add new version to historical storage
-                    self.historical.lock_or_err()?.add_edge_version(
+                    self.historical.write_or_err()?.add_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -647,7 +647,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
+                    self.temporal_indexes.write_or_err()?.insert_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -659,7 +659,7 @@ impl WriteTransaction {
 
                     // Close the current version's transaction_time in historical storage
                     // This marks the end of this version's visibility
-                    let mut historical = self.historical.lock_or_err()?;
+                    let mut historical = self.historical.write_or_err()?;
                     if let Some(current_version_id) = historical.get_current_node_version(*node_id)
                     {
                         historical.close_node_version_transaction_time(
@@ -691,7 +691,7 @@ impl WriteTransaction {
                     drop(historical); // Release lock before acquiring temporal_indexes lock
 
                     // Index the tombstone version
-                    self.temporal_indexes.lock_or_err()?.insert_node_version(
+                    self.temporal_indexes.write_or_err()?.insert_node_version(
                         *node_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -707,7 +707,7 @@ impl WriteTransaction {
 
                     // Close the current version's transaction_time in historical storage
                     // This marks the end of this version's visibility
-                    let mut historical = self.historical.lock_or_err()?;
+                    let mut historical = self.historical.write_or_err()?;
                     if let Some(current_version_id) = historical.get_current_edge_version(*edge_id)
                     {
                         historical.close_edge_version_transaction_time(
@@ -741,7 +741,7 @@ impl WriteTransaction {
                     drop(historical); // Release lock before acquiring temporal_indexes lock
 
                     // Index the tombstone version
-                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
+                    self.temporal_indexes.write_or_err()?.insert_edge_version(
                         *edge_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -1117,8 +1117,8 @@ mod tests {
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
         let current = Arc::new(CurrentStorage::new());
-        let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
@@ -1497,7 +1497,7 @@ mod tests {
         assert!(current.get_node(node_id).is_err());
 
         // Verify tombstone version was created in historical storage
-        let historical = historical.lock().unwrap();
+        let historical = historical.read().unwrap();
         let stats = historical.stats();
         assert!(
             stats.total_node_versions > 0,
@@ -1537,7 +1537,7 @@ mod tests {
         assert!(current.get_edge(edge_id).is_err());
 
         // Verify tombstone version was created in historical storage
-        let historical = historical.lock().unwrap();
+        let historical = historical.read().unwrap();
         let stats = historical.stats();
         assert!(
             stats.total_edge_versions > 0,
@@ -1616,8 +1616,8 @@ mod tests {
     #[test]
     fn test_interleaved_create_update_delete_operations() {
         let current = Arc::new(CurrentStorage::new());
-        let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
@@ -1786,8 +1786,8 @@ mod conflict_detection_tests {
     /// transactions for testing write-write conflict detection.
     struct TestHarness {
         current: Arc<CurrentStorage>,
-        historical: Arc<Mutex<HistoricalStorage>>,
-        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -1802,8 +1802,8 @@ mod conflict_detection_tests {
         /// Create a new test harness with all shared infrastructure.
         fn new() -> Self {
             let current = Arc::new(CurrentStorage::new());
-            let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-            let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
@@ -2229,8 +2229,8 @@ mod timestamp_ordering_tests {
     /// Test harness for timestamp ordering tests.
     struct TestHarness {
         current: Arc<CurrentStorage>,
-        historical: Arc<Mutex<HistoricalStorage>>,
-        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -2244,8 +2244,8 @@ mod timestamp_ordering_tests {
     impl TestHarness {
         fn new() -> Self {
             let current = Arc::new(CurrentStorage::new());
-            let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-            let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
