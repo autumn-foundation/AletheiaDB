@@ -507,22 +507,21 @@ mod tests {
         let id = interner.intern("performance test").unwrap();
 
         // Get a baseline Arc to check the strong count.
-        // The count is 2: one in string_to_id map, one in id_to_string map.
+        // We don't hardcode the count because DashMap's internal structure may vary.
         let s_arc = interner.resolve(id).unwrap();
-        let initial_count = Arc::strong_count(&s_arc);
-        assert_eq!(initial_count, 3); // 2 in maps + 1 in s_arc
+        let baseline_count = Arc::strong_count(&s_arc);
 
         // This test verifies that with_str works without cloning by checking the refcount.
         let mut call_count = 0;
         let result = interner.with_str(id, |s| {
             call_count += 1;
             // The count should not increase during the callback.
-            assert_eq!(Arc::strong_count(&s_arc), 3);
+            assert_eq!(Arc::strong_count(&s_arc), baseline_count);
             s.to_string()
         });
 
         // The count should remain unchanged after the call.
-        assert_eq!(Arc::strong_count(&s_arc), 3);
+        assert_eq!(Arc::strong_count(&s_arc), baseline_count);
         assert_eq!(result, Some("performance test".to_string()));
         assert_eq!(call_count, 1);
     }
@@ -579,5 +578,35 @@ mod tests {
 
         let is_empty = interner.with_str(id, |s| s.is_empty()).unwrap();
         assert!(is_empty);
+    }
+
+    #[test]
+    fn test_with_str_panic_safety() {
+        let interner = StringInterner::new();
+        let id = interner.intern("panic test").unwrap();
+
+        // Verify the interner works before panic
+        let before = interner.with_str(id, |s| s.to_string()).unwrap();
+        assert_eq!(before, "panic test");
+
+        // Cause a panic in the callback
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            interner.with_str(id, |_s| {
+                panic!("intentional panic in callback");
+            })
+        }));
+
+        // The panic should be caught
+        assert!(result.is_err());
+
+        // Verify the interner is still usable after the panic
+        // The DashMap entry guard should have been properly dropped
+        let after = interner.with_str(id, |s| s.to_string()).unwrap();
+        assert_eq!(after, "panic test");
+
+        // Verify we can still intern new strings
+        let new_id = interner.intern("after panic").unwrap();
+        let new_str = interner.with_str(new_id, |s| s.to_string()).unwrap();
+        assert_eq!(new_str, "after panic");
     }
 }
