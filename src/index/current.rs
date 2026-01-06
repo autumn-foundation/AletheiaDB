@@ -11,6 +11,7 @@ use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
 use crate::utils::lock::RwLockExt;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Concurrent indexes for current-state graph queries.
@@ -50,6 +51,9 @@ pub struct CurrentIndexes {
     /// Coordinates edge modifications with adjacency rebuilds.
     /// Edge ops hold read lock; rebuild holds write lock.
     rebuild_lock: RwLock<()>,
+    /// Tracks whether adjacency indexes are out of date and need rebuilding.
+    /// Set to true when edges are inserted/removed, cleared after rebuild.
+    adjacency_dirty: AtomicBool,
 }
 
 impl CurrentIndexes {
@@ -61,6 +65,7 @@ impl CurrentIndexes {
             outgoing: ArcSwap::from_pointee(AdjacencyIndex::new()),
             incoming: ArcSwap::from_pointee(AdjacencyIndex::new()),
             rebuild_lock: RwLock::new(()),
+            adjacency_dirty: AtomicBool::new(false),
         }
     }
 
@@ -72,13 +77,15 @@ impl CurrentIndexes {
     /// Insert an edge into the indexes.
     ///
     /// Note: This only updates the edge map. Adjacency indexes are rebuilt
-    /// separately for efficiency (batch updates).
+    /// lazily on next access for efficiency (batch updates).
     ///
     /// Acquires `rebuild_lock` in read mode to coordinate with concurrent
     /// adjacency rebuilds (which hold write lock).
     pub fn insert_edge(&self, edge: Edge) {
         let _guard = self.rebuild_lock.read_or_recover();
         self.edges.insert(edge.id, edge);
+        // Mark adjacency as dirty - will be rebuilt lazily on next access
+        self.adjacency_dirty.store(true, Ordering::Release);
     }
 
     /// Get a node by ID.
@@ -102,7 +109,12 @@ impl CurrentIndexes {
     /// adjacency rebuilds (which hold write lock).
     pub fn remove_edge(&self, id: EdgeId) -> Option<Edge> {
         let _guard = self.rebuild_lock.read_or_recover();
-        self.edges.remove(&id).map(|(_, edge)| edge)
+        let result = self.edges.remove(&id).map(|(_, edge)| edge);
+        if result.is_some() {
+            // Mark adjacency as dirty - will be rebuilt lazily on next access
+            self.adjacency_dirty.store(true, Ordering::Release);
+        }
+        result
     }
 
     /// Get the number of nodes.
@@ -129,13 +141,47 @@ impl CurrentIndexes {
         self.edges.contains_key(&id)
     }
 
+    /// Ensure adjacency indexes are up to date.
+    ///
+    /// If the `adjacency_dirty` flag is set, triggers a rebuild.
+    /// This is called before any adjacency access to ensure correctness.
+    ///
+    /// Uses double-checked locking pattern to minimize overhead:
+    /// 1. Quick check of dirty flag (no lock, just atomic read)
+    /// 2. If dirty, acquire write lock and check again
+    /// 3. Rebuild only if still dirty after acquiring lock
+    ///
+    /// This ensures only one thread rebuilds even if multiple threads
+    /// detect the dirty flag simultaneously.
+    #[inline]
+    fn ensure_adjacency_current(&self) {
+        // Fast path: adjacency is already current
+        if !self.adjacency_dirty.load(Ordering::Acquire) {
+            return;
+        }
+
+        // Slow path: rebuild needed
+        // Acquire write lock to prevent concurrent edge modifications
+        let _guard = self.rebuild_lock.write_or_recover();
+
+        // Double-check: another thread may have rebuilt while we waited for the lock
+        if !self.adjacency_dirty.load(Ordering::Acquire) {
+            return;
+        }
+
+        // Actually rebuild
+        self.rebuild_adjacency_internal();
+    }
+
     /// Get outgoing edges for a node.
     ///
     /// Returns a copy of the adjacency list for traversal.
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     #[inline]
     pub fn get_outgoing(&self, source: NodeId) -> Vec<AdjacencyEntry> {
+        self.ensure_adjacency_current();
         let outgoing = self.outgoing.load();
         outgoing.get_adjacency(source).to_vec()
     }
@@ -145,8 +191,10 @@ impl CurrentIndexes {
     /// Returns a copy of the adjacency list for reverse traversal.
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     #[inline]
     pub fn get_incoming(&self, target: NodeId) -> Vec<AdjacencyEntry> {
+        self.ensure_adjacency_current();
         let incoming = self.incoming.load();
         incoming.get_adjacency(target).to_vec()
     }
@@ -154,11 +202,13 @@ impl CurrentIndexes {
     /// Get outgoing edges with a specific label.
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     pub fn get_outgoing_with_label(
         &self,
         source: NodeId,
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
+        self.ensure_adjacency_current();
         let outgoing = self.outgoing.load();
         outgoing
             .get_adjacency_with_label(source, label)
@@ -169,11 +219,13 @@ impl CurrentIndexes {
     /// Get incoming edges with a specific label.
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     pub fn get_incoming_with_label(
         &self,
         target: NodeId,
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
+        self.ensure_adjacency_current();
         let incoming = self.incoming.load();
         incoming
             .get_adjacency_with_label(target, label)
@@ -184,8 +236,10 @@ impl CurrentIndexes {
     /// Get the out-degree of a node (number of outgoing edges).
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     #[inline]
     pub fn out_degree(&self, node: NodeId) -> usize {
+        self.ensure_adjacency_current();
         let outgoing = self.outgoing.load();
         outgoing.degree(node)
     }
@@ -193,16 +247,19 @@ impl CurrentIndexes {
     /// Get the in-degree of a node (number of incoming edges).
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     #[inline]
     pub fn in_degree(&self, node: NodeId) -> usize {
+        self.ensure_adjacency_current();
         let incoming = self.incoming.load();
         incoming.degree(node)
     }
 
     /// Rebuild adjacency indexes from current edges.
     ///
-    /// This should be called after batch edge insertions/deletions.
-    /// It's more efficient to rebuild than to incrementally update for large changes.
+    /// This can be called explicitly after batch edge insertions/deletions
+    /// to force an immediate rebuild, though normally adjacency is rebuilt
+    /// lazily on first access after modifications.
     ///
     /// # Concurrency
     ///
@@ -222,6 +279,7 @@ impl CurrentIndexes {
     /// - Always rebuilds complete index from scratch
     /// - Blocks concurrent edge modifications, but NOT adjacency reads (lock-free!)
     /// - Atomic swap eliminates reader blocking
+    /// - **Lazy rebuild**: Only rebuilds when adjacency is accessed after modifications
     ///
     /// **Future Optimization Opportunities:**
     ///
@@ -241,14 +299,18 @@ impl CurrentIndexes {
     /// batch operations (1-10ms for 10K edges).
     pub fn rebuild_adjacency(&self) {
         // Acquire write lock to block concurrent edge modifications.
-        // This ensures all edges in the DashMap at iteration start will
-        // be present in the rebuilt indexes.
         let _guard = self.rebuild_lock.write_or_recover();
+        self.rebuild_adjacency_internal();
+    }
 
+    /// Internal implementation of adjacency rebuild.
+    ///
+    /// SAFETY: Caller must hold `rebuild_lock` in write mode.
+    fn rebuild_adjacency_internal(&self) {
         let mut outgoing_edges = Vec::new();
         let mut incoming_edges = Vec::new();
 
-        // Collect all edges (no modifications can occur while we hold the lock)
+        // Collect all edges (no modifications can occur while caller holds the lock)
         for entry in self.edges.iter() {
             let edge = entry.value();
             outgoing_edges.push((edge.source, edge.target, edge.id, edge.label));
@@ -260,6 +322,9 @@ impl CurrentIndexes {
             .store(Arc::new(AdjacencyIndex::build(outgoing_edges)));
         self.incoming
             .store(Arc::new(AdjacencyIndex::build(incoming_edges)));
+
+        // Clear the dirty flag - adjacency is now current
+        self.adjacency_dirty.store(false, Ordering::Release);
     }
 
     /// Iterate over all nodes.

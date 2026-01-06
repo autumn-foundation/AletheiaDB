@@ -275,9 +275,8 @@ impl CurrentStorage {
         );
         self.indexes.insert_edge(edge);
 
-        // Rebuild adjacency indexes
-        // TODO: For better performance, batch this or use incremental updates
-        self.indexes.rebuild_adjacency();
+        // Adjacency indexes are now rebuilt lazily on first access (see CurrentIndexes)
+        // This eliminates O(n² log n) performance regression for batch operations
 
         Ok(edge_id)
     }
@@ -313,8 +312,8 @@ impl CurrentStorage {
             .remove_edge(id)
             .ok_or(StorageError::EdgeNotFound(id))?;
 
-        // Rebuild adjacency indexes
-        self.indexes.rebuild_adjacency();
+        // Adjacency indexes are now rebuilt lazily on first access (see CurrentIndexes)
+        // This eliminates O(n² log n) performance regression for batch operations
 
         Ok(edge)
     }
