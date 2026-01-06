@@ -106,6 +106,11 @@ pub struct WriteBuffer {
 
     /// Maximum number of operations allowed (DoS protection)
     max_operations: usize,
+
+    /// Track whether any vector properties were written in this transaction.
+    /// This flag is used to optimize the commit path by only triggering
+    /// temporal vector index updates when vector data was actually modified.
+    has_vector_operations: bool,
 }
 
 impl WriteBuffer {
@@ -121,6 +126,7 @@ impl WriteBuffer {
             modified_nodes: HashMap::new(),
             modified_edges: HashMap::new(),
             max_operations,
+            has_vector_operations: false,
         }
     }
 
@@ -134,6 +140,7 @@ impl WriteBuffer {
             modified_nodes: HashMap::with_capacity(capacity / 2),
             modified_edges: HashMap::with_capacity(capacity / 2),
             max_operations: capacity,
+            has_vector_operations: false,
         }
     }
 
@@ -154,15 +161,42 @@ impl WriteBuffer {
         let index = self.operations.len();
 
         // Track which entities are modified for conflict detection
+        // and check for vector properties
         match &write {
-            BufferedWrite::CreateNode { node_id, .. }
-            | BufferedWrite::UpdateNode { node_id, .. }
-            | BufferedWrite::DeleteNode { node_id } => {
+            BufferedWrite::CreateNode {
+                node_id,
+                properties,
+                ..
+            }
+            | BufferedWrite::UpdateNode {
+                node_id,
+                properties,
+                ..
+            } => {
+                self.modified_nodes.insert(*node_id, index);
+                // Check if this operation contains vector properties
+                self.has_vector_operations =
+                    self.has_vector_operations || properties.contains_vector();
+            }
+            BufferedWrite::DeleteNode { node_id } => {
                 self.modified_nodes.insert(*node_id, index);
             }
-            BufferedWrite::CreateEdge { edge_id, .. }
-            | BufferedWrite::UpdateEdge { edge_id, .. }
-            | BufferedWrite::DeleteEdge { edge_id } => {
+            BufferedWrite::CreateEdge {
+                edge_id,
+                properties,
+                ..
+            }
+            | BufferedWrite::UpdateEdge {
+                edge_id,
+                properties,
+                ..
+            } => {
+                self.modified_edges.insert(*edge_id, index);
+                // Check if this operation contains vector properties
+                self.has_vector_operations =
+                    self.has_vector_operations || properties.contains_vector();
+            }
+            BufferedWrite::DeleteEdge { edge_id } => {
                 self.modified_edges.insert(*edge_id, index);
             }
         }
@@ -205,6 +239,7 @@ impl WriteBuffer {
         self.operations.clear();
         self.modified_nodes.clear();
         self.modified_edges.clear();
+        self.has_vector_operations = false;
     }
 
     /// Get the number of buffered operations
@@ -215,6 +250,23 @@ impl WriteBuffer {
     /// Check if buffer is empty
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
+    }
+
+    /// Check if this transaction contains any vector property operations.
+    ///
+    /// This is used to optimize the commit path by only triggering temporal
+    /// vector index updates when vector data was actually modified.
+    pub fn has_vector_operations(&self) -> bool {
+        self.has_vector_operations
+    }
+
+    /// Mark that this transaction contains vector property operations.
+    ///
+    /// This is typically called when deleting entities that contain vector
+    /// properties, ensuring the temporal vector index is notified even though
+    /// the delete operation itself doesn't include property data in the buffer.
+    pub fn mark_has_vector_operations(&mut self) {
+        self.has_vector_operations = true;
     }
 }
 
@@ -467,5 +519,288 @@ mod tests {
         let buffer = WriteBuffer::with_capacity(10);
         assert_eq!(buffer.operations.capacity(), 10);
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_vector_operations_tracking_nodes() {
+        use crate::core::property::PropertyValue;
+
+        let mut buffer = WriteBuffer::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Document")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Initially, no vector operations
+        assert!(!buffer.has_vector_operations());
+
+        // Create node with vector property
+        let mut props = PropertyMap::new();
+        props = props
+            .builder()
+            .insert("embedding", PropertyValue::vector([0.1, 0.2, 0.3]))
+            .build();
+
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties: props,
+                temporal,
+            })
+            .unwrap();
+
+        // Should now track vector operations
+        assert!(buffer.has_vector_operations());
+    }
+
+    #[test]
+    fn test_vector_operations_tracking_no_vectors() {
+        let mut buffer = WriteBuffer::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Create node with only scalar properties (no vectors)
+        let props = PropertyMap::new()
+            .builder()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("active", true)
+            .build();
+
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties: props,
+                temporal,
+            })
+            .unwrap();
+
+        // Should NOT track vector operations
+        assert!(!buffer.has_vector_operations());
+    }
+
+    #[test]
+    fn test_vector_operations_clear() {
+        use crate::core::property::PropertyValue;
+
+        let mut buffer = WriteBuffer::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Document")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Add operation with vector
+        let props = PropertyMap::new()
+            .builder()
+            .insert("embedding", PropertyValue::vector([0.1, 0.2, 0.3]))
+            .build();
+
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties: props,
+                temporal,
+            })
+            .unwrap();
+
+        assert!(buffer.has_vector_operations());
+
+        // Clear should reset the flag
+        buffer.clear();
+        assert!(!buffer.has_vector_operations());
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_vector_operations_tracking_edges() {
+        use crate::core::property::PropertyValue;
+
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("SIMILAR_TO")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Initially, no vector operations
+        assert!(!buffer.has_vector_operations());
+
+        // Create edge with vector property
+        let props = PropertyMap::new()
+            .builder()
+            .insert("similarity", PropertyValue::vector([0.95, 0.85, 0.90]))
+            .build();
+
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties: props,
+                temporal,
+            })
+            .unwrap();
+
+        // Should now track vector operations
+        assert!(buffer.has_vector_operations());
+    }
+
+    #[test]
+    fn test_vector_operations_update_node() {
+        use crate::core::property::PropertyValue;
+
+        let mut buffer = WriteBuffer::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Document")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Update node with vector property
+        let props = PropertyMap::new()
+            .builder()
+            .insert("embedding", PropertyValue::vector([0.1, 0.2, 0.3]))
+            .build();
+
+        buffer
+            .add(BufferedWrite::UpdateNode {
+                node_id,
+                version_id,
+                label,
+                properties: props,
+                temporal,
+            })
+            .unwrap();
+
+        // Should track vector operations
+        assert!(buffer.has_vector_operations());
+    }
+
+    #[test]
+    fn test_vector_operations_update_edge() {
+        use crate::core::property::PropertyValue;
+
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("SIMILAR_TO")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Update edge with vector property
+        let props = PropertyMap::new()
+            .builder()
+            .insert("similarity", PropertyValue::vector([0.95]))
+            .build();
+
+        buffer
+            .add(BufferedWrite::UpdateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties: props,
+                temporal,
+            })
+            .unwrap();
+
+        // Should track vector operations
+        assert!(buffer.has_vector_operations());
+    }
+
+    #[test]
+    fn test_vector_operations_mark_manually() {
+        let mut buffer = WriteBuffer::new();
+
+        assert!(!buffer.has_vector_operations());
+
+        // Manually mark as having vector operations
+        buffer.mark_has_vector_operations();
+
+        assert!(buffer.has_vector_operations());
+    }
+
+    #[test]
+    fn test_vector_operations_mixed_operations() {
+        use crate::core::property::PropertyValue;
+
+        let mut buffer = WriteBuffer::new();
+        let temporal = BiTemporalInterval::current(time::now());
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Test")
+            .unwrap();
+
+        // Add several operations without vectors
+        for i in 0..5 {
+            buffer
+                .add(BufferedWrite::CreateNode {
+                    node_id: NodeId::new(i).unwrap(),
+                    version_id: VersionId::new(i).unwrap(),
+                    label,
+                    properties: PropertyMap::new().builder().insert("id", i as i64).build(),
+                    temporal,
+                })
+                .unwrap();
+        }
+
+        assert!(!buffer.has_vector_operations());
+
+        // Add one operation with a vector
+        let props = PropertyMap::new()
+            .builder()
+            .insert("embedding", PropertyValue::vector([0.1, 0.2]))
+            .build();
+
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id: NodeId::new(100).unwrap(),
+                version_id: VersionId::new(100).unwrap(),
+                label,
+                properties: props,
+                temporal,
+            })
+            .unwrap();
+
+        // Should now track vector operations
+        assert!(buffer.has_vector_operations());
+
+        // Add more non-vector operations - flag should remain true
+        for i in 6..10 {
+            buffer
+                .add(BufferedWrite::CreateNode {
+                    node_id: NodeId::new(i).unwrap(),
+                    version_id: VersionId::new(i).unwrap(),
+                    label,
+                    properties: PropertyMap::new().builder().insert("id", i as i64).build(),
+                    temporal,
+                })
+                .unwrap();
+        }
+
+        assert!(buffer.has_vector_operations());
     }
 }
