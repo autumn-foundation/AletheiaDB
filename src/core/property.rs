@@ -788,6 +788,19 @@ impl PropertyMap {
         PropertyMapBuilder::from_map(self)
     }
 
+    /// Check if this property map contains any vector properties.
+    ///
+    /// This is used to optimize the transaction commit path by only triggering
+    /// temporal vector index updates when vector data is actually present.
+    ///
+    /// Note: This only checks top-level properties. Nested vectors inside
+    /// Array values are not currently detected (vectors-in-arrays are not
+    /// a supported use case in the current implementation).
+    #[inline]
+    pub fn contains_vector(&self) -> bool {
+        self.inner.values().any(|v| matches!(v, PropertyValue::Vector(_)))
+    }
+
     // ========================================================================
     // Serialization Methods
     // ========================================================================
