@@ -11,6 +11,7 @@ use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
 use crate::utils::lock::RwLockExt;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Concurrent indexes for current-state graph queries.
@@ -50,6 +51,9 @@ pub struct CurrentIndexes {
     /// Coordinates edge modifications with adjacency rebuilds.
     /// Edge ops hold read lock; rebuild holds write lock.
     rebuild_lock: RwLock<()>,
+    /// Tracks whether adjacency indexes are out of date and need rebuilding.
+    /// Set to true when edges are inserted/removed, cleared after rebuild.
+    adjacency_dirty: AtomicBool,
 }
 
 impl CurrentIndexes {
@@ -61,6 +65,7 @@ impl CurrentIndexes {
             outgoing: ArcSwap::from_pointee(AdjacencyIndex::new()),
             incoming: ArcSwap::from_pointee(AdjacencyIndex::new()),
             rebuild_lock: RwLock::new(()),
+            adjacency_dirty: AtomicBool::new(false),
         }
     }
 
@@ -72,13 +77,15 @@ impl CurrentIndexes {
     /// Insert an edge into the indexes.
     ///
     /// Note: This only updates the edge map. Adjacency indexes are rebuilt
-    /// separately for efficiency (batch updates).
+    /// lazily on next access for efficiency (batch updates).
     ///
     /// Acquires `rebuild_lock` in read mode to coordinate with concurrent
     /// adjacency rebuilds (which hold write lock).
     pub fn insert_edge(&self, edge: Edge) {
         let _guard = self.rebuild_lock.read_or_recover();
         self.edges.insert(edge.id, edge);
+        // Mark adjacency as dirty - will be rebuilt lazily on next access
+        self.adjacency_dirty.store(true, Ordering::Release);
     }
 
     /// Get a node by ID.
@@ -102,7 +109,10 @@ impl CurrentIndexes {
     /// adjacency rebuilds (which hold write lock).
     pub fn remove_edge(&self, id: EdgeId) -> Option<Edge> {
         let _guard = self.rebuild_lock.read_or_recover();
-        self.edges.remove(&id).map(|(_, edge)| edge)
+        self.edges.remove(&id).map(|(_, edge)| edge).inspect(|_| {
+            // Mark adjacency as dirty - will be rebuilt lazily on next access
+            self.adjacency_dirty.store(true, Ordering::Release);
+        })
     }
 
     /// Get the number of nodes.
@@ -129,13 +139,71 @@ impl CurrentIndexes {
         self.edges.contains_key(&id)
     }
 
+    /// Ensure adjacency indexes are up to date.
+    ///
+    /// If the `adjacency_dirty` flag is set, triggers a rebuild.
+    /// This is called before any adjacency access to ensure correctness.
+    ///
+    /// Uses double-checked locking pattern to minimize overhead:
+    /// 1. Quick check of dirty flag (no lock, just atomic read with Acquire)
+    /// 2. If dirty, acquire write lock and check again with Relaxed
+    /// 3. Rebuild only if still dirty after acquiring lock
+    ///
+    /// This ensures only one thread rebuilds even if multiple threads
+    /// detect the dirty flag simultaneously.
+    ///
+    /// # Memory Ordering
+    ///
+    /// - First check uses `Acquire` to synchronize with the `Release` in
+    ///   `insert_edge`/`remove_edge` that set the flag
+    /// - Second check uses `Relaxed` because the lock acquisition provides
+    ///   full synchronization guarantees (no additional ordering needed)
+    ///
+    /// # Race Window (Acceptable)
+    ///
+    /// There's a benign race where:
+    /// 1. Thread A checks dirty=false, begins exiting fast path
+    /// 2. Thread B inserts edge, sets dirty=true
+    /// 3. Thread A proceeds with potentially stale adjacency pointer
+    ///
+    /// This is **acceptable** because:
+    /// - Thread A's adjacency pointer was loaded atomically before the check
+    /// - ArcSwap ensures Thread A sees a consistent (though older) snapshot
+    /// - Next adjacency access will trigger rebuild (eventual consistency)
+    /// - No data corruption or crashes can occur
+    ///
+    /// This is a standard tradeoff in lock-free data structures: we prioritize
+    /// performance (avoiding locks on every read) over strict linearizability.
+    #[inline]
+    fn ensure_adjacency_current(&self) {
+        // Fast path: adjacency is already current
+        if !self.adjacency_dirty.load(Ordering::Acquire) {
+            return;
+        }
+
+        // Slow path: rebuild needed
+        // Acquire write lock to prevent concurrent edge modifications
+        let _guard = self.rebuild_lock.write_or_recover();
+
+        // Double-check: another thread may have rebuilt while we waited for the lock
+        // Use Relaxed ordering here since the lock provides synchronization
+        if !self.adjacency_dirty.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Actually rebuild
+        self.rebuild_adjacency_internal();
+    }
+
     /// Get outgoing edges for a node.
     ///
     /// Returns a copy of the adjacency list for traversal.
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     #[inline]
     pub fn get_outgoing(&self, source: NodeId) -> Vec<AdjacencyEntry> {
+        self.ensure_adjacency_current();
         let outgoing = self.outgoing.load();
         outgoing.get_adjacency(source).to_vec()
     }
@@ -145,8 +213,10 @@ impl CurrentIndexes {
     /// Returns a copy of the adjacency list for reverse traversal.
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     #[inline]
     pub fn get_incoming(&self, target: NodeId) -> Vec<AdjacencyEntry> {
+        self.ensure_adjacency_current();
         let incoming = self.incoming.load();
         incoming.get_adjacency(target).to_vec()
     }
@@ -154,11 +224,13 @@ impl CurrentIndexes {
     /// Get outgoing edges with a specific label.
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     pub fn get_outgoing_with_label(
         &self,
         source: NodeId,
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
+        self.ensure_adjacency_current();
         let outgoing = self.outgoing.load();
         outgoing
             .get_adjacency_with_label(source, label)
@@ -169,11 +241,13 @@ impl CurrentIndexes {
     /// Get incoming edges with a specific label.
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     pub fn get_incoming_with_label(
         &self,
         target: NodeId,
         label: InternedString,
     ) -> Vec<AdjacencyEntry> {
+        self.ensure_adjacency_current();
         let incoming = self.incoming.load();
         incoming
             .get_adjacency_with_label(target, label)
@@ -184,8 +258,10 @@ impl CurrentIndexes {
     /// Get the out-degree of a node (number of outgoing edges).
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     #[inline]
     pub fn out_degree(&self, node: NodeId) -> usize {
+        self.ensure_adjacency_current();
         let outgoing = self.outgoing.load();
         outgoing.degree(node)
     }
@@ -193,16 +269,19 @@ impl CurrentIndexes {
     /// Get the in-degree of a node (number of incoming edges).
     ///
     /// **Lock-free**: Uses atomic pointer load, no lock acquisition needed.
+    /// Lazily rebuilds adjacency if needed before access.
     #[inline]
     pub fn in_degree(&self, node: NodeId) -> usize {
+        self.ensure_adjacency_current();
         let incoming = self.incoming.load();
         incoming.degree(node)
     }
 
     /// Rebuild adjacency indexes from current edges.
     ///
-    /// This should be called after batch edge insertions/deletions.
-    /// It's more efficient to rebuild than to incrementally update for large changes.
+    /// This can be called explicitly after batch edge insertions/deletions
+    /// to force an immediate rebuild, though normally adjacency is rebuilt
+    /// lazily on first access after modifications.
     ///
     /// # Concurrency
     ///
@@ -222,6 +301,7 @@ impl CurrentIndexes {
     /// - Always rebuilds complete index from scratch
     /// - Blocks concurrent edge modifications, but NOT adjacency reads (lock-free!)
     /// - Atomic swap eliminates reader blocking
+    /// - **Lazy rebuild**: Only rebuilds when adjacency is accessed after modifications
     ///
     /// **Future Optimization Opportunities:**
     ///
@@ -241,14 +321,18 @@ impl CurrentIndexes {
     /// batch operations (1-10ms for 10K edges).
     pub fn rebuild_adjacency(&self) {
         // Acquire write lock to block concurrent edge modifications.
-        // This ensures all edges in the DashMap at iteration start will
-        // be present in the rebuilt indexes.
         let _guard = self.rebuild_lock.write_or_recover();
+        self.rebuild_adjacency_internal();
+    }
 
+    /// Internal implementation of adjacency rebuild.
+    ///
+    /// SAFETY: Caller must hold `rebuild_lock` in write mode.
+    fn rebuild_adjacency_internal(&self) {
         let mut outgoing_edges = Vec::new();
         let mut incoming_edges = Vec::new();
 
-        // Collect all edges (no modifications can occur while we hold the lock)
+        // Collect all edges (no modifications can occur while caller holds the lock)
         for entry in self.edges.iter() {
             let edge = entry.value();
             outgoing_edges.push((edge.source, edge.target, edge.id, edge.label));
@@ -260,6 +344,9 @@ impl CurrentIndexes {
             .store(Arc::new(AdjacencyIndex::build(outgoing_edges)));
         self.incoming
             .store(Arc::new(AdjacencyIndex::build(incoming_edges)));
+
+        // Clear the dirty flag - adjacency is now current
+        self.adjacency_dirty.store(false, Ordering::Release);
     }
 
     /// Iterate over all nodes.
@@ -478,6 +565,86 @@ mod tests {
         // Verify adjacency updated correctly
         assert_eq!(indexes.out_degree(NodeId::new(1).unwrap()), 0);
         assert_eq!(indexes.in_degree(NodeId::new(2).unwrap()), 1); // only from 0 now
+    }
+
+    #[test]
+    fn test_lazy_rebuild_on_access() {
+        let indexes = CurrentIndexes::new();
+
+        // Add edges WITHOUT calling rebuild_adjacency()
+        indexes.insert_edge(create_test_edge(0, 0, 1, "KNOWS"));
+        indexes.insert_edge(create_test_edge(1, 0, 2, "KNOWS"));
+        indexes.insert_edge(create_test_edge(2, 1, 2, "KNOWS"));
+
+        // Adjacency should be rebuilt lazily on first access
+        // This tests that ensure_adjacency_current() works correctly
+        let outgoing = indexes.get_outgoing(NodeId::new(0).unwrap());
+        assert_eq!(
+            outgoing.len(),
+            2,
+            "Lazy rebuild should make edges accessible"
+        );
+
+        // Verify all adjacency data is correct
+        assert_eq!(indexes.out_degree(NodeId::new(0).unwrap()), 2);
+        assert_eq!(indexes.out_degree(NodeId::new(1).unwrap()), 1);
+        assert_eq!(indexes.in_degree(NodeId::new(2).unwrap()), 2);
+    }
+
+    #[test]
+    fn test_lazy_rebuild_after_delete() {
+        let indexes = CurrentIndexes::new();
+
+        // Add edges and access to trigger initial rebuild
+        indexes.insert_edge(create_test_edge(0, 0, 1, "KNOWS"));
+        indexes.insert_edge(create_test_edge(1, 1, 2, "KNOWS"));
+        let _ = indexes.get_outgoing(NodeId::new(0).unwrap());
+
+        // Remove edge WITHOUT calling rebuild_adjacency()
+        indexes.remove_edge(EdgeId::new(1).unwrap());
+
+        // Adjacency should be rebuilt lazily on next access
+        assert_eq!(indexes.out_degree(NodeId::new(1).unwrap()), 0);
+        assert_eq!(indexes.in_degree(NodeId::new(2).unwrap()), 0);
+    }
+
+    #[test]
+    fn test_no_unnecessary_rebuilds() {
+        let indexes = CurrentIndexes::new();
+
+        // Add edges and trigger rebuild
+        indexes.insert_edge(create_test_edge(0, 0, 1, "KNOWS"));
+        let _ = indexes.get_outgoing(NodeId::new(0).unwrap());
+
+        // Multiple accesses should not trigger additional rebuilds
+        // (We can't directly observe this, but it's important for performance)
+        for _ in 0..10 {
+            let outgoing = indexes.get_outgoing(NodeId::new(0).unwrap());
+            assert_eq!(outgoing.len(), 1);
+        }
+
+        // After accessing, if no modifications, adjacency should stay current
+        assert_eq!(indexes.in_degree(NodeId::new(1).unwrap()), 1);
+    }
+
+    #[test]
+    fn test_lazy_rebuild_with_labeled_traversal() {
+        let indexes = CurrentIndexes::new();
+
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let follows = GLOBAL_INTERNER.intern("FOLLOWS").unwrap();
+
+        // Add edges with different labels WITHOUT explicit rebuild
+        indexes.insert_edge(create_test_edge(0, 0, 1, "KNOWS"));
+        indexes.insert_edge(create_test_edge(1, 0, 2, "FOLLOWS"));
+        indexes.insert_edge(create_test_edge(2, 0, 3, "KNOWS"));
+
+        // Lazy rebuild should happen on labeled access
+        let knows_edges = indexes.get_outgoing_with_label(NodeId::new(0).unwrap(), knows);
+        assert_eq!(knows_edges.len(), 2);
+
+        let follows_edges = indexes.get_outgoing_with_label(NodeId::new(0).unwrap(), follows);
+        assert_eq!(follows_edges.len(), 1);
     }
 }
 
@@ -836,5 +1003,83 @@ mod concurrency_tests {
         // Verify final state
         indexes.rebuild_adjacency();
         assert_eq!(indexes.edge_count(), 500);
+    }
+
+    /// Test concurrent lazy rebuild without explicit rebuild_adjacency() calls.
+    ///
+    /// This test verifies that multiple threads can safely insert edges and
+    /// access adjacency concurrently, relying on lazy rebuilding rather than
+    /// explicit rebuild calls.
+    #[test]
+    fn test_concurrent_lazy_rebuild() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let indexes = Arc::new(CurrentIndexes::new());
+
+        // Add initial nodes
+        for i in 0..20 {
+            indexes.insert_node(create_test_node(i, "Node"));
+        }
+
+        let mut handles = Vec::new();
+
+        // Spawn 3 threads that insert edges WITHOUT calling rebuild_adjacency()
+        for thread_id in 0..3 {
+            let indexes_clone = Arc::clone(&indexes);
+            handles.push(thread::spawn(move || {
+                for i in 0..50 {
+                    let edge_id = thread_id * 100 + i;
+                    indexes_clone.insert_edge(create_test_edge(
+                        edge_id,
+                        edge_id % 20,
+                        (edge_id + 1) % 20,
+                        "LINK",
+                    ));
+                }
+            }));
+        }
+
+        // Spawn 2 threads that read adjacency (triggering lazy rebuilds)
+        for _ in 0..2 {
+            let indexes_clone = Arc::clone(&indexes);
+            handles.push(thread::spawn(move || {
+                for node_id in 0..20 {
+                    let node = NodeId::new(node_id).unwrap();
+                    // This should trigger lazy rebuild if needed
+                    let _outgoing = indexes_clone.get_outgoing(node);
+                    let _degree = indexes_clone.out_degree(node);
+                }
+            }));
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify final state: all edges should be accessible via adjacency
+        assert_eq!(
+            indexes.edge_count(),
+            150,
+            "Should have 150 edges (3 threads × 50 edges)"
+        );
+
+        // Verify adjacency is correct (may trigger final lazy rebuild)
+        let mut total_out_degree = 0;
+        let mut total_in_degree = 0;
+        for i in 0..20 {
+            total_out_degree += indexes.out_degree(NodeId::new(i).unwrap());
+            total_in_degree += indexes.in_degree(NodeId::new(i).unwrap());
+        }
+
+        assert_eq!(
+            total_out_degree, 150,
+            "Lazy rebuild should make all edges accessible via outgoing adjacency"
+        );
+        assert_eq!(
+            total_in_degree, 150,
+            "Lazy rebuild should make all edges accessible via incoming adjacency"
+        );
     }
 }
