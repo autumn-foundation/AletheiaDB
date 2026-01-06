@@ -1298,7 +1298,7 @@ impl TemporalVectorIndex {
     ///
     /// # Arguments
     ///
-    /// * `threshold` - Minimum drift value to include (exclusive)
+    /// * `threshold` - Minimum drift value to include (inclusive: drift >= threshold)
     /// * `time_range` - Time range to analyze
     /// * `metric` - Distance metric to use for drift calculation
     ///
@@ -1306,6 +1306,7 @@ impl TemporalVectorIndex {
     ///
     /// Vector of (NodeId, max_drift) pairs sorted by drift descending.
     /// Nodes with only one version in the range are excluded.
+    /// Nodes with zero drift (identical vectors across all versions) are also excluded.
     ///
     /// # Examples
     ///
@@ -1344,10 +1345,19 @@ impl TemporalVectorIndex {
 
         // Single-pass algorithm: iterate through snapshots once
         // Track last seen vector and maximum drift for each node
-        let mut last_vectors: HashMap<NodeId, Arc<[f32]>> = HashMap::new();
-        let mut max_drifts: HashMap<NodeId, f32> = HashMap::new();
-
         let snapshot_data = self.snapshot_data.read();
+
+        // Pre-allocate capacity based on first snapshot size for efficiency
+        let estimated_capacity = snapshot_data
+            .vector_history
+            .values()
+            .next()
+            .map(|s| s.len())
+            .unwrap_or(100);
+
+        let mut last_vectors: HashMap<NodeId, Arc<[f32]>> =
+            HashMap::with_capacity(estimated_capacity);
+        let mut max_drifts: HashMap<NodeId, f32> = HashMap::with_capacity(estimated_capacity);
 
         for (_timestamp, snapshot_vectors) in snapshot_data
             .vector_history
@@ -1366,7 +1376,7 @@ impl TemporalVectorIndex {
 
         let mut results: Vec<(NodeId, f32)> = max_drifts
             .into_iter()
-            .filter(|(_, drift)| *drift > threshold)
+            .filter(|(_, drift)| *drift >= threshold && *drift > 0.0)
             .collect();
 
         // Sort by drift descending (highest drift first)
@@ -2322,7 +2332,7 @@ mod tests {
         // Query with threshold 0.2 - should get nodes 2 and 3
         let results = index.find_semantic_drift(0.2, time_range, DriftMetric::Cosine)?;
 
-        assert_eq!(results.len(), 2, "Expected 2 nodes with drift > 0.2");
+        assert_eq!(results.len(), 2, "Expected 2 nodes with drift >= 0.2");
         assert!(results.iter().any(|(id, _)| *id == node2));
         assert!(results.iter().any(|(id, _)| *id == node3));
 

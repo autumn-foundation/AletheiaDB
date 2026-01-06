@@ -124,11 +124,11 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
     let results = index.find_semantic_drift(0.3, time_range, DriftMetric::Cosine)?;
 
     // Verify results
-    // Note: Exact count may vary based on normalization and threshold sensitivity
+    // High drift nodes (7-9) should always be included, moderate drift nodes (4-6)
+    // may or may not be included depending on exact drift values after normalization
     assert!(
-        results.len() >= 3,
-        "Expected at least 3 nodes with drift > 0.3, got {}",
-        results.len()
+        !results.is_empty(),
+        "Expected at least high drift nodes (7-9) in results"
     );
 
     // Verify doc 10 (single version) is not in results
@@ -137,26 +137,25 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
         "Single-version node should not be in results"
     );
 
-    // Verify docs 7-9 (high drift) are in results
+    // Verify docs 7-9 (high drift ~0.7-1.0) are definitely in results
     for i in 7..=9 {
         let node_id = NodeId::new(i).unwrap();
         assert!(
             results.iter().any(|(id, _)| *id == node_id),
-            "High drift node {} should be in results",
+            "High drift node {} (drift > 0.5) should be in results with threshold 0.3",
             i
         );
     }
 
-    // Verify some moderate/high drift nodes are in results
-    // (exact nodes may vary based on normalization and threshold)
-    let drift_node_count = results
-        .iter()
-        .filter(|(id, _)| (4..=9).any(|i| *id == NodeId::new(i).unwrap()))
-        .count();
-    assert!(
-        drift_node_count >= 3,
-        "Expected at least 3 high/moderate drift nodes in results"
-    );
+    // Verify all results have drift >= threshold
+    for (node_id, drift) in &results {
+        assert!(
+            *drift >= 0.3,
+            "Node {:?} has drift {:.3} which is below threshold 0.3",
+            node_id,
+            drift
+        );
+    }
 
     // Verify results are sorted by drift descending
     for i in 0..results.len().saturating_sub(1) {
