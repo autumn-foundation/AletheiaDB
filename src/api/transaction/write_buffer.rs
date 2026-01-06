@@ -163,20 +163,38 @@ impl WriteBuffer {
         // Track which entities are modified for conflict detection
         // and check for vector properties
         match &write {
-            BufferedWrite::CreateNode { node_id, properties, .. }
-            | BufferedWrite::UpdateNode { node_id, properties, .. } => {
+            BufferedWrite::CreateNode {
+                node_id,
+                properties,
+                ..
+            }
+            | BufferedWrite::UpdateNode {
+                node_id,
+                properties,
+                ..
+            } => {
                 self.modified_nodes.insert(*node_id, index);
                 // Check if this operation contains vector properties
-                self.has_vector_operations = self.has_vector_operations || properties.contains_vector();
+                self.has_vector_operations =
+                    self.has_vector_operations || properties.contains_vector();
             }
             BufferedWrite::DeleteNode { node_id } => {
                 self.modified_nodes.insert(*node_id, index);
             }
-            BufferedWrite::CreateEdge { edge_id, properties, .. }
-            | BufferedWrite::UpdateEdge { edge_id, properties, .. } => {
+            BufferedWrite::CreateEdge {
+                edge_id,
+                properties,
+                ..
+            }
+            | BufferedWrite::UpdateEdge {
+                edge_id,
+                properties,
+                ..
+            } => {
                 self.modified_edges.insert(*edge_id, index);
                 // Check if this operation contains vector properties
-                self.has_vector_operations = self.has_vector_operations || properties.contains_vector();
+                self.has_vector_operations =
+                    self.has_vector_operations || properties.contains_vector();
             }
             BufferedWrite::DeleteEdge { edge_id } => {
                 self.modified_edges.insert(*edge_id, index);

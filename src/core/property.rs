@@ -798,7 +798,9 @@ impl PropertyMap {
     /// a supported use case in the current implementation).
     #[inline]
     pub fn contains_vector(&self) -> bool {
-        self.inner.values().any(|v| matches!(v, PropertyValue::Vector(_)))
+        self.inner
+            .values()
+            .any(|v| matches!(v, PropertyValue::Vector(_)))
     }
 
     // ========================================================================
