@@ -19,6 +19,13 @@ arc-swap = "1.7"
 # Optional Tracy profiling support
 tracy-client = { version = "0.17", optional = true, default-features = false }
 
+# Observability framework (optional via feature flags)
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"], optional = true }
+tracing-tracy = { version = "0.11", optional = true }
+tracing-honeycomb = { version = "0.4", optional = true }
+libhoney-rust = { version = "0.1", optional = true }
+
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
@@ -47,6 +54,11 @@ lazy_static = "1.4"
 [features]
 # Enable Tracy profiling (use with: cargo build --release --features tracy)
 tracy = ["tracy-client/enable"]
+
+# Observability features
+observability = ["dep:tracing", "dep:tracing-subscriber"]
+observability-tracy = ["observability", "dep:tracing-tracy", "tracy"]
+observability-honeycomb = ["observability", "dep:tracing-honeycomb", "dep:libhoney-rust"]
 
 # Default features
 default = []

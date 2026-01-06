@@ -56,8 +56,20 @@ pub trait MutexExt<T> {
 
 impl<T> MutexExt<T> for Mutex<T> {
     fn lock_or_err(&self) -> Result<MutexGuard<'_, T>, Error> {
-        self.lock()
-            .map_err(|_| StorageError::LockPoisoned { lock_type: "Mutex" }.into())
+        self.lock().map_err(|_| {
+            #[cfg(feature = "observability")]
+            {
+                tracing::error!(
+                    lock_type = "Mutex",
+                    thread_id = ?std::thread::current().id(),
+                    "Lock poisoned - thread panicked while holding lock"
+                );
+                crate::observability::METRICS
+                    .lock_poison_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            StorageError::LockPoisoned { lock_type: "Mutex" }.into()
+        })
     }
 
     fn lock_or_recover(&self) -> MutexGuard<'_, T> {
@@ -103,8 +115,19 @@ pub trait RwLockExt<T> {
 impl<T> RwLockExt<T> for RwLock<T> {
     fn read_or_err(&self) -> Result<RwLockReadGuard<'_, T>, Error> {
         self.read().map_err(|_| {
+            #[cfg(feature = "observability")]
+            {
+                tracing::error!(
+                    lock_type = "RwLock(read)",
+                    thread_id = ?std::thread::current().id(),
+                    "Lock poisoned - thread panicked while holding lock"
+                );
+                crate::observability::METRICS
+                    .lock_poison_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             StorageError::LockPoisoned {
-                lock_type: "RwLock",
+                lock_type: "RwLock"
             }
             .into()
         })
@@ -112,6 +135,17 @@ impl<T> RwLockExt<T> for RwLock<T> {
 
     fn write_or_err(&self) -> Result<RwLockWriteGuard<'_, T>, Error> {
         self.write().map_err(|_| {
+            #[cfg(feature = "observability")]
+            {
+                tracing::error!(
+                    lock_type = "RwLock(write)",
+                    thread_id = ?std::thread::current().id(),
+                    "Lock poisoned - thread panicked while holding lock"
+                );
+                crate::observability::METRICS
+                    .lock_poison_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             StorageError::LockPoisoned {
                 lock_type: "RwLock",
             }
