@@ -329,7 +329,7 @@ fn test_semantic_evolution_end_to_end() -> Result<()> {
     let base_time = time::now();
 
     // Create a timeline of vector changes
-    let vectors = vec![
+    let vectors = [
         vec![1.0, 0.0, 0.0, 0.0],
         vec![0.9, 0.1, 0.0, 0.0],
         vec![0.7, 0.3, 0.0, 0.0],
@@ -412,7 +412,7 @@ fn test_calculate_consecutive_drift_end_to_end() -> Result<()> {
     let base_time = time::now();
 
     // Create a timeline: stable -> change -> stable -> big change
-    let vectors = vec![
+    let vectors = [
         vec![1.0, 0.0, 0.0, 0.0],
         vec![1.0, 0.0, 0.0, 0.0], // Same as previous (no drift)
         vec![0.9, 0.1, 0.0, 0.0], // Small drift
