@@ -131,10 +131,24 @@ pub struct TemporalVectorConfig {
     /// Snapshot retention policy (default: KeepN(100))
     pub retention_policy: RetentionPolicy,
 
-    /// Maximum number of snapshots to retain (default: 100)
+    /// Maximum number of snapshots to retain (default: 20, reduced from 100)
     ///
     /// When this limit is exceeded, the oldest snapshots are removed.
     /// This prevents unbounded storage growth.
+    ///
+    /// **CRITICAL - Memory Usage**: Each snapshot creates a full copy of the HNSW index.
+    /// With 100K vectors at 384 dimensions:
+    /// - Per snapshot: ~200MB (150MB vectors + 50-100MB HNSW graph)
+    /// - 20 snapshots: ~4GB total memory
+    /// - 100 snapshots: ~20GB total memory (NOT RECOMMENDED)
+    ///
+    /// **Recommended values**:
+    /// - Development/testing: 5-10 snapshots
+    /// - Production with limited memory (<16GB): 10-20 snapshots
+    /// - Production with ample memory (32GB+): 20-50 snapshots
+    ///
+    /// **Note**: This will be optimized in a future release using anchor+delta compression
+    /// (see GitHub issue #230), which will reduce memory usage by ~9X.
     pub max_snapshots: usize,
 
     /// Base HNSW configuration for all indexes (current + snapshots)
@@ -146,13 +160,16 @@ impl TemporalVectorConfig {
     ///
     /// Defaults:
     /// - Strategy: TransactionInterval(10) - mirrors anchor+delta pattern
-    /// - Retention: KeepN(100)
-    /// - Max snapshots: 100
+    /// - Retention: KeepN(20) - conservative for memory
+    /// - Max snapshots: 20 - reduced from 100 to prevent excessive memory usage
+    ///
+    /// **Note**: Default reduced to 20 snapshots (~4GB for 100K vectors) to prevent
+    /// out-of-memory issues. Increase max_snapshots if you have sufficient RAM.
     pub fn default_with_hnsw(hnsw_config: HnswConfig) -> Self {
         TemporalVectorConfig {
             snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
-            retention_policy: RetentionPolicy::KeepN(100),
-            max_snapshots: 100,
+            retention_policy: RetentionPolicy::KeepN(20),
+            max_snapshots: 20,
             hnsw_config,
         }
     }
@@ -161,8 +178,8 @@ impl TemporalVectorConfig {
     pub fn with_time_interval(hnsw_config: HnswConfig, interval_secs: u64) -> Self {
         TemporalVectorConfig {
             snapshot_strategy: SnapshotStrategy::TimeInterval(interval_secs),
-            retention_policy: RetentionPolicy::KeepN(100),
-            max_snapshots: 100,
+            retention_policy: RetentionPolicy::KeepN(20),
+            max_snapshots: 20,
             hnsw_config,
         }
     }
@@ -171,8 +188,8 @@ impl TemporalVectorConfig {
     pub fn with_change_threshold(hnsw_config: HnswConfig, threshold: f64) -> Self {
         TemporalVectorConfig {
             snapshot_strategy: SnapshotStrategy::ChangeThreshold(threshold),
-            retention_policy: RetentionPolicy::KeepN(100),
-            max_snapshots: 100,
+            retention_policy: RetentionPolicy::KeepN(20),
+            max_snapshots: 20,
             hnsw_config,
         }
     }
