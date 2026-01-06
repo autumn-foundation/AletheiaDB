@@ -10,7 +10,7 @@
 //! - Performance gain is most significant for frequently accessed strings
 //! - Real-world use cases: serialization, logging, display operations
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::interning::StringInterner;
 use std::sync::Arc;
 
