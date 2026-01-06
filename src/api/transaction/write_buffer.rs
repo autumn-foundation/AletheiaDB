@@ -86,7 +86,11 @@ pub enum BufferedWrite {
 }
 
 /// Default maximum number of operations per transaction (DoS protection)
-pub const DEFAULT_MAX_OPERATIONS: usize = 10_000;
+///
+/// Set to 50,000 to accommodate realistic batch operations (imports, migrations)
+/// while still providing protection against unbounded memory growth from malicious
+/// or buggy clients. Production workloads commonly need >10k ops per transaction.
+pub const DEFAULT_MAX_OPERATIONS: usize = 50_000;
 
 /// Write buffer for collecting uncommitted changes
 ///
