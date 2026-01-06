@@ -154,10 +154,9 @@ impl TxVisibilityManager {
     pub fn register_active(&self, tx_id: TxId) {
         let mut active_guard = self.active.lock_or_recover();
 
-        // Copy-on-write: clone the HashSet, modify, wrap in new Arc
-        let mut new_active = (**active_guard).clone();
-        new_active.insert(tx_id);
-        *active_guard = Arc::new(new_active);
+        // Use Arc::make_mut for idiomatic copy-on-write.
+        // This avoids a clone if the Arc is not shared (only one strong reference).
+        Arc::make_mut(&mut *active_guard).insert(tx_id);
     }
 
     /// Capture a snapshot for a transaction.
@@ -205,10 +204,8 @@ impl TxVisibilityManager {
         {
             let mut active_guard = self.active.lock_or_recover();
 
-            // Copy-on-write: clone the HashSet, modify, wrap in new Arc
-            let mut new_active = (**active_guard).clone();
-            new_active.remove(&tx_id);
-            *active_guard = Arc::new(new_active);
+            // Use Arc::make_mut for idiomatic copy-on-write.
+            Arc::make_mut(&mut *active_guard).remove(&tx_id);
         } // active lock released here
 
         let mut committed = self.committed.write_or_recover();
@@ -230,10 +227,8 @@ impl TxVisibilityManager {
     pub fn register_abort(&self, tx_id: TxId) {
         let mut active_guard = self.active.lock_or_recover();
 
-        // Copy-on-write: clone the HashSet, modify, wrap in new Arc
-        let mut new_active = (**active_guard).clone();
-        new_active.remove(&tx_id);
-        *active_guard = Arc::new(new_active);
+        // Use Arc::make_mut for idiomatic copy-on-write.
+        Arc::make_mut(&mut *active_guard).remove(&tx_id);
     }
 
     /// Check if a version is visible in a snapshot.
