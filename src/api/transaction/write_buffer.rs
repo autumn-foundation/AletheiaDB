@@ -540,7 +540,7 @@ mod tests {
         let mut props = PropertyMap::new();
         props = props
             .builder()
-            .insert("embedding", PropertyValue::vector(&[0.1, 0.2, 0.3]))
+            .insert("embedding", PropertyValue::vector([0.1, 0.2, 0.3]))
             .build();
 
         buffer
@@ -604,7 +604,7 @@ mod tests {
         // Add operation with vector
         let props = PropertyMap::new()
             .builder()
-            .insert("embedding", PropertyValue::vector(&[0.1, 0.2, 0.3]))
+            .insert("embedding", PropertyValue::vector([0.1, 0.2, 0.3]))
             .build();
 
         buffer
@@ -645,7 +645,7 @@ mod tests {
         // Create edge with vector property
         let props = PropertyMap::new()
             .builder()
-            .insert("similarity", PropertyValue::vector(&[0.95, 0.85, 0.90]))
+            .insert("similarity", PropertyValue::vector([0.95, 0.85, 0.90]))
             .build();
 
         buffer
@@ -679,7 +679,7 @@ mod tests {
         // Update node with vector property
         let props = PropertyMap::new()
             .builder()
-            .insert("embedding", PropertyValue::vector(&[0.1, 0.2, 0.3]))
+            .insert("embedding", PropertyValue::vector([0.1, 0.2, 0.3]))
             .build();
 
         buffer
@@ -713,7 +713,7 @@ mod tests {
         // Update edge with vector property
         let props = PropertyMap::new()
             .builder()
-            .insert("similarity", PropertyValue::vector(&[0.95]))
+            .insert("similarity", PropertyValue::vector([0.95]))
             .build();
 
         buffer
@@ -772,7 +772,7 @@ mod tests {
         // Add one operation with a vector
         let props = PropertyMap::new()
             .builder()
-            .insert("embedding", PropertyValue::vector(&[0.1, 0.2]))
+            .insert("embedding", PropertyValue::vector([0.1, 0.2]))
             .build();
 
         buffer
