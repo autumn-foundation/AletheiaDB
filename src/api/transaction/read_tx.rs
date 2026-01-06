@@ -75,22 +75,12 @@ impl ReadTransaction {
     pub fn tx_id(&self) -> TxId {
         self.tx_id
     }
-}
 
-impl ReadOps for ReadTransaction {
-    fn get_node(&self, id: NodeId) -> Result<Node> {
-        // FAST PATH: Try current storage first
-        let current_node = self.current.get_node(id)?;
-
-        // Check if current version is visible in our snapshot
-        if self
-            .visibility_manager
-            .is_visible(&self.snapshot, current_node.metadata.created_by_tx)
-        {
-            return Ok(current_node);
-        }
-
-        // SLOW PATH: Current version not visible - query historical storage
+    /// Query historical storage for a node version visible at snapshot time.
+    ///
+    /// This is the slow path used when the current version is not visible
+    /// or when the node has been deleted from current storage.
+    fn get_node_from_historical(&self, id: NodeId) -> Result<Node> {
         let historical = self.historical.read_or_err()?;
 
         // Find version visible at our snapshot timestamp
@@ -110,14 +100,21 @@ impl ReadOps for ReadTransaction {
                 // Reconstruct properties from anchor+delta
                 let properties = historical.reconstruct_node_properties(vid)?;
 
+                // Extract metadata from the temporal interval
+                // NOTE: Historical versions don't track created_by_tx, so we use TxId(0)
+                // The commit_timestamp is extracted from transaction_time.start
+                let metadata = VersionMetadata::new(
+                    super::TxId::new(0),                          // Historical versions don't track creating tx
+                    version.temporal.transaction_time().start(),  // Extract commit timestamp
+                );
+
                 // Build Node from historical version
-                // Use default metadata since visibility already validated
                 Ok(Node::with_metadata(
                     id,
                     version.label,
                     properties,
                     vid,
-                    VersionMetadata::default_for_existing(),
+                    metadata,
                 ))
             }
             None => {
@@ -127,19 +124,11 @@ impl ReadOps for ReadTransaction {
         }
     }
 
-    fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        // FAST PATH: Try current storage first
-        let current_edge = self.current.get_edge(id)?;
-
-        // Check if current version is visible in our snapshot
-        if self
-            .visibility_manager
-            .is_visible(&self.snapshot, current_edge.metadata.created_by_tx)
-        {
-            return Ok(current_edge);
-        }
-
-        // SLOW PATH: Current version not visible - query historical storage
+    /// Query historical storage for an edge version visible at snapshot time.
+    ///
+    /// This is the slow path used when the current version is not visible
+    /// or when the edge has been deleted from current storage.
+    fn get_edge_from_historical(&self, id: EdgeId) -> Result<Edge> {
         let historical = self.historical.read_or_err()?;
 
         // Find version visible at our snapshot timestamp
@@ -159,8 +148,15 @@ impl ReadOps for ReadTransaction {
                 // Reconstruct properties from anchor+delta
                 let properties = historical.reconstruct_edge_properties(vid)?;
 
+                // Extract metadata from the temporal interval
+                // NOTE: Historical versions don't track created_by_tx, so we use TxId(0)
+                // The commit_timestamp is extracted from transaction_time.start
+                let metadata = VersionMetadata::new(
+                    super::TxId::new(0),                          // Historical versions don't track creating tx
+                    version.temporal.transaction_time().start(),  // Extract commit timestamp
+                );
+
                 // Build Edge from historical version
-                // Use default metadata since visibility already validated
                 Ok(Edge::with_metadata(
                     id,
                     version.label,
@@ -168,7 +164,7 @@ impl ReadOps for ReadTransaction {
                     version.target,
                     properties,
                     vid,
-                    VersionMetadata::default_for_existing(),
+                    metadata,
                 ))
             }
             None => {
@@ -176,6 +172,48 @@ impl ReadOps for ReadTransaction {
                 Err(StorageError::EdgeNotFound(id).into())
             }
         }
+    }
+}
+
+impl ReadOps for ReadTransaction {
+    fn get_node(&self, id: NodeId) -> Result<Node> {
+        // FAST PATH: Try current storage first
+        // Note: Use if-let to handle deletion case (when node was deleted after snapshot)
+        if let Ok(current_node) = self.current.get_node(id) {
+            // Check if current version is visible in our snapshot
+            if self
+                .visibility_manager
+                .is_visible(&self.snapshot, current_node.metadata.created_by_tx)
+            {
+                return Ok(current_node);
+            }
+            // If not visible, fall through to the slow path
+        }
+        // If the node is not in current storage (e.g., it was deleted),
+        // we must still check historical storage
+
+        // SLOW PATH: Query historical storage for version visible at snapshot time
+        self.get_node_from_historical(id)
+    }
+
+    fn get_edge(&self, id: EdgeId) -> Result<Edge> {
+        // FAST PATH: Try current storage first
+        // Note: Use if-let to handle deletion case (when edge was deleted after snapshot)
+        if let Ok(current_edge) = self.current.get_edge(id) {
+            // Check if current version is visible in our snapshot
+            if self
+                .visibility_manager
+                .is_visible(&self.snapshot, current_edge.metadata.created_by_tx)
+            {
+                return Ok(current_edge);
+            }
+            // If not visible, fall through to the slow path
+        }
+        // If the edge is not in current storage (e.g., it was deleted),
+        // we must still check historical storage
+
+        // SLOW PATH: Query historical storage for version visible at snapshot time
+        self.get_edge_from_historical(id)
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
