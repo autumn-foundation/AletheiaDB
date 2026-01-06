@@ -73,6 +73,38 @@ pub struct Metrics {
     /// **Action**: If rate >10/sec, investigate application access patterns.
     /// Consider optimistic locking, application-level batching, or sharding.
     pub write_conflicts: AtomicU64,
+
+    // Error categorization counters (Phase 3)
+    /// Total number of storage-related errors.
+    ///
+    /// Includes: NodeNotFound, EdgeNotFound, InvalidProperty, WalError, etc.
+    pub error_storage_total: AtomicU64,
+
+    /// Total number of temporal constraint violations.
+    ///
+    /// Includes: InvalidTimeRange, TemporalParadox, VersionChain corruption, etc.
+    pub error_temporal_total: AtomicU64,
+
+    /// Total number of query-related errors.
+    ///
+    /// Includes: SyntaxError, InvalidParameter, Timeout, LimitExceeded, etc.
+    pub error_query_total: AtomicU64,
+
+    /// Total number of transaction errors.
+    ///
+    /// Includes: InvalidState, AlreadyCommitted, ValidationFailed, CommitFailed, etc.
+    pub error_transaction_total: AtomicU64,
+
+    /// Total number of vector-related errors.
+    ///
+    /// Includes: DimensionMismatch, ContainsNaN, InvalidVector, etc.
+    pub error_vector_total: AtomicU64,
+
+    /// Total number of I/O errors.
+    pub error_io_total: AtomicU64,
+
+    /// Total number of other/miscellaneous errors.
+    pub error_other_total: AtomicU64,
 }
 
 impl Metrics {
@@ -85,6 +117,13 @@ impl Metrics {
             timestamp_violations: AtomicU64::new(0),
             wal_checksum_failures: AtomicU64::new(0),
             write_conflicts: AtomicU64::new(0),
+            error_storage_total: AtomicU64::new(0),
+            error_temporal_total: AtomicU64::new(0),
+            error_query_total: AtomicU64::new(0),
+            error_transaction_total: AtomicU64::new(0),
+            error_vector_total: AtomicU64::new(0),
+            error_io_total: AtomicU64::new(0),
+            error_other_total: AtomicU64::new(0),
         }
     }
 
@@ -107,6 +146,13 @@ impl Metrics {
             timestamp_violations: self.timestamp_violations.load(Ordering::Relaxed),
             wal_checksum_failures: self.wal_checksum_failures.load(Ordering::Relaxed),
             write_conflicts: self.write_conflicts.load(Ordering::Relaxed),
+            error_storage_total: self.error_storage_total.load(Ordering::Relaxed),
+            error_temporal_total: self.error_temporal_total.load(Ordering::Relaxed),
+            error_query_total: self.error_query_total.load(Ordering::Relaxed),
+            error_transaction_total: self.error_transaction_total.load(Ordering::Relaxed),
+            error_vector_total: self.error_vector_total.load(Ordering::Relaxed),
+            error_io_total: self.error_io_total.load(Ordering::Relaxed),
+            error_other_total: self.error_other_total.load(Ordering::Relaxed),
         }
     }
 
@@ -121,6 +167,13 @@ impl Metrics {
         self.timestamp_violations.store(0, Ordering::Relaxed);
         self.wal_checksum_failures.store(0, Ordering::Relaxed);
         self.write_conflicts.store(0, Ordering::Relaxed);
+        self.error_storage_total.store(0, Ordering::Relaxed);
+        self.error_temporal_total.store(0, Ordering::Relaxed);
+        self.error_query_total.store(0, Ordering::Relaxed);
+        self.error_transaction_total.store(0, Ordering::Relaxed);
+        self.error_vector_total.store(0, Ordering::Relaxed);
+        self.error_io_total.store(0, Ordering::Relaxed);
+        self.error_other_total.store(0, Ordering::Relaxed);
     }
 }
 
@@ -141,6 +194,27 @@ pub struct MetricsSnapshot {
 
     /// Number of write-write conflicts (Snapshot Isolation).
     pub write_conflicts: u64,
+
+    /// Total storage errors.
+    pub error_storage_total: u64,
+
+    /// Total temporal errors.
+    pub error_temporal_total: u64,
+
+    /// Total query errors.
+    pub error_query_total: u64,
+
+    /// Total transaction errors.
+    pub error_transaction_total: u64,
+
+    /// Total vector errors.
+    pub error_vector_total: u64,
+
+    /// Total I/O errors.
+    pub error_io_total: u64,
+
+    /// Total other errors.
+    pub error_other_total: u64,
 }
 
 impl MetricsSnapshot {

@@ -11,7 +11,6 @@ use crate::core::id::{EdgeId, IdGenerator, NodeId};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
-use crate::index::vector::TemporalSearchResults;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
@@ -134,6 +133,8 @@ impl GallifreyDB {
     /// // No commit needed - transaction is read-only
     /// ```
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("read_transaction").entered();
         let tx_id = self.tx_id_gen.next();
         let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
 
@@ -141,9 +142,7 @@ impl GallifreyDB {
         self.visibility_manager.register_active(tx_id);
 
         // Capture snapshot
-        let snapshot = self
-            .visibility_manager
-            .capture_snapshot(snapshot_timestamp, tx_id);
+        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp, tx_id);
 
         Ok(ReadTransaction::new(
             tx_id,
@@ -195,6 +194,8 @@ impl GallifreyDB {
     /// tx.commit()?;  // or tx.rollback()
     /// ```
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("write_transaction").entered();
         let tx_id = self.tx_id_gen.next();
         let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
 
@@ -202,9 +203,7 @@ impl GallifreyDB {
         self.visibility_manager.register_active(tx_id);
 
         // Capture snapshot
-        let snapshot = self
-            .visibility_manager
-            .capture_snapshot(snapshot_timestamp, tx_id);
+        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp, tx_id);
 
         Ok(WriteTransaction::new(
             tx_id,
@@ -303,6 +302,8 @@ impl GallifreyDB {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Node> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_node_at_time").entered();
         let historical = self.historical.lock_or_err()?;
 
         // Find the version valid at this time
@@ -334,6 +335,8 @@ impl GallifreyDB {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Edge> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_edge_at_time").entered();
         let historical = self.historical.lock_or_err()?;
 
         let version_id = historical
@@ -383,6 +386,8 @@ impl GallifreyDB {
     ///
     /// Returns an error if vector indexing is already enabled.
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("enable_vector_index").entered();
         self.current.enable_vector_index(property_name, config)
     }
 
@@ -418,6 +423,8 @@ impl GallifreyDB {
     /// - Query node is not found
     /// - Query node does not have the indexed vector property
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar").entered();
         self.current.find_similar(query_node_id, k)
     }
 
@@ -444,6 +451,10 @@ impl GallifreyDB {
         label: &str,
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar_with_label").entered();
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar").entered();
         self.current
             .find_similar_with_label(query_node_id, label, k)
     }
@@ -484,6 +495,10 @@ impl GallifreyDB {
         embedding: &[f32],
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar_by_embedding").entered();
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar").entered();
         self.current.find_similar_by_embedding(embedding, k)
     }
 
@@ -526,131 +541,14 @@ impl GallifreyDB {
         label: &str,
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar_by_embedding_with_label").entered();
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar_by_embedding").entered();
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar").entered();
         self.current
             .find_similar_by_embedding_with_label(embedding, label, k)
-    }
-
-    // ========================================================================
-    // Temporal Vector Search (Phase 3)
-    // ========================================================================
-
-    /// Enable temporal vector indexing for a specific property.
-    ///
-    /// Once enabled, vector changes will be tracked over time using snapshot-based
-    /// indexing, enabling point-in-time vector queries and semantic drift tracking.
-    ///
-    /// # Arguments
-    ///
-    /// * `property_name` - Name of the property containing vectors
-    /// * `config` - Temporal vector index configuration
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if temporal vector indexing is already enabled.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    ///
-    /// let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
-    /// let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
-    /// db.enable_temporal_vector_index("embedding", temporal_config)?;
-    /// ```
-    pub fn enable_temporal_vector_index(
-        &self,
-        property_name: &str,
-        config: crate::index::vector::temporal::TemporalVectorConfig,
-    ) -> Result<()> {
-        self.current
-            .enable_temporal_vector_index(property_name, config)
-    }
-
-    /// Check if temporal vector indexing is enabled.
-    pub fn is_temporal_vector_index_enabled(&self) -> bool {
-        self.current.is_temporal_vector_index_enabled()
-    }
-
-    /// Find k most similar nodes at a specific point in time.
-    ///
-    /// Returns nodes similar to the query embedding as they existed at the given timestamp.
-    /// This enables "semantic time travel" - understanding what was semantically similar
-    /// at different points in the database's history.
-    ///
-    /// # Arguments
-    ///
-    /// * `embedding` - Query vector
-    /// * `k` - Number of results
-    /// * `timestamp` - Point in time to query
-    ///
-    /// # Returns
-    ///
-    /// Vector of (NodeId, similarity) pairs sorted by similarity (descending).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Temporal vector index is not enabled
-    /// - No snapshot exists at or before the timestamp
-    /// - Embedding dimensions don't match the indexed property
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Find similar documents as they existed in the past
-    /// let query_embedding = vec![0.1; 384];
-    /// let timestamp = 1234567890000000; // microseconds since epoch
-    /// let results = db.find_similar_as_of(&query_embedding, 10, timestamp)?;
-    /// for (node_id, similarity) in results {
-    ///     println!("Historical similarity: {:?} -> {}", node_id, similarity);
-    /// }
-    /// ```
-    pub fn find_similar_as_of(
-        &self,
-        embedding: &[f32],
-        k: usize,
-        timestamp: Timestamp,
-    ) -> Result<Vec<(NodeId, f32)>> {
-        self.current.find_similar_as_of(embedding, k, timestamp)
-    }
-
-    /// Find k most similar nodes across a time range.
-    ///
-    /// Returns results for each snapshot within the time range, showing how
-    /// semantic similarity evolved over time. This is useful for semantic drift
-    /// tracking and understanding how the meaning of concepts changed.
-    ///
-    /// # Arguments
-    ///
-    /// * `embedding` - Query vector
-    /// * `k` - Number of results per snapshot
-    /// * `time_range` - Time range to query
-    ///
-    /// # Returns
-    ///
-    /// Vector of (timestamp, results) pairs where results are Vec<(NodeId, similarity)>.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use gallifreydb::core::temporal::TimeRange;
-    ///
-    /// // Track how similar documents changed over time
-    /// let query = vec![0.1; 384];
-    /// let time_range = TimeRange::between(start_ts, end_ts);
-    /// let results = db.find_similar_in_range(&query, 10, time_range)?;
-    /// for (timestamp, similar_nodes) in results {
-    ///     println!("At {}: found {} similar nodes", timestamp, similar_nodes.len());
-    /// }
-    /// ```
-    pub fn find_similar_in_range(
-        &self,
-        embedding: &[f32],
-        k: usize,
-        time_range: crate::core::temporal::TimeRange,
-    ) -> Result<TemporalSearchResults> {
-        self.current.find_similar_in_range(embedding, k, time_range)
     }
 
     /// Get the number of nodes in the current state.
@@ -1653,130 +1551,5 @@ mod tests {
 
         // Should find doc2 but not doc_no_vector
         assert_eq!(results.len(), 1); // Only doc2 (doc1 is excluded as query node)
-    }
-
-    #[test]
-    fn test_enable_temporal_vector_index() {
-        use crate::index::vector::{DistanceMetric, HnswConfig, TemporalVectorConfig};
-
-        let db = GallifreyDB::new();
-
-        // Create temporal vector index config
-        let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine);
-        let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
-
-        // Enable temporal vector index
-        assert!(
-            db.enable_temporal_vector_index("embedding", temporal_config)
-                .is_ok()
-        );
-
-        // Should fail if trying to enable again
-        let hnsw_config2 = HnswConfig::new(3, DistanceMetric::Cosine);
-        let temporal_config2 = TemporalVectorConfig::default_with_hnsw(hnsw_config2);
-        assert!(
-            db.enable_temporal_vector_index("embedding", temporal_config2)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn test_is_temporal_vector_index_enabled() {
-        use crate::index::vector::{DistanceMetric, HnswConfig, TemporalVectorConfig};
-
-        let db = GallifreyDB::new();
-
-        // Initially disabled
-        assert!(!db.is_temporal_vector_index_enabled());
-
-        // Enable temporal vector index
-        let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine);
-        let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
-        db.enable_temporal_vector_index("embedding", temporal_config)
-            .unwrap();
-
-        // Now enabled
-        assert!(db.is_temporal_vector_index_enabled());
-    }
-
-    #[test]
-    fn test_find_similar_as_of_api() -> crate::utils::Result<()> {
-        use crate::index::vector::{
-            DistanceMetric, HnswConfig, TemporalVectorConfig, temporal::SnapshotStrategy,
-        };
-
-        let db = GallifreyDB::new();
-
-        // Enable temporal vector index with frequent snapshots
-        let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine);
-        let mut temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
-        temporal_config.snapshot_strategy = SnapshotStrategy::TransactionInterval(1);
-        db.enable_temporal_vector_index("embedding", temporal_config)?;
-
-        // Create nodes with vectors at different times
-        let _node1 = db.create_node(
-            "Document",
-            PropertyMapBuilder::new()
-                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
-                .build(),
-        )?;
-
-        let _node2 = db.create_node(
-            "Document",
-            PropertyMapBuilder::new()
-                .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
-                .build(),
-        )?;
-
-        // Query as of current time
-        let query = [1.0f32, 0.0, 0.0];
-        let timestamp = crate::core::temporal::time::now();
-        let _results = db.find_similar_as_of(&query, 10, timestamp)?;
-
-        // Should complete successfully (exact count depends on snapshot timing)
-        // Just verify no panic occurred
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_find_similar_in_range_api() -> crate::utils::Result<()> {
-        use crate::core::temporal::TimeRange;
-        use crate::index::vector::{
-            DistanceMetric, HnswConfig, TemporalVectorConfig, temporal::SnapshotStrategy,
-        };
-
-        let db = GallifreyDB::new();
-
-        // Enable temporal vector index with frequent snapshots
-        let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine);
-        let mut temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
-        temporal_config.snapshot_strategy = SnapshotStrategy::TransactionInterval(1);
-        db.enable_temporal_vector_index("embedding", temporal_config)?;
-
-        // Create nodes with vectors
-        let _node1 = db.create_node(
-            "Document",
-            PropertyMapBuilder::new()
-                .insert_vector("embedding", &[1.0f32, 0.0, 0.0])
-                .build(),
-        )?;
-
-        let _node2 = db.create_node(
-            "Document",
-            PropertyMapBuilder::new()
-                .insert_vector("embedding", &[0.9f32, 0.1, 0.0])
-                .build(),
-        )?;
-
-        // Query over time range
-        let query = [1.0f32, 0.0, 0.0];
-        let time_range = TimeRange::between(0, crate::core::temporal::time::now());
-        let _results = db.find_similar_in_range(&query, 5, time_range)?;
-
-        // Should complete successfully (exact results depend on snapshot timing)
-        // Just verify no panic occurred
-
-        Ok(())
     }
 }
