@@ -839,12 +839,19 @@ mod tests {
         data[0..4].copy_from_slice(b"XXXX"); // Invalid magic
         std::fs::write(&checkpoint_path, data)?;
 
-        // Attempt to load
+        // Attempt to load - should fail with CorruptedData error
         let result = Checkpoint::load(&checkpoint_path);
 
         assert!(result.is_err());
-        let err_str = result.unwrap_err().to_string();
-        assert!(err_str.contains("Invalid checkpoint magic") || err_str.contains("corrupt"));
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Storage(
+                    crate::utils::error::StorageError::CorruptedData(_)
+                )
+            ),
+            "Expected CorruptedData error for invalid magic bytes"
+        );
 
         Ok(())
     }
@@ -865,12 +872,19 @@ mod tests {
         data[4..8].copy_from_slice(&99u32.to_le_bytes());
         std::fs::write(&checkpoint_path, data)?;
 
-        // Attempt to load
+        // Attempt to load - should fail with CorruptedData error for unsupported version
         let result = Checkpoint::load(&checkpoint_path);
 
         assert!(result.is_err());
-        let err_str = result.unwrap_err().to_string();
-        assert!(err_str.contains("Unsupported checkpoint version") || err_str.contains("version"));
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Storage(
+                    crate::utils::error::StorageError::CorruptedData(_)
+                )
+            ),
+            "Expected CorruptedData error for unsupported version"
+        );
 
         Ok(())
     }
@@ -986,7 +1000,11 @@ mod tests {
             .count();
 
         // Should have at most 3 checkpoints
-        assert!(checkpoint_count <= 3, "Expected ≤3 checkpoints, found {}", checkpoint_count);
+        assert!(
+            checkpoint_count <= 3,
+            "Expected ≤3 checkpoints, found {}",
+            checkpoint_count
+        );
 
         Ok(())
     }

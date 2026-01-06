@@ -457,7 +457,11 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            EmbeddingError::ProviderError { provider, message, status_code } => {
+            EmbeddingError::ProviderError {
+                provider,
+                message,
+                status_code,
+            } => {
                 assert_eq!(provider, "invalid-provider");
                 assert!(message.contains("Invalid embedding"));
                 assert!(status_code.is_none());
@@ -520,9 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_dimension_mismatch_error() {
-        let provider = Arc::new(BatchInvalidProvider {
-            dimensions: 256,
-        });
+        let provider = Arc::new(BatchInvalidProvider { dimensions: 256 });
         let service = EmbeddingService::new(provider);
 
         let texts = vec!["first", "second", "third"];
@@ -568,9 +570,13 @@ mod tests {
 
         let embedding = service.embed("test").await.unwrap();
 
-        // Service should not double-normalize since provider normalized
-        // (Our mock doesn't actually normalize, but service trusts the flag)
-        assert_eq!(embedding.len(), 10);
+        // Service should not double-normalize, so the vector should remain un-normalized
+        // as returned by the mock provider (which doesn't actually normalize).
+        let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (magnitude - 1.0).abs() > 1e-6,
+            "Service should not normalize if provider claims to have already done so"
+        );
     }
 
     #[tokio::test]

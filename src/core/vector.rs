@@ -4145,9 +4145,15 @@ mod proptests {
         let result = validate_vector(&vector_with_nan);
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        let err_str = err.to_string();
-        assert!(err_str.contains("NaN") || err_str.contains("invalid"));
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::ContainsNaN {
+                    count: 1
+                })
+            ),
+            "Expected ContainsNaN error with count=1"
+        );
     }
 
     #[test]
@@ -4156,8 +4162,19 @@ mod proptests {
 
         let result = validate_vector(&vector_with_inf);
 
-        // Should reject vectors with infinity values
-        assert!(result.is_err(), "validate_vector should reject infinity values");
+        assert!(
+            result.is_err(),
+            "validate_vector should reject infinity values"
+        );
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Vector(
+                    crate::utils::error::VectorError::ContainsInfinity { count: 1 }
+                )
+            ),
+            "Expected ContainsInfinity error with count=1"
+        );
     }
 
     #[test]
@@ -4165,18 +4182,18 @@ mod proptests {
         let zero_vector = vec![0.0, 0.0, 0.0];
         let normal_vector = vec![1.0, 2.0, 3.0];
 
-        // Zero magnitude should result in error or special handling
+        // The implementation returns 0.0 for zero magnitude vectors.
         let result = cosine_similarity(&zero_vector, &normal_vector);
 
-        // Either error (division by zero) or returns 0.0
         match result {
             Ok(sim) => {
-                // If implementation returns 0.0 for zero magnitude, that's acceptable
                 assert_eq!(sim, 0.0, "Cosine similarity with zero vector should be 0.0");
             }
             Err(e) => {
-                // If implementation errors on zero magnitude, that's also acceptable
-                assert!(e.to_string().contains("zero") || e.to_string().contains("magnitude"));
+                panic!(
+                    "Expected Ok(0.0) for zero magnitude vector, but got Err: {}",
+                    e
+                );
             }
         }
     }

@@ -2277,8 +2277,15 @@ mod tests {
 
         // Should fail with corrupted data error for invalid ID
         assert!(result.is_err());
-        let err_str = result.unwrap_err().to_string();
-        assert!(err_str.contains("Invalid node ID") || err_str.contains("corrupt"));
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Storage(
+                    crate::utils::error::StorageError::CorruptedData(_)
+                )
+            ),
+            "Expected CorruptedData error for invalid node ID"
+        );
 
         Ok(())
     }
@@ -2328,10 +2335,17 @@ mod tests {
         let wal = WriteAheadLog::new(config)?;
         let result = wal.read_from(LSN::initial());
 
-        // Should either error on invalid edge ID or on corrupted data
+        // Should fail with corrupted data error for invalid edge ID
         assert!(result.is_err());
-        let err_str = result.unwrap_err().to_string();
-        assert!(err_str.contains("Invalid edge ID") || err_str.contains("corrupt"));
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Storage(
+                    crate::utils::error::StorageError::CorruptedData(_)
+                )
+            ),
+            "Expected CorruptedData error for invalid edge ID"
+        );
 
         Ok(())
     }
@@ -2367,8 +2381,15 @@ mod tests {
         let result = wal.read_from(LSN::initial());
 
         assert!(result.is_err());
-        let err_str = result.unwrap_err().to_string();
-        assert!(err_str.contains("Invalid version ID") || err_str.contains("corrupt"));
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Storage(
+                    crate::utils::error::StorageError::CorruptedData(_)
+                )
+            ),
+            "Expected CorruptedData error for invalid version ID"
+        );
 
         Ok(())
     }
@@ -2398,8 +2419,15 @@ mod tests {
         let result = wal.read_from(LSN::initial());
 
         assert!(result.is_err());
-        let err_str = result.unwrap_err().to_string();
-        assert!(err_str.contains("Unknown WAL operation") || err_str.contains("corrupt"));
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Storage(
+                    crate::utils::error::StorageError::CorruptedData(_)
+                )
+            ),
+            "Expected CorruptedData error for unknown operation type"
+        );
 
         Ok(())
     }
@@ -2446,7 +2474,9 @@ mod tests {
         match result {
             Err(e) => {
                 // Truncation detected - this is valid behavior
-                assert!(e.to_string().contains("Buffer too short") || e.to_string().contains("corrupt"));
+                assert!(
+                    e.to_string().contains("Buffer too short") || e.to_string().contains("corrupt")
+                );
             }
             Ok(entries) => {
                 // Graceful recovery - should have at least some entries
@@ -2557,7 +2587,11 @@ mod tests {
             .count();
 
         // Should have at most segments_to_retain + current segment
-        assert!(segment_count <= 6, "Expected ≤6 segments (5 retained + 1 current), found {}", segment_count);
+        assert!(
+            segment_count <= 6,
+            "Expected ≤6 segments (5 retained + 1 current), found {}",
+            segment_count
+        );
 
         Ok(())
     }
