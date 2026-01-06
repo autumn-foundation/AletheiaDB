@@ -338,10 +338,7 @@ fn bench_semantic_evolution(c: &mut Criterion) {
                 let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
 
                 b.iter(|| {
-                    let _ = index.semantic_evolution(
-                        black_box(node_id),
-                        black_box(time_range),
-                    );
+                    let _ = index.semantic_evolution(black_box(node_id), black_box(time_range));
                 });
             },
         );
@@ -367,7 +364,8 @@ fn bench_track_semantic_drift(c: &mut Criterion) {
                 for i in 0..snapshot_count {
                     let vector: Vec<f32> = (0..384)
                         .map(|j| {
-                            let angle = (i as f32 / snapshot_count as f32) * std::f32::consts::PI / 4.0;
+                            let angle =
+                                (i as f32 / snapshot_count as f32) * std::f32::consts::PI / 4.0;
                             if j == 0 {
                                 angle.cos()
                             } else if j == 1 {
@@ -436,10 +434,8 @@ fn bench_calculate_consecutive_drift(c: &mut Criterion) {
                 let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
 
                 b.iter(|| {
-                    let _ = index.calculate_consecutive_drift(
-                        black_box(node_id),
-                        black_box(time_range),
-                    );
+                    let _ = index
+                        .calculate_consecutive_drift(black_box(node_id), black_box(time_range));
                 });
             },
         );
@@ -465,11 +461,13 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
                         // Create 10 snapshots
                         for snapshot_idx in 0..10 {
                             for i in 0..vector_count {
-                                let node_id = NodeId::new((snapshot_idx * vector_count + i) as u64).unwrap();
+                                let node_id =
+                                    NodeId::new((snapshot_idx * vector_count + i) as u64).unwrap();
                                 let vector: Vec<f32> = (0..384)
                                     .map(|j| (snapshot_idx + i + j) as f32 / 1000.0)
                                     .collect();
-                                let _ = index.add(node_id, &vector, (snapshot_idx * 1000 + i) as i64);
+                                let _ =
+                                    index.add(node_id, &vector, (snapshot_idx * 1000 + i) as i64);
                             }
                             let _ = index.on_transaction();
                         }
