@@ -114,6 +114,30 @@ impl HistoricalStorage {
         config: AnchorConfig,
         retention_policy: RetentionPolicy,
     ) -> Self {
+        Self::with_config_retention_and_cache_size(
+            config,
+            retention_policy,
+            DEFAULT_RECONSTRUCTION_CACHE_SIZE,
+        )
+    }
+
+    /// Create a new historical storage with full customization including cache size.
+    ///
+    /// # Arguments
+    /// * `config` - Anchor creation configuration
+    /// * `retention_policy` - Version retention limits (DoS protection)
+    /// * `cache_size` - Maximum number of cached property reconstructions per type (node/edge)
+    ///
+    /// # Cache Sizing
+    /// Consider your workload when sizing the cache:
+    /// - Small properties (no vectors): 1,000-10,000 entries
+    /// - Large properties (1536-dim vectors ~6KB): 100-1,000 entries
+    /// - Default: 10,000 entries
+    pub fn with_config_retention_and_cache_size(
+        config: AnchorConfig,
+        retention_policy: RetentionPolicy,
+        cache_size: usize,
+    ) -> Self {
         HistoricalStorage {
             config,
             retention_policy,
@@ -123,8 +147,8 @@ impl HistoricalStorage {
             edge_version_heads: HashMap::new(),
             node_version_counts: HashMap::new(),
             edge_version_counts: HashMap::new(),
-            node_property_cache: Arc::new(Cache::new(DEFAULT_RECONSTRUCTION_CACHE_SIZE)),
-            edge_property_cache: Arc::new(Cache::new(DEFAULT_RECONSTRUCTION_CACHE_SIZE)),
+            node_property_cache: Arc::new(Cache::new(cache_size)),
+            edge_property_cache: Arc::new(Cache::new(cache_size)),
         }
     }
 
@@ -281,10 +305,15 @@ impl HistoricalStorage {
     ///
     /// This walks backward to find the nearest anchor, then applies all deltas
     /// forward to reconstruct the full property state.
+    ///
+    /// **Cache Behavior**: Properties are cached by VersionId. Since properties are
+    /// immutable per version and temporal visibility is checked separately in
+    /// `find_node_version_at_time()`, cached properties are always valid and don't
+    /// require invalidation when temporal intervals are modified.
     pub fn reconstruct_node_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
         // Check cache first (fast path for concurrent reads)
         if let Some(cached) = self.node_property_cache.get(&version_id) {
-            return Ok((*cached).clone());
+            return Ok(cached.as_ref().clone());
         }
 
         // Cache miss - reconstruct properties
@@ -320,10 +349,13 @@ impl HistoricalStorage {
     }
 
     /// Reconstruct the properties of an edge version.
+    ///
+    /// **Cache Behavior**: Same as `reconstruct_node_properties()` - properties are
+    /// immutable per VersionId, so caching doesn't require invalidation.
     pub fn reconstruct_edge_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
         // Check cache first (fast path for concurrent reads)
         if let Some(cached) = self.edge_property_cache.get(&version_id) {
-            return Ok((*cached).clone());
+            return Ok(cached.as_ref().clone());
         }
 
         // Cache miss - reconstruct properties
@@ -590,6 +622,8 @@ impl HistoricalStorage {
             edge_delta_count,
             unique_nodes: self.node_version_heads.len(),
             unique_edges: self.edge_version_heads.len(),
+            node_cache_entries: self.node_property_cache.len(),
+            edge_cache_entries: self.edge_property_cache.len(),
         }
     }
 }
@@ -619,6 +653,10 @@ pub struct HistoricalStats {
     pub unique_nodes: usize,
     /// Number of unique edges with version history
     pub unique_edges: usize,
+    /// Number of cached node property reconstructions
+    pub node_cache_entries: usize,
+    /// Number of cached edge property reconstructions
+    pub edge_cache_entries: usize,
 }
 
 impl HistoricalStats {
