@@ -313,6 +313,12 @@ impl SnapshotData {
     }
 
     fn len(&self) -> usize {
+        // Consistency check: snapshots and vector_history should always be in sync
+        debug_assert_eq!(
+            self.snapshots.len(),
+            self.vector_history.len(),
+            "SnapshotData inconsistency: snapshots and vector_history out of sync"
+        );
         self.snapshots.len()
     }
 }
@@ -612,6 +618,16 @@ impl TemporalVectorIndex {
     /// # Returns
     ///
     /// A tuple of (HnswIndex snapshot, vector map)
+    ///
+    /// # Partial Build Failure
+    ///
+    /// If `snapshot.add()` fails partway through iteration, this function returns
+    /// `Err` but has already allocated memory for partial structures. This is
+    /// acceptable because:
+    /// - The partially built snapshot is immediately dropped and deallocated
+    /// - The error indicates invalid data (e.g., dimension mismatch) that would
+    ///   prevent snapshot creation anyway
+    /// - Pre-validating all vectors would require a full extra pass over the data
     fn build_snapshot_data(&self) -> Result<(HnswIndex, VectorSnapshot)> {
         let snapshot = HnswIndex::new(self.config.hnsw_config.clone())?;
         let mut vector_snapshot = HashMap::with_capacity(self.vectors.len());
@@ -658,6 +674,10 @@ impl TemporalVectorIndex {
             let mut metadata = self.metadata.write();
 
             // Double-check: another thread may have created snapshot while we were building
+            // MEMORY TRADE-OFF: If another thread won the race, we discard our fully-built
+            // snapshot here. For large graphs this wastes RAM temporarily, but it's a
+            // deliberate trade-off to avoid holding locks during expensive HNSW construction.
+            // The discarded snapshot is immediately dropped and deallocated.
             if !self.should_create_snapshot(&metadata, current_time)? {
                 return Ok(()); // Another thread beat us to it, discard our snapshot
             }
@@ -1052,6 +1072,13 @@ impl TemporalVectorIndex {
     /// Vector of (Timestamp, Arc<[f32]>) pairs showing the node's vector at each
     /// snapshot in the time range. If the node has no vector in any snapshot within
     /// the range, an empty vector is returned.
+    ///
+    /// # Memory Warning
+    ///
+    /// **CAUTION**: This function collects all vectors in the time range into a `Vec`.
+    /// For very large time ranges (e.g., spanning thousands of snapshots), this can
+    /// allocate significant memory. Consider using narrower time ranges or implementing
+    /// a streaming iterator if you need to process large temporal datasets.
     ///
     /// # Examples
     ///
