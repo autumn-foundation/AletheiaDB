@@ -187,7 +187,8 @@ fn bench_wal_overhead(c: &mut Criterion) {
 fn bench_batch_edge_insertions(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_edge_insertions");
 
-    // Test different batch sizes
+    // Test different batch sizes (DEFAULT_MAX_OPERATIONS is 50K)
+    // Each iteration creates batch_size nodes + (batch_size - 1) edges = ~2*batch_size ops
     for batch_size in [100, 1000, 10000] {
         group.bench_function(format!("batch_{}_edges", batch_size), |b| {
             b.iter(|| {
@@ -402,7 +403,7 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
 /// This tests the impact of rebuild on read performance.
 fn bench_read_during_rebuild(c: &mut Criterion) {
     // Pre-populate a database with 4K nodes + 4K edges
-    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // Note: stays under DEFAULT_MAX_OPERATIONS (50K) limit defined in
     // src/api/transaction/write_buffer.rs for DoS protection
     let db = GallifreyDB::new();
     let node_ids: Vec<_> = db
@@ -451,7 +452,7 @@ fn bench_concurrent_visibility_checks(c: &mut Criterion) {
     let mut group = c.benchmark_group("concurrent_visibility");
 
     // Pre-populate database with committed data (500 nodes)
-    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // Note: stays under DEFAULT_MAX_OPERATIONS (50K) limit defined in
     // src/api/transaction/write_buffer.rs for DoS protection
     let db = Arc::new(GallifreyDB::new());
     let node_ids: Vec<_> = db
@@ -501,7 +502,7 @@ fn bench_sequential_visibility_checks(c: &mut Criterion) {
     let db = GallifreyDB::new();
 
     // Pre-populate with 500 nodes
-    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // Note: stays under DEFAULT_MAX_OPERATIONS (50K) limit defined in
     // src/api/transaction/write_buffer.rs for DoS protection
     let node_ids: Vec<_> = db
         .write(|tx| {
