@@ -179,6 +179,9 @@ impl StringInterner {
     /// Get the string as a &str without cloning the Arc.
     ///
     /// This is useful when you just need to read the string temporarily.
+    ///
+    /// **Note:** For read-only access, prefer [`with_str`](Self::with_str) to avoid Arc cloning overhead.
+    /// This method still clones the Arc internally.
     pub fn get(&self, id: InternedString) -> Option<impl AsRef<str> + '_> {
         self.id_to_string.get(&id).map(|entry| {
             let arc: Arc<str> = Arc::clone(entry.value());
@@ -197,6 +200,18 @@ impl StringInterner {
     /// - Serialization
     /// - String comparisons
     /// - Any read-only operation that doesn't need to own the string
+    ///
+    /// # Performance Example
+    ///
+    /// When serializing property keys, this avoids Arc clones:
+    /// ```ignore
+    /// // Instead of:
+    /// let key_str = interner.resolve(key_id)?;
+    /// serializer.serialize_str(key_str.as_ref())?; // Arc clone overhead
+    ///
+    /// // Use:
+    /// interner.with_str(key_id, |s| serializer.serialize_str(s))?;
+    /// ```
     ///
     /// # Examples
     ///
@@ -218,7 +233,9 @@ impl StringInterner {
     where
         F: FnOnce(&str) -> R,
     {
-        self.id_to_string.get(&id).map(|entry| f(entry.value().as_ref()))
+        self.id_to_string
+            .get(&id)
+            .map(|entry| f(entry.value().as_ref()))
     }
 
     /// Check if a string has been interned.
@@ -476,9 +493,11 @@ mod tests {
         assert!(contains);
 
         // Return Vec (must own the data since it outlives the callback)
-        let words: Vec<String> = interner.with_str(id, |s| {
-            s.split_whitespace().map(|w| w.to_string()).collect()
-        }).unwrap();
+        let words: Vec<String> = interner
+            .with_str(id, |s| {
+                s.split_whitespace().map(|w| w.to_string()).collect()
+            })
+            .unwrap();
         assert_eq!(words, vec!["test", "string"]);
     }
 
@@ -487,15 +506,23 @@ mod tests {
         let interner = StringInterner::new();
         let id = interner.intern("performance test").unwrap();
 
-        // This test verifies that with_str works without cloning
-        // While we can't directly measure Arc refcounts in safe code,
-        // we can verify the behavior is correct
+        // Get a baseline Arc to check the strong count.
+        // The count is 2: one in string_to_id map, one in id_to_string map.
+        let s_arc = interner.resolve(id).unwrap();
+        let initial_count = Arc::strong_count(&s_arc);
+        assert_eq!(initial_count, 3); // 2 in maps + 1 in s_arc
+
+        // This test verifies that with_str works without cloning by checking the refcount.
         let mut call_count = 0;
         let result = interner.with_str(id, |s| {
             call_count += 1;
+            // The count should not increase during the callback.
+            assert_eq!(Arc::strong_count(&s_arc), 3);
             s.to_string()
         });
 
+        // The count should remain unchanged after the call.
+        assert_eq!(Arc::strong_count(&s_arc), 3);
         assert_eq!(result, Some("performance test".to_string()));
         assert_eq!(call_count, 1);
     }
@@ -507,22 +534,22 @@ mod tests {
         let interner = Arc::new(StringInterner::new());
         let id = interner.intern("concurrent").unwrap();
 
-        let mut handles = vec![];
-
-        // Spawn 10 threads, each accessing the same string via with_str
-        for i in 0..10 {
-            let interner_clone = Arc::clone(&interner);
-            let handle = thread::spawn(move || {
-                interner_clone.with_str(id, |s| {
-                    assert_eq!(s, "concurrent");
-                    format!("{}-{}", s, i)
-                }).unwrap()
-            });
-            handles.push(handle);
-        }
-
-        // Collect all results
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        // Spawn 10 threads using a scope to ensure they all complete.
+        let results: Vec<String> = thread::scope(|s| {
+            let mut handles = Vec::new();
+            for i in 0..10 {
+                let interner_clone = Arc::clone(&interner);
+                handles.push(s.spawn(move || {
+                    interner_clone
+                        .with_str(id, |s| {
+                            assert_eq!(s, "concurrent");
+                            format!("{}-{}", s, i)
+                        })
+                        .unwrap()
+                }));
+            }
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
 
         // Verify each thread got the correct result
         for (i, result) in results.iter().enumerate() {
