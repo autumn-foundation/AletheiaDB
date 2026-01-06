@@ -37,6 +37,15 @@ const WAL_VERSION_LEGACY: u8 = 1;
 /// Size of the WAL segment header (magic + version).
 const WAL_HEADER_SIZE: usize = 5;
 
+/// Size of entry components for checksum verification
+const LSN_SIZE: usize = 8;
+const TIMESTAMP_SIZE: usize = 8;
+const CHECKSUM_SIZE: usize = 4;
+const OP_TYPE_SIZE: usize = 1;
+
+/// Offset to checksum field within an entry (after LSN + timestamp)
+const CHECKSUM_OFFSET_IN_ENTRY: usize = LSN_SIZE + TIMESTAMP_SIZE;
+
 /// Log Sequence Number - monotonically increasing identifier for WAL entries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LSN(pub u64);
@@ -274,6 +283,45 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
             context, e
         )))
     })
+}
+
+/// Verify the integrity of a WAL entry by computing and comparing its checksum.
+///
+/// # Arguments
+/// * `buffer` - The complete buffer containing the WAL entry
+/// * `entry_start` - Offset where this entry starts in the buffer
+/// * `entry_end` - Offset where this entry ends (current offset after parsing)
+/// * `stored_checksum` - The checksum value read from the entry
+/// * `lsn` - The LSN of this entry (for error reporting)
+/// * `context` - Context string for error messages (e.g., "replay" or "migration")
+///
+/// # Returns
+/// * `Ok(())` if checksum is valid
+/// * `Err` if checksum mismatch detected
+#[inline]
+fn verify_entry_checksum(
+    buffer: &[u8],
+    entry_start: usize,
+    entry_end: usize,
+    stored_checksum: u32,
+    lsn: LSN,
+    context: &str,
+) -> Result<()> {
+    // Compute checksum over LSN + timestamp + operation data (excluding checksum field)
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&buffer[entry_start..entry_start + CHECKSUM_OFFSET_IN_ENTRY]); // LSN + timestamp
+    hasher.update(&buffer[entry_start + CHECKSUM_OFFSET_IN_ENTRY + CHECKSUM_SIZE..entry_end]); // Operation data
+    let computed_checksum = hasher.finalize();
+
+    if stored_checksum != computed_checksum {
+        return Err(StorageError::CorruptedData(format!(
+            "WAL checksum mismatch during {} at LSN {}: stored={:#x}, computed={:#x}",
+            context, lsn.0, stored_checksum, computed_checksum
+        ))
+        .into());
+    }
+
+    Ok(())
 }
 
 impl WriteAheadLog {
@@ -975,19 +1023,7 @@ impl WriteAheadLog {
             };
 
             // Verify checksum integrity
-            // Compute checksum over LSN (8 bytes) + timestamp (8 bytes) + operation data (offset - entry_start - 20)
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&buffer[entry_start..entry_start + 16]); // LSN + timestamp
-            hasher.update(&buffer[entry_start + 20..offset]); // Operation data (skip checksum field)
-            let computed_checksum = hasher.finalize();
-
-            if stored_checksum != computed_checksum {
-                return Err(StorageError::CorruptedData(format!(
-                    "WAL checksum mismatch at LSN {}: stored={:#x}, computed={:#x}",
-                    lsn.0, stored_checksum, computed_checksum
-                ))
-                .into());
-            }
+            verify_entry_checksum(&buffer, entry_start, offset, stored_checksum, lsn, "replay")?;
 
             // Only include entries >= start_lsn
             if lsn >= start_lsn {
@@ -1537,19 +1573,7 @@ fn parse_wal_entries_versioned(
         };
 
         // Verify checksum integrity
-        // Compute checksum over LSN (8 bytes) + timestamp (8 bytes) + operation data (offset - entry_start - 20)
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&buffer[entry_start..entry_start + 16]); // LSN + timestamp
-        hasher.update(&buffer[entry_start + 20..offset]); // Operation data (skip checksum field)
-        let computed_checksum = hasher.finalize();
-
-        if stored_checksum != computed_checksum {
-            return Err(StorageError::CorruptedData(format!(
-                "WAL checksum mismatch during migration at LSN {}: stored={:#x}, computed={:#x}",
-                lsn.0, stored_checksum, computed_checksum
-            ))
-            .into());
-        }
+        verify_entry_checksum(&buffer, entry_start, offset, stored_checksum, lsn, "migration")?;
 
         if lsn >= start_lsn {
             entries.push(WalEntry {
@@ -2297,12 +2321,14 @@ mod tests {
             let mut buffer = Vec::new();
             file.read_to_end(&mut buffer).unwrap();
 
-            // The checksum is at offset 16-19 (after magic+version header, LSN, and timestamp)
-            // WAL_HEADER_SIZE = 5, LSN = 8, timestamp = 8, so checksum is at offset 5+8+8 = 21
-            if buffer.len() > 24 {
+            // Calculate checksum offset using constants
+            let checksum_offset = WAL_HEADER_SIZE + CHECKSUM_OFFSET_IN_ENTRY;
+            let min_required_size = checksum_offset + CHECKSUM_SIZE;
+
+            if buffer.len() > min_required_size {
                 // Corrupt the checksum by flipping bits
-                buffer[21] ^= 0xFF;
-                buffer[22] ^= 0xFF;
+                buffer[checksum_offset] ^= 0xFF;
+                buffer[checksum_offset + 1] ^= 0xFF;
 
                 // Write the corrupted data back
                 file.seek(std::io::SeekFrom::Start(0)).unwrap();
@@ -2323,13 +2349,16 @@ mod tests {
 
             // Should get a CorruptedData error about checksum mismatch
             assert!(result.is_err());
-            let err = result.unwrap_err();
-            let err_msg = format!("{:?}", err);
-            assert!(
-                err_msg.contains("checksum mismatch") || err_msg.contains("CorruptedData"),
-                "Expected checksum error but got: {}",
-                err_msg
-            );
+            match result.unwrap_err() {
+                Error::Storage(StorageError::CorruptedData(msg)) => {
+                    assert!(
+                        msg.contains("checksum mismatch"),
+                        "Error message should mention checksum mismatch, but was: {}",
+                        msg
+                    );
+                }
+                err => panic!("Expected StorageError::CorruptedData, but got {:?}", err),
+            }
         }
 
         Ok(())
@@ -2372,10 +2401,12 @@ mod tests {
             let mut buffer = Vec::new();
             file.read_to_end(&mut buffer).unwrap();
 
-            // Corrupt data after the checksum (operation data area)
-            // Header(5) + LSN(8) + timestamp(8) + checksum(4) + op_type(1) = 26
-            if buffer.len() > 30 {
-                buffer[30] ^= 0xFF; // Flip some bits in the operation data
+            // Calculate offset to operation data using constants
+            let payload_start = WAL_HEADER_SIZE + LSN_SIZE + TIMESTAMP_SIZE + CHECKSUM_SIZE + OP_TYPE_SIZE;
+            let corruption_offset = payload_start + 4; // Corrupt inside the NodeId field
+
+            if buffer.len() > corruption_offset {
+                buffer[corruption_offset] ^= 0xFF; // Flip some bits in the operation data
 
                 file.seek(std::io::SeekFrom::Start(0)).unwrap();
                 file.write_all(&buffer).unwrap();
@@ -2393,13 +2424,16 @@ mod tests {
 
             let result = wal.read_from(LSN::initial());
             assert!(result.is_err());
-            let err = result.unwrap_err();
-            let err_msg = format!("{:?}", err);
-            assert!(
-                err_msg.contains("checksum mismatch") || err_msg.contains("CorruptedData"),
-                "Expected checksum error but got: {}",
-                err_msg
-            );
+            match result.unwrap_err() {
+                Error::Storage(StorageError::CorruptedData(msg)) => {
+                    assert!(
+                        msg.contains("checksum mismatch"),
+                        "Error message should mention checksum mismatch, but was: {}",
+                        msg
+                    );
+                }
+                err => panic!("Expected StorageError::CorruptedData, but got {:?}", err),
+            }
         }
 
         Ok(())
