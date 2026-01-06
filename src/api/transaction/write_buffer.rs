@@ -2,7 +2,7 @@
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
-use crate::core::property::PropertyMap;
+use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::BiTemporalInterval;
 use crate::utils::error::{Result, StorageError};
 use std::collections::HashMap;
@@ -88,6 +88,14 @@ pub enum BufferedWrite {
 /// Default maximum number of operations per transaction (DoS protection)
 pub const DEFAULT_MAX_OPERATIONS: usize = 10_000;
 
+/// Helper function to check if a PropertyMap contains any vector properties.
+///
+/// This is used to optimize the commit path by only triggering temporal vector
+/// index updates when vector data was actually modified.
+fn contains_vector_properties(properties: &PropertyMap) -> bool {
+    properties.values().any(|v| matches!(v, PropertyValue::Vector(_)))
+}
+
 /// Write buffer for collecting uncommitted changes
 ///
 /// Buffers all write operations in a transaction until commit time,
@@ -106,6 +114,11 @@ pub struct WriteBuffer {
 
     /// Maximum number of operations allowed (DoS protection)
     max_operations: usize,
+
+    /// Track whether any vector properties were written in this transaction.
+    /// This flag is used to optimize the commit path by only triggering
+    /// temporal vector index updates when vector data was actually modified.
+    has_vector_operations: bool,
 }
 
 impl WriteBuffer {
@@ -121,6 +134,7 @@ impl WriteBuffer {
             modified_nodes: HashMap::new(),
             modified_edges: HashMap::new(),
             max_operations,
+            has_vector_operations: false,
         }
     }
 
@@ -134,6 +148,7 @@ impl WriteBuffer {
             modified_nodes: HashMap::with_capacity(capacity / 2),
             modified_edges: HashMap::with_capacity(capacity / 2),
             max_operations: capacity,
+            has_vector_operations: false,
         }
     }
 
@@ -154,15 +169,28 @@ impl WriteBuffer {
         let index = self.operations.len();
 
         // Track which entities are modified for conflict detection
+        // and check for vector properties
         match &write {
-            BufferedWrite::CreateNode { node_id, .. }
-            | BufferedWrite::UpdateNode { node_id, .. }
-            | BufferedWrite::DeleteNode { node_id } => {
+            BufferedWrite::CreateNode { node_id, properties, .. }
+            | BufferedWrite::UpdateNode { node_id, properties, .. } => {
+                self.modified_nodes.insert(*node_id, index);
+                // Check if this operation contains vector properties
+                if !self.has_vector_operations && contains_vector_properties(properties) {
+                    self.has_vector_operations = true;
+                }
+            }
+            BufferedWrite::DeleteNode { node_id } => {
                 self.modified_nodes.insert(*node_id, index);
             }
-            BufferedWrite::CreateEdge { edge_id, .. }
-            | BufferedWrite::UpdateEdge { edge_id, .. }
-            | BufferedWrite::DeleteEdge { edge_id } => {
+            BufferedWrite::CreateEdge { edge_id, properties, .. }
+            | BufferedWrite::UpdateEdge { edge_id, properties, .. } => {
+                self.modified_edges.insert(*edge_id, index);
+                // Check if this operation contains vector properties
+                if !self.has_vector_operations && contains_vector_properties(properties) {
+                    self.has_vector_operations = true;
+                }
+            }
+            BufferedWrite::DeleteEdge { edge_id } => {
                 self.modified_edges.insert(*edge_id, index);
             }
         }
@@ -205,6 +233,7 @@ impl WriteBuffer {
         self.operations.clear();
         self.modified_nodes.clear();
         self.modified_edges.clear();
+        self.has_vector_operations = false;
     }
 
     /// Get the number of buffered operations
@@ -215,6 +244,14 @@ impl WriteBuffer {
     /// Check if buffer is empty
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
+    }
+
+    /// Check if this transaction contains any vector property operations.
+    ///
+    /// This is used to optimize the commit path by only triggering temporal
+    /// vector index updates when vector data was actually modified.
+    pub fn has_vector_operations(&self) -> bool {
+        self.has_vector_operations
     }
 }
 

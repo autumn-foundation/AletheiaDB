@@ -203,7 +203,10 @@ impl WriteTransaction {
         self.apply_changes(commit_timestamp)?;
 
         // Notify temporal vector index of transaction completion (for snapshot creation)
-        self.current.on_temporal_vector_transaction()?;
+        // Only call this if the transaction modified vector properties to avoid unnecessary overhead
+        if self.buffer.has_vector_operations() {
+            self.current.on_temporal_vector_transaction()?;
+        }
 
         // Register commit with visibility manager
         self.visibility_manager
