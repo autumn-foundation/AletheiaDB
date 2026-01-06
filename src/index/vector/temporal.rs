@@ -2077,7 +2077,13 @@ mod tests {
         // Should get dimension mismatch error
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, Error::Vector(VectorError::DimensionMismatch { expected: 4, actual: 3 })));
+        assert!(matches!(
+            err,
+            Error::Vector(VectorError::DimensionMismatch {
+                expected: 4,
+                actual: 3
+            })
+        ));
 
         Ok(())
     }
