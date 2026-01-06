@@ -24,8 +24,8 @@ use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::{WalOperation, WriteAheadLog};
 use crate::utils::error::{Result, StorageError, TransactionError};
-use crate::utils::lock::MutexExt;
-use std::sync::{Arc, Mutex};
+use crate::utils::lock::{MutexExt, RwLockExt};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Write transaction with full ACID guarantees.
 ///
@@ -53,8 +53,8 @@ pub struct WriteTransaction {
 
     // Shared references to storage (Arc for zero-copy sharing)
     current: Arc<CurrentStorage>,
-    historical: Arc<Mutex<HistoricalStorage>>,
-    temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    temporal_indexes: Arc<RwLock<TemporalIndexes>>,
     wal: Arc<Mutex<WriteAheadLog>>,
     current_timestamp: Arc<Mutex<Timestamp>>,
     visibility_manager: Arc<TxVisibilityManager>,
@@ -72,8 +72,8 @@ impl WriteTransaction {
         tx_id: TxId,
         snapshot: TransactionSnapshot,
         current: Arc<CurrentStorage>,
-        historical: Arc<Mutex<HistoricalStorage>>,
-        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -567,8 +567,69 @@ impl WriteTransaction {
     }
 
     /// Apply all buffered changes to storage.
+    ///
+    /// # Lock Consolidation Optimization
+    ///
+    /// Acquires locks for historical storage and temporal indexes once before
+    /// processing all operations, reducing lock overhead from O(N) to O(1).
+    ///
+    /// ## Performance Trade-offs
+    ///
+    /// **Benefits:**
+    /// - Reduces lock acquisitions from 2N (per operation) to 2 (total)
+    /// - For 1000 operations: 2000 lock ops → 2 lock ops
+    ///
+    /// **Costs:**
+    /// - Longer critical section (holds locks for entire operation batch)
+    /// - May reduce concurrency for other transactions during this time
+    /// - Acceptable for most workloads; monitor if contention becomes an issue
+    ///
+    /// ## Error Handling
+    ///
+    /// If any operation fails, locks are released via RAII (automatic drop).
+    /// Note: Partial application is NOT rolled back here since this runs AFTER
+    /// WAL flush (see commit() at line 203). WAL recovery will handle consistency.
+    ///
+    /// ## Lock Ordering Hierarchy
+    ///
+    /// To prevent deadlocks, locks must be acquired in this order:
+    /// 1. `historical` - historical storage (acquired first)
+    /// 2. `temporal_indexes` - temporal indexes (acquired second)
+    /// 3. `version_id_gen` - version ID generator (acquired later for tombstones)
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
         let temporal = BiTemporalInterval::current(commit_timestamp);
+
+        // Acquire locks once before processing all operations.
+        // This reduces lock overhead from 2N acquisitions (per operation) to just 2 (total).
+        let mut historical = self.historical.write_or_err()?;
+        let mut temporal_indexes = self.temporal_indexes.write_or_err()?;
+
+        // Pre-generate all tombstone version IDs at once to reduce lock contention
+        // on the ID generator. Count delete operations and generate IDs in batch.
+        let num_deletes = self
+            .buffer
+            .operations()
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    super::BufferedWrite::DeleteNode { .. }
+                        | super::BufferedWrite::DeleteEdge { .. }
+                )
+            })
+            .count();
+
+        let mut tombstone_ids = if num_deletes > 0 {
+            let ids: Result<Vec<u64>> = {
+                let id_gen = self.version_id_gen.lock_or_err()?;
+                (0..num_deletes)
+                    .map(|_| id_gen.next().map_err(Into::into))
+                    .collect()
+            };
+            ids?.into_iter()
+        } else {
+            Vec::new().into_iter()
+        };
 
         for write in self.buffer.operations() {
             match write {
@@ -591,7 +652,7 @@ impl WriteTransaction {
                     self.current.insert_node_direct(node, commit_timestamp)?;
 
                     // Store in historical storage
-                    self.historical.lock_or_err()?.add_node_version(
+                    historical.add_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -600,11 +661,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_node_version(
-                        *node_id,
-                        *version_id,
-                        temporal,
-                    );
+                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal);
                 }
                 super::BufferedWrite::CreateEdge {
                     edge_id,
@@ -629,7 +686,7 @@ impl WriteTransaction {
                     self.current.insert_edge_direct(edge)?;
 
                     // Store in historical storage
-                    self.historical.lock_or_err()?.add_edge_version(
+                    historical.add_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -640,11 +697,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
-                        *edge_id,
-                        *version_id,
-                        temporal,
-                    );
+                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal);
                 }
                 super::BufferedWrite::UpdateNode {
                     node_id,
@@ -665,7 +718,7 @@ impl WriteTransaction {
                     self.current.update_node_direct(node, commit_timestamp)?;
 
                     // Add new version to historical storage
-                    self.historical.lock_or_err()?.add_node_version(
+                    historical.add_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -674,11 +727,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_node_version(
-                        *node_id,
-                        *version_id,
-                        temporal,
-                    );
+                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal);
                 }
                 super::BufferedWrite::UpdateEdge {
                     edge_id,
@@ -703,7 +752,7 @@ impl WriteTransaction {
                     self.current.update_edge_direct(edge)?;
 
                     // Add new version to historical storage
-                    self.historical.lock_or_err()?.add_edge_version(
+                    historical.add_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -714,11 +763,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
-                        *edge_id,
-                        *version_id,
-                        temporal,
-                    );
+                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal);
                 }
                 super::BufferedWrite::DeleteNode { node_id } => {
                     // Get the node before deleting
@@ -726,7 +771,6 @@ impl WriteTransaction {
 
                     // Close the current version's transaction_time in historical storage
                     // This marks the end of this version's visibility
-                    let mut historical = self.historical.lock_or_err()?;
                     if let Some(current_version_id) = historical.get_current_node_version(*node_id)
                     {
                         historical.close_node_version_transaction_time(
@@ -735,9 +779,18 @@ impl WriteTransaction {
                         )?;
                     }
 
-                    // Generate version ID for tombstone
-                    let tombstone_version_id =
-                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+                    // Use pre-generated tombstone version ID (no lock needed)
+                    // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
+                    let tombstone_version_id = VersionId::new_unchecked(
+                        tombstone_ids.next().ok_or_else(|| {
+                            StorageError::InconsistentState {
+                                reason: format!(
+                                    "Tombstone ID exhaustion for DeleteNode: expected {} deletes, iterator depleted at node_id {:?}",
+                                    num_deletes, node_id
+                                ),
+                            }
+                        })?,
+                    );
 
                     // Create tombstone temporal interval
                     // The tombstone marks when the deletion occurred. Its transaction_time
@@ -755,10 +808,9 @@ impl WriteTransaction {
                         node.label,
                         node.properties.clone(),
                     )?;
-                    drop(historical); // Release lock before acquiring temporal_indexes lock
 
                     // Index the tombstone version
-                    self.temporal_indexes.lock_or_err()?.insert_node_version(
+                    temporal_indexes.insert_node_version(
                         *node_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -774,7 +826,6 @@ impl WriteTransaction {
 
                     // Close the current version's transaction_time in historical storage
                     // This marks the end of this version's visibility
-                    let mut historical = self.historical.lock_or_err()?;
                     if let Some(current_version_id) = historical.get_current_edge_version(*edge_id)
                     {
                         historical.close_edge_version_transaction_time(
@@ -783,9 +834,18 @@ impl WriteTransaction {
                         )?;
                     }
 
-                    // Generate version ID for tombstone
-                    let tombstone_version_id =
-                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+                    // Use pre-generated tombstone version ID (no lock needed)
+                    // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
+                    let tombstone_version_id = VersionId::new_unchecked(
+                        tombstone_ids.next().ok_or_else(|| {
+                            StorageError::InconsistentState {
+                                reason: format!(
+                                    "Tombstone ID exhaustion for DeleteEdge: expected {} deletes, iterator depleted at edge_id {:?}",
+                                    num_deletes, edge_id
+                                ),
+                            }
+                        })?,
+                    );
 
                     // Create tombstone temporal interval
                     // The tombstone marks when the deletion occurred. Its transaction_time
@@ -805,10 +865,9 @@ impl WriteTransaction {
                         edge.target,
                         edge.properties.clone(),
                     )?;
-                    drop(historical); // Release lock before acquiring temporal_indexes lock
 
                     // Index the tombstone version
-                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
+                    temporal_indexes.insert_edge_version(
                         *edge_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -819,6 +878,18 @@ impl WriteTransaction {
                 }
             }
         }
+
+        // Safety check: verify all pre-generated tombstone IDs were consumed
+        // This detects count mismatches in development builds
+        debug_assert!(
+            tombstone_ids.next().is_none(),
+            "Tombstone ID surplus: expected {} deletes, but iterator has remaining IDs",
+            num_deletes
+        );
+
+        // Explicitly drop locks before rebuilding adjacency to document lock release point
+        drop(historical);
+        drop(temporal_indexes);
 
         // Rebuild adjacency indexes once after all edge operations
         // This is much more efficient than rebuilding after each operation
@@ -1184,8 +1255,8 @@ mod tests {
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
         let current = Arc::new(CurrentStorage::new());
-        let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
@@ -1206,7 +1277,7 @@ mod tests {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: std::collections::HashSet::new(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
         };
 
         let tx = WriteTransaction::new(
@@ -1564,7 +1635,7 @@ mod tests {
         assert!(current.get_node(node_id).is_err());
 
         // Verify tombstone version was created in historical storage
-        let historical = historical.lock().unwrap();
+        let historical = historical.read().unwrap();
         let stats = historical.stats();
         assert!(
             stats.total_node_versions > 0,
@@ -1604,7 +1675,7 @@ mod tests {
         assert!(current.get_edge(edge_id).is_err());
 
         // Verify tombstone version was created in historical storage
-        let historical = historical.lock().unwrap();
+        let historical = historical.read().unwrap();
         let stats = historical.stats();
         assert!(
             stats.total_edge_versions > 0,
@@ -1683,8 +1754,8 @@ mod tests {
     #[test]
     fn test_interleaved_create_update_delete_operations() {
         let current = Arc::new(CurrentStorage::new());
-        let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
@@ -1707,7 +1778,7 @@ mod tests {
         // Create initial transaction to set up nodes and one edge
         let snapshot1 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: std::collections::HashSet::new(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
         };
         let mut tx1 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1739,7 +1810,7 @@ mod tests {
         // Create second transaction with interleaved operations
         let snapshot2 = TransactionSnapshot {
             snapshot_timestamp: time::now(),
-            active_transactions: std::collections::HashSet::new(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
         };
         let mut tx2 = WriteTransaction::new(
             tx_id_gen.next(),
@@ -1793,6 +1864,72 @@ mod tests {
         assert_eq!(current.out_degree(node1), 2); // KNOWS and LIKES
         assert_eq!(current.out_degree(node2), 1); // FOLLOWS
         assert_eq!(current.in_degree(node3), 2); // receives FOLLOWS and LIKES
+    }
+
+    /// Test that tombstone ID pre-generation matches actual delete operations.
+    ///
+    /// This test verifies the critical invariant that the number of IDs generated
+    /// matches the number of delete operations, preventing iterator exhaustion.
+    #[test]
+    fn test_tombstone_id_count_matches_deletes() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create initial nodes and edges in current storage
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props.clone()).unwrap();
+        let node3 = current.create_node("Person", props.clone()).unwrap();
+        let node4 = current.create_node("Person", props.clone()).unwrap();
+
+        let edge1 = current
+            .create_edge(node1, node2, "KNOWS", props.clone())
+            .unwrap();
+        let edge2 = current
+            .create_edge(node2, node3, "KNOWS", props.clone())
+            .unwrap();
+        let edge3 = current
+            .create_edge(node3, node4, "KNOWS", props.clone())
+            .unwrap();
+
+        // Create a transaction with mixed operations:
+        // - Some creates
+        // - Some updates
+        // - MULTIPLE deletes (both nodes and edges)
+        let node5 = tx.create_node("Person", props.clone()).unwrap();
+        tx.create_edge(node1, node5, "FOLLOWS", props.clone())
+            .unwrap();
+
+        tx.update_node(
+            node4,
+            PropertyMapBuilder::new().insert("age", 30i64).build(),
+        )
+        .unwrap();
+
+        // Delete operations: 2 nodes + 2 edges = 4 tombstones needed
+        tx.delete_node(node3).unwrap(); // This will also require tombstone for node
+        tx.delete_node(node4).unwrap(); // This will also require tombstone for node
+        tx.delete_edge(edge1).unwrap(); // Tombstone for edge
+        tx.delete_edge(edge2).unwrap(); // Tombstone for edge
+
+        // Commit should succeed without panicking on iterator exhaustion
+        let result = tx.commit();
+        assert!(
+            result.is_ok(),
+            "Commit should succeed with correct tombstone ID count"
+        );
+
+        // Verify deletes were applied
+        assert!(current.get_node(node3).is_err());
+        assert!(current.get_node(node4).is_err());
+        assert!(current.get_edge(edge1).is_err());
+        assert!(current.get_edge(edge2).is_err());
+
+        // Verify non-deleted entities still exist
+        assert!(current.get_node(node1).is_ok());
+        assert!(current.get_node(node2).is_ok());
+        assert!(current.get_node(node5).is_ok());
+        assert!(current.get_edge(edge3).is_ok());
     }
 
     #[test]
@@ -1853,8 +1990,8 @@ mod conflict_detection_tests {
     /// transactions for testing write-write conflict detection.
     struct TestHarness {
         current: Arc<CurrentStorage>,
-        historical: Arc<Mutex<HistoricalStorage>>,
-        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -1869,8 +2006,8 @@ mod conflict_detection_tests {
         /// Create a new test harness with all shared infrastructure.
         fn new() -> Self {
             let current = Arc::new(CurrentStorage::new());
-            let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-            let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
@@ -1906,7 +2043,7 @@ mod conflict_detection_tests {
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
-                active_transactions: std::collections::HashSet::new(),
+                active_transactions: Arc::new(std::collections::HashSet::new()),
             };
 
             WriteTransaction::new(
@@ -2296,8 +2433,8 @@ mod timestamp_ordering_tests {
     /// Test harness for timestamp ordering tests.
     struct TestHarness {
         current: Arc<CurrentStorage>,
-        historical: Arc<Mutex<HistoricalStorage>>,
-        temporal_indexes: Arc<Mutex<TemporalIndexes>>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -2311,8 +2448,8 @@ mod timestamp_ordering_tests {
     impl TestHarness {
         fn new() -> Self {
             let current = Arc::new(CurrentStorage::new());
-            let historical = Arc::new(Mutex::new(HistoricalStorage::new()));
-            let temporal_indexes = Arc::new(Mutex::new(TemporalIndexes::new()));
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
 
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
@@ -2347,7 +2484,7 @@ mod timestamp_ordering_tests {
         fn create_tx(&self) -> WriteTransaction {
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: *self.current_timestamp.lock().unwrap(),
-                active_transactions: std::collections::HashSet::new(),
+                active_transactions: Arc::new(std::collections::HashSet::new()),
             };
 
             WriteTransaction::new(

@@ -4135,4 +4135,66 @@ mod proptests {
             }
         }
     }
+
+    // ========== New Error Handling Tests for Coverage ==========
+
+    #[test]
+    fn test_validate_vector_nan_rejection() {
+        let vector_with_nan = vec![1.0, 2.0, f32::NAN, 4.0];
+
+        let result = validate_vector(&vector_with_nan);
+
+        assert!(result.is_err());
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::ContainsNaN {
+                    count: 1
+                })
+            ),
+            "Expected ContainsNaN error with count=1"
+        );
+    }
+
+    #[test]
+    fn test_validate_vector_infinity_rejection() {
+        let vector_with_inf = vec![1.0, 2.0, f32::INFINITY, 4.0];
+
+        let result = validate_vector(&vector_with_inf);
+
+        assert!(
+            result.is_err(),
+            "validate_vector should reject infinity values"
+        );
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Vector(
+                    crate::utils::error::VectorError::ContainsInfinity { count: 1 }
+                )
+            ),
+            "Expected ContainsInfinity error with count=1"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_magnitude_handling() {
+        let zero_vector = vec![0.0, 0.0, 0.0];
+        let normal_vector = vec![1.0, 2.0, 3.0];
+
+        // The implementation returns 0.0 for zero magnitude vectors.
+        let result = cosine_similarity(&zero_vector, &normal_vector);
+
+        match result {
+            Ok(sim) => {
+                assert_eq!(sim, 0.0, "Cosine similarity with zero vector should be 0.0");
+            }
+            Err(e) => {
+                panic!(
+                    "Expected Ok(0.0) for zero magnitude vector, but got Err: {}",
+                    e
+                );
+            }
+        }
+    }
 }

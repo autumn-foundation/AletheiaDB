@@ -5,6 +5,8 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::{GallifreyDB, PropertyMapBuilder, ReadOps, WriteOps};
+use std::sync::Arc;
+use std::thread;
 
 fn bench_read_transaction_creation(c: &mut Criterion) {
     let db = GallifreyDB::new();
@@ -399,12 +401,14 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
 /// Benchmark concurrent read operations during adjacency rebuild.
 /// This tests the impact of rebuild on read performance.
 fn bench_read_during_rebuild(c: &mut Criterion) {
-    // Pre-populate a database with 10K edges
+    // Pre-populate a database with 4K nodes + 4K edges
+    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // src/api/transaction/write_buffer.rs for DoS protection
     let db = GallifreyDB::new();
     let node_ids: Vec<_> = db
         .write(|tx| {
             let mut nodes = Vec::new();
-            for i in 0..10000 {
+            for i in 0..4000 {
                 let node = tx.create_node(
                     "Node",
                     PropertyMapBuilder::new().insert("id", i as i64).build(),
@@ -412,7 +416,7 @@ fn bench_read_during_rebuild(c: &mut Criterion) {
                 nodes.push(node);
             }
 
-            for i in 0..9999 {
+            for i in 0..3999 {
                 tx.create_edge(
                     nodes[i],
                     nodes[i + 1],
@@ -435,6 +439,313 @@ fn bench_read_during_rebuild(c: &mut Criterion) {
     });
 }
 
+/// Benchmark concurrent read operations to measure visibility check performance.
+///
+/// This benchmark demonstrates the RwLock optimization in TxVisibilityManager (issue #222).
+/// Every read operation (get_node, get_edge) performs a visibility check, which previously
+/// used a Mutex causing read contention. With RwLock, concurrent readers can proceed
+/// without serialization.
+///
+/// Performance target from CLAUDE.md: <1µs single-hop traversal includes visibility checks.
+fn bench_concurrent_visibility_checks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_visibility");
+
+    // Pre-populate database with committed data (500 nodes)
+    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // src/api/transaction/write_buffer.rs for DoS protection
+    let db = Arc::new(GallifreyDB::new());
+    let node_ids: Vec<_> = db
+        .write(|tx| {
+            let mut nodes = Vec::new();
+            for i in 0..500 {
+                let node = tx.create_node(
+                    "Node",
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                )?;
+                nodes.push(node);
+            }
+            Ok(nodes)
+        })
+        .unwrap();
+
+    // Benchmark with different thread counts to show scalability
+    for thread_count in [1, 2, 4, 8] {
+        group.bench_function(format!("{}_threads", thread_count), |b| {
+            b.iter(|| {
+                let handles: Vec<_> = (0..thread_count)
+                    .map(|_| {
+                        let db_clone = Arc::clone(&db);
+                        let nodes = node_ids.clone();
+                        thread::spawn(move || {
+                            // Each thread performs 100 read operations
+                            // Each read triggers a visibility check via is_visible()
+                            for node_id in nodes.iter().take(100) {
+                                let _ = db_clone.get_node(black_box(*node_id));
+                            }
+                        })
+                    })
+                    .collect();
+
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark single-threaded visibility check performance (baseline).
+fn bench_sequential_visibility_checks(c: &mut Criterion) {
+    let db = GallifreyDB::new();
+
+    // Pre-populate with 500 nodes
+    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // src/api/transaction/write_buffer.rs for DoS protection
+    let node_ids: Vec<_> = db
+        .write(|tx| {
+            let mut nodes = Vec::new();
+            for i in 0..500 {
+                let node = tx.create_node(
+                    "Node",
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                )?;
+                nodes.push(node);
+            }
+            Ok(nodes)
+        })
+        .unwrap();
+
+    c.bench_function("sequential_get_node_500", |b| {
+        b.iter(|| {
+            // Sequential reads - each triggers visibility check
+            for node_id in &node_ids {
+                let _ = db.get_node(black_box(*node_id));
+            }
+        });
+    });
+}
+
+/// Benchmark concurrent transaction creation with many active transactions.
+///
+/// This benchmark measures the overhead of `capture_snapshot` when there are many
+/// active transactions. Issue #221 identified that cloning the HashSet of active
+/// transactions creates O(N²) scaling: with N concurrent transactions, each new
+/// transaction clones a HashSet containing N elements.
+///
+/// This benchmark simulates the worst-case scenario where many long-running
+/// transactions are active while new transactions are being created.
+fn bench_concurrent_transaction_creation_with_active_txs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_tx_creation");
+
+    // Test with different numbers of concurrent active transactions
+    for active_count in [10, 50, 100] {
+        group.bench_function(format!("{}_active_txs", active_count), |b| {
+            b.iter_batched(
+                || {
+                    // Setup: create DB and start many active write transactions
+                    let db = Arc::new(GallifreyDB::new());
+                    let mut active_txs = Vec::new();
+
+                    for _ in 0..active_count {
+                        let tx = db.write_transaction().unwrap();
+                        active_txs.push(tx);
+                    }
+
+                    (db, active_txs)
+                },
+                |(db, _active_txs)| {
+                    // Measure: create new transactions while others are active
+                    // Each creation calls capture_snapshot which clones active tx set
+                    for _ in 0..10 {
+                        let _tx = db.write_transaction().unwrap();
+                    }
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark apply_changes with large transactions to measure lock consolidation impact.
+///
+/// This benchmark measures commit latency for transactions of varying sizes to verify
+/// the performance improvements from Issue #223 (lock consolidation in apply_changes).
+///
+/// Tests transaction sizes of 10, 100, and 1000 operations with different operation mixes:
+/// - Mixed operations (creates, updates, deletes)
+/// - Create-heavy (mostly creates)
+/// - Delete-heavy (tests tombstone ID pre-generation optimization)
+fn bench_apply_changes_large_tx(c: &mut Criterion) {
+    let mut group = c.benchmark_group("apply_changes_large_tx");
+
+    // Test different transaction sizes
+    for size in [10, 100, 1000] {
+        // Mixed operations: creates, updates, deletes
+        group.bench_function(format!("mixed_{}_ops", size), |b| {
+            b.iter_batched(
+                || {
+                    // Setup: create DB with some existing data for updates/deletes
+                    let db = GallifreyDB::new();
+                    let (nodes, edges) = db
+                        .write(|tx| {
+                            let mut nodes = Vec::new();
+                            let mut edges = Vec::new();
+
+                            // Create nodes for later updates/deletes
+                            for i in 0..size {
+                                let node = tx.create_node(
+                                    "Person",
+                                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                                )?;
+                                nodes.push(node);
+                            }
+
+                            // Create edges for later deletes
+                            for i in 0..(size / 2) {
+                                let edge = tx.create_edge(
+                                    nodes[i],
+                                    nodes[i + 1],
+                                    "KNOWS",
+                                    PropertyMapBuilder::new().build(),
+                                )?;
+                                edges.push(edge);
+                            }
+
+                            Ok((nodes, edges))
+                        })
+                        .unwrap();
+
+                    (db, nodes, edges)
+                },
+                |(db, nodes, edges)| {
+                    // Measure: mixed transaction with creates, updates, deletes
+                    db.write(|tx| {
+                        let ops_per_type = size / 4;
+
+                        // 25% creates
+                        for i in 0..ops_per_type {
+                            tx.create_node(
+                                "NewPerson",
+                                PropertyMapBuilder::new()
+                                    .insert("id", (i + 10000) as i64)
+                                    .build(),
+                            )?;
+                        }
+
+                        // 25% updates
+                        for (i, &node_id) in nodes.iter().enumerate().take(ops_per_type) {
+                            tx.update_node(
+                                node_id,
+                                PropertyMapBuilder::new()
+                                    .insert("updated", true)
+                                    .insert("age", (i + 20) as i64)
+                                    .build(),
+                            )?;
+                        }
+
+                        // 25% node deletes (tests tombstone ID generation)
+                        for i in 0..ops_per_type.min(nodes.len() / 2) {
+                            tx.delete_node(nodes[nodes.len() - 1 - i])?;
+                        }
+
+                        // 25% edge deletes (tests tombstone ID generation)
+                        for &edge_id in edges.iter().take(ops_per_type) {
+                            tx.delete_edge(edge_id)?;
+                        }
+
+                        Ok(())
+                    })
+                    .unwrap();
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+
+        // Create-heavy workload
+        group.bench_function(format!("creates_{}_ops", size), |b| {
+            b.iter(|| {
+                let db = GallifreyDB::new();
+                db.write(|tx| {
+                    for i in 0..size {
+                        tx.create_node(
+                            "Person",
+                            PropertyMapBuilder::new()
+                                .insert("id", i as i64)
+                                .insert("name", format!("Person{}", i))
+                                .build(),
+                        )?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            });
+        });
+
+        // Delete-heavy workload (tests tombstone ID pre-generation optimization)
+        group.bench_function(format!("deletes_{}_ops", size), |b| {
+            b.iter_batched(
+                || {
+                    // Setup: create DB with nodes and edges to delete
+                    let db = GallifreyDB::new();
+                    let (nodes, edges) = db
+                        .write(|tx| {
+                            let mut nodes = Vec::new();
+                            let mut edges = Vec::new();
+
+                            for i in 0..size {
+                                let node = tx.create_node(
+                                    "Person",
+                                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                                )?;
+                                nodes.push(node);
+                            }
+
+                            for i in 0..(size - 1) {
+                                let edge = tx.create_edge(
+                                    nodes[i],
+                                    nodes[i + 1],
+                                    "KNOWS",
+                                    PropertyMapBuilder::new().build(),
+                                )?;
+                                edges.push(edge);
+                            }
+
+                            Ok((nodes, edges))
+                        })
+                        .unwrap();
+
+                    (db, nodes, edges)
+                },
+                |(db, nodes, edges)| {
+                    // Measure: delete all nodes and edges
+                    // This heavily tests the tombstone ID pre-generation optimization
+                    db.write(|tx| {
+                        // Delete edges first (to avoid referential integrity issues)
+                        for edge in edges {
+                            tx.delete_edge(edge)?;
+                        }
+
+                        // Delete nodes
+                        for node in nodes {
+                            tx.delete_node(node)?;
+                        }
+
+                        Ok(())
+                    })
+                    .unwrap();
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_read_transaction_creation,
@@ -451,6 +762,10 @@ criterion_group!(
     bench_batch_edge_deletions,
     bench_batch_insertions_with_prepopulated_graph,
     bench_read_during_rebuild,
+    bench_concurrent_visibility_checks,
+    bench_sequential_visibility_checks,
+    bench_concurrent_transaction_creation_with_active_txs,
+    bench_apply_changes_large_tx,
 );
 
 criterion_main!(benches);

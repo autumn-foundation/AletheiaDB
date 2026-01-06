@@ -6,23 +6,32 @@
 
 use crate::api::transaction::types::TxId;
 use crate::core::temporal::Timestamp;
-use crate::utils::lock::MutexExt;
+use crate::utils::lock::{MutexExt, RwLockExt};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Snapshot of transaction visibility at a point in time.
 ///
 /// A snapshot captures the set of transactions that were active when the
 /// snapshot was taken. This is used to determine which versions are visible
 /// to a transaction using Snapshot Isolation.
+///
+/// # Performance (Issue #221)
+///
+/// Uses `Arc<HashSet<TxId>>` instead of `HashSet<TxId>` to avoid O(N²) cloning
+/// overhead when capturing snapshots. With N concurrent transactions, cloning
+/// a HashSet containing N elements on every transaction creation was creating
+/// quadratic scaling. Arc allows cheap snapshot captures (just Arc clone).
 #[derive(Debug, Clone)]
 pub struct TransactionSnapshot {
     /// Timestamp when snapshot was taken
     pub snapshot_timestamp: Timestamp,
 
     /// Transactions that were active when snapshot was taken
-    /// (not yet committed or aborted)
-    pub active_transactions: HashSet<TxId>,
+    /// (not yet committed or aborted).
+    ///
+    /// Wrapped in Arc to enable efficient snapshot capture without full HashSet cloning.
+    pub active_transactions: Arc<HashSet<TxId>>,
 }
 
 impl TransactionSnapshot {
@@ -66,53 +75,62 @@ impl TransactionSnapshot {
 ///
 /// # Lock Recovery Safety
 ///
-/// This struct uses `lock_or_recover()` for all lock acquisitions. This is safe
-/// because the protected data structures (`HashSet<TxId>` and `BTreeMap<TxId, Timestamp>`)
-/// have no complex invariants that could be violated by a mid-operation panic:
+/// This struct uses `lock_or_recover()`, `read_or_recover()`, and `write_or_recover()`
+/// for all lock acquisitions. This is safe because the protected data structures
+/// (`HashSet<TxId>` and `BTreeMap<TxId, Timestamp>`) have no complex invariants that
+/// could be violated by a mid-operation panic:
 ///
 /// - **Worst case**: A transaction ID may be missing from the active/committed sets
 /// - **Behavior**: This fails safe by being conservative (treating as uncommitted/not visible)
 /// - **No corruption**: Standard library collections remain valid after partial operations
+///
+/// # Concurrency
+///
+/// The `committed` map uses an `RwLock` instead of `Mutex` to allow concurrent readers.
+/// This eliminates read contention in `is_visible()`, which is called during every
+/// read operation (get_node, get_edge). Multiple transactions can check visibility
+/// simultaneously, while commits still acquire exclusive write access.
+///
+/// # Performance Optimization (Issue #221)
+///
+/// The `active` set uses Arc-wrapping with copy-on-write semantics to avoid O(N²)
+/// cloning overhead in `capture_snapshot`. Previously, with N concurrent transactions,
+/// each new transaction would clone a HashSet of N elements. Now we only clone the
+/// Arc (cheap pointer copy) and use copy-on-write for mutations.
 pub struct TxVisibilityManager {
-    /// Currently active transactions
-    active: Mutex<HashSet<TxId>>,
+    /// Currently active transactions, wrapped in Arc for efficient snapshot capture.
+    ///
+    /// Uses copy-on-write: mutations create a new HashSet, update it, and replace the Arc.
+    /// Snapshots just clone the Arc (cheap), avoiding full HashSet clones.
+    active: Mutex<Arc<HashSet<TxId>>>,
 
     /// Committed transactions: TxId → commit_timestamp
-    committed: Mutex<BTreeMap<TxId, Timestamp>>,
-
-    /// Active snapshots: TxId → snapshot_timestamp
-    /// Tracked to determine safe cleanup threshold (watermark)
-    active_snapshots: Mutex<BTreeMap<TxId, Timestamp>>,
-
-    /// Counter for triggering periodic cleanup
-    commit_counter: std::sync::atomic::AtomicUsize,
-
-    /// How often to trigger cleanup (every N commits)
-    cleanup_interval: usize,
+    ///
+    /// # Memory Characteristics
+    ///
+    /// This map grows with the total number of committed transactions (~24 bytes per entry).
+    /// For temporal databases supporting historical queries, this is expected behavior.
+    ///
+    /// **Memory estimates:**
+    /// - 1M transactions: ~24MB
+    /// - 10M transactions: ~240MB
+    /// - 100M transactions: ~2.4GB
+    ///
+    /// This metadata is essential for MVCC snapshot isolation and cannot be safely
+    /// removed without breaking visibility semantics (see issue #226 discussion).
+    ///
+    /// **Future optimizations** (tracked in separate issues):
+    /// - Epoch-based compression for 10-100x memory savings
+    /// - Embedding timestamps in versions (architectural refactor)
+    committed: RwLock<BTreeMap<TxId, Timestamp>>,
 }
 
 impl TxVisibilityManager {
-    /// Create a new visibility manager with default cleanup interval.
+    /// Create a new visibility manager.
     pub fn new() -> Self {
-        Self::with_cleanup_interval(1000)
-    }
-
-    /// Create a new visibility manager with custom cleanup interval.
-    ///
-    /// # Arguments
-    /// * `interval` - Number of commits between cleanup operations
-    ///
-    /// # Note
-    /// A smaller interval means more frequent cleanup (less memory usage, more CPU).
-    /// A larger interval means less frequent cleanup (more memory usage, less CPU).
-    /// Default is 1000 commits.
-    pub fn with_cleanup_interval(interval: usize) -> Self {
         TxVisibilityManager {
-            active: Mutex::new(HashSet::new()),
-            committed: Mutex::new(BTreeMap::new()),
-            active_snapshots: Mutex::new(BTreeMap::new()),
-            commit_counter: std::sync::atomic::AtomicUsize::new(0),
-            cleanup_interval: interval,
+            active: Mutex::new(Arc::new(HashSet::new())),
+            committed: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -123,13 +141,22 @@ impl TxVisibilityManager {
     /// # Arguments
     /// * `tx_id` - The ID of the transaction being started
     ///
+    /// # Implementation (Copy-on-Write)
+    ///
+    /// Uses copy-on-write to modify the active set: clones the HashSet, modifies it,
+    /// and replaces the Arc. This ensures that existing snapshots remain valid while
+    /// allowing efficient snapshot capture (just Arc clone, not HashSet clone).
+    ///
     /// # Note
     ///
     /// Uses lock recovery to prevent cascade panics if the lock was poisoned
     /// by a panicking thread. The transaction set can safely be used after recovery.
     pub fn register_active(&self, tx_id: TxId) {
-        let mut active = self.active.lock_or_recover();
-        active.insert(tx_id);
+        let mut active_guard = self.active.lock_or_recover();
+
+        // Use Arc::make_mut for idiomatic copy-on-write.
+        // This avoids a clone if the Arc is not shared (only one strong reference).
+        Arc::make_mut(&mut *active_guard).insert(tx_id);
     }
 
     /// Capture a snapshot for a transaction.
@@ -138,30 +165,23 @@ impl TxVisibilityManager {
     /// This snapshot will be used to determine visibility of versions
     /// throughout the transaction's lifetime.
     ///
-    /// The snapshot is also registered for watermark tracking, which enables
-    /// cleanup of old committed transaction records.
-    ///
     /// # Arguments
     /// * `snapshot_timestamp` - The timestamp for this snapshot
-    /// * `tx_id` - The ID of the transaction taking this snapshot
     ///
     /// # Returns
     /// A `TransactionSnapshot` capturing the current visibility state
-    pub fn capture_snapshot(
-        &self,
-        snapshot_timestamp: Timestamp,
-        tx_id: TxId,
-    ) -> TransactionSnapshot {
-        let active = self.active.lock_or_recover();
-
-        // Register snapshot for watermark tracking
-        let mut active_snapshots = self.active_snapshots.lock_or_recover();
-        active_snapshots.insert(tx_id, snapshot_timestamp);
-        drop(active_snapshots); // Release lock early
+    ///
+    /// # Performance (Issue #221 Fix)
+    ///
+    /// Previously cloned the entire HashSet of active transactions, creating O(N²)
+    /// overhead with N concurrent transactions. Now clones only the Arc (cheap pointer
+    /// copy), reducing snapshot capture from O(N) to O(1).
+    pub fn capture_snapshot(&self, snapshot_timestamp: Timestamp) -> TransactionSnapshot {
+        let active_guard = self.active.lock_or_recover();
 
         TransactionSnapshot {
             snapshot_timestamp,
-            active_transactions: active.clone(),
+            active_transactions: Arc::clone(&active_guard),
         }
     }
 
@@ -171,96 +191,44 @@ impl TxVisibilityManager {
     /// It removes the transaction from the active set and records its
     /// commit timestamp.
     ///
-    /// This method also unregisters the transaction's snapshot and may
-    /// trigger periodic cleanup of old committed records.
-    ///
     /// # Arguments
     /// * `tx_id` - The ID of the committing transaction
     /// * `commit_timestamp` - When the transaction committed
+    ///
+    /// # Implementation (Copy-on-Write)
+    ///
+    /// Uses copy-on-write to remove from active set: clones HashSet, removes tx_id,
+    /// wraps in new Arc. This ensures existing snapshots remain valid.
     pub fn register_commit(&self, tx_id: TxId, commit_timestamp: Timestamp) {
-        let mut active = self.active.lock_or_recover();
-        active.remove(&tx_id);
+        // Drop active lock before acquiring committed write lock to reduce contention
+        {
+            let mut active_guard = self.active.lock_or_recover();
 
-        let mut committed = self.committed.lock_or_recover();
+            // Use Arc::make_mut for idiomatic copy-on-write.
+            Arc::make_mut(&mut *active_guard).remove(&tx_id);
+        } // active lock released here
+
+        let mut committed = self.committed.write_or_recover();
         committed.insert(tx_id, commit_timestamp);
-        drop(committed);
-        drop(active);
-
-        // Unregister snapshot
-        let mut active_snapshots = self.active_snapshots.lock_or_recover();
-        active_snapshots.remove(&tx_id);
-        drop(active_snapshots);
-
-        // Periodic cleanup trigger
-        let count = self
-            .commit_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count.is_multiple_of(self.cleanup_interval) {
-            self.cleanup_old_committed();
-        }
     }
 
     /// Register a transaction abort.
     ///
     /// This should be called when a transaction aborts (rolls back).
-    /// It removes the transaction from the active set and unregisters
-    /// its snapshot.
+    /// It removes the transaction from the active set.
     ///
     /// # Arguments
     /// * `tx_id` - The ID of the aborting transaction
+    ///
+    /// # Implementation (Copy-on-Write)
+    ///
+    /// Uses copy-on-write to remove from active set: clones HashSet, removes tx_id,
+    /// wraps in new Arc. This ensures existing snapshots remain valid.
     pub fn register_abort(&self, tx_id: TxId) {
-        let mut active = self.active.lock_or_recover();
-        active.remove(&tx_id);
-        drop(active);
+        let mut active_guard = self.active.lock_or_recover();
 
-        // Unregister snapshot
-        let mut active_snapshots = self.active_snapshots.lock_or_recover();
-        active_snapshots.remove(&tx_id);
-    }
-
-    /// Clean up old committed transaction records no longer needed.
-    ///
-    /// Removes committed transactions whose commit timestamps are older
-    /// than the oldest active snapshot. This is safe because:
-    /// 1. Visibility rule: commit_ts < snapshot_ts
-    /// 2. If commit_ts < min(all snapshots), no active snapshot can reference it
-    /// 3. Future snapshots will have even higher timestamps
-    ///
-    /// # Returns
-    /// The number of records removed
-    ///
-    /// # Implementation Note
-    /// This method is automatically called periodically by `register_commit`
-    /// based on the cleanup interval. Manual calls are also safe and will
-    /// return 0 if no cleanup is possible.
-    pub fn cleanup_old_committed(&self) -> usize {
-        // Find watermark: minimum snapshot timestamp
-        let watermark = {
-            let active_snapshots = self.active_snapshots.lock_or_recover();
-
-            if active_snapshots.is_empty() {
-                // No active snapshots - can't safely cleanup
-                // (future snapshots might need these records)
-                return 0;
-            }
-
-            active_snapshots
-                .values()
-                .copied()
-                .min()
-                .expect("checked non-empty above")
-        };
-
-        // Remove old committed records
-        let mut committed = self.committed.lock_or_recover();
-        let original_count = committed.len();
-
-        // Retain only records that might be visible to active snapshots
-        // Keep if: commit_timestamp >= watermark
-        // (Because visibility check is: commit_ts < snapshot_ts)
-        committed.retain(|_tx_id, &mut commit_ts| commit_ts >= watermark);
-
-        original_count - committed.len()
+        // Use Arc::make_mut for idiomatic copy-on-write.
+        Arc::make_mut(&mut *active_guard).remove(&tx_id);
     }
 
     /// Check if a version is visible in a snapshot.
@@ -282,7 +250,7 @@ impl TxVisibilityManager {
         }
 
         // Check if transaction committed
-        let committed = self.committed.lock_or_recover();
+        let committed = self.committed.read_or_recover();
 
         match committed.get(&created_by_tx) {
             None => false, // Not committed - not visible
@@ -298,8 +266,8 @@ impl TxVisibilityManager {
     /// This is primarily useful for testing and monitoring.
     #[allow(dead_code)]
     pub fn active_count(&self) -> usize {
-        let active = self.active.lock_or_recover();
-        active.len()
+        let active_guard = self.active.lock_or_recover();
+        active_guard.len()
     }
 
     /// Get the number of committed transactions tracked.
@@ -307,34 +275,8 @@ impl TxVisibilityManager {
     /// This is primarily useful for testing and monitoring.
     #[allow(dead_code)]
     pub fn committed_count(&self) -> usize {
-        let committed = self.committed.lock_or_recover();
+        let committed = self.committed.read_or_recover();
         committed.len()
-    }
-
-    /// Get visibility manager statistics for monitoring.
-    ///
-    /// Returns a tuple of (active_count, committed_count, snapshot_count).
-    /// Useful for monitoring memory usage and cleanup effectiveness.
-    ///
-    /// # Returns
-    /// (active_count, committed_count, snapshot_count)
-    pub fn stats(&self) -> (usize, usize, usize) {
-        let active = self.active.lock_or_recover();
-        let committed = self.committed.lock_or_recover();
-        let snapshots = self.active_snapshots.lock_or_recover();
-        (active.len(), committed.len(), snapshots.len())
-    }
-
-    /// Get the current cleanup watermark (minimum active snapshot timestamp).
-    ///
-    /// The watermark represents the oldest snapshot timestamp currently active.
-    /// Committed records older than this watermark are candidates for cleanup.
-    ///
-    /// # Returns
-    /// `Some(timestamp)` if there are active snapshots, `None` otherwise
-    pub fn watermark(&self) -> Option<Timestamp> {
-        let snapshots = self.active_snapshots.lock_or_recover();
-        snapshots.values().copied().min()
     }
 }
 
@@ -352,7 +294,7 @@ mod tests {
     fn test_snapshot_visibility_committed_before() {
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100,
-            active_transactions: HashSet::new(),
+            active_transactions: Arc::new(HashSet::new()),
         };
 
         // Version committed before snapshot - visible
@@ -363,7 +305,7 @@ mod tests {
     fn test_snapshot_visibility_committed_after() {
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100,
-            active_transactions: HashSet::new(),
+            active_transactions: Arc::new(HashSet::new()),
         };
 
         // Version committed after snapshot - not visible
@@ -374,7 +316,7 @@ mod tests {
     fn test_snapshot_visibility_uncommitted() {
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100,
-            active_transactions: HashSet::new(),
+            active_transactions: Arc::new(HashSet::new()),
         };
 
         // Uncommitted version - not visible
@@ -388,7 +330,7 @@ mod tests {
 
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100,
-            active_transactions: active,
+            active_transactions: Arc::new(active),
         };
 
         // Version from active transaction - not visible even if committed before snapshot
@@ -417,7 +359,7 @@ mod tests {
         manager.register_active(TxId::new(1));
         manager.register_active(TxId::new(2));
 
-        let snapshot = manager.capture_snapshot(100, TxId::new(999));
+        let snapshot = manager.capture_snapshot(100);
 
         assert_eq!(snapshot.snapshot_timestamp, 100);
         assert_eq!(snapshot.active_transactions.len(), 2);
@@ -461,7 +403,7 @@ mod tests {
         manager.register_commit(TxId::new(1), 50);
 
         // Take snapshot after commit
-        let snapshot = manager.capture_snapshot(100, TxId::new(999));
+        let snapshot = manager.capture_snapshot(100);
 
         // Version from tx1 should be visible
         assert!(manager.is_visible(&snapshot, TxId::new(1)));
@@ -474,7 +416,7 @@ mod tests {
         // Start transaction 1 but don't commit
         manager.register_active(TxId::new(1));
 
-        let snapshot = manager.capture_snapshot(100, TxId::new(999));
+        let snapshot = manager.capture_snapshot(100);
 
         // Version from uncommitted tx1 should not be visible
         assert!(!manager.is_visible(&snapshot, TxId::new(1)));
@@ -488,7 +430,7 @@ mod tests {
         manager.register_active(TxId::new(1));
 
         // Take snapshot (tx1 is active)
-        let snapshot = manager.capture_snapshot(100, TxId::new(999));
+        let snapshot = manager.capture_snapshot(100);
 
         // Commit tx1 after snapshot
         manager.register_commit(TxId::new(1), 90);
@@ -506,7 +448,7 @@ mod tests {
         manager.register_active(TxId::new(1));
 
         // Snapshot 1 - sees tx1 as active
-        let snapshot1 = manager.capture_snapshot(100, TxId::new(998));
+        let snapshot1 = manager.capture_snapshot(100);
         assert_eq!(snapshot1.active_transactions.len(), 1);
 
         // Commit tx1, start tx2
@@ -514,7 +456,7 @@ mod tests {
         manager.register_active(TxId::new(2));
 
         // Snapshot 2 - sees tx2 as active, tx1 committed
-        let snapshot2 = manager.capture_snapshot(120, TxId::new(997));
+        let snapshot2 = manager.capture_snapshot(120);
         assert_eq!(snapshot2.active_transactions.len(), 1);
         assert!(snapshot2.active_transactions.contains(&TxId::new(2)));
 
@@ -524,126 +466,69 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_removes_old_entries() {
-        let manager = TxVisibilityManager::new();
-
-        // Commit transactions at various times
-        manager.register_active(TxId::new(1));
-        manager.register_commit(TxId::new(1), 50);
-
-        manager.register_active(TxId::new(2));
-        manager.register_commit(TxId::new(2), 100);
-
-        manager.register_active(TxId::new(3));
-        manager.register_commit(TxId::new(3), 150);
-
-        manager.register_active(TxId::new(4));
-        manager.register_commit(TxId::new(4), 200);
-
-        assert_eq!(manager.committed_count(), 4);
-
-        // Create snapshot at timestamp 150 (watermark)
-        manager.register_active(TxId::new(10));
-        manager.capture_snapshot(150, TxId::new(10));
-
-        // Cleanup - should remove entries with commit_ts < 150 (tx1, tx2)
-        let removed = manager.cleanup_old_committed();
-        assert_eq!(removed, 2);
-        assert_eq!(manager.committed_count(), 2);
-    }
-
-    #[test]
-    fn test_no_cleanup_without_snapshots() {
-        let manager = TxVisibilityManager::new();
-
-        manager.register_active(TxId::new(1));
-        manager.register_commit(TxId::new(1), 100);
-
-        manager.register_active(TxId::new(2));
-        manager.register_commit(TxId::new(2), 200);
-
-        // No snapshots - cleanup should remove nothing
-        let removed = manager.cleanup_old_committed();
-        assert_eq!(removed, 0);
-        assert_eq!(manager.committed_count(), 2);
-    }
-
-    #[test]
-    fn test_automatic_cleanup_trigger() {
-        // Use small interval for testing
-        let manager = TxVisibilityManager::with_cleanup_interval(10);
-
-        // Create base snapshot to establish watermark
-        manager.register_active(TxId::new(999));
-        manager.capture_snapshot(500, TxId::new(999));
-
-        // Commit transactions - cleanup triggers every 10
-        for i in 0..25 {
-            let tx_id = TxId::new(i);
-            manager.register_active(tx_id);
-            manager.capture_snapshot(100 + i as i64, tx_id);
-            manager.register_commit(tx_id, 100 + i as i64);
-        }
-
-        // Cleanup should have triggered, reducing committed count
-        let (_, committed, _) = manager.stats();
-        assert!(committed < 25);
-    }
-
-    #[test]
-    fn test_stats_method() {
+    fn test_count_methods() {
         let manager = TxVisibilityManager::new();
 
         // Initially empty
-        let (active, committed, snapshots) = manager.stats();
-        assert_eq!(active, 0);
-        assert_eq!(committed, 0);
-        assert_eq!(snapshots, 0);
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.committed_count(), 0);
 
-        // Add active transaction with snapshot
+        // Add active transactions
         manager.register_active(TxId::new(1));
-        manager.capture_snapshot(100, TxId::new(1));
-
-        let (active, committed, snapshots) = manager.stats();
-        assert_eq!(active, 1);
-        assert_eq!(committed, 0);
-        assert_eq!(snapshots, 1);
-
-        // Commit another transaction (with timestamp >= watermark to avoid cleanup)
         manager.register_active(TxId::new(2));
-        manager.capture_snapshot(110, TxId::new(2));
-        manager.register_commit(TxId::new(2), 150); // >= watermark (100)
+        assert_eq!(manager.active_count(), 2);
+        assert_eq!(manager.committed_count(), 0);
 
-        let (active, committed, snapshots) = manager.stats();
-        assert_eq!(active, 1); // tx1 still active
-        assert_eq!(committed, 1); // tx2 committed
-        assert_eq!(snapshots, 1); // tx1 snapshot still active, tx2 snapshot unregistered
+        // Commit one
+        manager.register_commit(TxId::new(1), 100);
+        assert_eq!(manager.active_count(), 1);
+        assert_eq!(manager.committed_count(), 1);
+
+        // Abort the other
+        manager.register_abort(TxId::new(2));
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.committed_count(), 1);
     }
 
     #[test]
-    fn test_watermark_calculation() {
-        let manager = TxVisibilityManager::new();
+    fn test_concurrent_visibility_checks() {
+        use std::sync::Arc;
+        use std::thread;
 
-        // No snapshots - no watermark
-        assert_eq!(manager.watermark(), None);
+        let manager = Arc::new(TxVisibilityManager::new());
 
-        // Add snapshots at different times
-        manager.register_active(TxId::new(1));
-        manager.capture_snapshot(100, TxId::new(1));
+        // Setup: commit several transactions
+        for i in 1..=10 {
+            manager.register_active(TxId::new(i));
+            manager.register_commit(TxId::new(i), (i * 10) as i64);
+        }
 
-        manager.register_active(TxId::new(2));
-        manager.capture_snapshot(200, TxId::new(2));
+        // Take snapshot after all commits (timestamp 100 is the last commit)
+        let snapshot = manager.capture_snapshot(101);
 
-        manager.register_active(TxId::new(3));
-        manager.capture_snapshot(50, TxId::new(3));
+        // Spawn multiple threads doing concurrent visibility checks
+        // This test demonstrates that RwLock allows concurrent readers
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let mgr = Arc::clone(&manager);
+                let snap = snapshot.clone();
+                thread::spawn(move || {
+                    // Each thread performs many visibility checks
+                    for _ in 0..1000 {
+                        let tx_id = TxId::new((i % 10) + 1);
+                        // All these transactions were committed before snapshot time
+                        assert!(mgr.is_visible(&snap, tx_id));
+                    }
+                })
+            })
+            .collect();
 
-        // Watermark should be minimum (50)
-        assert_eq!(manager.watermark(), Some(50));
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
 
-        // Remove minimum snapshot
-        manager.register_abort(TxId::new(3));
-
-        // Watermark should now be 100
-        assert_eq!(manager.watermark(), Some(100));
+        // Verify the manager is still in a valid state
+        assert_eq!(manager.committed_count(), 10);
     }
 }
