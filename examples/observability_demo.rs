@@ -79,12 +79,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         alice_id,
         bob_id,
         "KNOWS",
-        PropertyMapBuilder::new()
-            .insert("since", 2020)
-            .build(),
+        PropertyMapBuilder::new().insert("since", 2020).build(),
     )?;
 
-    println!("✓ Created nodes: Alice ({:?}), Bob ({:?})", alice_id, bob_id);
+    println!(
+        "✓ Created nodes: Alice ({:?}), Bob ({:?})",
+        alice_id, bob_id
+    );
     println!("✓ Created edge: KNOWS ({:?})", edge_id);
 
     // Demonstrate transactions (these are instrumented)

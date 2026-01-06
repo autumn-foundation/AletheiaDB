@@ -50,7 +50,7 @@
 pub mod metrics;
 
 // Re-export key types
-pub use metrics::{Metrics, MetricsSnapshot, METRICS};
+pub use metrics::{METRICS, Metrics, MetricsSnapshot};
 
 use std::sync::Once;
 
@@ -164,7 +164,7 @@ pub fn init(config: Config) {
 /// - Uses a compact format suitable for production
 #[cfg(feature = "observability")]
 fn init_tracing_subscriber() {
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
 
     // Create subscriber with env filter
     let subscriber = fmt()

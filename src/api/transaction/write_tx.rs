@@ -125,7 +125,8 @@ impl WriteTransaction {
         let _span = tracing::info_span!(
             "transaction_commit",
             tx_id = %self.tx_id
-        ).entered();
+        )
+        .entered();
 
         #[cfg(feature = "observability")]
         let commit_start = std::time::Instant::now();
@@ -225,11 +226,14 @@ impl WriteTransaction {
                 let flush_completed = std::time::Instant::now();
 
                 // Record detailed breakdown for Honeycomb
-                let ts_lock_wait_us = ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
-                let wal_lock_wait_us = wal_lock_acquired.duration_since(wal_lock_start).as_micros() as u64;
+                let ts_lock_wait_us =
+                    ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
+                let wal_lock_wait_us =
+                    wal_lock_acquired.duration_since(wal_lock_start).as_micros() as u64;
                 let wal_log_us = wal_logged.duration_since(wal_lock_acquired).as_micros() as u64;
                 let wal_flush_us = flush_completed.duration_since(wal_logged).as_micros() as u64;
-                let total_locked_us = flush_completed.duration_since(ts_lock_start).as_micros() as u64;
+                let total_locked_us =
+                    flush_completed.duration_since(ts_lock_start).as_micros() as u64;
 
                 // Calculate total commit duration for Honeycomb queries
                 let total_commit_us = commit_start.elapsed().as_micros() as u64;

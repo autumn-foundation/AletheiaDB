@@ -149,7 +149,7 @@ impl<T> RwLockExt<T> for RwLock<T> {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             StorageError::LockPoisoned {
-                lock_type: "RwLock"
+                lock_type: "RwLock",
             }
             .into()
         })

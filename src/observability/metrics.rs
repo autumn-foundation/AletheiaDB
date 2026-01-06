@@ -309,9 +309,7 @@ mod tests {
         metrics.reset();
 
         // Timestamp violation is critical
-        metrics
-            .timestamp_violations
-            .fetch_add(1, Ordering::Relaxed);
+        metrics.timestamp_violations.fetch_add(1, Ordering::Relaxed);
         assert!(metrics.snapshot().has_critical_errors());
 
         metrics.reset();
