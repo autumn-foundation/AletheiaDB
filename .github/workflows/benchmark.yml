@@ -62,9 +62,15 @@ jobs:
       - name: Run all benchmarks once
         run: |
           echo "Running all benchmarks..."
-          # Run once and capture both formats
+          # Run once - Criterion generates JSON files AND outputs bencher format
           cargo bench --all-features -- --output-format bencher | tee all_benchmarks.txt
-          # Criterion JSON output is automatically saved to target/criterion/
+
+      - name: Verify Criterion output
+        run: |
+          echo "Checking for Criterion output..."
+          ls -la target/ || echo "No target dir"
+          ls -la target/criterion/ || echo "No criterion dir"
+          find target/criterion -name "estimates.json" | head -5 || echo "No estimates.json files found"
 
       - name: Store historical benchmark results
         uses: benchmark-action/github-action-benchmark@v1
