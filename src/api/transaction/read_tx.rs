@@ -124,6 +124,26 @@ impl ReadTransaction {
         }
     }
 
+    /// Filter a list of edge IDs to only include those visible in our snapshot.
+    ///
+    /// This prevents phantom reads by checking each edge's visibility.
+    /// Edges that don't exist or aren't visible are filtered out.
+    fn filter_visible_edges(&self, edge_ids: Vec<EdgeId>) -> Vec<EdgeId> {
+        edge_ids
+            .into_iter()
+            .filter(|&edge_id| {
+                // Check if edge is visible in our snapshot
+                if let Ok(edge) = self.current.get_edge(edge_id) {
+                    self.visibility_manager
+                        .is_visible(&self.snapshot, edge.metadata.created_by_tx)
+                } else {
+                    // Edge doesn't exist or was deleted - not visible
+                    false
+                }
+            })
+            .collect()
+    }
+
     /// Query historical storage for an edge version visible at snapshot time.
     ///
     /// This is the slow path used when the current version is not visible
@@ -217,15 +237,22 @@ impl ReadOps for ReadTransaction {
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        self.current.get_outgoing_edges(node_id)
+        // Filter edges to only return those visible in our snapshot
+        // This prevents phantom reads where we see edges created after our snapshot
+        let edge_ids = self.current.get_outgoing_edges(node_id);
+        self.filter_visible_edges(edge_ids)
     }
 
     fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
-        self.current.get_incoming_edges(node_id)
+        // Filter edges to only return those visible in our snapshot
+        let edge_ids = self.current.get_incoming_edges(node_id);
+        self.filter_visible_edges(edge_ids)
     }
 
     fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
-        self.current.get_outgoing_edges_with_label(node_id, label)
+        // Filter edges to only return those visible in our snapshot
+        let edge_ids = self.current.get_outgoing_edges_with_label(node_id, label);
+        self.filter_visible_edges(edge_ids)
     }
 
     fn node_count(&self) -> usize {
