@@ -401,7 +401,9 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
 /// Benchmark concurrent read operations during adjacency rebuild.
 /// This tests the impact of rebuild on read performance.
 fn bench_read_during_rebuild(c: &mut Criterion) {
-    // Pre-populate a database with 4K nodes + 4K edges (stay under 10K transaction limit)
+    // Pre-populate a database with 4K nodes + 4K edges
+    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // src/api/transaction/write_buffer.rs for DoS protection
     let db = GallifreyDB::new();
     let node_ids: Vec<_> = db
         .write(|tx| {
@@ -448,7 +450,9 @@ fn bench_read_during_rebuild(c: &mut Criterion) {
 fn bench_concurrent_visibility_checks(c: &mut Criterion) {
     let mut group = c.benchmark_group("concurrent_visibility");
 
-    // Pre-populate database with committed data (500 nodes to stay under transaction limit)
+    // Pre-populate database with committed data (500 nodes)
+    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // src/api/transaction/write_buffer.rs for DoS protection
     let db = Arc::new(GallifreyDB::new());
     let node_ids: Vec<_> = db
         .write(|tx| {
@@ -496,7 +500,9 @@ fn bench_concurrent_visibility_checks(c: &mut Criterion) {
 fn bench_sequential_visibility_checks(c: &mut Criterion) {
     let db = GallifreyDB::new();
 
-    // Pre-populate with 500 nodes (stay under transaction limit)
+    // Pre-populate with 500 nodes
+    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // src/api/transaction/write_buffer.rs for DoS protection
     let node_ids: Vec<_> = db
         .write(|tx| {
             let mut nodes = Vec::new();
