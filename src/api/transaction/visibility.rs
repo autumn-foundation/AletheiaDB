@@ -161,8 +161,11 @@ impl TxVisibilityManager {
     /// * `tx_id` - The ID of the committing transaction
     /// * `commit_timestamp` - When the transaction committed
     pub fn register_commit(&self, tx_id: TxId, commit_timestamp: Timestamp) {
-        let mut active = self.active.lock_or_recover();
-        active.remove(&tx_id);
+        // Drop active lock before acquiring committed write lock to reduce contention
+        {
+            let mut active = self.active.lock_or_recover();
+            active.remove(&tx_id);
+        } // active lock released here
 
         let mut committed = self.committed.write_or_recover();
         committed.insert(tx_id, commit_timestamp);
@@ -437,5 +440,47 @@ mod tests {
         manager.register_abort(TxId::new(2));
         assert_eq!(manager.active_count(), 0);
         assert_eq!(manager.committed_count(), 1);
+    }
+
+    #[test]
+    fn test_concurrent_visibility_checks() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let manager = Arc::new(TxVisibilityManager::new());
+
+        // Setup: commit several transactions
+        for i in 1..=10 {
+            manager.register_active(TxId::new(i));
+            manager.register_commit(TxId::new(i), (i * 10) as i64);
+        }
+
+        // Take snapshot after all commits (timestamp 100 is the last commit)
+        let snapshot = manager.capture_snapshot(101);
+
+        // Spawn multiple threads doing concurrent visibility checks
+        // This test demonstrates that RwLock allows concurrent readers
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let mgr = Arc::clone(&manager);
+                let snap = snapshot.clone();
+                thread::spawn(move || {
+                    // Each thread performs many visibility checks
+                    for _ in 0..1000 {
+                        let tx_id = TxId::new((i % 10) + 1);
+                        // All these transactions were committed before snapshot time
+                        assert!(mgr.is_visible(&snap, tx_id));
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify the manager is still in a valid state
+        assert_eq!(manager.committed_count(), 10);
     }
 }
