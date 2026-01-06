@@ -227,11 +227,7 @@ fn test_semantic_drift_with_multiple_snapshots() -> Result<()> {
             index.remove(node_id, ts)?;
         }
         let mut padded = vec![0.0f32; 128];
-        for (j, &val) in embedding.iter().enumerate() {
-            if j < 128 {
-                padded[j] = val;
-            }
-        }
+        padded[..embedding.len()].copy_from_slice(embedding);
         index.add(node_id, &padded, ts)?;
         index.on_transaction_at(ts)?;
         ts += 1000;

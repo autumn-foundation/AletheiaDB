@@ -1337,7 +1337,7 @@ impl TemporalVectorIndex {
         time_range: TimeRange,
         metric: DriftMetric,
     ) -> Result<Vec<(NodeId, f32)>> {
-        use std::collections::HashSet;
+        use std::collections::HashMap;
 
         // Validate threshold
         if threshold.is_nan() || threshold.is_infinite() {
@@ -1347,44 +1347,37 @@ impl TemporalVectorIndex {
             .into());
         }
 
-        // Collect all unique NodeIds that appear in the time range
-        let snapshot_data = self.snapshot_data.read();
-        let mut unique_nodes = HashSet::new();
+        // Single-pass algorithm: iterate through snapshots once
+        // Track last seen vector and maximum drift for each node
+        let mut last_vectors: HashMap<NodeId, Arc<[f32]>> = HashMap::new();
+        let mut max_drifts: HashMap<NodeId, f32> = HashMap::new();
 
-        for snapshot_vectors in snapshot_data
+        let snapshot_data = self.snapshot_data.read();
+
+        for (_timestamp, snapshot_vectors) in snapshot_data
             .vector_history
             .range(time_range.start()..=time_range.end())
-            .map(|(_, vectors)| vectors)
         {
-            for &node_id in snapshot_vectors.keys() {
-                unique_nodes.insert(node_id);
+            for (node_id, curr_vector) in snapshot_vectors.iter() {
+                if let Some(prev_vector) = last_vectors.get(node_id) {
+                    let drift = Self::compute_drift_distance(prev_vector, curr_vector, metric)?;
+                    let max_drift_entry = max_drifts.entry(*node_id).or_insert(0.0);
+                    *max_drift_entry = max_drift_entry.max(drift);
+                }
+                last_vectors.insert(*node_id, Arc::clone(curr_vector));
             }
         }
-
-        // Release the lock before processing
         drop(snapshot_data);
 
-        // Convert to Vec for iteration
-        let node_vec: Vec<NodeId> = unique_nodes.into_iter().collect();
-
-        // Calculate drift for each node
-        // TODO: Add parallel processing with rayon for large node counts (>1000)
-        let results: Vec<(NodeId, f32)> = node_vec
-            .iter()
-            .filter_map(|&node_id| {
-                self.calculate_max_drift(node_id, time_range, metric)
-                    .ok()
-                    .flatten()
-                    .map(|drift| (node_id, drift))
-            })
+        let mut results: Vec<(NodeId, f32)> = max_drifts
+            .into_iter()
             .filter(|(_, drift)| *drift > threshold)
             .collect();
 
         // Sort by drift descending (highest drift first)
-        let mut sorted_results = results;
-        sorted_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-        Ok(sorted_results)
+        Ok(results)
     }
 
     /// Calculates the maximum consecutive drift for a single node.
@@ -2324,8 +2317,6 @@ mod tests {
 
         let mut ts = 1000i64;
 
-        let mut ts = 1000i64;
-
         // Create nodes with known drift patterns
         // Node 1: No drift (identical vectors)
         let node1 = NodeId::new(1).unwrap();
@@ -2380,8 +2371,6 @@ mod tests {
             hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
-
-        let mut ts = 1000i64;
 
         let mut ts = 1000i64;
 
@@ -2512,7 +2501,6 @@ mod tests {
         let node1 = NodeId::new(1).unwrap();
         index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
-        std::thread::sleep(std::time::Duration::from_millis(10));
         ts += 1000;
         index.remove(node1, ts)?;
         index.add(node1, &[0.9, 0.1, 0.0, 0.0], ts)?;
@@ -2546,7 +2534,6 @@ mod tests {
         let node1 = NodeId::new(1).unwrap();
         index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
-        std::thread::sleep(std::time::Duration::from_millis(10));
         ts += 1000;
         index.remove(node1, ts)?;
         index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
@@ -2592,7 +2579,6 @@ mod tests {
         let node1 = NodeId::new(1).unwrap();
         index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
-        std::thread::sleep(std::time::Duration::from_millis(10));
         ts += 1000;
         index.remove(node1, ts)?;
         index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
