@@ -542,11 +542,12 @@ fn test_drift_calculation_with_normalized_vectors() -> Result<()> {
     // Should have 2 drift measurements
     assert_eq!(drift.len(), 2);
 
-    // Drift from v1 to v2 should be less than v2 to v3
-    // because v1->v2 is 45 degrees, v2->v3 is also 45 degrees
-    // Both should be similar
-    assert!(drift[0].1 > 0.0);
-    assert!(drift[1].1 > 0.0);
+    // Drift from v1 to v2 is a 45-degree rotation, and so is v2 to v3.
+    // Therefore, the drift values should be approximately equal.
+    // drift = 1.0 - cos(45deg) = 1.0 - 1/sqrt(2) ≈ 0.2929
+    let expected_drift = 1.0 - (1.0 / std::f32::consts::SQRT_2);
+    assert!((drift[0].1 - expected_drift).abs() < 1e-4);
+    assert!((drift[1].1 - expected_drift).abs() < 1e-4);
 
     Ok(())
 }
