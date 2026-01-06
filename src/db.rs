@@ -133,8 +133,6 @@ impl GallifreyDB {
     /// // No commit needed - transaction is read-only
     /// ```
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
-        #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("read_transaction").entered();
         let tx_id = self.tx_id_gen.next();
         let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
 
@@ -194,8 +192,6 @@ impl GallifreyDB {
     /// tx.commit()?;  // or tx.rollback()
     /// ```
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
-        #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("write_transaction").entered();
         let tx_id = self.tx_id_gen.next();
         let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
 
