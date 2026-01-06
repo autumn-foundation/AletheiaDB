@@ -66,129 +66,44 @@ committed.retain(|_, &mut commit_ts| commit_ts >= watermark);  // Keep if >= 100
 
 ---
 
-### Tier 2: Retention-Based Mode (Opt-In, Bounded History) ⚠️
+### Tier 2: Why Retention-Based Cleanup Doesn't Work ❌
 
-**For applications that don't need infinite history**, provide an opt-in retention mode:
+**Initial idea:** Provide opt-in retention mode with bounded memory.
+
+**Why this fails (discovered during analysis):**
+
+The "visibility paradox" makes this fundamentally broken:
 
 ```rust
-/// Retention configuration for transaction metadata.
-///
-/// WARNING: Enabling retention cleanup limits historical queries to the
-/// retention window. Time-travel queries beyond this window will fail.
-pub struct RetentionConfig {
-    /// Retention window in seconds
-    pub window_seconds: u64,
-
-    /// Cleanup interval (number of commits between cleanup runs)
-    pub cleanup_interval: usize,
-}
-
-impl TxVisibilityManager {
-    /// Create visibility manager with retention-based cleanup.
-    ///
-    /// # Warning
-    /// Queries attempting to read data older than the retention window
-    /// will fail with `VisibilityError::SnapshotTooOld`.
-    pub fn with_retention(config: RetentionConfig) -> Self {
-        // Enable cleanup with explicit retention window
+// BROKEN: Returns false for transactions that should be visible
+match committed.get(&created_by_tx) {
+    None => {
+        if snapshot.snapshot_timestamp < oldest_retained {
+            return Err(SnapshotTooOld);
+        }
+        // BUG: Returns false even though tx might be visible!
+        Ok(false)
     }
 }
 ```
 
-**Modified cleanup logic:**
-```rust
-pub fn cleanup_old_committed(&self) -> Result<usize, ()> {
-    // Only cleanup if retention is configured
-    let retention_window = match self.retention_config {
-        Some(ref cfg) => cfg.window_seconds,
-        None => return Ok(0), // No cleanup if retention not configured
-    };
+**Example failure:**
+1. `oldest_retained = 100`
+2. tx1 committed at t=50, was pruned
+3. Snapshot taken at t=120
+4. Query for tx1: `committed.get(tx1)` returns `None`
+5. Check: `120 < 100` = false, so proceed
+6. Return `Ok(false)` ❌ **WRONG!** Should be visible (50 < 120)
 
-    // Calculate cutoff: current_time - retention_window
-    let current_time = *self.current_timestamp.lock_or_err()?;
-    let cutoff_timestamp = current_time - (retention_window as i64);
+**The problem:** We can't distinguish "never committed" from "committed and pruned" without additional state.
 
-    // CRITICAL: Also check active snapshots watermark
-    // Must not remove transactions that active snapshots need
-    let watermark = {
-        let snapshots = self.active_snapshots.lock_or_recover();
-        if snapshots.is_empty() {
-            cutoff_timestamp
-        } else {
-            let min_active = snapshots.values().copied().min().unwrap();
-            // Use MINIMUM of cutoff and watermark (most conservative)
-            std::cmp::min(cutoff_timestamp, min_active)
-        }
-    };
+**Possible fixes all have issues:**
+- Track `pruned_before` watermark → False positives (phantom data)
+- Track individual pruned TxIds → Defeats memory savings
+- Assume all pruned are visible → False positives
+- Assume all pruned are invisible → False negatives (this proposal)
 
-    // Remove transactions that committed BEFORE watermark
-    // BUT: we must handle this in is_visible()!
-    let mut committed = self.committed.lock_or_recover();
-    let original_count = committed.len();
-
-    committed.retain(|_tx_id, &mut commit_ts| commit_ts >= watermark);
-
-    // Track what we've pruned
-    let removed = original_count - committed.len();
-    if removed > 0 {
-        self.oldest_retained_commit_ts.store(watermark, Ordering::Release);
-    }
-
-    Ok(removed)
-}
-```
-
-**Modified is_visible() to handle pruned transactions:**
-```rust
-pub fn is_visible(
-    &self,
-    snapshot: &TransactionSnapshot,
-    created_by_tx: TxId,
-) -> Result<bool, VisibilityError> {
-    if created_by_tx.as_u64() == 0 {
-        return Ok(true);
-    }
-
-    let committed = self.committed.lock_or_recover();
-
-    match committed.get(&created_by_tx) {
-        Some(&commit_ts) => {
-            // Have timestamp - apply normal visibility rules
-            Ok(snapshot.is_visible(created_by_tx, Some(commit_ts)))
-        }
-        None => {
-            // Transaction not in committed map
-
-            let oldest_retained = self.oldest_retained_commit_ts.load(Ordering::Acquire);
-
-            if oldest_retained == i64::MIN {
-                // No cleanup has occurred - transaction never committed
-                return Ok(false);
-            }
-
-            // Transaction might have been pruned
-            // Check if snapshot is within retention window
-
-            if snapshot.snapshot_timestamp < oldest_retained {
-                // Snapshot is querying data older than retention window
-                return Err(VisibilityError::SnapshotTooOld {
-                    snapshot_ts: snapshot.snapshot_timestamp,
-                    oldest_retained,
-                });
-            }
-
-            // Snapshot is within retention window, transaction not committed
-            Ok(false)
-        }
-    }
-}
-```
-
-**Trade-offs:**
-- ✅ Bounded memory: O(transactions_in_window) not O(all_transactions)
-- ✅ Explicit semantics: Fails with clear error when querying old data
-- ⚠️ Limits time-travel to retention window
-- ⚠️ Changes API signature (`Result` return type)
+**Conclusion:** Retention-based cleanup is incompatible with correctness. Use Tier 3 (compression) instead.
 
 ---
 
