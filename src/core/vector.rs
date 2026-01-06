@@ -4135,4 +4135,49 @@ mod proptests {
             }
         }
     }
+
+    // ========== New Error Handling Tests for Coverage ==========
+
+    #[test]
+    fn test_validate_vector_nan_rejection() {
+        let vector_with_nan = vec![1.0, 2.0, f32::NAN, 4.0];
+
+        let result = validate_vector(&vector_with_nan);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(err_str.contains("NaN") || err_str.contains("invalid"));
+    }
+
+    #[test]
+    fn test_validate_vector_infinity_rejection() {
+        let vector_with_inf = vec![1.0, 2.0, f32::INFINITY, 4.0];
+
+        let result = validate_vector(&vector_with_inf);
+
+        // Should reject vectors with infinity values
+        assert!(result.is_err(), "validate_vector should reject infinity values");
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_magnitude_handling() {
+        let zero_vector = vec![0.0, 0.0, 0.0];
+        let normal_vector = vec![1.0, 2.0, 3.0];
+
+        // Zero magnitude should result in error or special handling
+        let result = cosine_similarity(&zero_vector, &normal_vector);
+
+        // Either error (division by zero) or returns 0.0
+        match result {
+            Ok(sim) => {
+                // If implementation returns 0.0 for zero magnitude, that's acceptable
+                assert_eq!(sim, 0.0, "Cosine similarity with zero vector should be 0.0");
+            }
+            Err(e) => {
+                // If implementation errors on zero magnitude, that's also acceptable
+                assert!(e.to_string().contains("zero") || e.to_string().contains("magnitude"));
+            }
+        }
+    }
 }

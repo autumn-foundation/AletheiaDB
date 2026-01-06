@@ -609,4 +609,113 @@ mod tests {
         let new_str = interner.with_str(new_id, |s| s.to_string()).unwrap();
         assert_eq!(new_str, "after panic");
     }
+
+    // ========== New Concurrency & Error Handling Tests for Coverage ==========
+
+    #[test]
+    fn test_intern_capacity_exceeded_error() -> crate::utils::error::Result<()> {
+        let interner = StringInterner::with_max_capacity(10);
+
+        // Intern 10 strings - should all succeed
+        for i in 0..10 {
+            interner.intern(&format!("string_{}", i))?;
+        }
+
+        assert_eq!(interner.len(), 10);
+
+        // 11th string should fail with CapacityExceeded error
+        let result = interner.intern("overflow");
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::utils::error::Error::Storage(
+                    crate::utils::error::StorageError::CapacityExceeded { .. }
+                )
+            ),
+            "Expected CapacityExceeded error, got: {:?}",
+            err
+        );
+
+        // Should still have exactly 10 strings
+        assert_eq!(interner.len(), 10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_intern_concurrent_capacity_race() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let interner = Arc::new(StringInterner::with_max_capacity(100));
+        let barrier = Arc::new(Barrier::new(10));
+        let mut handles = vec![];
+
+        // Spawn 10 threads, each trying to intern 20 unique strings (200 total attempts)
+        for thread_id in 0..10 {
+            let interner = Arc::clone(&interner);
+            let barrier = Arc::clone(&barrier);
+
+            let handle = thread::spawn(move || {
+                barrier.wait(); // Synchronize all threads
+
+                let mut success_count = 0;
+                for i in 0..20 {
+                    let string = format!("thread_{}_string_{}", thread_id, i);
+                    if interner.intern(&string).is_ok() {
+                        success_count += 1;
+                    }
+                }
+                success_count
+            });
+            handles.push(handle);
+        }
+
+        // Collect results
+        let total_successes: usize = handles
+            .into_iter()
+            .map(|h: std::thread::JoinHandle<usize>| h.join().unwrap())
+            .sum();
+
+        // Exactly 100 successful interns is guaranteed by atomic operations:
+        // - fetch_add(1, Ordering::Relaxed) atomically reserves an ID
+        // - If ID >= max_capacity, intern() returns error and undoes reservation
+        // - This ensures exactly `max_capacity` successful interns, no more, no less
+        assert_eq!(total_successes, 100);
+        assert_eq!(interner.len(), 100);
+    }
+
+    #[test]
+    fn test_concurrent_intern_same_string_deduplication() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let interner = Arc::new(StringInterner::new());
+        let mut handles = vec![];
+
+        // 100 threads all trying to intern the same string "concurrent"
+        for _ in 0..100 {
+            let interner = Arc::clone(&interner);
+            let handle = thread::spawn(move || interner.intern("concurrent").unwrap());
+            handles.push(handle);
+        }
+
+        // Collect all IDs
+        let ids: Vec<_> = handles
+            .into_iter()
+            .map(|h: std::thread::JoinHandle<InternedString>| h.join().unwrap())
+            .collect();
+
+        // All IDs should be identical (deduplication)
+        let first_id = ids[0];
+        for id in &ids[1..] {
+            assert_eq!(*id, first_id);
+        }
+
+        // Should only have 1 unique string
+        assert_eq!(interner.len(), 1);
+    }
 }

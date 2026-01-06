@@ -322,3 +322,218 @@ impl From<EmbeddingError> for crate::utils::Error {
         crate::utils::Error::Other(format!("Embedding error: {}", e))
     }
 }
+
+#[cfg(all(test, feature = "embeddings"))]
+mod tests {
+    use super::*;
+
+    // Mock provider for testing trait default methods
+    struct MockProvider {
+        dimensions: usize,
+        name: String,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for MockProvider {
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            Ok(vec![0.0; self.dimensions])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_embedding_provider_default_embed_batch() {
+        let provider = MockProvider {
+            dimensions: 384,
+            name: "test-provider".to_string(),
+        };
+
+        let texts = vec!["hello", "world", "test"];
+        let results = provider.embed_batch(&texts).await.unwrap();
+
+        assert_eq!(results.len(), 3);
+        for embedding in results {
+            assert_eq!(embedding.len(), 384);
+        }
+    }
+
+    #[test]
+    fn test_embedding_provider_default_normalized_by_default() {
+        let provider = MockProvider {
+            dimensions: 384,
+            name: "test-provider".to_string(),
+        };
+
+        // Default should be false
+        assert!(!provider.normalized_by_default());
+    }
+
+    #[test]
+    fn test_embedding_provider_default_max_text_length() {
+        let provider = MockProvider {
+            dimensions: 384,
+            name: "test-provider".to_string(),
+        };
+
+        // Default should be None
+        assert!(provider.max_text_length().is_none());
+    }
+
+    #[test]
+    fn test_embedding_error_display_provider_error() {
+        let err = EmbeddingError::ProviderError {
+            provider: "OpenAI".to_string(),
+            message: "Invalid API key".to_string(),
+            status_code: Some(401),
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("OpenAI"));
+        assert!(display.contains("HTTP 401"));
+        assert!(display.contains("Invalid API key"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_provider_error_no_status() {
+        let err = EmbeddingError::ProviderError {
+            provider: "TestProvider".to_string(),
+            message: "Generic error".to_string(),
+            status_code: None,
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("TestProvider"));
+        assert!(display.contains("Generic error"));
+        assert!(!display.contains("HTTP"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_auth_failed() {
+        let err = EmbeddingError::AuthenticationFailed {
+            provider: "OpenAI".to_string(),
+            reason: "Missing API key".to_string(),
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("OpenAI authentication failed"));
+        assert!(display.contains("Missing API key"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_rate_limit() {
+        let err = EmbeddingError::RateLimitExceeded {
+            provider: "HuggingFace".to_string(),
+            retry_after: Some(std::time::Duration::from_secs(60)),
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("HuggingFace"));
+        assert!(display.contains("rate limit exceeded"));
+        assert!(display.contains("retry after"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_rate_limit_no_retry() {
+        let err = EmbeddingError::RateLimitExceeded {
+            provider: "TestProvider".to_string(),
+            retry_after: None,
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("TestProvider"));
+        assert!(display.contains("rate limit exceeded"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_text_too_long() {
+        let err = EmbeddingError::TextTooLong {
+            length: 10000,
+            max_length: 8000,
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("10000"));
+        assert!(display.contains("8000"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_dimension_mismatch() {
+        let err = EmbeddingError::DimensionMismatch {
+            expected: 384,
+            actual: 768,
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("384"));
+        assert!(display.contains("768"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_model_not_found() {
+        let err = EmbeddingError::ModelNotFound {
+            model: "gpt-4".to_string(),
+            provider: "OpenAI".to_string(),
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("gpt-4"));
+        assert!(display.contains("OpenAI"));
+        assert!(display.contains("not found"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_network_error() {
+        let err = EmbeddingError::NetworkError("Connection timeout".to_string());
+
+        let display = format!("{}", err);
+        assert!(display.contains("Network error"));
+        assert!(display.contains("Connection timeout"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_model_load_error() {
+        let err = EmbeddingError::ModelLoadError {
+            model: "bert-base".to_string(),
+            reason: "File not found".to_string(),
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("bert-base"));
+        assert!(display.contains("File not found"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_config_error() {
+        let err = EmbeddingError::ConfigError("Invalid dimension".to_string());
+
+        let display = format!("{}", err);
+        assert!(display.contains("Configuration error"));
+        assert!(display.contains("Invalid dimension"));
+    }
+
+    #[test]
+    fn test_embedding_error_display_other() {
+        let err = EmbeddingError::Other("Unknown error".to_string());
+
+        let display = format!("{}", err);
+        assert_eq!(display, "Unknown error");
+    }
+
+    #[test]
+    fn test_embedding_error_conversion_to_main_error() {
+        let emb_err = EmbeddingError::ConfigError("Test error".to_string());
+        let main_err: crate::utils::Error = emb_err.into();
+
+        let display = format!("{}", main_err);
+        assert!(display.contains("Embedding error"));
+        assert!(display.contains("Configuration error"));
+        assert!(display.contains("Test error"));
+    }
+}
