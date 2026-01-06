@@ -1624,4 +1624,295 @@ mod tests {
         assert_eq!(vec1[1], 1.0);
         assert_eq!(vec2[1], 1.0);
     }
+
+    // ============================================================
+    // Cache Tests
+    // ============================================================
+
+    #[test]
+    fn test_cache_hit_on_second_read() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+
+        storage
+            .add_node_version(node_id, version_id, temporal, label, props.clone())
+            .unwrap();
+
+        // First read - cache miss, populates cache
+        let result1 = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(result1.get("name").and_then(|v| v.as_str()), Some("Alice"));
+
+        // Check cache was populated
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 1);
+
+        // Second read - should hit cache
+        let result2 = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(result2.get("name").and_then(|v| v.as_str()), Some("Alice"));
+
+        // Cache size shouldn't change
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 1);
+    }
+
+    #[test]
+    fn test_cache_populates_delta_chain() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Create anchor + 3 deltas
+        let v1 = VersionId::new(1).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new().insert("value", 1i64).build(),
+            )
+            .unwrap();
+
+        let v2 = VersionId::new(2).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                PropertyMapBuilder::new().insert("value", 2i64).build(),
+            )
+            .unwrap();
+
+        let v3 = VersionId::new(3).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v3,
+                BiTemporalInterval::current(3000),
+                label,
+                PropertyMapBuilder::new().insert("value", 3i64).build(),
+            )
+            .unwrap();
+
+        let v4 = VersionId::new(4).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v4,
+                BiTemporalInterval::current(4000),
+                label,
+                PropertyMapBuilder::new().insert("value", 4i64).build(),
+            )
+            .unwrap();
+
+        // Reconstruct v4 (latest delta) - should populate entire chain
+        let result = storage.reconstruct_node_properties(v4).unwrap();
+        assert_eq!(result.get("value").and_then(|v| v.as_int()), Some(4));
+
+        // Cache should have all versions in the chain
+        let stats = storage.stats();
+        assert!(stats.node_cache_entries >= 4);
+    }
+
+    #[test]
+    fn test_cache_with_custom_size() {
+        let storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig::default(),
+            RetentionPolicy::default(),
+            100, // Small cache size
+        );
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 0);
+        assert_eq!(stats.edge_cache_entries, 0);
+    }
+
+    #[test]
+    fn test_edge_cache_functionality() {
+        let mut storage = HistoricalStorage::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(10).unwrap();
+        let target = NodeId::new(20).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
+
+        storage
+            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .unwrap();
+
+        // First read - cache miss
+        let result1 = storage.reconstruct_edge_properties(version_id).unwrap();
+        assert_eq!(result1.get("since").and_then(|v| v.as_int()), Some(2020));
+
+        // Check cache was populated
+        let stats = storage.stats();
+        assert_eq!(stats.edge_cache_entries, 1);
+
+        // Second read - should hit cache
+        let result2 = storage.reconstruct_edge_properties(version_id).unwrap();
+        assert_eq!(result2.get("since").and_then(|v| v.as_int()), Some(2020));
+
+        // Cache size shouldn't change
+        let stats = storage.stats();
+        assert_eq!(stats.edge_cache_entries, 1);
+    }
+
+    #[test]
+    fn test_cache_stats_accuracy() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+
+        // Create 5 node versions
+        for i in 0..5 {
+            let version_id = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal,
+                    label,
+                    PropertyMapBuilder::new().insert("value", i as i64).build(),
+                )
+                .unwrap();
+            // Reconstruct to populate cache
+            storage.reconstruct_node_properties(version_id).unwrap();
+        }
+
+        // Create 3 edge versions
+        for i in 0..3 {
+            let version_id = VersionId::new(100 + i).unwrap();
+            storage
+                .add_edge_version(
+                    edge_id,
+                    version_id,
+                    temporal,
+                    label,
+                    node_id,
+                    node_id,
+                    PropertyMapBuilder::new().insert("value", i as i64).build(),
+                )
+                .unwrap();
+            // Reconstruct to populate cache
+            storage.reconstruct_edge_properties(version_id).unwrap();
+        }
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 5);
+        assert_eq!(stats.edge_cache_entries, 3);
+    }
+
+    #[test]
+    fn test_cache_with_large_properties() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
+
+        // Create large property map with vector
+        let large_vector: Vec<f32> = (0..1536).map(|i| i as f32 / 1536.0).collect();
+        let props = PropertyMapBuilder::new()
+            .insert("title", "Large Document")
+            .insert_vector("embedding", &large_vector)
+            .insert("content", "x".repeat(10000).as_str())
+            .build();
+
+        storage
+            .add_node_version(
+                node_id,
+                version_id,
+                BiTemporalInterval::current(1000),
+                label,
+                props,
+            )
+            .unwrap();
+
+        // First read
+        let result1 = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(
+            result1
+                .get("embedding")
+                .and_then(|v| v.as_vector())
+                .map(|v| v.len()),
+            Some(1536)
+        );
+
+        // Second read should hit cache
+        let result2 = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(result1.get("title"), result2.get("title"));
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 1);
+    }
+
+    #[test]
+    fn test_extract_node_version_data() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new().insert("name", "Bob").build();
+
+        storage
+            .add_node_version(node_id, version_id, temporal, label, props)
+            .unwrap();
+
+        let (vid, nid, lbl, data) = storage.extract_node_version_data(version_id).unwrap();
+        assert_eq!(vid, version_id);
+        assert_eq!(nid, node_id);
+        assert_eq!(lbl, label);
+
+        // Verify data can be used for copy-out reconstruction
+        match data {
+            VersionData::Anchor { properties } => {
+                assert_eq!(properties.get("name").and_then(|v| v.as_str()), Some("Bob"));
+            }
+            _ => panic!("Expected anchor"),
+        }
+    }
+
+    #[test]
+    fn test_extract_edge_version_data() {
+        let mut storage = HistoricalStorage::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(10).unwrap();
+        let target = NodeId::new(20).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new().insert("since", 2021i64).build();
+
+        storage
+            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .unwrap();
+
+        let (vid, eid, lbl, src, tgt, data) =
+            storage.extract_edge_version_data(version_id).unwrap();
+        assert_eq!(vid, version_id);
+        assert_eq!(eid, edge_id);
+        assert_eq!(lbl, label);
+        assert_eq!(src, source);
+        assert_eq!(tgt, target);
+
+        // Verify data
+        match data {
+            VersionData::Anchor { properties } => {
+                assert_eq!(properties.get("since").and_then(|v| v.as_int()), Some(2021));
+            }
+            _ => panic!("Expected anchor"),
+        }
+    }
 }
