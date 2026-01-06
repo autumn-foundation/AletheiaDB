@@ -158,6 +158,22 @@ impl CurrentIndexes {
     ///   `insert_edge`/`remove_edge` that set the flag
     /// - Second check uses `Relaxed` because the lock acquisition provides
     ///   full synchronization guarantees (no additional ordering needed)
+    ///
+    /// # Race Window (Acceptable)
+    ///
+    /// There's a benign race where:
+    /// 1. Thread A checks dirty=false, begins exiting fast path
+    /// 2. Thread B inserts edge, sets dirty=true
+    /// 3. Thread A proceeds with potentially stale adjacency pointer
+    ///
+    /// This is **acceptable** because:
+    /// - Thread A's adjacency pointer was loaded atomically before the check
+    /// - ArcSwap ensures Thread A sees a consistent (though older) snapshot
+    /// - Next adjacency access will trigger rebuild (eventual consistency)
+    /// - No data corruption or crashes can occur
+    ///
+    /// This is a standard tradeoff in lock-free data structures: we prioritize
+    /// performance (avoiding locks on every read) over strict linearizability.
     #[inline]
     fn ensure_adjacency_current(&self) {
         // Fast path: adjacency is already current
@@ -563,7 +579,11 @@ mod tests {
         // Adjacency should be rebuilt lazily on first access
         // This tests that ensure_adjacency_current() works correctly
         let outgoing = indexes.get_outgoing(NodeId::new(0).unwrap());
-        assert_eq!(outgoing.len(), 2, "Lazy rebuild should make edges accessible");
+        assert_eq!(
+            outgoing.len(),
+            2,
+            "Lazy rebuild should make edges accessible"
+        );
 
         // Verify all adjacency data is correct
         assert_eq!(indexes.out_degree(NodeId::new(0).unwrap()), 2);
@@ -1039,7 +1059,11 @@ mod concurrency_tests {
         }
 
         // Verify final state: all edges should be accessible via adjacency
-        assert_eq!(indexes.edge_count(), 150, "Should have 150 edges (3 threads × 50 edges)");
+        assert_eq!(
+            indexes.edge_count(),
+            150,
+            "Should have 150 edges (3 threads × 50 edges)"
+        );
 
         // Verify adjacency is correct (may trigger final lazy rebuild)
         let mut total_out_degree = 0;
