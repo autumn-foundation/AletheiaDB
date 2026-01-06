@@ -59,11 +59,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run benchmarks (bencher format for historical tracking)
-        run: cargo bench --bench current_state -- --output-format bencher | tee current_state_output.txt
-
-      - name: Run benchmarks (bencher format for historical tracking)
-        run: cargo bench --bench gallifreydb -- --output-format bencher | tee gallifreydb_output.txt
+      - name: Run all benchmarks once
+        run: |
+          echo "Running all benchmarks..."
+          # Run once and capture both formats
+          cargo bench --all-features -- --output-format bencher | tee all_benchmarks.txt
+          # Criterion JSON output is automatically saved to target/criterion/
 
       - name: Store historical benchmark results
         uses: benchmark-action/github-action-benchmark@v1
@@ -71,7 +72,7 @@ jobs:
         with:
           name: GallifreyDB Benchmarks
           tool: 'cargo'
-          output-file-path: gallifreydb_output.txt
+          output-file-path: all_benchmarks.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
           # Show alert with commit comment on detecting possible performance regression
@@ -81,11 +82,6 @@ jobs:
           # Store in dev/bench for historical charts
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
-
-      - name: Run all benchmarks (for HTML tables)
-        run: |
-          echo "Running all benchmarks..."
-          cargo bench --all-features
 
       - name: Generate benchmark HTML tables
         run: |
@@ -162,57 +158,12 @@ jobs:
           echo "Running benchmarks for PR..."
           cargo bench --all-features
 
-      - name: Generate benchmark summary for PR
+      - name: Generate PR comment from benchmarks
         run: |
           python scripts/generate_benchmark_tables.py \
             --input target/criterion \
-            --output benchmark-results
-
-      - name: Create PR comment with results
-        run: |
-          echo "## 🚀 Benchmark Results" > benchmark_results.md
-          echo "" >> benchmark_results.md
-          echo "Benchmarks have been run for this PR. Key metrics:" >> benchmark_results.md
-          echo "" >> benchmark_results.md
-
-          # Extract some key benchmarks and format them nicely
-          echo "### Performance Summary" >> benchmark_results.md
-          echo "" >> benchmark_results.md
-          echo "| Benchmark | Mean | Std Dev |" >> benchmark_results.md
-          echo "|-----------|------|---------|" >> benchmark_results.md
-
-          # Parse a few key benchmarks from criterion output
-          for bench in "node_lookup" "single_hop" "3_hop_traversal"; do
-            if [ -f "target/criterion/${bench}/base/estimates.json" ]; then
-              python3 -c "
-import json
-import sys
-try:
-    with open('target/criterion/${bench}/base/estimates.json') as f:
-        data = json.load(f)
-    mean_ns = data['mean']['point_estimate']
-    std_ns = data['std_dev']['point_estimate']
-    if mean_ns < 1000:
-        mean_str = f'{mean_ns:.2f} ns'
-        std_str = f'{std_ns:.2f} ns'
-    elif mean_ns < 1000000:
-        mean_str = f'{mean_ns/1000:.2f} µs'
-        std_str = f'{std_ns/1000:.2f} µs'
-    else:
-        mean_str = f'{mean_ns/1000000:.2f} ms'
-        std_str = f'{std_ns/1000000:.2f} ms'
-    print(f'| ${bench} | {mean_str} | ± {std_str} |')
-except:
-    pass
-" >> benchmark_results.md || echo "| ${bench} | N/A | N/A |" >> benchmark_results.md
-            fi
-          done
-
-          echo "" >> benchmark_results.md
-          echo "---" >> benchmark_results.md
-          echo "*Full benchmark results available in workflow artifacts*" >> benchmark_results.md
-          echo "" >> benchmark_results.md
-          echo "📊 [View detailed results](https://madmax983.github.io/GallifreyDB/benchmarks/)" >> benchmark_results.md
+            --output benchmark_results.md \
+            --format pr-comment
 
           # Also output to step summary
           cat benchmark_results.md >> $GITHUB_STEP_SUMMARY

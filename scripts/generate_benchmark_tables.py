@@ -14,11 +14,10 @@ Usage:
 import argparse
 import json
 import os
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 from collections import defaultdict
 
 
@@ -76,7 +75,7 @@ def format_time(ns: float) -> tuple[float, str]:
         return ns / 1_000_000_000, "s"
 
 
-def collect_benchmark_results(criterion_dir: Path) -> Dict[str, List[BenchmarkResult]]:
+def collect_benchmark_results(criterion_dir: Path) -> dict[str, list[BenchmarkResult]]:
     """Collect all benchmark results from Criterion output directory."""
     results = defaultdict(list)
 
@@ -97,7 +96,7 @@ def collect_benchmark_results(criterion_dir: Path) -> Dict[str, List[BenchmarkRe
     return dict(results)
 
 
-def generate_html_table(suite_name: str, results: List[BenchmarkResult]) -> str:
+def generate_html_table(suite_name: str, results: list[BenchmarkResult]) -> str:
     """Generate an HTML table for a benchmark suite."""
     # Sort results by name
     results.sort(key=lambda r: r.name)
@@ -135,8 +134,33 @@ def generate_html_table(suite_name: str, results: List[BenchmarkResult]) -> str:
     return html
 
 
-def generate_index_page(all_results: Dict[str, List[BenchmarkResult]], output_dir: Path) -> None:
+def load_performance_targets() -> list[dict]:
+    """Load performance targets from JSON file."""
+    targets_path = Path(__file__).parent.parent / "benchmarks" / "performance-targets.json"
+    try:
+        with open(targets_path, 'r') as f:
+            data = json.load(f)
+            return data.get('targets', [])
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Warning: Could not load performance targets: {e}", file=sys.stderr)
+        return []
+
+
+def generate_index_page(all_results: dict[str, list[BenchmarkResult]], output_dir: Path) -> None:
     """Generate the main index page with all benchmark results."""
+
+    # Load performance targets
+    targets = load_performance_targets()
+    targets_html = ""
+    if targets:
+        targets_html = "<ul>\n"
+        for target in targets:
+            metric = target.get('metric', '')
+            goal = target.get('target', '')
+            targets_html += f"                <li>{metric}: {goal}</li>\n"
+        targets_html += "            </ul>"
+    else:
+        targets_html = "<p>Performance targets not available</p>"
 
     html = """<!DOCTYPE html>
 <html lang="en">
@@ -262,13 +286,7 @@ def generate_index_page(all_results: Dict[str, List[BenchmarkResult]], output_di
 
         <div class="performance-target">
             <h3>Performance Targets</h3>
-            <ul>
-                <li>Current-state single-hop traversal: &lt;1µs</li>
-                <li>Current-state 3-hop traversal: &lt;100µs</li>
-                <li>Time-travel reconstruction: &lt;10ms</li>
-                <li>Batch insertion throughput: &gt;100k edges/sec</li>
-                <li>Storage overhead: &lt;2X vs non-temporal</li>
-            </ul>
+            """ + targets_html + """
         </div>
 """
 
@@ -295,6 +313,45 @@ def generate_index_page(all_results: Dict[str, List[BenchmarkResult]], output_di
     print(f"Generated index page: {index_path}")
 
 
+def generate_pr_comment(all_results: dict[str, list[BenchmarkResult]], output_path: Path) -> None:
+    """Generate a markdown summary for PR comments."""
+    # Get top benchmarks from each suite
+    top_benchmarks = []
+    for suite_name, results in all_results.items():
+        # Sort by mean time and take top 3
+        sorted_results = sorted(results, key=lambda r: r.mean)[:3]
+        top_benchmarks.extend(sorted_results)
+
+    # Sort all top benchmarks and take top 10 overall
+    top_benchmarks = sorted(top_benchmarks, key=lambda r: r.mean)[:10]
+
+    md = """## 🚀 Benchmark Results
+
+Benchmarks have been run for this PR. Top performers:
+
+### Performance Summary
+
+| Benchmark | Mean | Std Dev |
+|-----------|------|---------|
+"""
+
+    for bench in top_benchmarks:
+        md += f"| {bench.name} | {bench.mean:.2f} {bench.unit} | ± {bench.std_dev:.2f} {bench.unit} |\n"
+
+    md += """
+---
+*Full benchmark results available in workflow artifacts*
+
+📊 [View detailed results](https://madmax983.github.io/GallifreyDB/benchmarks/)
+📈 [Historical trends](https://madmax983.github.io/GallifreyDB/dev/bench/)
+"""
+
+    with open(output_path, 'w') as f:
+        f.write(md)
+
+    print(f"Generated PR comment: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Generate HTML tables for benchmark results')
     parser.add_argument(
@@ -308,6 +365,13 @@ def main():
         type=Path,
         default=Path('benchmark-results'),
         help='Output directory for HTML tables (default: benchmark-results)'
+    )
+    parser.add_argument(
+        '--format',
+        type=str,
+        choices=['html', 'pr-comment'],
+        default='html',
+        help='Output format: html (default) or pr-comment (markdown for PR comments)'
     )
 
     args = parser.parse_args()
@@ -332,11 +396,17 @@ def main():
     for suite, results in all_results.items():
         print(f"  - {suite}: {len(results)} benchmarks")
 
-    # Generate HTML output
-    print(f"\nGenerating HTML tables in {args.output}...")
-    generate_index_page(all_results, args.output)
+    # Generate output based on format
+    if args.format == 'html':
+        print(f"\nGenerating HTML tables in {args.output}...")
+        generate_index_page(all_results, args.output)
+        print("\nDone! Open benchmark-results/index.html to view results")
+    elif args.format == 'pr-comment':
+        print(f"\nGenerating PR comment...")
+        output_file = args.output / 'pr_comment.md' if args.output.is_dir() else args.output
+        generate_pr_comment(all_results, output_file)
+        print(f"\nDone! PR comment written to {output_file}")
 
-    print("\nDone! Open benchmark-results/index.html to view results")
     return 0
 
 

@@ -95,7 +95,8 @@ GallifreyDB is designed for high performance with minimal temporal overhead. Vie
 | Current-state node lookup | <1µs | ~22ns ✅ |
 | Current-state edge traversal | <1µs | ~23ns ✅ |
 | 3-hop traversal | <100µs | ~20ns per hop ✅ |
-| Time-travel queries | <10ms | ~20ns ✅ |
+
+**Note**: Time-travel query benchmarks are being improved to measure realistic historical reconstruction scenarios.
 
 Benchmarks are automatically run on every push to trunk and published to GitHub Pages. See [docs/BENCHMARKING.md](docs/BENCHMARKING.md) for detailed benchmarking guide.
 
