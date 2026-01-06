@@ -8,21 +8,30 @@ use crate::api::transaction::types::TxId;
 use crate::core::temporal::Timestamp;
 use crate::utils::lock::{MutexExt, RwLockExt};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Snapshot of transaction visibility at a point in time.
 ///
 /// A snapshot captures the set of transactions that were active when the
 /// snapshot was taken. This is used to determine which versions are visible
 /// to a transaction using Snapshot Isolation.
+///
+/// # Performance (Issue #221)
+///
+/// Uses `Arc<HashSet<TxId>>` instead of `HashSet<TxId>` to avoid O(N²) cloning
+/// overhead when capturing snapshots. With N concurrent transactions, cloning
+/// a HashSet containing N elements on every transaction creation was creating
+/// quadratic scaling. Arc allows cheap snapshot captures (just Arc clone).
 #[derive(Debug, Clone)]
 pub struct TransactionSnapshot {
     /// Timestamp when snapshot was taken
     pub snapshot_timestamp: Timestamp,
 
     /// Transactions that were active when snapshot was taken
-    /// (not yet committed or aborted)
-    pub active_transactions: HashSet<TxId>,
+    /// (not yet committed or aborted).
+    ///
+    /// Wrapped in Arc to enable efficient snapshot capture without full HashSet cloning.
+    pub active_transactions: Arc<HashSet<TxId>>,
 }
 
 impl TransactionSnapshot {
@@ -81,9 +90,19 @@ impl TransactionSnapshot {
 /// This eliminates read contention in `is_visible()`, which is called during every
 /// read operation (get_node, get_edge). Multiple transactions can check visibility
 /// simultaneously, while commits still acquire exclusive write access.
+///
+/// # Performance Optimization (Issue #221)
+///
+/// The `active` set uses Arc-wrapping with copy-on-write semantics to avoid O(N²)
+/// cloning overhead in `capture_snapshot`. Previously, with N concurrent transactions,
+/// each new transaction would clone a HashSet of N elements. Now we only clone the
+/// Arc (cheap pointer copy) and use copy-on-write for mutations.
 pub struct TxVisibilityManager {
-    /// Currently active transactions
-    active: Mutex<HashSet<TxId>>,
+    /// Currently active transactions, wrapped in Arc for efficient snapshot capture.
+    ///
+    /// Uses copy-on-write: mutations create a new HashSet, update it, and replace the Arc.
+    /// Snapshots just clone the Arc (cheap), avoiding full HashSet clones.
+    active: Mutex<Arc<HashSet<TxId>>>,
 
     /// Committed transactions: TxId → commit_timestamp
     ///
@@ -110,7 +129,7 @@ impl TxVisibilityManager {
     /// Create a new visibility manager.
     pub fn new() -> Self {
         TxVisibilityManager {
-            active: Mutex::new(HashSet::new()),
+            active: Mutex::new(Arc::new(HashSet::new())),
             committed: RwLock::new(BTreeMap::new()),
         }
     }
@@ -122,13 +141,22 @@ impl TxVisibilityManager {
     /// # Arguments
     /// * `tx_id` - The ID of the transaction being started
     ///
+    /// # Implementation (Copy-on-Write)
+    ///
+    /// Uses copy-on-write to modify the active set: clones the HashSet, modifies it,
+    /// and replaces the Arc. This ensures that existing snapshots remain valid while
+    /// allowing efficient snapshot capture (just Arc clone, not HashSet clone).
+    ///
     /// # Note
     ///
     /// Uses lock recovery to prevent cascade panics if the lock was poisoned
     /// by a panicking thread. The transaction set can safely be used after recovery.
     pub fn register_active(&self, tx_id: TxId) {
-        let mut active = self.active.lock_or_recover();
-        active.insert(tx_id);
+        let mut active_guard = self.active.lock_or_recover();
+
+        // Use Arc::make_mut for idiomatic copy-on-write.
+        // This avoids a clone if the Arc is not shared (only one strong reference).
+        Arc::make_mut(&mut *active_guard).insert(tx_id);
     }
 
     /// Capture a snapshot for a transaction.
@@ -142,12 +170,18 @@ impl TxVisibilityManager {
     ///
     /// # Returns
     /// A `TransactionSnapshot` capturing the current visibility state
+    ///
+    /// # Performance (Issue #221 Fix)
+    ///
+    /// Previously cloned the entire HashSet of active transactions, creating O(N²)
+    /// overhead with N concurrent transactions. Now clones only the Arc (cheap pointer
+    /// copy), reducing snapshot capture from O(N) to O(1).
     pub fn capture_snapshot(&self, snapshot_timestamp: Timestamp) -> TransactionSnapshot {
-        let active = self.active.lock_or_recover();
+        let active_guard = self.active.lock_or_recover();
 
         TransactionSnapshot {
             snapshot_timestamp,
-            active_transactions: active.clone(),
+            active_transactions: Arc::clone(&active_guard),
         }
     }
 
@@ -160,11 +194,18 @@ impl TxVisibilityManager {
     /// # Arguments
     /// * `tx_id` - The ID of the committing transaction
     /// * `commit_timestamp` - When the transaction committed
+    ///
+    /// # Implementation (Copy-on-Write)
+    ///
+    /// Uses copy-on-write to remove from active set: clones HashSet, removes tx_id,
+    /// wraps in new Arc. This ensures existing snapshots remain valid.
     pub fn register_commit(&self, tx_id: TxId, commit_timestamp: Timestamp) {
         // Drop active lock before acquiring committed write lock to reduce contention
         {
-            let mut active = self.active.lock_or_recover();
-            active.remove(&tx_id);
+            let mut active_guard = self.active.lock_or_recover();
+
+            // Use Arc::make_mut for idiomatic copy-on-write.
+            Arc::make_mut(&mut *active_guard).remove(&tx_id);
         } // active lock released here
 
         let mut committed = self.committed.write_or_recover();
@@ -178,9 +219,16 @@ impl TxVisibilityManager {
     ///
     /// # Arguments
     /// * `tx_id` - The ID of the aborting transaction
+    ///
+    /// # Implementation (Copy-on-Write)
+    ///
+    /// Uses copy-on-write to remove from active set: clones HashSet, removes tx_id,
+    /// wraps in new Arc. This ensures existing snapshots remain valid.
     pub fn register_abort(&self, tx_id: TxId) {
-        let mut active = self.active.lock_or_recover();
-        active.remove(&tx_id);
+        let mut active_guard = self.active.lock_or_recover();
+
+        // Use Arc::make_mut for idiomatic copy-on-write.
+        Arc::make_mut(&mut *active_guard).remove(&tx_id);
     }
 
     /// Check if a version is visible in a snapshot.
@@ -218,8 +266,8 @@ impl TxVisibilityManager {
     /// This is primarily useful for testing and monitoring.
     #[allow(dead_code)]
     pub fn active_count(&self) -> usize {
-        let active = self.active.lock_or_recover();
-        active.len()
+        let active_guard = self.active.lock_or_recover();
+        active_guard.len()
     }
 
     /// Get the number of committed transactions tracked.
@@ -246,7 +294,7 @@ mod tests {
     fn test_snapshot_visibility_committed_before() {
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100,
-            active_transactions: HashSet::new(),
+            active_transactions: Arc::new(HashSet::new()),
         };
 
         // Version committed before snapshot - visible
@@ -257,7 +305,7 @@ mod tests {
     fn test_snapshot_visibility_committed_after() {
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100,
-            active_transactions: HashSet::new(),
+            active_transactions: Arc::new(HashSet::new()),
         };
 
         // Version committed after snapshot - not visible
@@ -268,7 +316,7 @@ mod tests {
     fn test_snapshot_visibility_uncommitted() {
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100,
-            active_transactions: HashSet::new(),
+            active_transactions: Arc::new(HashSet::new()),
         };
 
         // Uncommitted version - not visible
@@ -282,7 +330,7 @@ mod tests {
 
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: 100,
-            active_transactions: active,
+            active_transactions: Arc::new(active),
         };
 
         // Version from active transaction - not visible even if committed before snapshot
