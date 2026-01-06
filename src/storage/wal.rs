@@ -37,6 +37,16 @@ const WAL_VERSION_LEGACY: u8 = 1;
 /// Size of the WAL segment header (magic + version).
 const WAL_HEADER_SIZE: usize = 5;
 
+/// Size of entry components for checksum verification
+const LSN_SIZE: usize = 8;
+const TIMESTAMP_SIZE: usize = 8;
+const CHECKSUM_SIZE: usize = 4;
+#[cfg_attr(not(test), allow(dead_code))]
+const OP_TYPE_SIZE: usize = 1;
+
+/// Offset to checksum field within an entry (after LSN + timestamp)
+const CHECKSUM_OFFSET_IN_ENTRY: usize = LSN_SIZE + TIMESTAMP_SIZE;
+
 /// Log Sequence Number - monotonically increasing identifier for WAL entries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LSN(pub u64);
@@ -274,6 +284,45 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
             context, e
         )))
     })
+}
+
+/// Verify the integrity of a WAL entry by computing and comparing its checksum.
+///
+/// # Arguments
+/// * `buffer` - The complete buffer containing the WAL entry
+/// * `entry_start` - Offset where this entry starts in the buffer
+/// * `entry_end` - Offset where this entry ends (current offset after parsing)
+/// * `stored_checksum` - The checksum value read from the entry
+/// * `lsn` - The LSN of this entry (for error reporting)
+/// * `context` - Context string for error messages (e.g., "replay" or "migration")
+///
+/// # Returns
+/// * `Ok(())` if checksum is valid
+/// * `Err` if checksum mismatch detected
+#[inline]
+fn verify_entry_checksum(
+    buffer: &[u8],
+    entry_start: usize,
+    entry_end: usize,
+    stored_checksum: u32,
+    lsn: LSN,
+    context: &str,
+) -> Result<()> {
+    // Compute checksum over LSN + timestamp + operation data (excluding checksum field)
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&buffer[entry_start..entry_start + CHECKSUM_OFFSET_IN_ENTRY]); // LSN + timestamp
+    hasher.update(&buffer[entry_start + CHECKSUM_OFFSET_IN_ENTRY + CHECKSUM_SIZE..entry_end]); // Operation data
+    let computed_checksum = hasher.finalize();
+
+    if stored_checksum != computed_checksum {
+        return Err(StorageError::CorruptedData(format!(
+            "WAL checksum mismatch during {} at LSN {}: stored={:#x}, computed={:#x}",
+            context, lsn.0, stored_checksum, computed_checksum
+        ))
+        .into());
+    }
+
+    Ok(())
 }
 
 impl WriteAheadLog {
@@ -657,6 +706,9 @@ impl WriteAheadLog {
                 break;
             }
 
+            // Store the start of this entry for checksum verification
+            let entry_start = offset;
+
             // Read LSN (8 bytes)
             let lsn = LSN(u64::from_le_bytes([
                 buffer[offset],
@@ -684,7 +736,7 @@ impl WriteAheadLog {
             offset += 8;
 
             // Read checksum (4 bytes)
-            let checksum = u32::from_le_bytes([
+            let stored_checksum = u32::from_le_bytes([
                 buffer[offset],
                 buffer[offset + 1],
                 buffer[offset + 2],
@@ -971,13 +1023,16 @@ impl WriteAheadLog {
                 }
             };
 
+            // Verify checksum integrity
+            verify_entry_checksum(&buffer, entry_start, offset, stored_checksum, lsn, "replay")?;
+
             // Only include entries >= start_lsn
             if lsn >= start_lsn {
                 let entry = WalEntry {
                     lsn,
                     timestamp,
                     operation,
-                    checksum,
+                    checksum: stored_checksum,
                 };
                 entries.push(entry);
             }
@@ -1207,6 +1262,9 @@ fn parse_wal_entries_versioned(
             break;
         }
 
+        // Store the start of this entry for checksum verification
+        let entry_start = offset;
+
         // Read LSN (8 bytes)
         let lsn = LSN(u64::from_le_bytes([
             buffer[offset],
@@ -1234,7 +1292,7 @@ fn parse_wal_entries_versioned(
         offset += 8;
 
         // Read checksum (4 bytes)
-        let checksum = u32::from_le_bytes([
+        let stored_checksum = u32::from_le_bytes([
             buffer[offset],
             buffer[offset + 1],
             buffer[offset + 2],
@@ -1515,12 +1573,22 @@ fn parse_wal_entries_versioned(
             }
         };
 
+        // Verify checksum integrity
+        verify_entry_checksum(
+            buffer,
+            entry_start,
+            offset,
+            stored_checksum,
+            lsn,
+            "migration",
+        )?;
+
         if lsn >= start_lsn {
             entries.push(WalEntry {
                 lsn,
                 timestamp,
                 operation,
-                checksum,
+                checksum: stored_checksum,
             });
         }
     }
@@ -2219,6 +2287,278 @@ mod tests {
 
         // No migration needed for v2 segments
         assert_eq!(count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_replay_detects_checksum_corruption() -> Result<()> {
+        use std::io::{Read, Seek, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().to_path_buf();
+
+        // Create a WAL with some entries
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                sync_on_write: true,
+                ..Default::default()
+            };
+            let mut wal = WriteAheadLog::new(config)?;
+
+            wal.append(WalOperation::CreateNode {
+                node_id: NodeId::new(1).unwrap(),
+                label: "Person".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            })?;
+            wal.flush()?;
+        }
+
+        // Corrupt the checksum in the WAL file
+        let segment_path = wal_dir.join("000001.log");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&segment_path)
+                .unwrap();
+
+            // Read the entire file
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer).unwrap();
+
+            // Calculate checksum offset using constants
+            let checksum_offset = WAL_HEADER_SIZE + CHECKSUM_OFFSET_IN_ENTRY;
+            let min_required_size = checksum_offset + CHECKSUM_SIZE;
+
+            if buffer.len() > min_required_size {
+                // Corrupt the checksum by flipping bits
+                buffer[checksum_offset] ^= 0xFF;
+                buffer[checksum_offset + 1] ^= 0xFF;
+
+                // Write the corrupted data back
+                file.seek(std::io::SeekFrom::Start(0)).unwrap();
+                file.write_all(&buffer).unwrap();
+                file.sync_all().unwrap();
+            }
+        }
+
+        // Try to read the corrupted WAL - should fail with checksum error
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                ..Default::default()
+            };
+            let wal = WriteAheadLog::new(config)?;
+
+            let result = wal.read_from(LSN::initial());
+
+            // Should get a CorruptedData error about checksum mismatch
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                Error::Storage(StorageError::CorruptedData(msg)) => {
+                    assert!(
+                        msg.contains("checksum mismatch"),
+                        "Error message should mention checksum mismatch, but was: {}",
+                        msg
+                    );
+                }
+                err => panic!("Expected StorageError::CorruptedData, but got {:?}", err),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_replay_detects_data_corruption() -> Result<()> {
+        use std::io::{Read, Seek, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().to_path_buf();
+
+        // Create a WAL with an entry
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                sync_on_write: true,
+                ..Default::default()
+            };
+            let mut wal = WriteAheadLog::new(config)?;
+
+            wal.append(WalOperation::CreateNode {
+                node_id: NodeId::new(42).unwrap(),
+                label: "TestNode".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            })?;
+            wal.flush()?;
+        }
+
+        // Corrupt some data in the operation payload (not the checksum)
+        let segment_path = wal_dir.join("000001.log");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&segment_path)
+                .unwrap();
+
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer).unwrap();
+
+            // Calculate offset to operation data using constants
+            let payload_start =
+                WAL_HEADER_SIZE + LSN_SIZE + TIMESTAMP_SIZE + CHECKSUM_SIZE + OP_TYPE_SIZE;
+            let corruption_offset = payload_start + 4; // Corrupt inside the NodeId field
+
+            if buffer.len() > corruption_offset {
+                buffer[corruption_offset] ^= 0xFF; // Flip some bits in the operation data
+
+                file.seek(std::io::SeekFrom::Start(0)).unwrap();
+                file.write_all(&buffer).unwrap();
+                file.sync_all().unwrap();
+            }
+        }
+
+        // Try to read - should fail because checksum won't match the corrupted data
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                ..Default::default()
+            };
+            let wal = WriteAheadLog::new(config)?;
+
+            let result = wal.read_from(LSN::initial());
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                Error::Storage(StorageError::CorruptedData(msg)) => {
+                    assert!(
+                        msg.contains("checksum mismatch"),
+                        "Error message should mention checksum mismatch, but was: {}",
+                        msg
+                    );
+                }
+                err => panic!("Expected StorageError::CorruptedData, but got {:?}", err),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_replay_detects_corruption_in_middle_entry() -> Result<()> {
+        use std::io::{Read, Seek, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().to_path_buf();
+
+        // Create a WAL with THREE entries to test multi-entry checksum verification
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                sync_on_write: true,
+                segment_size: 1024 * 1024, // Large enough to hold all 3 entries
+                ..Default::default()
+            };
+            let mut wal = WriteAheadLog::new(config)?;
+
+            // Entry 1
+            wal.append(WalOperation::CreateNode {
+                node_id: NodeId::new(1).unwrap(),
+                label: "FirstNode".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            })?;
+
+            // Entry 2 (this will be corrupted)
+            wal.append(WalOperation::CreateNode {
+                node_id: NodeId::new(2).unwrap(),
+                label: "SecondNode".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            })?;
+
+            // Entry 3
+            wal.append(WalOperation::CreateNode {
+                node_id: NodeId::new(3).unwrap(),
+                label: "ThirdNode".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            })?;
+
+            wal.flush()?;
+        }
+
+        // Corrupt the SECOND entry (not first or last)
+        let segment_path = wal_dir.join("000001.log");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&segment_path)
+                .unwrap();
+
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer).unwrap();
+
+            // Find the second entry by skipping the first entry
+            // Each CreateNode entry has: LSN(8) + timestamp(8) + checksum(4) + op_type(1) + node_id(8) + label_len(4) + label + properties + temporal
+            // First entry starts at WAL_HEADER_SIZE (5)
+
+            // We'll corrupt a byte in the middle of the file, which should be in the second entry
+            // Calculate approximate position: header + (entry_size * 1.5)
+            let approx_entry_size = 60; // Rough estimate for our CreateNode entries
+            let corruption_offset = WAL_HEADER_SIZE + approx_entry_size + 20; // Middle of second entry
+
+            if buffer.len() > corruption_offset {
+                // Corrupt a byte in what should be the second entry
+                let original = buffer[corruption_offset];
+                buffer[corruption_offset] ^= 0xFF;
+
+                eprintln!(
+                    "Corrupted byte at offset {} (changed {:02x} to {:02x})",
+                    corruption_offset, original, buffer[corruption_offset]
+                );
+
+                file.seek(std::io::SeekFrom::Start(0)).unwrap();
+                file.write_all(&buffer).unwrap();
+                file.sync_all().unwrap();
+            }
+        }
+
+        // Try to read - should fail when it hits the corrupted second entry
+        {
+            let config = WalConfig {
+                wal_dir: wal_dir.clone(),
+                ..Default::default()
+            };
+            let wal = WriteAheadLog::new(config)?;
+
+            let result = wal.read_from(LSN::initial());
+
+            // Should fail with checksum error
+            assert!(
+                result.is_err(),
+                "Expected error when reading corrupted multi-entry WAL"
+            );
+            match result.unwrap_err() {
+                Error::Storage(StorageError::CorruptedData(msg)) => {
+                    assert!(
+                        msg.contains("checksum mismatch"),
+                        "Error message should mention checksum mismatch, but was: {}",
+                        msg
+                    );
+                    eprintln!(
+                        "✓ Successfully detected corruption in multi-entry segment: {}",
+                        msg
+                    );
+                }
+                err => panic!("Expected StorageError::CorruptedData, but got {:?}", err),
+            }
+        }
 
         Ok(())
     }
