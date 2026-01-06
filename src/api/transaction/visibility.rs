@@ -6,9 +6,9 @@
 
 use crate::api::transaction::types::TxId;
 use crate::core::temporal::Timestamp;
-use crate::utils::lock::MutexExt;
+use crate::utils::lock::{MutexExt, RwLockExt};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 /// Snapshot of transaction visibility at a point in time.
 ///
@@ -66,13 +66,21 @@ impl TransactionSnapshot {
 ///
 /// # Lock Recovery Safety
 ///
-/// This struct uses `lock_or_recover()` for all lock acquisitions. This is safe
-/// because the protected data structures (`HashSet<TxId>` and `BTreeMap<TxId, Timestamp>`)
-/// have no complex invariants that could be violated by a mid-operation panic:
+/// This struct uses `lock_or_recover()`, `read_or_recover()`, and `write_or_recover()`
+/// for all lock acquisitions. This is safe because the protected data structures
+/// (`HashSet<TxId>` and `BTreeMap<TxId, Timestamp>`) have no complex invariants that
+/// could be violated by a mid-operation panic:
 ///
 /// - **Worst case**: A transaction ID may be missing from the active/committed sets
 /// - **Behavior**: This fails safe by being conservative (treating as uncommitted/not visible)
 /// - **No corruption**: Standard library collections remain valid after partial operations
+///
+/// # Concurrency
+///
+/// The `committed` map uses an `RwLock` instead of `Mutex` to allow concurrent readers.
+/// This eliminates read contention in `is_visible()`, which is called during every
+/// read operation (get_node, get_edge). Multiple transactions can check visibility
+/// simultaneously, while commits still acquire exclusive write access.
 pub struct TxVisibilityManager {
     /// Currently active transactions
     active: Mutex<HashSet<TxId>>,
@@ -95,7 +103,7 @@ pub struct TxVisibilityManager {
     /// **Future optimizations** (tracked in separate issues):
     /// - Epoch-based compression for 10-100x memory savings
     /// - Embedding timestamps in versions (architectural refactor)
-    committed: Mutex<BTreeMap<TxId, Timestamp>>,
+    committed: RwLock<BTreeMap<TxId, Timestamp>>,
 }
 
 impl TxVisibilityManager {
@@ -103,7 +111,7 @@ impl TxVisibilityManager {
     pub fn new() -> Self {
         TxVisibilityManager {
             active: Mutex::new(HashSet::new()),
-            committed: Mutex::new(BTreeMap::new()),
+            committed: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -156,7 +164,7 @@ impl TxVisibilityManager {
         let mut active = self.active.lock_or_recover();
         active.remove(&tx_id);
 
-        let mut committed = self.committed.lock_or_recover();
+        let mut committed = self.committed.write_or_recover();
         committed.insert(tx_id, commit_timestamp);
     }
 
@@ -191,7 +199,7 @@ impl TxVisibilityManager {
         }
 
         // Check if transaction committed
-        let committed = self.committed.lock_or_recover();
+        let committed = self.committed.read_or_recover();
 
         match committed.get(&created_by_tx) {
             None => false, // Not committed - not visible
@@ -216,7 +224,7 @@ impl TxVisibilityManager {
     /// This is primarily useful for testing and monitoring.
     #[allow(dead_code)]
     pub fn committed_count(&self) -> usize {
-        let committed = self.committed.lock_or_recover();
+        let committed = self.committed.read_or_recover();
         committed.len()
     }
 }
