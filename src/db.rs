@@ -148,6 +148,7 @@ impl GallifreyDB {
             snapshot,
             Arc::clone(&self.current),
             Arc::clone(&self.visibility_manager),
+            Arc::clone(&self.historical),
         ))
     }
 
