@@ -8,6 +8,7 @@
 //! - Anchors are created every N versions (configurable)
 //! - Deltas store only changed properties
 //! - Reconstruction walks backward to nearest anchor and applies deltas forward
+//! - TinyLFU cache reduces redundant delta chain traversals for concurrent reads
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
@@ -17,7 +18,9 @@ use crate::storage::version::{
     AnchorConfig, EdgeVersion, NodeVersion, TemporalVersion, VersionData,
 };
 use crate::utils::error::{Result, StorageError, TemporalError};
+use quick_cache::sync::Cache;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Default maximum number of versions per entity (DoS protection)
 pub const DEFAULT_MAX_VERSIONS_PER_ENTITY: usize = 1_000;
@@ -64,10 +67,14 @@ impl RetentionPolicy {
     }
 }
 
+/// Default cache size for reconstructed properties (10,000 entries)
+const DEFAULT_RECONSTRUCTION_CACHE_SIZE: usize = 10_000;
+
 /// Historical storage for versioned nodes and edges.
 ///
 /// This storage engine maintains version chains for all temporal data,
 /// using anchor+delta compression to minimize storage overhead.
+/// A TinyLFU cache reduces redundant delta chain traversals for concurrent reads.
 pub struct HistoricalStorage {
     /// Configuration for anchor creation strategy
     config: AnchorConfig,
@@ -85,6 +92,10 @@ pub struct HistoricalStorage {
     node_version_counts: HashMap<NodeId, usize>,
     /// Cached version counts per edge (for O(1) capacity checks)
     edge_version_counts: HashMap<EdgeId, usize>,
+    /// TinyLFU cache for reconstructed node properties (reduces lock contention)
+    node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// TinyLFU cache for reconstructed edge properties
+    edge_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
 }
 
 impl HistoricalStorage {
@@ -103,6 +114,30 @@ impl HistoricalStorage {
         config: AnchorConfig,
         retention_policy: RetentionPolicy,
     ) -> Self {
+        Self::with_config_retention_and_cache_size(
+            config,
+            retention_policy,
+            DEFAULT_RECONSTRUCTION_CACHE_SIZE,
+        )
+    }
+
+    /// Create a new historical storage with full customization including cache size.
+    ///
+    /// # Arguments
+    /// * `config` - Anchor creation configuration
+    /// * `retention_policy` - Version retention limits (DoS protection)
+    /// * `cache_size` - Maximum number of cached property reconstructions per type (node/edge)
+    ///
+    /// # Cache Sizing
+    /// Consider your workload when sizing the cache:
+    /// - Small properties (no vectors): 1,000-10,000 entries
+    /// - Large properties (1536-dim vectors ~6KB): 100-1,000 entries
+    /// - Default: 10,000 entries
+    pub fn with_config_retention_and_cache_size(
+        config: AnchorConfig,
+        retention_policy: RetentionPolicy,
+        cache_size: usize,
+    ) -> Self {
         HistoricalStorage {
             config,
             retention_policy,
@@ -112,6 +147,8 @@ impl HistoricalStorage {
             edge_version_heads: HashMap::new(),
             node_version_counts: HashMap::new(),
             edge_version_counts: HashMap::new(),
+            node_property_cache: Arc::new(Cache::new(cache_size)),
+            edge_property_cache: Arc::new(Cache::new(cache_size)),
         }
     }
 
@@ -268,14 +305,25 @@ impl HistoricalStorage {
     ///
     /// This walks backward to find the nearest anchor, then applies all deltas
     /// forward to reconstruct the full property state.
+    ///
+    /// **Cache Behavior**: Properties are cached by VersionId. Since properties are
+    /// immutable per version and temporal visibility is checked separately in
+    /// `find_node_version_at_time()`, cached properties are always valid and don't
+    /// require invalidation when temporal intervals are modified.
     pub fn reconstruct_node_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
+        // Check cache first (fast path for concurrent reads)
+        if let Some(cached) = self.node_property_cache.get(&version_id) {
+            return Ok(cached.as_ref().clone());
+        }
+
+        // Cache miss - reconstruct properties
         let version = self
             .node_versions
             .get(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        match &version.data {
-            VersionData::Anchor { properties } => Ok(properties.clone()),
+        let properties = match &version.data {
+            VersionData::Anchor { properties } => properties.clone(),
             VersionData::Delta { delta } => {
                 // Find the previous version
                 let prev_id = version
@@ -285,24 +333,39 @@ impl HistoricalStorage {
                         reason: "Delta version has no previous version".to_string(),
                     })?;
 
-                // Recursively reconstruct previous version
+                // Recursively reconstruct previous version (may hit cache)
                 let base_properties = self.reconstruct_node_properties(prev_id)?;
 
                 // Apply this delta
-                Ok(delta.apply(&base_properties))
+                delta.apply(&base_properties)
             }
-        }
+        };
+
+        // Populate cache for future reads
+        self.node_property_cache
+            .insert(version_id, Arc::new(properties.clone()));
+
+        Ok(properties)
     }
 
     /// Reconstruct the properties of an edge version.
+    ///
+    /// **Cache Behavior**: Same as `reconstruct_node_properties()` - properties are
+    /// immutable per VersionId, so caching doesn't require invalidation.
     pub fn reconstruct_edge_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
+        // Check cache first (fast path for concurrent reads)
+        if let Some(cached) = self.edge_property_cache.get(&version_id) {
+            return Ok(cached.as_ref().clone());
+        }
+
+        // Cache miss - reconstruct properties
         let version = self
             .edge_versions
             .get(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        match &version.data {
-            VersionData::Anchor { properties } => Ok(properties.clone()),
+        let properties = match &version.data {
+            VersionData::Anchor { properties } => properties.clone(),
             VersionData::Delta { delta } => {
                 let prev_id = version
                     .prev_version
@@ -311,10 +374,17 @@ impl HistoricalStorage {
                         reason: "Delta version has no previous version".to_string(),
                     })?;
 
+                // Recursively reconstruct previous version (may hit cache)
                 let base_properties = self.reconstruct_edge_properties(prev_id)?;
-                Ok(delta.apply(&base_properties))
+                delta.apply(&base_properties)
             }
-        }
+        };
+
+        // Populate cache for future reads
+        self.edge_property_cache
+            .insert(version_id, Arc::new(properties.clone()));
+
+        Ok(properties)
     }
 
     /// Get a node version by ID.
@@ -476,6 +546,57 @@ impl HistoricalStorage {
         }
     }
 
+    /// Extract version metadata and data for copy-out reconstruction (nodes).
+    ///
+    /// This method copies the necessary version chain data while holding the lock,
+    /// allowing reconstruction to proceed outside the lock.
+    ///
+    /// Returns (version metadata, label, data) that can be used for lock-free reconstruction.
+    pub fn extract_node_version_data(
+        &self,
+        version_id: VersionId,
+    ) -> Result<(VersionId, NodeId, InternedString, VersionData)> {
+        let version = self
+            .node_versions
+            .get(&version_id)
+            .ok_or(StorageError::VersionNotFound(version_id))?;
+
+        // Clone the version data - these are cheap copies (Arc-based)
+        Ok((
+            version.id,
+            version.node_id,
+            version.label,
+            version.data.clone(),
+        ))
+    }
+
+    /// Extract version metadata and data for copy-out reconstruction (edges).
+    pub fn extract_edge_version_data(
+        &self,
+        version_id: VersionId,
+    ) -> Result<(
+        VersionId,
+        EdgeId,
+        InternedString,
+        NodeId,
+        NodeId,
+        VersionData,
+    )> {
+        let version = self
+            .edge_versions
+            .get(&version_id)
+            .ok_or(StorageError::VersionNotFound(version_id))?;
+
+        Ok((
+            version.id,
+            version.edge_id,
+            version.label,
+            version.source,
+            version.target,
+            version.data.clone(),
+        ))
+    }
+
     /// Get statistics about the storage.
     pub fn stats(&self) -> HistoricalStats {
         let mut node_anchor_count = 0;
@@ -508,6 +629,8 @@ impl HistoricalStorage {
             edge_delta_count,
             unique_nodes: self.node_version_heads.len(),
             unique_edges: self.edge_version_heads.len(),
+            node_cache_entries: self.node_property_cache.len(),
+            edge_cache_entries: self.edge_property_cache.len(),
         }
     }
 }
@@ -537,6 +660,10 @@ pub struct HistoricalStats {
     pub unique_nodes: usize,
     /// Number of unique edges with version history
     pub unique_edges: usize,
+    /// Number of cached node property reconstructions
+    pub node_cache_entries: usize,
+    /// Number of cached edge property reconstructions
+    pub edge_cache_entries: usize,
 }
 
 impl HistoricalStats {
@@ -1496,5 +1623,296 @@ mod tests {
         assert!(vec2[0].is_nan());
         assert_eq!(vec1[1], 1.0);
         assert_eq!(vec2[1], 1.0);
+    }
+
+    // ============================================================
+    // Cache Tests
+    // ============================================================
+
+    #[test]
+    fn test_cache_hit_on_second_read() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+
+        storage
+            .add_node_version(node_id, version_id, temporal, label, props.clone())
+            .unwrap();
+
+        // First read - cache miss, populates cache
+        let result1 = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(result1.get("name").and_then(|v| v.as_str()), Some("Alice"));
+
+        // Check cache was populated
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 1);
+
+        // Second read - should hit cache
+        let result2 = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(result2.get("name").and_then(|v| v.as_str()), Some("Alice"));
+
+        // Cache size shouldn't change
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 1);
+    }
+
+    #[test]
+    fn test_cache_populates_delta_chain() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Create anchor + 3 deltas
+        let v1 = VersionId::new(1).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new().insert("value", 1i64).build(),
+            )
+            .unwrap();
+
+        let v2 = VersionId::new(2).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                PropertyMapBuilder::new().insert("value", 2i64).build(),
+            )
+            .unwrap();
+
+        let v3 = VersionId::new(3).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v3,
+                BiTemporalInterval::current(3000),
+                label,
+                PropertyMapBuilder::new().insert("value", 3i64).build(),
+            )
+            .unwrap();
+
+        let v4 = VersionId::new(4).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v4,
+                BiTemporalInterval::current(4000),
+                label,
+                PropertyMapBuilder::new().insert("value", 4i64).build(),
+            )
+            .unwrap();
+
+        // Reconstruct v4 (latest delta) - should populate entire chain
+        let result = storage.reconstruct_node_properties(v4).unwrap();
+        assert_eq!(result.get("value").and_then(|v| v.as_int()), Some(4));
+
+        // Cache should have all versions in the chain
+        let stats = storage.stats();
+        assert!(stats.node_cache_entries >= 4);
+    }
+
+    #[test]
+    fn test_cache_with_custom_size() {
+        let storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig::default(),
+            RetentionPolicy::default(),
+            100, // Small cache size
+        );
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 0);
+        assert_eq!(stats.edge_cache_entries, 0);
+    }
+
+    #[test]
+    fn test_edge_cache_functionality() {
+        let mut storage = HistoricalStorage::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(10).unwrap();
+        let target = NodeId::new(20).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
+
+        storage
+            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .unwrap();
+
+        // First read - cache miss
+        let result1 = storage.reconstruct_edge_properties(version_id).unwrap();
+        assert_eq!(result1.get("since").and_then(|v| v.as_int()), Some(2020));
+
+        // Check cache was populated
+        let stats = storage.stats();
+        assert_eq!(stats.edge_cache_entries, 1);
+
+        // Second read - should hit cache
+        let result2 = storage.reconstruct_edge_properties(version_id).unwrap();
+        assert_eq!(result2.get("since").and_then(|v| v.as_int()), Some(2020));
+
+        // Cache size shouldn't change
+        let stats = storage.stats();
+        assert_eq!(stats.edge_cache_entries, 1);
+    }
+
+    #[test]
+    fn test_cache_stats_accuracy() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+
+        // Create 5 node versions
+        for i in 0..5 {
+            let version_id = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal,
+                    label,
+                    PropertyMapBuilder::new().insert("value", i as i64).build(),
+                )
+                .unwrap();
+            // Reconstruct to populate cache
+            storage.reconstruct_node_properties(version_id).unwrap();
+        }
+
+        // Create 3 edge versions
+        for i in 0..3 {
+            let version_id = VersionId::new(100 + i).unwrap();
+            storage
+                .add_edge_version(
+                    edge_id,
+                    version_id,
+                    temporal,
+                    label,
+                    node_id,
+                    node_id,
+                    PropertyMapBuilder::new().insert("value", i as i64).build(),
+                )
+                .unwrap();
+            // Reconstruct to populate cache
+            storage.reconstruct_edge_properties(version_id).unwrap();
+        }
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 5);
+        assert_eq!(stats.edge_cache_entries, 3);
+    }
+
+    #[test]
+    fn test_cache_with_large_properties() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
+
+        // Create large property map with vector
+        let large_vector: Vec<f32> = (0..1536).map(|i| i as f32 / 1536.0).collect();
+        let props = PropertyMapBuilder::new()
+            .insert("title", "Large Document")
+            .insert_vector("embedding", &large_vector)
+            .insert("content", "x".repeat(10000).as_str())
+            .build();
+
+        storage
+            .add_node_version(
+                node_id,
+                version_id,
+                BiTemporalInterval::current(1000),
+                label,
+                props,
+            )
+            .unwrap();
+
+        // First read
+        let result1 = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(
+            result1
+                .get("embedding")
+                .and_then(|v| v.as_vector())
+                .map(|v| v.len()),
+            Some(1536)
+        );
+
+        // Second read should hit cache
+        let result2 = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(result1.get("title"), result2.get("title"));
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_cache_entries, 1);
+    }
+
+    #[test]
+    fn test_extract_node_version_data() {
+        let mut storage = HistoricalStorage::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new().insert("name", "Bob").build();
+
+        storage
+            .add_node_version(node_id, version_id, temporal, label, props)
+            .unwrap();
+
+        let (vid, nid, lbl, data) = storage.extract_node_version_data(version_id).unwrap();
+        assert_eq!(vid, version_id);
+        assert_eq!(nid, node_id);
+        assert_eq!(lbl, label);
+
+        // Verify data can be used for copy-out reconstruction
+        match data {
+            VersionData::Anchor { properties } => {
+                assert_eq!(properties.get("name").and_then(|v| v.as_str()), Some("Bob"));
+            }
+            _ => panic!("Expected anchor"),
+        }
+    }
+
+    #[test]
+    fn test_extract_edge_version_data() {
+        let mut storage = HistoricalStorage::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(10).unwrap();
+        let target = NodeId::new(20).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new().insert("since", 2021i64).build();
+
+        storage
+            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .unwrap();
+
+        let (vid, eid, lbl, src, tgt, data) =
+            storage.extract_edge_version_data(version_id).unwrap();
+        assert_eq!(vid, version_id);
+        assert_eq!(eid, edge_id);
+        assert_eq!(lbl, label);
+        assert_eq!(src, source);
+        assert_eq!(tgt, target);
+
+        // Verify data
+        match data {
+            VersionData::Anchor { properties } => {
+                assert_eq!(properties.get("since").and_then(|v| v.as_int()), Some(2021));
+            }
+            _ => panic!("Expected anchor"),
+        }
     }
 }
