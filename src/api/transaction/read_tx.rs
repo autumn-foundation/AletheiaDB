@@ -11,8 +11,11 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::time;
 use crate::storage::current::CurrentStorage;
+use crate::storage::historical::HistoricalStorage;
+use crate::storage::version::VersionMetadata;
 use crate::utils::error::{Result, StorageError};
-use std::sync::Arc;
+use crate::utils::lock::RwLockExt;
+use std::sync::{Arc, RwLock};
 
 /// Read-only transaction
 ///
@@ -35,6 +38,7 @@ pub struct ReadTransaction {
     snapshot: TransactionSnapshot,
     current: Arc<CurrentStorage>,
     visibility_manager: Arc<TxVisibilityManager>,
+    historical: Arc<RwLock<HistoricalStorage>>,
 }
 
 impl ReadTransaction {
@@ -44,6 +48,7 @@ impl ReadTransaction {
         snapshot: TransactionSnapshot,
         current: Arc<CurrentStorage>,
         visibility_manager: Arc<TxVisibilityManager>,
+        historical: Arc<RwLock<HistoricalStorage>>,
     ) -> Self {
         ReadTransaction {
             tx_id,
@@ -51,6 +56,7 @@ impl ReadTransaction {
             snapshot,
             current,
             visibility_manager,
+            historical,
         }
     }
 
@@ -73,35 +79,103 @@ impl ReadTransaction {
 
 impl ReadOps for ReadTransaction {
     fn get_node(&self, id: NodeId) -> Result<Node> {
-        // Snapshot Isolation: only read versions visible in our snapshot
-        let node = self.current.get_node(id)?;
+        // FAST PATH: Try current storage first
+        let current_node = self.current.get_node(id)?;
 
-        // Check if this version is visible in our snapshot
-        if !self
+        // Check if current version is visible in our snapshot
+        if self
             .visibility_manager
-            .is_visible(&self.snapshot, node.metadata.created_by_tx)
+            .is_visible(&self.snapshot, current_node.metadata.created_by_tx)
         {
-            // Version not visible - return NodeNotFound
-            return Err(StorageError::NodeNotFound(id).into());
+            return Ok(current_node);
         }
 
-        Ok(node)
+        // SLOW PATH: Current version not visible - query historical storage
+        let historical = self.historical.read_or_err()?;
+
+        // Find version visible at our snapshot timestamp
+        let version_id = historical.find_node_version_at_time(
+            id,
+            self.snapshot.snapshot_timestamp, // valid_time
+            self.snapshot.snapshot_timestamp, // transaction_time
+        );
+
+        match version_id {
+            Some(vid) => {
+                // Found a visible version - reconstruct it
+                let version = historical
+                    .get_node_version(vid)
+                    .ok_or(StorageError::VersionNotFound(vid))?;
+
+                // Reconstruct properties from anchor+delta
+                let properties = historical.reconstruct_node_properties(vid)?;
+
+                // Build Node from historical version
+                // Use default metadata since visibility already validated
+                Ok(Node::with_metadata(
+                    id,
+                    version.label,
+                    properties,
+                    vid,
+                    VersionMetadata::default_for_existing(),
+                ))
+            }
+            None => {
+                // No version visible at snapshot time
+                Err(StorageError::NodeNotFound(id).into())
+            }
+        }
     }
 
     fn get_edge(&self, id: EdgeId) -> Result<Edge> {
-        // Snapshot Isolation: only read versions visible in our snapshot
-        let edge = self.current.get_edge(id)?;
+        // FAST PATH: Try current storage first
+        let current_edge = self.current.get_edge(id)?;
 
-        // Check if this version is visible in our snapshot
-        if !self
+        // Check if current version is visible in our snapshot
+        if self
             .visibility_manager
-            .is_visible(&self.snapshot, edge.metadata.created_by_tx)
+            .is_visible(&self.snapshot, current_edge.metadata.created_by_tx)
         {
-            // Version not visible - return EdgeNotFound
-            return Err(StorageError::EdgeNotFound(id).into());
+            return Ok(current_edge);
         }
 
-        Ok(edge)
+        // SLOW PATH: Current version not visible - query historical storage
+        let historical = self.historical.read_or_err()?;
+
+        // Find version visible at our snapshot timestamp
+        let version_id = historical.find_edge_version_at_time(
+            id,
+            self.snapshot.snapshot_timestamp, // valid_time
+            self.snapshot.snapshot_timestamp, // transaction_time
+        );
+
+        match version_id {
+            Some(vid) => {
+                // Found a visible version - reconstruct it
+                let version = historical
+                    .get_edge_version(vid)
+                    .ok_or(StorageError::VersionNotFound(vid))?;
+
+                // Reconstruct properties from anchor+delta
+                let properties = historical.reconstruct_edge_properties(vid)?;
+
+                // Build Edge from historical version
+                // Use default metadata since visibility already validated
+                Ok(Edge::with_metadata(
+                    id,
+                    version.label,
+                    version.source,
+                    version.target,
+                    properties,
+                    vid,
+                    VersionMetadata::default_for_existing(),
+                ))
+            }
+            None => {
+                // No version visible at snapshot time
+                Err(StorageError::EdgeNotFound(id).into())
+            }
+        }
     }
 
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
@@ -144,11 +218,12 @@ mod tests {
     // Helper to create a test ReadTransaction with snapshot
     fn create_test_read_tx(tx_id: TxId, current: Arc<CurrentStorage>) -> ReadTransaction {
         let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let snapshot = TransactionSnapshot {
             snapshot_timestamp: time::now(),
             active_transactions: Arc::new(HashSet::new()),
         };
-        ReadTransaction::new(tx_id, snapshot, current, visibility_manager)
+        ReadTransaction::new(tx_id, snapshot, current, visibility_manager, historical)
     }
 
     #[test]
@@ -311,6 +386,7 @@ mod tests {
 
         {
             // Create read transaction
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
             let snapshot = TransactionSnapshot {
                 snapshot_timestamp: time::now(),
                 active_transactions: Arc::new(HashSet::new()),
@@ -320,6 +396,7 @@ mod tests {
                 snapshot,
                 Arc::clone(&current),
                 Arc::clone(&visibility_manager),
+                Arc::clone(&historical),
             );
 
             // Transaction should still be active while in scope
