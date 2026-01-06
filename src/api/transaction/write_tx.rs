@@ -231,12 +231,18 @@ impl WriteTransaction {
                 let wal_flush_us = flush_completed.duration_since(wal_logged).as_micros() as u64;
                 let total_locked_us = flush_completed.duration_since(ts_lock_start).as_micros() as u64;
 
+                // Calculate total commit duration for Honeycomb queries
+                let total_commit_us = commit_start.elapsed().as_micros() as u64;
+                let operations_count = self.buffer.operations().len();
+
                 tracing::info!(
                     ts_lock_wait_us,
                     wal_lock_wait_us,
                     wal_log_us,
                     wal_flush_us,
                     total_locked_us,
+                    total_commit_us,
+                    operations_count,
                     commit_ts = %commit,
                     "Transaction commit breakdown"
                 );

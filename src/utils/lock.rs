@@ -56,6 +56,17 @@ pub trait MutexExt<T> {
 
 impl<T> MutexExt<T> for Mutex<T> {
     fn lock_or_err(&self) -> Result<MutexGuard<'_, T>, Error> {
+        // Debug-only: Track lock acquisitions to detect excessive contention
+        #[cfg(all(debug_assertions, feature = "observability"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count % 10000 == 0 {
+                tracing::debug!(count, "Mutex lock acquisition count");
+            }
+        }
+
         self.lock().map_err(|_| {
             #[cfg(feature = "observability")]
             {
@@ -114,6 +125,17 @@ pub trait RwLockExt<T> {
 
 impl<T> RwLockExt<T> for RwLock<T> {
     fn read_or_err(&self) -> Result<RwLockReadGuard<'_, T>, Error> {
+        // Debug-only: Track read lock acquisitions
+        #[cfg(all(debug_assertions, feature = "observability"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static READ_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = READ_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count % 10000 == 0 {
+                tracing::debug!(count, "RwLock read acquisition count");
+            }
+        }
+
         self.read().map_err(|_| {
             #[cfg(feature = "observability")]
             {
@@ -134,6 +156,17 @@ impl<T> RwLockExt<T> for RwLock<T> {
     }
 
     fn write_or_err(&self) -> Result<RwLockWriteGuard<'_, T>, Error> {
+        // Debug-only: Track write lock acquisitions
+        #[cfg(all(debug_assertions, feature = "observability"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static WRITE_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = WRITE_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count % 10000 == 0 {
+                tracing::debug!(count, "RwLock write acquisition count");
+            }
+        }
+
         self.write().map_err(|_| {
             #[cfg(feature = "observability")]
             {
