@@ -5,6 +5,8 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::{GallifreyDB, PropertyMapBuilder, ReadOps, WriteOps};
+use std::sync::Arc;
+use std::thread;
 
 fn bench_read_transaction_creation(c: &mut Criterion) {
     let db = GallifreyDB::new();
@@ -399,12 +401,14 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
 /// Benchmark concurrent read operations during adjacency rebuild.
 /// This tests the impact of rebuild on read performance.
 fn bench_read_during_rebuild(c: &mut Criterion) {
-    // Pre-populate a database with 10K edges
+    // Pre-populate a database with 4K nodes + 4K edges
+    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // src/api/transaction/write_buffer.rs for DoS protection
     let db = GallifreyDB::new();
     let node_ids: Vec<_> = db
         .write(|tx| {
             let mut nodes = Vec::new();
-            for i in 0..10000 {
+            for i in 0..4000 {
                 let node = tx.create_node(
                     "Node",
                     PropertyMapBuilder::new().insert("id", i as i64).build(),
@@ -412,7 +416,7 @@ fn bench_read_during_rebuild(c: &mut Criterion) {
                 nodes.push(node);
             }
 
-            for i in 0..9999 {
+            for i in 0..3999 {
                 tx.create_edge(
                     nodes[i],
                     nodes[i + 1],
@@ -435,6 +439,94 @@ fn bench_read_during_rebuild(c: &mut Criterion) {
     });
 }
 
+/// Benchmark concurrent read operations to measure visibility check performance.
+///
+/// This benchmark demonstrates the RwLock optimization in TxVisibilityManager (issue #222).
+/// Every read operation (get_node, get_edge) performs a visibility check, which previously
+/// used a Mutex causing read contention. With RwLock, concurrent readers can proceed
+/// without serialization.
+///
+/// Performance target from CLAUDE.md: <1µs single-hop traversal includes visibility checks.
+fn bench_concurrent_visibility_checks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_visibility");
+
+    // Pre-populate database with committed data (500 nodes)
+    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // src/api/transaction/write_buffer.rs for DoS protection
+    let db = Arc::new(GallifreyDB::new());
+    let node_ids: Vec<_> = db
+        .write(|tx| {
+            let mut nodes = Vec::new();
+            for i in 0..500 {
+                let node = tx.create_node(
+                    "Node",
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                )?;
+                nodes.push(node);
+            }
+            Ok(nodes)
+        })
+        .unwrap();
+
+    // Benchmark with different thread counts to show scalability
+    for thread_count in [1, 2, 4, 8] {
+        group.bench_function(format!("{}_threads", thread_count), |b| {
+            b.iter(|| {
+                let handles: Vec<_> = (0..thread_count)
+                    .map(|_| {
+                        let db_clone = Arc::clone(&db);
+                        let nodes = node_ids.clone();
+                        thread::spawn(move || {
+                            // Each thread performs 100 read operations
+                            // Each read triggers a visibility check via is_visible()
+                            for node_id in nodes.iter().take(100) {
+                                let _ = db_clone.get_node(black_box(*node_id));
+                            }
+                        })
+                    })
+                    .collect();
+
+                for handle in handles {
+                    handle.join().unwrap();
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark single-threaded visibility check performance (baseline).
+fn bench_sequential_visibility_checks(c: &mut Criterion) {
+    let db = GallifreyDB::new();
+
+    // Pre-populate with 500 nodes
+    // Note: stays under DEFAULT_MAX_OPERATIONS (10K) limit defined in
+    // src/api/transaction/write_buffer.rs for DoS protection
+    let node_ids: Vec<_> = db
+        .write(|tx| {
+            let mut nodes = Vec::new();
+            for i in 0..500 {
+                let node = tx.create_node(
+                    "Node",
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                )?;
+                nodes.push(node);
+            }
+            Ok(nodes)
+        })
+        .unwrap();
+
+    c.bench_function("sequential_get_node_500", |b| {
+        b.iter(|| {
+            // Sequential reads - each triggers visibility check
+            for node_id in &node_ids {
+                let _ = db.get_node(black_box(*node_id));
+            }
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_read_transaction_creation,
@@ -451,6 +543,8 @@ criterion_group!(
     bench_batch_edge_deletions,
     bench_batch_insertions_with_prepopulated_graph,
     bench_read_during_rebuild,
+    bench_concurrent_visibility_checks,
+    bench_sequential_visibility_checks,
 );
 
 criterion_main!(benches);
