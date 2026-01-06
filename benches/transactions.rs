@@ -594,9 +594,9 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                         }
 
                         // 25% updates
-                        for i in 0..ops_per_type.min(nodes.len()) {
+                        for (i, &node_id) in nodes.iter().enumerate().take(ops_per_type) {
                             tx.update_node(
-                                nodes[i],
+                                node_id,
                                 PropertyMapBuilder::new()
                                     .insert("updated", true)
                                     .insert("age", (i + 20) as i64)
@@ -610,8 +610,8 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                         }
 
                         // 25% edge deletes (tests tombstone ID generation)
-                        for i in 0..ops_per_type.min(edges.len()) {
-                            tx.delete_edge(edges[i])?;
+                        for &edge_id in edges.iter().take(ops_per_type) {
+                            tx.delete_edge(edge_id)?;
                         }
 
                         Ok(())
