@@ -500,8 +500,17 @@ impl WriteTransaction {
     }
 
     /// Apply all buffered changes to storage.
+    ///
+    /// Acquires locks for historical storage and temporal indexes once before
+    /// processing all operations, reducing lock overhead from O(N) to O(1).
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
         let temporal = BiTemporalInterval::current(commit_timestamp);
+
+        // Acquire locks once before processing all operations.
+        // This reduces lock overhead from 2N acquisitions (per operation) to just 2 (total).
+        // Lock ordering: historical first, then temporal_indexes (consistent ordering avoids deadlock).
+        let mut historical = self.historical.lock_or_err()?;
+        let mut temporal_indexes = self.temporal_indexes.lock_or_err()?;
 
         for write in self.buffer.operations() {
             match write {
@@ -524,7 +533,7 @@ impl WriteTransaction {
                     self.current.insert_node_direct(node, commit_timestamp)?;
 
                     // Store in historical storage
-                    self.historical.lock_or_err()?.add_node_version(
+                    historical.add_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -533,11 +542,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_node_version(
-                        *node_id,
-                        *version_id,
-                        temporal,
-                    );
+                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal);
                 }
                 super::BufferedWrite::CreateEdge {
                     edge_id,
@@ -562,7 +567,7 @@ impl WriteTransaction {
                     self.current.insert_edge_direct(edge)?;
 
                     // Store in historical storage
-                    self.historical.lock_or_err()?.add_edge_version(
+                    historical.add_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -573,11 +578,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
-                        *edge_id,
-                        *version_id,
-                        temporal,
-                    );
+                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal);
                 }
                 super::BufferedWrite::UpdateNode {
                     node_id,
@@ -598,7 +599,7 @@ impl WriteTransaction {
                     self.current.update_node_direct(node, commit_timestamp)?;
 
                     // Add new version to historical storage
-                    self.historical.lock_or_err()?.add_node_version(
+                    historical.add_node_version(
                         *node_id,
                         *version_id,
                         temporal,
@@ -607,11 +608,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_node_version(
-                        *node_id,
-                        *version_id,
-                        temporal,
-                    );
+                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal);
                 }
                 super::BufferedWrite::UpdateEdge {
                     edge_id,
@@ -636,7 +633,7 @@ impl WriteTransaction {
                     self.current.update_edge_direct(edge)?;
 
                     // Add new version to historical storage
-                    self.historical.lock_or_err()?.add_edge_version(
+                    historical.add_edge_version(
                         *edge_id,
                         *version_id,
                         temporal,
@@ -647,11 +644,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
-                        *edge_id,
-                        *version_id,
-                        temporal,
-                    );
+                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal);
                 }
                 super::BufferedWrite::DeleteNode { node_id } => {
                     // Get the node before deleting
@@ -659,7 +652,6 @@ impl WriteTransaction {
 
                     // Close the current version's transaction_time in historical storage
                     // This marks the end of this version's visibility
-                    let mut historical = self.historical.lock_or_err()?;
                     if let Some(current_version_id) = historical.get_current_node_version(*node_id)
                     {
                         historical.close_node_version_transaction_time(
@@ -688,10 +680,9 @@ impl WriteTransaction {
                         node.label,
                         node.properties.clone(),
                     )?;
-                    drop(historical); // Release lock before acquiring temporal_indexes lock
 
                     // Index the tombstone version
-                    self.temporal_indexes.lock_or_err()?.insert_node_version(
+                    temporal_indexes.insert_node_version(
                         *node_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -707,7 +698,6 @@ impl WriteTransaction {
 
                     // Close the current version's transaction_time in historical storage
                     // This marks the end of this version's visibility
-                    let mut historical = self.historical.lock_or_err()?;
                     if let Some(current_version_id) = historical.get_current_edge_version(*edge_id)
                     {
                         historical.close_edge_version_transaction_time(
@@ -738,10 +728,9 @@ impl WriteTransaction {
                         edge.target,
                         edge.properties.clone(),
                     )?;
-                    drop(historical); // Release lock before acquiring temporal_indexes lock
 
                     // Index the tombstone version
-                    self.temporal_indexes.lock_or_err()?.insert_edge_version(
+                    temporal_indexes.insert_edge_version(
                         *edge_id,
                         tombstone_version_id,
                         tombstone_temporal,
@@ -752,6 +741,10 @@ impl WriteTransaction {
                 }
             }
         }
+
+        // Explicitly drop locks before rebuilding adjacency to document lock release point
+        drop(historical);
+        drop(temporal_indexes);
 
         // Rebuild adjacency indexes once after all edge operations
         // This is much more efficient than rebuilding after each operation
