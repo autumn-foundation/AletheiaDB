@@ -71,7 +71,7 @@ use parking_lot::RwLock;
 
 use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
-use crate::core::vector::cosine_similarity;
+use crate::core::vector::{cosine_similarity, euclidean_distance};
 use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, HnswConfig, TemporalSearchResults, VectorIndex};
 use crate::utils::{Error, Result, TemporalError, VectorError};
@@ -246,6 +246,48 @@ pub enum SnapshotStrategy {
         /// Change threshold (0.0-1.0)
         change_threshold: f64,
     },
+}
+
+/// Metric for measuring semantic drift between vector embeddings.
+///
+/// Different metrics capture different aspects of how meaning has changed:
+/// - **Cosine**: Angular difference (independent of magnitude)
+/// - **Euclidean**: Spatial distance (sensitive to magnitude)
+/// - **Angular**: Actual geometric angle in radians
+///
+/// # Examples
+///
+/// ```rust
+/// use gallifreydb::index::vector::temporal::DriftMetric;
+///
+/// let metric = DriftMetric::default(); // Cosine
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriftMetric {
+    /// Cosine distance: 1.0 - cosine_similarity
+    ///
+    /// Range: [0, 2] for normalized vectors, typically [0, 1]
+    /// Most interpretable for semantic embeddings.
+    /// Value of 0 = identical meaning, 1 = orthogonal, 2 = opposite.
+    Cosine,
+
+    /// Euclidean (L2) distance between vectors.
+    ///
+    /// Sensitive to both direction and magnitude changes.
+    /// Useful for detecting absolute changes in embedding space.
+    Euclidean,
+
+    /// Angular distance: arccos(cosine_similarity)
+    ///
+    /// Returns the geometric angle between vectors in radians.
+    /// Range: [0, π] where 0 = identical, π/2 = orthogonal, π = opposite.
+    Angular,
+}
+
+impl Default for DriftMetric {
+    fn default() -> Self {
+        DriftMetric::Cosine
+    }
 }
 
 /// Type alias for vector snapshot: map of NodeId to vector data
@@ -1253,6 +1295,161 @@ impl TemporalVectorIndex {
         Ok(drift)
     }
 
+    /// Finds all nodes whose semantic drift exceeds a threshold within a time range.
+    ///
+    /// This is a global query that scans all nodes and returns those whose embeddings
+    /// have changed significantly. The drift is measured as the maximum consecutive
+    /// change between any two adjacent versions in the time range.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` - Minimum drift value to include (exclusive)
+    /// * `time_range` - Time range to analyze
+    /// * `metric` - Distance metric to use for drift calculation
+    ///
+    /// # Returns
+    ///
+    /// Vector of (NodeId, max_drift) pairs sorted by drift descending.
+    /// Nodes with only one version in the range are excluded.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig, DriftMetric};
+    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// # use gallifreydb::core::temporal::TimeRange;
+    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// # let config = TemporalVectorConfig::default_with_hnsw(HnswConfig::new(4, DistanceMetric::Cosine));
+    /// # let index = TemporalVectorIndex::new(config)?;
+    /// let time_range = TimeRange::new(1000000, 2000000);
+    ///
+    /// // Find all nodes that drifted more than 0.3 using cosine distance
+    /// let drifted = index.find_semantic_drift(0.3, time_range, DriftMetric::Cosine)?;
+    /// for (node_id, drift) in drifted {
+    ///     println!("Node {:?}: max drift = {:.3}", node_id, drift);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn find_semantic_drift(
+        &self,
+        threshold: f32,
+        time_range: TimeRange,
+        metric: DriftMetric,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        use std::collections::HashSet;
+
+        // Validate threshold
+        if threshold.is_nan() || threshold.is_infinite() {
+            return Err(VectorError::InvalidVector {
+                reason: "Threshold must be a finite number".to_string(),
+            }
+            .into());
+        }
+
+        // Collect all unique NodeIds that appear in the time range
+        let snapshot_data = self.snapshot_data.read();
+        let mut unique_nodes = HashSet::new();
+
+        for snapshot_vectors in snapshot_data
+            .vector_history
+            .range(time_range.start()..=time_range.end())
+            .map(|(_, vectors)| vectors)
+        {
+            for &node_id in snapshot_vectors.keys() {
+                unique_nodes.insert(node_id);
+            }
+        }
+
+        // Release the lock before processing
+        drop(snapshot_data);
+
+        // Convert to Vec for iteration
+        let node_vec: Vec<NodeId> = unique_nodes.into_iter().collect();
+
+        // Calculate drift for each node
+        // TODO: Add parallel processing with rayon for large node counts (>1000)
+        let results: Vec<(NodeId, f32)> = node_vec
+            .iter()
+            .filter_map(|&node_id| {
+                self.calculate_max_drift(node_id, time_range, metric)
+                    .ok()
+                    .flatten()
+                    .map(|drift| (node_id, drift))
+            })
+            .filter(|(_, drift)| *drift > threshold)
+            .collect();
+
+        // Sort by drift descending (highest drift first)
+        let mut sorted_results = results;
+        sorted_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(sorted_results)
+    }
+
+    /// Calculates the maximum consecutive drift for a single node.
+    ///
+    /// Returns the largest drift value between any two adjacent versions
+    /// of the node's embedding within the time range.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(max_drift)` if the node has at least 2 versions in the range
+    /// - `None` if the node has fewer than 2 versions (no drift to measure)
+    fn calculate_max_drift(
+        &self,
+        node_id: NodeId,
+        time_range: TimeRange,
+        metric: DriftMetric,
+    ) -> Result<Option<f32>> {
+        let evolution = self.semantic_evolution(node_id, time_range)?;
+
+        if evolution.len() < 2 {
+            // Need at least 2 vectors to calculate drift
+            return Ok(None);
+        }
+
+        let mut max_drift = 0.0f32;
+
+        // Calculate drift between consecutive vectors
+        for window in evolution.windows(2) {
+            let (_prev_timestamp, prev_vector) = &window[0];
+            let (_curr_timestamp, curr_vector) = &window[1];
+
+            let drift = Self::compute_drift_distance(prev_vector, curr_vector, metric)?;
+            max_drift = max_drift.max(drift);
+        }
+
+        Ok(Some(max_drift))
+    }
+
+    /// Computes the drift distance between two vectors using the specified metric.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - First vector
+    /// * `b` - Second vector
+    /// * `metric` - Distance metric to use
+    ///
+    /// # Returns
+    ///
+    /// The drift distance as a f32 value. Higher values indicate more drift.
+    fn compute_drift_distance(a: &[f32], b: &[f32], metric: DriftMetric) -> Result<f32> {
+        match metric {
+            DriftMetric::Cosine => {
+                let similarity = cosine_similarity(a, b)?;
+                Ok(1.0 - similarity)
+            }
+            DriftMetric::Euclidean => euclidean_distance(a, b),
+            DriftMetric::Angular => {
+                let similarity = cosine_similarity(a, b)?;
+                // Clamp to [-1, 1] to handle numerical errors
+                let clamped = similarity.clamp(-1.0, 1.0);
+                Ok(clamped.acos())
+            }
+        }
+    }
+
     /// Returns information about all snapshots.
     ///
     /// Useful for monitoring and debugging.
@@ -2113,5 +2310,321 @@ mod tests {
         ));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_find_semantic_drift_basic() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new(config)?;
+
+        let mut ts = 1000i64;
+
+        let mut ts = 1000i64;
+
+        // Create nodes with known drift patterns
+        // Node 1: No drift (identical vectors)
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+        index.remove(node1, ts)?;
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?; // Same vector
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+
+        // Node 2: High drift (orthogonal vectors)
+        ts += 1000;
+        let node2 = NodeId::new(2).unwrap();
+        index.add(node2, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+        index.remove(node2, ts)?;
+        index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts)?; // Orthogonal
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+
+        // Node 3: Medium drift
+        ts += 1000;
+        let node3 = NodeId::new(3).unwrap();
+        index.add(node3, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+        index.remove(node3, ts)?;
+        index.add(node3, &[0.7071, 0.7071, 0.0, 0.0], ts)?; // 45 degree angle
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+
+        let time_range = TimeRange::new(0, i64::MAX);
+
+        // Query with threshold 0.2 - should get nodes 2 and 3
+        let results = index.find_semantic_drift(0.2, time_range, DriftMetric::Cosine)?;
+
+        assert_eq!(results.len(), 2, "Expected 2 nodes with drift > 0.2");
+        assert!(results.iter().any(|(id, _)| *id == node2));
+        assert!(results.iter().any(|(id, _)| *id == node3));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_semantic_drift_sorted_descending() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new(config)?;
+
+        let mut ts = 1000i64;
+
+        let mut ts = 1000i64;
+
+        // Create nodes with different drift levels
+        let node1 = NodeId::new(1).unwrap();
+        let node2 = NodeId::new(2).unwrap();
+        let node3 = NodeId::new(3).unwrap();
+
+        // Node 1: Low drift
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+        index.remove(node1, ts)?;
+        index.add(node1, &[0.9, 0.1, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+
+        // Node 2: High drift
+        ts += 1000;
+        index.add(node2, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+        index.remove(node2, ts)?;
+        index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+
+        // Node 3: Medium drift
+        ts += 1000;
+        index.add(node3, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+        index.remove(node3, ts)?;
+        index.add(node3, &[0.7071, 0.7071, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+
+        let time_range = TimeRange::new(0, i64::MAX);
+        let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
+
+        // Results should be sorted by drift descending
+        assert_eq!(results.len(), 3);
+        assert!(results[0].1 > results[1].1, "Results not sorted descending");
+        assert!(results[1].1 > results[2].1, "Results not sorted descending");
+
+        // Node 2 (high drift) should be first
+        assert_eq!(results[0].0, node2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_semantic_drift_single_version_excluded() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new(config)?;
+
+        let mut ts = 1000i64;
+
+        // Node with only one version
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+
+        // Node with two versions (has drift)
+        ts += 1000;
+        let node2 = NodeId::new(2).unwrap();
+        index.add(node2, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+        index.remove(node2, ts)?;
+        index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        ts += 1000;
+
+        let time_range = TimeRange::new(0, i64::MAX);
+        let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
+
+        // Only node2 should be in results (node1 has only 1 version)
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_semantic_drift_empty_range() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new(config)?;
+
+        let mut ts = 10000i64;
+
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+
+        // Query a time range before any snapshots
+        let time_range = TimeRange::new(0, 100);
+        let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
+
+        assert_eq!(results.len(), 0, "Empty range should return no results");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_semantic_drift_threshold_zero() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new(config)?;
+
+        let mut ts = 1000i64;
+
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        ts += 1000;
+        index.remove(node1, ts)?;
+        index.add(node1, &[0.9, 0.1, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+
+        let time_range = TimeRange::new(0, i64::MAX);
+
+        // Threshold 0.0 should return all drifting nodes
+        let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
+        assert_eq!(results.len(), 1);
+
+        // Negative threshold should also work
+        let results = index.find_semantic_drift(-0.5, time_range, DriftMetric::Cosine)?;
+        assert_eq!(results.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_semantic_drift_all_metrics() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new(config)?;
+
+        let mut ts = 1000i64;
+
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        ts += 1000;
+        index.remove(node1, ts)?;
+        index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+
+        let time_range = TimeRange::new(0, i64::MAX);
+
+        // All metrics should detect drift
+        let cosine_results = index.find_semantic_drift(0.5, time_range, DriftMetric::Cosine)?;
+        assert_eq!(cosine_results.len(), 1, "Cosine metric should detect drift");
+
+        let euclidean_results =
+            index.find_semantic_drift(0.5, time_range, DriftMetric::Euclidean)?;
+        assert_eq!(
+            euclidean_results.len(),
+            1,
+            "Euclidean metric should detect drift"
+        );
+
+        let angular_results = index.find_semantic_drift(0.5, time_range, DriftMetric::Angular)?;
+        assert_eq!(
+            angular_results.len(),
+            1,
+            "Angular metric should detect drift"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_semantic_drift_metrics_comparison() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new(config)?;
+
+        let mut ts = 1000i64;
+
+        // Create orthogonal vectors (90 degree angle)
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        ts += 1000;
+        index.remove(node1, ts)?;
+        index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
+        index.on_transaction_at(ts)?;
+
+        let time_range = TimeRange::new(0, i64::MAX);
+
+        // Cosine distance: 1.0 - 0.0 = 1.0
+        let cosine_results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
+        assert_eq!(cosine_results[0].1, 1.0, "Cosine distance should be 1.0");
+
+        // Euclidean distance: sqrt(2) ≈ 1.414
+        let euclidean_results =
+            index.find_semantic_drift(0.0, time_range, DriftMetric::Euclidean)?;
+        assert!(
+            (euclidean_results[0].1 - 1.414).abs() < 0.01,
+            "Euclidean distance should be ~1.414"
+        );
+
+        // Angular distance: π/2 ≈ 1.571
+        let angular_results = index.find_semantic_drift(0.0, time_range, DriftMetric::Angular)?;
+        assert!(
+            (angular_results[0].1 - std::f32::consts::FRAC_PI_2).abs() < 0.01,
+            "Angular distance should be ~π/2"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_drift_metric_default() {
+        let metric = DriftMetric::default();
+        assert_eq!(metric, DriftMetric::Cosine, "Default should be Cosine");
     }
 }
