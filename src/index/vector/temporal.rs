@@ -1332,7 +1332,9 @@ mod tests {
         let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
         let config = TemporalVectorConfig::default_with_hnsw(hnsw_config.clone());
 
-        assert_eq!(config.max_snapshots, 100);
+        // Verify new conservative defaults (reduced from 100 to 20, see issue #230)
+        assert_eq!(config.max_snapshots, 20);
+        assert_eq!(config.retention_policy, RetentionPolicy::KeepN(20));
         assert!(matches!(
             config.snapshot_strategy,
             SnapshotStrategy::TransactionInterval(10)
@@ -1534,7 +1536,7 @@ mod tests {
         let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
         let config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
 
-        // Verify default config has retention policy
-        assert_eq!(config.retention_policy, RetentionPolicy::KeepN(100));
+        // Verify default config has retention policy (reduced from 100 to 20, see issue #230)
+        assert_eq!(config.retention_policy, RetentionPolicy::KeepN(20));
     }
 }
