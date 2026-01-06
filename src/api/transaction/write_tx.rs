@@ -501,16 +501,68 @@ impl WriteTransaction {
 
     /// Apply all buffered changes to storage.
     ///
+    /// # Lock Consolidation Optimization
+    ///
     /// Acquires locks for historical storage and temporal indexes once before
     /// processing all operations, reducing lock overhead from O(N) to O(1).
+    ///
+    /// ## Performance Trade-offs
+    ///
+    /// **Benefits:**
+    /// - Reduces lock acquisitions from 2N (per operation) to 2 (total)
+    /// - For 1000 operations: 2000 lock ops → 2 lock ops
+    ///
+    /// **Costs:**
+    /// - Longer critical section (holds locks for entire operation batch)
+    /// - May reduce concurrency for other transactions during this time
+    /// - Acceptable for most workloads; monitor if contention becomes an issue
+    ///
+    /// ## Error Handling
+    ///
+    /// If any operation fails, locks are released via RAII (automatic drop).
+    /// Note: Partial application is NOT rolled back here since this runs AFTER
+    /// WAL flush (see commit() at line 203). WAL recovery will handle consistency.
+    ///
+    /// ## Lock Ordering Hierarchy
+    ///
+    /// To prevent deadlocks, locks must be acquired in this order:
+    /// 1. `historical` - historical storage (acquired first)
+    /// 2. `temporal_indexes` - temporal indexes (acquired second)
+    /// 3. `version_id_gen` - version ID generator (acquired later for tombstones)
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
         let temporal = BiTemporalInterval::current(commit_timestamp);
 
         // Acquire locks once before processing all operations.
         // This reduces lock overhead from 2N acquisitions (per operation) to just 2 (total).
-        // Lock ordering: historical first, then temporal_indexes (consistent ordering avoids deadlock).
         let mut historical = self.historical.lock_or_err()?;
         let mut temporal_indexes = self.temporal_indexes.lock_or_err()?;
+
+        // Pre-generate all tombstone version IDs at once to reduce lock contention
+        // on the ID generator. Count delete operations and generate IDs in batch.
+        let num_deletes = self
+            .buffer
+            .operations()
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    super::BufferedWrite::DeleteNode { .. }
+                        | super::BufferedWrite::DeleteEdge { .. }
+                )
+            })
+            .count();
+
+        let mut tombstone_ids = if num_deletes > 0 {
+            let ids: Result<Vec<u64>> = {
+                let id_gen = self.version_id_gen.lock_or_err()?;
+                (0..num_deletes)
+                    .map(|_| id_gen.next().map_err(Into::into))
+                    .collect()
+            };
+            ids?.into_iter()
+        } else {
+            Vec::new().into_iter()
+        };
 
         for write in self.buffer.operations() {
             match write {
@@ -660,9 +712,12 @@ impl WriteTransaction {
                         )?;
                     }
 
-                    // Generate version ID for tombstone
-                    let tombstone_version_id =
-                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+                    // Use pre-generated tombstone version ID (no lock needed)
+                    let tombstone_version_id = VersionId::new_unchecked(
+                        tombstone_ids
+                            .next()
+                            .expect("pre-counted delete operations should have sufficient IDs"),
+                    );
 
                     // Create tombstone temporal interval
                     // The tombstone marks when the deletion occurred. Its transaction_time
@@ -706,9 +761,12 @@ impl WriteTransaction {
                         )?;
                     }
 
-                    // Generate version ID for tombstone
-                    let tombstone_version_id =
-                        VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+                    // Use pre-generated tombstone version ID (no lock needed)
+                    let tombstone_version_id = VersionId::new_unchecked(
+                        tombstone_ids
+                            .next()
+                            .expect("pre-counted delete operations should have sufficient IDs"),
+                    );
 
                     // Create tombstone temporal interval
                     // The tombstone marks when the deletion occurred. Its transaction_time
