@@ -618,7 +618,7 @@ mod tests {
 
         // Intern 10 strings - should all succeed
         for i in 0..10 {
-            interner.intern(&format!("string_{}", i))?;
+            interner.intern(format!("string_{}", i))?;
         }
 
         assert_eq!(interner.len(), 10);
