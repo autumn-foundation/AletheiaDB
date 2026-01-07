@@ -381,8 +381,9 @@ def main():
         print(f"Error: Input directory not found: {args.input}", file=sys.stderr)
         return 1
 
-    # Create output directory
-    args.output.mkdir(parents=True, exist_ok=True)
+    # Create output directory only for HTML format
+    if args.format == 'html':
+        args.output.mkdir(parents=True, exist_ok=True)
 
     # Collect benchmark results
     print(f"Collecting benchmark results from {args.input}...")
@@ -403,9 +404,10 @@ def main():
         print("\nDone! Open benchmark-results/index.html to view results")
     elif args.format == 'pr-comment':
         print(f"\nGenerating PR comment...")
-        output_file = args.output / 'pr_comment.md' if args.output.is_dir() else args.output
-        generate_pr_comment(all_results, output_file)
-        print(f"\nDone! PR comment written to {output_file}")
+        # Ensure parent directory exists
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        generate_pr_comment(all_results, args.output)
+        print(f"\nDone! PR comment written to {args.output}")
 
     return 0
 
