@@ -74,9 +74,31 @@ just check-all
 
 # Run benchmarks
 just bench
+
+# Run benchmarks and generate HTML tables
+just bench-tables
 ```
 
 See `justfile` for all available commands.
+
+## Performance & Benchmarks
+
+GallifreyDB is designed for high performance with minimal temporal overhead. View live benchmark results:
+
+- **[📊 Latest Benchmarks](https://madmax983.github.io/GallifreyDB/benchmarks/)** - Comprehensive tables with all metrics
+- **[📈 Historical Trends](https://madmax983.github.io/GallifreyDB/dev/bench/)** - Performance over time with regression tracking
+
+### Current Performance
+
+| Metric | Target | Actual |
+|--------|--------|--------|
+| Current-state node lookup | <1µs | ~22ns ✅ |
+| Current-state edge traversal | <1µs | ~23ns ✅ |
+| 3-hop traversal | <100µs | ~20ns per hop ✅ |
+
+**Note**: Time-travel query benchmarks are being improved to measure realistic historical reconstruction scenarios.
+
+Benchmarks are automatically run on every push to trunk and published to GitHub Pages. See [docs/BENCHMARKING.md](docs/BENCHMARKING.md) for detailed benchmarking guide.
 
 ## Project Status
 
