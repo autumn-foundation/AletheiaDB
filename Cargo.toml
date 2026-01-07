@@ -26,6 +26,10 @@ tracing-tracy = { version = "0.11", optional = true }
 tracing-honeycomb = { version = "0.4", optional = true }
 libhoney-rust = { version = "0.1", optional = true }
 
+# Prometheus metrics (optional)
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.17", optional = true }
+
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
@@ -59,6 +63,7 @@ tracy = ["tracy-client/enable"]
 observability = ["dep:tracing", "dep:tracing-subscriber"]
 observability-tracy = ["observability", "dep:tracing-tracy", "tracy"]
 observability-honeycomb = ["observability", "dep:tracing-honeycomb", "dep:libhoney-rust"]
+observability-prometheus = ["observability", "dep:metrics", "dep:metrics-exporter-prometheus"]
 
 # Default features
 default = []
@@ -167,3 +172,11 @@ name = "temporal_vector"
 harness = false
 path = "benches/temporal_vector.rs"
 required-features = []
+
+# Patch libhoney-rust to use git version with updated dependencies
+# This overrides the crates.io version for ALL dependencies (including tracing-honeycomb)
+# Reason: crates.io v0.1.6 uses reqwest 0.10 with known CVEs
+# Git version uses reqwest 0.11 and tokio 1.0 (updated Jan 2021, not published)
+# See: https://github.com/nlopes/libhoney-rust/issues/80
+[patch.crates-io]
+libhoney-rust = { git = "https://github.com/nlopes/libhoney-rust" }

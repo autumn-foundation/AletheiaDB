@@ -36,15 +36,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize observability (only compiled with 'observability' feature)
     #[cfg(feature = "observability")]
     {
-        observability::init(observability::Config::default());
+        let config = observability::Config::from_env();
+        observability::init(config.clone());
         println!("📊 Observability initialized");
 
         #[cfg(feature = "observability-honeycomb")]
         {
-            if std::env::var("HONEYCOMB_API_KEY").is_ok() {
+            if config.honeycomb.is_some() {
                 println!("🐝 Honeycomb integration active");
             } else {
                 println!("⚠️  HONEYCOMB_API_KEY not set - falling back to stdout logging");
+            }
+        }
+
+        #[cfg(feature = "observability-prometheus")]
+        {
+            if let Some(ref prom_config) = config.prometheus {
+                println!(
+                    "📈 Prometheus metrics available at http://{}/metrics",
+                    prom_config.bind_addr
+                );
             }
         }
     }
