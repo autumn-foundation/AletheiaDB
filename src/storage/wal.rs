@@ -503,18 +503,18 @@ impl WriteAheadLog {
                         .and_then(|h| h.try_clone().ok())
                 }; // WAL lock is released here - parallel writes can now proceed during fsync
 
-                if let Some(sync_handle) = handle_to_sync {
-                    if let Err(e) = sync_handle.sync_data() {
-                        // Mark flush as failed if using GroupCommit
-                        if let Some(ref gc) = group_commit_clone {
-                            let err = Error::Storage(StorageError::IoError(format!(
-                                "fsync failed: {}",
-                                e
-                            )));
-                            gc.mark_flushed(Err(err));
-                        }
-                        return;
+                if let Some(sync_handle) = handle_to_sync
+                    && let Err(e) = sync_handle.sync_data()
+                {
+                    // Mark flush as failed if using GroupCommit
+                    if let Some(ref gc) = group_commit_clone {
+                        let err = Error::Storage(StorageError::IoError(format!(
+                            "fsync failed: {}",
+                            e
+                        )));
+                        gc.mark_flushed(Err(err));
                     }
+                    return;
                 }
 
                 // Phase 3: Update state and notify waiters
