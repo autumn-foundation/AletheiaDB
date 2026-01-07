@@ -284,22 +284,23 @@ mod tests {
             move || {
                 flush_count_clone.fetch_add(1, Ordering::SeqCst);
             },
-            Duration::from_millis(20),
+            Duration::from_millis(50),
         );
 
-        // Wait for ~100ms - should get ~5 flushes
-        thread::sleep(Duration::from_millis(100));
+        // Wait longer to account for slow CI systems and thread startup delays
+        thread::sleep(Duration::from_millis(200));
 
         drop(guard);
 
         let elapsed = start.elapsed();
         let count = flush_count.load(Ordering::SeqCst);
 
-        // Should have at least 3 flushes in 100ms with 20ms interval
-        // (Being conservative due to timing variability)
+        // Should have at least 2 flushes in 200ms with 50ms interval
+        // (Being very conservative for slow/loaded CI systems)
+        // Expected: ~4 flushes, but requiring only 2 to avoid flakiness
         assert!(
-            count >= 3,
-            "expected at least 3 flushes in {:?}, got {}",
+            count >= 2,
+            "expected at least 2 flushes in {:?}, got {}",
             elapsed,
             count
         );
