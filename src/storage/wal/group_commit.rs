@@ -6,6 +6,7 @@
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
+use crate::utils::lock::MutexExt;
 use crate::utils::{Error, StorageError};
 
 /// Coordinates group commit batching and waiting.
@@ -104,6 +105,11 @@ impl GroupCommitCoordinator {
     /// # Returns
     ///
     /// A tuple of (epoch_to_wait_for, should_trigger_flush)
+    ///
+    /// # Panics
+    ///
+    /// Panics if the coordinator lock is poisoned. This is an unrecoverable state
+    /// indicating the coordinator is broken and cannot safely coordinate commits.
     pub fn register_transaction(&self) -> (u64, bool) {
         let mut state = self.state.lock().expect("group commit lock poisoned");
 
@@ -127,12 +133,15 @@ impl GroupCommitCoordinator {
     /// - The flush for this epoch failed
     /// - The wait times out (10x max_delay_ms with 2 second minimum for thread startup)
     pub fn wait_for_flush(&self, epoch: u64) -> Result<(), Error> {
-        let mut state = self.state.lock().expect("group commit lock poisoned");
+        let mut state = self.state.lock_or_err()?;
 
-        // Use a generous timeout to account for thread startup delays on slow CI systems
-        // Minimum 2 seconds for thread startup, or 10x max_delay for longer intervals
-        let timeout =
-            Duration::from_millis(self.config.max_delay_ms * 10).max(Duration::from_secs(2));
+        // Timeout scaling:
+        // - 100x max_delay for reasonable headroom (e.g., 1ms delay → 100ms timeout)
+        // - Minimum 500ms for CI system thread startup delays
+        // - Maximum 5s to avoid blocking production workloads too long on stuck threads
+        let timeout = Duration::from_millis(self.config.max_delay_ms * 100)
+            .max(Duration::from_millis(500))
+            .min(Duration::from_secs(5));
 
         // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
         // and this wait (rare but possible on fast systems), this loop exits immediately since

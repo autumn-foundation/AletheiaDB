@@ -497,33 +497,56 @@ impl WriteAheadLog {
                         Err(_) => return,
                     };
                     // Clone the file handle to perform the slow sync operation outside of the lock
-                    wal_guard
-                        .sync_handle
-                        .as_ref()
-                        .and_then(|h| h.try_clone().ok())
+                    match wal_guard.sync_handle.as_ref() {
+                        Some(h) => h.try_clone(),
+                        None => {
+                            // No sync handle available (shouldn't happen in normal operation)
+                            if let Some(ref gc) = group_commit_clone {
+                                let err = Error::Storage(StorageError::IoError(
+                                    "No sync handle available".to_string(),
+                                ));
+                                gc.mark_flushed(Err(err));
+                            }
+                            return;
+                        }
+                    }
                 }; // WAL lock is released here - parallel writes can now proceed during fsync
 
-                if let Some(sync_handle) = handle_to_sync
-                    && let Err(e) = sync_handle.sync_data()
-                {
-                    // Mark flush as failed if using GroupCommit
-                    if let Some(ref gc) = group_commit_clone {
-                        let err =
-                            Error::Storage(StorageError::IoError(format!("fsync failed: {}", e)));
-                        gc.mark_flushed(Err(err));
+                // Fsync to disk
+                match handle_to_sync {
+                    Ok(sync_handle) => {
+                        if let Err(e) = sync_handle.sync_data() {
+                            // Mark flush as failed if using GroupCommit
+                            if let Some(ref gc) = group_commit_clone {
+                                let err = Error::Storage(StorageError::IoError(format!(
+                                    "fsync failed: {}",
+                                    e
+                                )));
+                                gc.mark_flushed(Err(err));
+                            }
+                            return;
+                        }
                     }
-                    return;
+                    Err(e) => {
+                        // File descriptor limit reached or other clone error
+                        // This is a critical resource exhaustion issue - report it
+                        if let Some(ref gc) = group_commit_clone {
+                            let err = Error::Storage(StorageError::IoError(format!(
+                                "Failed to clone file handle (possible FD exhaustion): {}",
+                                e
+                            )));
+                            gc.mark_flushed(Err(err));
+                        }
+                        return;
+                    }
                 }
 
-                // Phase 3: Update state and notify waiters
-                {
-                    let mut wal_guard: std::sync::MutexGuard<'_, WriteAheadLog> =
-                        match wal_clone.lock() {
-                            Ok(guard) => guard,
-                            Err(_) => return,
-                        };
-                    wal_guard.has_pending_data = false;
-                }
+                // Phase 3: Notify waiters
+                // NOTE: We do NOT reset has_pending_data here to avoid a race condition:
+                // - New writes may have occurred after we cloned the file handle (Phase 2)
+                // - Those writes may or may not have been flushed by our fsync
+                // - Setting the flag to false could incorrectly indicate no pending data
+                // The flag will be reset by synchronous flush paths that hold the lock throughout.
 
                 // Notify GroupCommit waiters that flush is complete
                 if let Some(ref gc) = group_commit_clone {
