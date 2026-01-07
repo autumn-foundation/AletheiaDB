@@ -125,12 +125,13 @@ impl GroupCommitCoordinator {
     ///
     /// Returns an error if:
     /// - The flush for this epoch failed
-    /// - The wait times out (2x max_delay_ms as safety margin)
+    /// - The wait times out (10x max_delay_ms with 2 second minimum for thread startup)
     pub fn wait_for_flush(&self, epoch: u64) -> Result<(), Error> {
         let mut state = self.state.lock().expect("group commit lock poisoned");
 
-        // Double the max_delay as a safety timeout
-        let timeout = Duration::from_millis(self.config.max_delay_ms * 2);
+        // Use a generous timeout to account for thread startup delays on slow CI systems
+        // Minimum 2 seconds for thread startup, or 10x max_delay for longer intervals
+        let timeout = Duration::from_millis(self.config.max_delay_ms * 10).max(Duration::from_secs(2));
 
         while state.flushed_epoch <= epoch {
             let (new_state, timeout_result) = self
