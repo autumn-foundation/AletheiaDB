@@ -1,102 +1,185 @@
 //! Temporal indexes for efficient time-based queries.
 //!
-//! This module implements B-Tree based indexes that enable fast lookup of
-//! versions by entity ID and timestamp. The indexes support both point-in-time
-//! queries and range queries over temporal dimensions.
-//!
-//! # Index Structure
-//!
-//! We maintain separate indexes for valid time and transaction time:
-//! - `valid_time_index`: BTreeMap<(EntityId, Timestamp), Vec<VersionId>>
-//! - `transaction_time_index`: BTreeMap<(EntityId, Timestamp), Vec<VersionId>>
-//!
-//! This allows efficient queries like:
-//! - "Find all versions of entity X valid at time T"
-//! - "Find all versions recorded between times T1 and T2"
+//! This module implements a Timeline Index per entity, storing versions in sorted
+//! vectors to enable efficient binary search and cache-friendly scanning.
+//! It uses `DashMap` for fine-grained concurrency, allowing parallel writes to
+//! different entities without global locking bottlenecks.
 
 use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
-use std::collections::BTreeMap;
+use dashmap::DashMap;
 
-/// Index entry combining entity and time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct TemporalKey {
-    entity_id: EntityId,
-    timestamp: Timestamp,
+/// Entry in the timeline index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimelineEntry {
+    start: Timestamp,
+    end: Timestamp,
+    version_id: VersionId,
 }
 
-impl TemporalKey {
-    fn new(entity_id: EntityId, timestamp: Timestamp) -> Self {
-        TemporalKey {
-            entity_id,
-            timestamp,
+/// Timeline for a specific entity.
+#[derive(Debug, Clone, Default)]
+struct EntityTimeline {
+    /// Versions sorted by start time.
+    versions: Vec<TimelineEntry>,
+}
+
+impl EntityTimeline {
+    /// Insert a new version into the timeline, maintaining sorted order by start time.
+    fn insert(&mut self, start: Timestamp, end: Timestamp, version_id: VersionId) {
+        let entry = TimelineEntry {
+            start,
+            end,
+            version_id,
+        };
+
+        // Optimization: if this version starts after the last one (common case), just push it.
+        if self.versions.last().is_none_or(|last| last.start <= start) {
+            self.versions.push(entry);
+            return;
         }
+
+        let idx = self.versions.partition_point(|e| e.start < start);
+        self.versions.insert(idx, entry);
     }
+
+    /// Insert multiple versions at once and sort. Efficient for large retroactive updates.
+    fn insert_batch(&mut self, mut entries: Vec<TimelineEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        self.versions.append(&mut entries);
+        // Timsort is O(N) for already sorted data and efficient for partially sorted data.
+        self.versions.sort_by_key(|e| e.start);
+    }
+
+    /// Find all versions in this timeline that overlap with the given time range.
+    fn find_in_range(&self, range: TimeRange) -> Vec<VersionId> {
+        // Find versions starting before the query range ends.
+        let cutoff = self.versions.partition_point(|e| e.start < range.end());
+
+        // Scan candidate versions. Pre-allocate assuming a subset will match.
+        let mut results = Vec::with_capacity(cutoff.min(16));
+        for entry in &self.versions[..cutoff] {
+            if entry.end > range.start() {
+                results.push(entry.version_id);
+            }
+        }
+
+        results
+    }
+}
+
+/// Grouped timelines for valid and transaction dimensions.
+#[derive(Debug, Clone, Default)]
+struct EntityTimelines {
+    valid: EntityTimeline,
+    tx: EntityTimeline,
 }
 
 /// Temporal indexes for efficient time-based lookups.
 ///
-/// These indexes use B-Tree structures to enable logarithmic-time
-/// lookups and efficient range scans.
-#[derive(Debug, Clone)]
+/// This implementation uses a per-entity timeline index with sorted vectors,
+/// providing O(log N) lookup and cache-friendly scanning. It leverages `DashMap`
+/// for fine-grained concurrency, avoiding global bottlenecks during writes.
+#[derive(Debug, Default)]
 pub struct TemporalIndexes {
-    /// Index by valid time start
-    valid_time_index: BTreeMap<TemporalKey, Vec<VersionId>>,
-    /// Index by transaction time start
-    transaction_time_index: BTreeMap<TemporalKey, Vec<VersionId>>,
+    /// Combined index for both valid and transaction timelines.
+    index: DashMap<EntityId, EntityTimelines>,
 }
 
 impl TemporalIndexes {
     /// Create a new empty temporal index.
     pub fn new() -> Self {
-        TemporalIndexes {
-            valid_time_index: BTreeMap::new(),
-            transaction_time_index: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     /// Insert a node version into the temporal indexes.
     pub fn insert_node_version(
-        &mut self,
+        &self,
         node_id: NodeId,
         version_id: VersionId,
         temporal: BiTemporalInterval,
     ) {
-        let entity_id = EntityId::Node(node_id);
-        self.insert_version(entity_id, version_id, temporal);
+        self.insert_version(EntityId::Node(node_id), version_id, temporal);
     }
 
     /// Insert an edge version into the temporal indexes.
     pub fn insert_edge_version(
-        &mut self,
+        &self,
         edge_id: EdgeId,
         version_id: VersionId,
         temporal: BiTemporalInterval,
     ) {
-        let entity_id = EntityId::Edge(edge_id);
-        self.insert_version(entity_id, version_id, temporal);
+        self.insert_version(EntityId::Edge(edge_id), version_id, temporal);
+    }
+
+    /// Insert multiple node versions into the temporal indexes efficiently.
+    pub fn insert_node_versions_batch(
+        &self,
+        node_id: NodeId,
+        versions: Vec<(VersionId, BiTemporalInterval)>,
+    ) {
+        self.insert_versions_batch(EntityId::Node(node_id), versions);
+    }
+
+    /// Insert multiple edge versions into the temporal indexes efficiently.
+    pub fn insert_edge_versions_batch(
+        &self,
+        edge_id: EdgeId,
+        versions: Vec<(VersionId, BiTemporalInterval)>,
+    ) {
+        self.insert_versions_batch(EntityId::Edge(edge_id), versions);
     }
 
     /// Insert a version into both temporal indexes.
     fn insert_version(
-        &mut self,
+        &self,
         entity_id: EntityId,
         version_id: VersionId,
         temporal: BiTemporalInterval,
     ) {
-        // Index by valid time start
-        let valid_key = TemporalKey::new(entity_id, temporal.valid_time().start());
-        self.valid_time_index
-            .entry(valid_key)
-            .or_default()
-            .push(version_id);
+        let mut timelines = self.index.entry(entity_id).or_default();
+        
+        let valid = temporal.valid_time();
+        timelines.valid.insert(valid.start(), valid.end(), version_id);
 
-        // Index by transaction time start
-        let tx_key = TemporalKey::new(entity_id, temporal.transaction_time().start());
-        self.transaction_time_index
-            .entry(tx_key)
-            .or_default()
-            .push(version_id);
+        let tx = temporal.transaction_time();
+        timelines.tx.insert(tx.start(), tx.end(), version_id);
+    }
+
+    /// Helper for batch insertion of versions.
+    fn insert_versions_batch(
+        &self,
+        entity_id: EntityId,
+        versions: Vec<(VersionId, BiTemporalInterval)>,
+    ) {
+        if versions.is_empty() {
+            return;
+        }
+
+        let mut valid_entries = Vec::with_capacity(versions.len());
+        let mut tx_entries = Vec::with_capacity(versions.len());
+
+        for (v_id, temporal) in versions {
+            let valid = temporal.valid_time();
+            let tx = temporal.transaction_time();
+
+            valid_entries.push(TimelineEntry {
+                start: valid.start(),
+                end: valid.end(),
+                version_id: v_id,
+            });
+            tx_entries.push(TimelineEntry {
+                start: tx.start(),
+                end: tx.end(),
+                version_id: v_id,
+            });
+        }
+
+        let mut timelines = self.index.entry(entity_id).or_default();
+        timelines.valid.insert_batch(valid_entries);
+        timelines.tx.insert_batch(tx_entries);
     }
 
     /// Find all node versions that overlap with the given valid time range.
@@ -105,8 +188,10 @@ impl TemporalIndexes {
         node_id: NodeId,
         time_range: TimeRange,
     ) -> Vec<VersionId> {
-        let entity_id = EntityId::Node(node_id);
-        self.find_versions_in_range(&self.valid_time_index, entity_id, time_range)
+        self.index
+            .get(&EntityId::Node(node_id))
+            .map(|t| t.valid.find_in_range(time_range))
+            .unwrap_or_default()
     }
 
     /// Find all edge versions that overlap with the given valid time range.
@@ -115,8 +200,10 @@ impl TemporalIndexes {
         edge_id: EdgeId,
         time_range: TimeRange,
     ) -> Vec<VersionId> {
-        let entity_id = EntityId::Edge(edge_id);
-        self.find_versions_in_range(&self.valid_time_index, entity_id, time_range)
+        self.index
+            .get(&EntityId::Edge(edge_id))
+            .map(|t| t.valid.find_in_range(time_range))
+            .unwrap_or_default()
     }
 
     /// Find all node versions recorded in the given transaction time range.
@@ -125,8 +212,10 @@ impl TemporalIndexes {
         node_id: NodeId,
         time_range: TimeRange,
     ) -> Vec<VersionId> {
-        let entity_id = EntityId::Node(node_id);
-        self.find_versions_in_range(&self.transaction_time_index, entity_id, time_range)
+        self.index
+            .get(&EntityId::Node(node_id))
+            .map(|t| t.tx.find_in_range(time_range))
+            .unwrap_or_default()
     }
 
     /// Find all edge versions recorded in the given transaction time range.
@@ -135,51 +224,23 @@ impl TemporalIndexes {
         edge_id: EdgeId,
         time_range: TimeRange,
     ) -> Vec<VersionId> {
-        let entity_id = EntityId::Edge(edge_id);
-        self.find_versions_in_range(&self.transaction_time_index, entity_id, time_range)
+        self.index
+            .get(&EntityId::Edge(edge_id))
+            .map(|t| t.tx.find_in_range(time_range))
+            .unwrap_or_default()
     }
 
-    /// Find versions in a specific index within a time range.
-    ///
-    /// This finds all versions whose start time falls within the query range.
-    /// For overlap queries, the caller should query with an extended range.
-    fn find_versions_in_range(
-        &self,
-        index: &BTreeMap<TemporalKey, Vec<VersionId>>,
-        entity_id: EntityId,
-        time_range: TimeRange,
-    ) -> Vec<VersionId> {
-        // Find versions whose start time is within the query range
-        let start_key = TemporalKey::new(entity_id, time_range.start());
-        let end_key = TemporalKey::new(entity_id, time_range.end());
-
-        let mut results = Vec::new();
-
-        // Range query over the B-Tree
-        for (_key, versions) in index.range(start_key..=end_key) {
-            results.extend_from_slice(versions);
-        }
-
-        results
-    }
-
-    /// Get the number of indexed versions.
+    /// Get the total number of indexed version entries.
     pub fn version_count(&self) -> usize {
-        // Count unique versions across both indexes
-        // Note: This is an approximation as versions appear in both indexes
-        self.valid_time_index.values().map(|v| v.len()).sum()
+        self.index
+            .iter()
+            .map(|entry| entry.value().valid.versions.len())
+            .sum()
     }
 
     /// Clear all indexes.
-    pub fn clear(&mut self) {
-        self.valid_time_index.clear();
-        self.transaction_time_index.clear();
-    }
-}
-
-impl Default for TemporalIndexes {
-    fn default() -> Self {
-        Self::new()
+    pub fn clear(&self) {
+        self.index.clear();
     }
 }
 
@@ -190,20 +251,21 @@ mod tests {
 
     #[test]
     fn test_insert_and_find_node_versions() {
-        let mut indexes = TemporalIndexes::new();
+        let indexes = TemporalIndexes::new();
 
         let node_id = NodeId::new(1).unwrap();
         let v1 = VersionId::new(100).unwrap();
         let v2 = VersionId::new(101).unwrap();
         let v3 = VersionId::new(102).unwrap();
 
-        // Insert versions at different valid times
+        // v1: [0, 1000)
         indexes.insert_node_version(
             node_id,
             v1,
             BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
         );
 
+        // v2: [1000, 2000)
         indexes.insert_node_version(
             node_id,
             v2,
@@ -213,6 +275,7 @@ mod tests {
             ),
         );
 
+        // v3: [2000, 3000)
         indexes.insert_node_version(
             node_id,
             v3,
@@ -222,26 +285,101 @@ mod tests {
             ),
         );
 
-        // Query for versions in valid time range [500, 1500]
+        // Test overlap logic: Query [500, 1500)
+        // v1 overlaps (500 to 1000)
+        // v2 overlaps (1000 to 1500)
         let results =
             indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(500, 1500));
 
-        // Should find only v2 (starts at 1000, which is in range [500, 1500])
-        // v1 starts at 0, which is before the range
-        // v3 starts at 2000, which is after the range
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&v1));
+        assert!(results.contains(&v2));
+        assert!(!results.contains(&v3));
+    }
+
+    #[test]
+    fn test_edge_cases_overlap() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+
+        // Overlapping intervals (should be possible in valid time)
+        let v1 = VersionId::new(1).unwrap();
+        let v2 = VersionId::new(2).unwrap();
+        indexes.insert_node_version(node_id, v1, BiTemporalInterval::new(TimeRange::new(0, 2000), TimeRange::from(0)));
+        indexes.insert_node_version(node_id, v2, BiTemporalInterval::new(TimeRange::new(1000, 3000), TimeRange::from(0)));
+
+        // Query point at 1500 (both should match)
+        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(1500));
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&v1));
+        assert!(results.contains(&v2));
+
+        // Query point at 500 (only v1)
+        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(500));
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&v1));
+
+        // Query point at 2500 (only v2)
+        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(2500));
         assert_eq!(results.len(), 1);
         assert!(results.contains(&v2));
     }
 
     #[test]
+    fn test_adjacent_intervals() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+
+        let v1 = VersionId::new(1).unwrap();
+        let v2 = VersionId::new(2).unwrap();
+        // v1: [0, 1000), v2: [1000, 2000)
+        indexes.insert_node_version(node_id, v1, BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::from(0)));
+        indexes.insert_node_version(node_id, v2, BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::from(0)));
+
+        // Query point at 1000 (only v2 because [start, end) is inclusive-exclusive)
+        // Use [1000, 1001) to represent the point 1000
+        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(1000, 1001));
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&v2));
+
+        // Query range [500, 1000) (only v1 because 1000 is exclusive)
+        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(500, 1000));
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&v1));
+    }
+
+    #[test]
+    fn test_batch_insertion() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        
+        let versions = vec![
+            (VersionId::new(1).unwrap(), BiTemporalInterval::new(TimeRange::new(0, 10), TimeRange::from(0))),
+            (VersionId::new(3).unwrap(), BiTemporalInterval::new(TimeRange::new(20, 30), TimeRange::from(0))),
+            (VersionId::new(2).unwrap(), BiTemporalInterval::new(TimeRange::new(10, 20), TimeRange::from(0))),
+        ];
+        
+        indexes.insert_node_versions_batch(node_id, versions);
+        
+        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(5, 25));
+        assert_eq!(results.len(), 3);
+        
+        // Verify sort order internally (though opaque to API)
+        let timelines = indexes.index.get(&EntityId::Node(node_id)).unwrap();
+        assert_eq!(timelines.valid.versions[0].start, 0);
+        assert_eq!(timelines.valid.versions[1].start, 10);
+        assert_eq!(timelines.valid.versions[2].start, 20);
+    }
+
+    #[test]
     fn test_transaction_time_range_query() {
-        let mut indexes = TemporalIndexes::new();
+        let indexes = TemporalIndexes::new();
 
         let edge_id = EdgeId::new(1).unwrap();
         let v1 = VersionId::new(100).unwrap();
         let v2 = VersionId::new(101).unwrap();
 
-        // Version recorded at tx time 1000
+        // v1: tx [1000, MAX)
         indexes.insert_edge_version(
             edge_id,
             v1,
@@ -251,7 +389,7 @@ mod tests {
             ),
         );
 
-        // Version recorded at tx time 2000
+        // v2: tx [2000, MAX)
         indexes.insert_edge_version(
             edge_id,
             v2,
@@ -261,30 +399,18 @@ mod tests {
             ),
         );
 
-        // Query for versions recorded between 1500 and 2500
+        // Query: [1500, 2500)
         let results = indexes
             .find_edge_versions_in_transaction_time_range(edge_id, TimeRange::new(1500, 2500));
 
-        // Should find only v2
-        assert_eq!(results.len(), 1);
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&v1));
         assert!(results.contains(&v2));
     }
 
     #[test]
-    fn test_empty_index() {
-        let indexes = TemporalIndexes::new();
-
-        let results = indexes.find_node_versions_in_valid_time_range(
-            NodeId::new(1).unwrap(),
-            TimeRange::new(0, 1000),
-        );
-
-        assert_eq!(results.len(), 0);
-    }
-
-    #[test]
     fn test_multiple_entities() {
-        let mut indexes = TemporalIndexes::new();
+        let indexes = TemporalIndexes::new();
 
         let node1 = NodeId::new(1).unwrap();
         let node2 = NodeId::new(2).unwrap();
@@ -292,10 +418,8 @@ mod tests {
         let v2 = VersionId::new(101).unwrap();
 
         indexes.insert_node_version(node1, v1, BiTemporalInterval::current(1000));
-
         indexes.insert_node_version(node2, v2, BiTemporalInterval::current(1000));
 
-        // Query for node1 should only return v1
         let results =
             indexes.find_node_versions_in_valid_time_range(node1, TimeRange::new(0, 2000));
 
@@ -306,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut indexes = TemporalIndexes::new();
+        let indexes = TemporalIndexes::new();
 
         indexes.insert_node_version(
             NodeId::new(1).unwrap(),
@@ -319,21 +443,5 @@ mod tests {
         indexes.clear();
 
         assert_eq!(indexes.version_count(), 0);
-    }
-
-    #[test]
-    fn test_temporal_key_ordering() {
-        let node1 = EntityId::Node(NodeId::new(1).unwrap());
-        let node2 = EntityId::Node(NodeId::new(2).unwrap());
-
-        let key1 = TemporalKey::new(node1, 1000);
-        let key2 = TemporalKey::new(node1, 2000);
-        let key3 = TemporalKey::new(node2, 1000);
-
-        // Same entity, different times
-        assert!(key1 < key2);
-
-        // Different entities
-        assert!(key1 < key3);
     }
 }

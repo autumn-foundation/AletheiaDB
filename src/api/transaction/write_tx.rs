@@ -538,7 +538,7 @@ impl WriteTransaction {
         // Acquire locks once before processing all operations.
         // This reduces lock overhead from 2N acquisitions (per operation) to just 2 (total).
         let mut historical = self.historical.write_or_err()?;
-        let mut temporal_indexes = self.temporal_indexes.write_or_err()?;
+        let temporal_indexes = self.temporal_indexes.write_or_err()?;
 
         // Pre-generate all tombstone version IDs at once to reduce lock contention
         // on the ID generator. Count delete operations and generate IDs in batch.

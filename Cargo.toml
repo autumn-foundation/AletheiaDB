@@ -162,3 +162,9 @@ name = "concurrent_reads"
 harness = false
 path = "benches/concurrent_reads.rs"
 required-features = []
+
+[[bench]]
+name = "temporal_query"
+harness = false
+path = "benches/temporal_query.rs"
+required-features = []
