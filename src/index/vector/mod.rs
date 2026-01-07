@@ -481,5 +481,6 @@ pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};
 
 // Re-export temporal types for convenience
 pub use temporal::{
-    RetentionPolicy, SnapshotInfo, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
+    DriftMetric, RetentionPolicy, SnapshotInfo, SnapshotStrategy, TemporalVectorConfig,
+    TemporalVectorIndex,
 };

@@ -270,7 +270,10 @@ impl WriteTransaction {
         self.apply_changes(commit_timestamp)?;
 
         // Notify temporal vector index of transaction completion (for snapshot creation)
-        self.current.on_temporal_vector_transaction()?;
+        // Only call this if the transaction modified vector properties to avoid unnecessary overhead
+        if self.buffer.has_vector_operations() {
+            self.current.on_temporal_vector_transaction()?;
+        }
 
         // Register commit with visibility manager
         self.visibility_manager
@@ -1212,8 +1215,14 @@ impl WriteOps for WriteTransaction {
             .into());
         }
 
-        // Verify node exists
-        self.current.get_node(node_id)?;
+        // Verify node exists and check for vector properties
+        let node = self.current.get_node(node_id)?;
+
+        // If the node being deleted contains vector properties, mark the buffer
+        // to ensure the temporal vector index is notified on commit
+        if !self.buffer.has_vector_operations() && node.properties.contains_vector() {
+            self.buffer.mark_has_vector_operations();
+        }
 
         // Buffer the write
         self.buffer
@@ -1232,8 +1241,14 @@ impl WriteOps for WriteTransaction {
             .into());
         }
 
-        // Verify edge exists
-        self.current.get_edge(edge_id)?;
+        // Verify edge exists and check for vector properties
+        let edge = self.current.get_edge(edge_id)?;
+
+        // If the edge being deleted contains vector properties, mark the buffer
+        // to ensure the temporal vector index is notified on commit
+        if !self.buffer.has_vector_operations() && edge.properties.contains_vector() {
+            self.buffer.mark_has_vector_operations();
+        }
 
         // Buffer the write
         self.buffer
