@@ -40,11 +40,21 @@ pub enum Error {
 impl Error {
     /// Create a new error from a message.
     pub fn other<S: Into<String>>(msg: S) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_other_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Other(msg.into())
     }
 
     /// Create a new NotImplemented error.
     pub fn not_implemented<S: Into<String>, R: Into<String>>(feature: S, reason: R) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_other_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::NotImplemented {
             feature: feature.into(),
             reason: reason.into(),
@@ -81,36 +91,66 @@ impl std::error::Error for Error {
 // Conversions from specific error types to main Error type
 impl From<StorageError> for Error {
     fn from(e: StorageError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_storage_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Storage(e)
     }
 }
 
 impl From<TemporalError> for Error {
     fn from(e: TemporalError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_temporal_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Temporal(e)
     }
 }
 
 impl From<QueryError> for Error {
     fn from(e: QueryError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_query_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Query(e)
     }
 }
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_io_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Io(e)
     }
 }
 
 impl From<TransactionError> for Error {
     fn from(e: TransactionError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_transaction_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Transaction(e)
     }
 }
 
 impl From<VectorError> for Error {
     fn from(e: VectorError) -> Self {
+        #[cfg(feature = "observability")]
+        crate::observability::METRICS
+            .error_vector_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         Error::Vector(e)
     }
 }

@@ -56,8 +56,31 @@ pub trait MutexExt<T> {
 
 impl<T> MutexExt<T> for Mutex<T> {
     fn lock_or_err(&self) -> Result<MutexGuard<'_, T>, Error> {
-        self.lock()
-            .map_err(|_| StorageError::LockPoisoned { lock_type: "Mutex" }.into())
+        // Debug-only: Track lock acquisitions to detect excessive contention
+        #[cfg(all(debug_assertions, feature = "observability"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count.is_multiple_of(10000) {
+                tracing::debug!(count, "Mutex lock acquisition count");
+            }
+        }
+
+        self.lock().map_err(|_| {
+            #[cfg(feature = "observability")]
+            {
+                tracing::error!(
+                    lock_type = "Mutex",
+                    thread_id = ?std::thread::current().id(),
+                    "Lock poisoned - thread panicked while holding lock"
+                );
+                crate::observability::METRICS
+                    .lock_poison_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            StorageError::LockPoisoned { lock_type: "Mutex" }.into()
+        })
     }
 
     fn lock_or_recover(&self) -> MutexGuard<'_, T> {
@@ -102,7 +125,29 @@ pub trait RwLockExt<T> {
 
 impl<T> RwLockExt<T> for RwLock<T> {
     fn read_or_err(&self) -> Result<RwLockReadGuard<'_, T>, Error> {
+        // Debug-only: Track read lock acquisitions
+        #[cfg(all(debug_assertions, feature = "observability"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static READ_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = READ_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count.is_multiple_of(10000) {
+                tracing::debug!(count, "RwLock read acquisition count");
+            }
+        }
+
         self.read().map_err(|_| {
+            #[cfg(feature = "observability")]
+            {
+                tracing::error!(
+                    lock_type = "RwLock(read)",
+                    thread_id = ?std::thread::current().id(),
+                    "Lock poisoned - thread panicked while holding lock"
+                );
+                crate::observability::METRICS
+                    .lock_poison_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             StorageError::LockPoisoned {
                 lock_type: "RwLock",
             }
@@ -111,7 +156,29 @@ impl<T> RwLockExt<T> for RwLock<T> {
     }
 
     fn write_or_err(&self) -> Result<RwLockWriteGuard<'_, T>, Error> {
+        // Debug-only: Track write lock acquisitions
+        #[cfg(all(debug_assertions, feature = "observability"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static WRITE_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = WRITE_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count.is_multiple_of(10000) {
+                tracing::debug!(count, "RwLock write acquisition count");
+            }
+        }
+
         self.write().map_err(|_| {
+            #[cfg(feature = "observability")]
+            {
+                tracing::error!(
+                    lock_type = "RwLock(write)",
+                    thread_id = ?std::thread::current().id(),
+                    "Lock poisoned - thread panicked while holding lock"
+                );
+                crate::observability::METRICS
+                    .lock_poison_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             StorageError::LockPoisoned {
                 lock_type: "RwLock",
             }
