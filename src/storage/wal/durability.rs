@@ -130,19 +130,17 @@ impl DurabilityMode {
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError::InvalidConfig`] if validation fails.
+    /// Returns [`StorageError::WalError`] if validation fails.
     pub fn async_mode_validated(flush_interval_ms: u64) -> Result<Self> {
         if flush_interval_ms == 0 {
-            return Err(StorageError::InvalidConfig {
-                field: "flush_interval_ms".to_string(),
-                reason: "must be greater than 0".to_string(),
+            return Err(StorageError::WalError {
+                reason: "flush_interval_ms must be greater than 0".to_string(),
             }
             .into());
         }
         if flush_interval_ms > 60_000 {
-            return Err(StorageError::InvalidConfig {
-                field: "flush_interval_ms".to_string(),
-                reason: "must be <= 60000ms (1 minute)".to_string(),
+            return Err(StorageError::WalError {
+                reason: "flush_interval_ms must be <= 60000ms (1 minute)".to_string(),
             }
             .into());
         }
@@ -176,14 +174,8 @@ impl DurabilityMode {
             max_delay_ms <= 1000,
             "max_delay_ms must be <= 1000ms (1 second)"
         );
-        assert!(
-            max_batch_size > 0,
-            "max_batch_size must be greater than 0"
-        );
-        assert!(
-            max_batch_size <= 10_000,
-            "max_batch_size must be <= 10000"
-        );
+        assert!(max_batch_size > 0, "max_batch_size must be greater than 0");
+        assert!(max_batch_size <= 10_000, "max_batch_size must be <= 10000");
         DurabilityMode::GroupCommit {
             max_delay_ms,
             max_batch_size,
@@ -198,33 +190,29 @@ impl DurabilityMode {
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError::InvalidConfig`] if validation fails.
+    /// Returns [`StorageError::WalError`] if validation fails.
     pub fn group_commit_validated(max_delay_ms: u64, max_batch_size: usize) -> Result<Self> {
         if max_delay_ms == 0 {
-            return Err(StorageError::InvalidConfig {
-                field: "max_delay_ms".to_string(),
-                reason: "must be greater than 0".to_string(),
+            return Err(StorageError::WalError {
+                reason: "max_delay_ms must be greater than 0".to_string(),
             }
             .into());
         }
         if max_delay_ms > 1000 {
-            return Err(StorageError::InvalidConfig {
-                field: "max_delay_ms".to_string(),
-                reason: "must be <= 1000ms (1 second)".to_string(),
+            return Err(StorageError::WalError {
+                reason: "max_delay_ms must be <= 1000ms (1 second)".to_string(),
             }
             .into());
         }
         if max_batch_size == 0 {
-            return Err(StorageError::InvalidConfig {
-                field: "max_batch_size".to_string(),
-                reason: "must be greater than 0".to_string(),
+            return Err(StorageError::WalError {
+                reason: "max_batch_size must be greater than 0".to_string(),
             }
             .into());
         }
         if max_batch_size > 10_000 {
-            return Err(StorageError::InvalidConfig {
-                field: "max_batch_size".to_string(),
-                reason: "must be <= 10000".to_string(),
+            return Err(StorageError::WalError {
+                reason: "max_batch_size must be <= 10000".to_string(),
             }
             .into());
         }

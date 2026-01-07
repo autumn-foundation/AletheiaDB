@@ -508,10 +508,8 @@ impl WriteAheadLog {
                 {
                     // Mark flush as failed if using GroupCommit
                     if let Some(ref gc) = group_commit_clone {
-                        let err = Error::Storage(StorageError::IoError(format!(
-                            "fsync failed: {}",
-                            e
-                        )));
+                        let err =
+                            Error::Storage(StorageError::IoError(format!("fsync failed: {}", e)));
                         gc.mark_flushed(Err(err));
                     }
                     return;
