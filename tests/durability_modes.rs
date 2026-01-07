@@ -3,12 +3,12 @@
 //! Tests the three durability modes (Synchronous, Async, GroupCommit)
 //! and their interactions including piggybacking.
 
-use gallifreydb::{
-    DurabilityMode, GallifreyDB, GLOBAL_INTERNER, Node, PropertyMapBuilder, WriteOps, WriteOptions,
-};
 use gallifreydb::storage::wal::WalConfig;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use gallifreydb::{
+    DurabilityMode, GLOBAL_INTERNER, GallifreyDB, Node, PropertyMapBuilder, WriteOps, WriteOptions,
+};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -45,7 +45,10 @@ fn test_synchronous_mode_is_default() {
     // Default mode should be Synchronous
     let node_id = db
         .write(|tx| {
-            tx.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+            tx.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
         })
         .expect("write failed");
 
@@ -64,7 +67,10 @@ fn test_synchronous_mode_explicit() {
 
     let node_id = db
         .write_with_options(options, |tx| {
-            tx.create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build())
+            tx.create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
         })
         .expect("write failed");
 
@@ -97,9 +103,7 @@ fn test_async_mode_returns_immediately() {
             .write_with_options(options.clone(), |tx| {
                 tx.create_node(
                     "Record",
-                    PropertyMapBuilder::new()
-                        .insert("index", i as i64)
-                        .build(),
+                    PropertyMapBuilder::new().insert("index", i as i64).build(),
                 )
             })
             .expect("write failed");
@@ -184,9 +188,7 @@ fn test_group_commit_batches_transactions() {
                 .write_with_options(options, |tx| {
                     tx.create_node(
                         "BatchItem",
-                        PropertyMapBuilder::new()
-                            .insert("thread", i as i64)
-                            .build(),
+                        PropertyMapBuilder::new().insert("thread", i as i64).build(),
                     )
                 })
                 .expect("write failed");
@@ -318,9 +320,7 @@ fn test_override_async_db_with_sync_transaction() {
         .write_with_options(options, |tx| {
             tx.create_node(
                 "Critical",
-                PropertyMapBuilder::new()
-                    .insert("important", true)
-                    .build(),
+                PropertyMapBuilder::new().insert("important", true).build(),
             )
         })
         .expect("write failed");
@@ -384,9 +384,7 @@ fn test_sync_piggybacks_async_data() {
         .write_with_options(async_options, |tx| {
             tx.create_node(
                 "AsyncData",
-                PropertyMapBuilder::new()
-                    .insert("pending", true)
-                    .build(),
+                PropertyMapBuilder::new().insert("pending", true).build(),
             )
         })
         .expect("async write failed");
@@ -406,8 +404,14 @@ fn test_sync_piggybacks_async_data() {
         .expect("sync write failed");
 
     // Both nodes should be visible and durable
-    assert_eq!(get_label(&db.get_node(async_node).expect("lookup")), "AsyncData");
-    assert_eq!(get_label(&db.get_node(sync_node).expect("lookup")), "SyncData");
+    assert_eq!(
+        get_label(&db.get_node(async_node).expect("lookup")),
+        "AsyncData"
+    );
+    assert_eq!(
+        get_label(&db.get_node(sync_node).expect("lookup")),
+        "SyncData"
+    );
 }
 
 #[test]
@@ -450,8 +454,14 @@ fn test_group_commit_piggybacks_async_data() {
         .expect("group commit write failed");
 
     // Both should be visible and durable
-    assert_eq!(get_label(&db.get_node(async_node).expect("lookup")), "AsyncPending");
-    assert_eq!(get_label(&db.get_node(gc_node).expect("lookup")), "GroupCommitData");
+    assert_eq!(
+        get_label(&db.get_node(async_node).expect("lookup")),
+        "AsyncPending"
+    );
+    assert_eq!(
+        get_label(&db.get_node(gc_node).expect("lookup")),
+        "GroupCommitData"
+    );
 }
 
 // =============================================================================
@@ -551,12 +561,15 @@ fn test_write_with_options_closure_semantics() {
 fn test_error_in_write_with_options_propagates() {
     let db = GallifreyDB::new();
 
-    let result: Result<(), gallifreydb::Error> = db.write_with_options(WriteOptions::default(), |_tx| {
-        Err(gallifreydb::Error::Storage(gallifreydb::StorageError::InvalidProperty {
-            key: "test".into(),
-            reason: "intentional failure".into(),
-        }))
-    });
+    let result: Result<(), gallifreydb::Error> =
+        db.write_with_options(WriteOptions::default(), |_tx| {
+            Err(gallifreydb::Error::Storage(
+                gallifreydb::StorageError::InvalidProperty {
+                    key: "test".into(),
+                    reason: "intentional failure".into(),
+                },
+            ))
+        });
 
     assert!(result.is_err());
     match result {
@@ -611,6 +624,9 @@ fn test_concurrent_mixed_modes() {
 
     // All nodes should be visible
     for node_id in node_ids {
-        assert_eq!(get_label(&db.get_node(node_id).expect("lookup")), "ConcurrentNode");
+        assert_eq!(
+            get_label(&db.get_node(node_id).expect("lookup")),
+            "ConcurrentNode"
+        );
     }
 }

@@ -5,12 +5,10 @@
 //! - Async: Background flush thread
 //! - GroupCommit: Batched fsync with ACID guarantees
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::{
-    core::PropertyMapBuilder, storage::wal::DurabilityMode, GallifreyDB,
-    storage::wal::WalConfig, WriteOptions, WriteOps,
+    GallifreyDB, WriteOps, WriteOptions, core::PropertyMapBuilder, storage::wal::DurabilityMode,
+    storage::wal::WalConfig,
 };
 use std::sync::Arc;
 use std::thread;

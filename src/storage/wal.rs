@@ -214,6 +214,7 @@ pub struct WalConfig {
     /// **Deprecated**: Use `durability_mode` instead. This field is kept for
     /// backward compatibility and is ignored when `durability_mode` is set
     /// to anything other than `Synchronous`.
+    #[deprecated(since = "0.2.0", note = "Use `durability_mode` instead")]
     pub sync_on_write: bool,
     /// Number of WAL segments to keep for recovery
     pub segments_to_retain: usize,
@@ -453,7 +454,10 @@ impl WriteAheadLog {
         // Get the durability mode and group commit coordinator while holding the lock
         let (mode, group_commit): (DurabilityMode, Option<Arc<GroupCommitCoordinator>>) = {
             let wal_guard = wal.lock().expect("WAL lock poisoned");
-            (wal_guard.config.durability_mode, wal_guard.group_commit.clone())
+            (
+                wal_guard.config.durability_mode,
+                wal_guard.group_commit.clone(),
+            )
         };
 
         let interval = match mode {
@@ -472,25 +476,35 @@ impl WriteAheadLog {
             move || {
                 // Phase 1: Flush to OS page cache (fast, µs)
                 {
-                    let mut wal_guard: std::sync::MutexGuard<'_, WriteAheadLog> = match wal_clone.lock() {
-                        Ok(guard) => guard,
-                        Err(_) => return,
-                    };
+                    let mut wal_guard: std::sync::MutexGuard<'_, WriteAheadLog> =
+                        match wal_clone.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => return,
+                        };
                     if let Err(_e) = wal_guard.flush_to_os() {
                         // Log error in production, but continue
                     }
                 } // Lock released - parallel writes can now pile up
 
                 // Phase 2: Sync to disk (slow, ms) - no lock held!
-                // We need to get sync_handle without holding the lock
-                {
-                    let wal_guard: std::sync::MutexGuard<'_, WriteAheadLog> = match wal_clone.lock() {
+                // Clone the file handle while holding the lock, then release lock before fsync.
+                // CRITICAL: try_clone() creates a new file descriptor that shares the same
+                // file description, so sync_data() flushes all writes made through any handle.
+                let handle_to_sync = {
+                    let wal_guard: std::sync::MutexGuard<'_, WriteAheadLog> = match wal_clone.lock()
+                    {
                         Ok(guard) => guard,
                         Err(_) => return,
                     };
-                    if let Some(sync_handle) = &wal_guard.sync_handle
-                        && let Err(e) = sync_handle.sync_data()
-                    {
+                    // Clone the file handle to perform the slow sync operation outside of the lock
+                    wal_guard
+                        .sync_handle
+                        .as_ref()
+                        .and_then(|h| h.try_clone().ok())
+                }; // WAL lock is released here - parallel writes can now proceed during fsync
+
+                if let Some(sync_handle) = handle_to_sync {
+                    if let Err(e) = sync_handle.sync_data() {
                         // Mark flush as failed if using GroupCommit
                         if let Some(ref gc) = group_commit_clone {
                             let err = Error::Storage(StorageError::IoError(format!(
@@ -505,10 +519,11 @@ impl WriteAheadLog {
 
                 // Phase 3: Update state and notify waiters
                 {
-                    let mut wal_guard: std::sync::MutexGuard<'_, WriteAheadLog> = match wal_clone.lock() {
-                        Ok(guard) => guard,
-                        Err(_) => return,
-                    };
+                    let mut wal_guard: std::sync::MutexGuard<'_, WriteAheadLog> =
+                        match wal_clone.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => return,
+                        };
                     wal_guard.has_pending_data = false;
                 }
 
@@ -539,9 +554,9 @@ impl WriteAheadLog {
         // Clone the file handle for sync operations.
         // This allows us to release the writer lock before calling sync_data(),
         // enabling parallel writes during the slow fsync operation.
-        let sync_handle = file
-            .try_clone()
-            .map_err(|e| StorageError::IoError(format!("Failed to clone WAL file handle: {}", e)))?;
+        let sync_handle = file.try_clone().map_err(|e| {
+            StorageError::IoError(format!("Failed to clone WAL file handle: {}", e))
+        })?;
 
         // Get current file size
         let metadata = file.metadata().map_err(|e| {
@@ -1317,6 +1332,13 @@ impl WriteAheadLog {
     pub fn commit_with_mode(&mut self, mode: DurabilityMode) -> Result<Option<u64>> {
         match mode {
             DurabilityMode::Synchronous => {
+                // Piggyback optimization: Wake background thread to flush pending async data
+                // before we do our own fsync. This reduces the data-at-risk window for async
+                // writes without slowing down the synchronous commit.
+                if let Some(signal) = &self.flush_signal {
+                    signal.request_flush();
+                }
+
                 // Immediate full flush (current behavior)
                 self.flush()?;
                 Ok(None)

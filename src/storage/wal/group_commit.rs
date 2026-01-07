@@ -131,7 +131,8 @@ impl GroupCommitCoordinator {
 
         // Use a generous timeout to account for thread startup delays on slow CI systems
         // Minimum 2 seconds for thread startup, or 10x max_delay for longer intervals
-        let timeout = Duration::from_millis(self.config.max_delay_ms * 10).max(Duration::from_secs(2));
+        let timeout =
+            Duration::from_millis(self.config.max_delay_ms * 10).max(Duration::from_secs(2));
 
         while state.flushed_epoch <= epoch {
             let (new_state, timeout_result) = self

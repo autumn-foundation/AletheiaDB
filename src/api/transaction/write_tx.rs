@@ -209,6 +209,8 @@ impl WriteTransaction {
             *ts += 1; // Post-increment for visibility of this commit
 
             // Acquire WAL lock once and hold through logging.
+            // CRITICAL: We release this lock BEFORE waiting for GroupCommit epoch flush
+            // to prevent deadlock (flush thread needs WAL lock to mark epochs complete).
             let mut wal = self
                 .wal
                 .lock()
@@ -222,18 +224,16 @@ impl WriteTransaction {
             let epoch = wal.commit_with_mode(self.durability_mode)?;
 
             (commit, epoch)
-            // Both locks released here
+            // Both locks released here - MUST release before waiting for epoch!
         };
 
-        // For GroupCommit mode, wait for the epoch to be flushed
-        // IMPORTANT: Do NOT hold WAL lock while waiting - that would deadlock with flush thread
+        // For GroupCommit mode, wait for the epoch to be flushed.
+        // CRITICAL DEADLOCK PREVENTION: WAL lock MUST be released before this wait!
+        // The flush thread needs the WAL lock to call mark_flushed(), so holding it
+        // here would cause a deadlock where we wait for flush thread, but flush thread
+        // waits for the WAL lock we're holding.
         if let Some(epoch) = wait_epoch {
-            let coordinator = self
-                .wal
-                .lock()
-                .expect("WAL lock poisoned")
-                .group_commit_coordinator()
-                .cloned();
+            let coordinator = self.wal.lock_or_err()?.group_commit_coordinator().cloned();
 
             if let Some(gc) = coordinator {
                 gc.wait_for_flush(epoch)?;
