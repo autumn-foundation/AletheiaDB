@@ -227,50 +227,54 @@ fn bench_batch_edge_insertions(c: &mut Criterion) {
 
 /// Benchmark edge updates in batch to verify optimization.
 fn bench_batch_edge_updates(c: &mut Criterion) {
-    let db = GallifreyDB::new();
-
-    // Pre-create a graph with 1000 edges
-    let edge_ids: Vec<_> = db
-        .write(|tx| {
-            let mut nodes = Vec::new();
-            let mut edges = Vec::new();
-
-            for i in 0..1000 {
-                let node = tx.create_node(
-                    "Node",
-                    PropertyMapBuilder::new().insert("id", i as i64).build(),
-                )?;
-                nodes.push(node);
-            }
-
-            for i in 0..999 {
-                let edge = tx.create_edge(
-                    nodes[i],
-                    nodes[i + 1],
-                    "CONNECTS",
-                    PropertyMapBuilder::new().build(),
-                )?;
-                edges.push(edge);
-            }
-
-            Ok(edges)
-        })
-        .unwrap();
-
     c.bench_function("batch_update_1000_edges", |b| {
-        b.iter(|| {
-            db.write(|tx| {
-                // Update all edges
-                for edge_id in &edge_ids {
-                    tx.update_edge(
-                        *edge_id,
-                        PropertyMapBuilder::new().insert("weight", 1i64).build(),
-                    )?;
-                }
-                Ok(())
-            })
-            .unwrap();
-        });
+        b.iter_batched(
+            || {
+                // Setup: Create DB with 1000 edges
+                let db = GallifreyDB::new();
+                let edge_ids: Vec<_> = db
+                    .write(|tx| {
+                        let mut nodes = Vec::new();
+                        let mut edges = Vec::new();
+
+                        for i in 0..1000 {
+                            let node = tx.create_node(
+                                "Node",
+                                PropertyMapBuilder::new().insert("id", i as i64).build(),
+                            )?;
+                            nodes.push(node);
+                        }
+
+                        for i in 0..999 {
+                            let edge = tx.create_edge(
+                                nodes[i],
+                                nodes[i + 1],
+                                "CONNECTS",
+                                PropertyMapBuilder::new().build(),
+                            )?;
+                            edges.push(edge);
+                        }
+
+                        Ok(edges)
+                    })
+                    .unwrap();
+                (db, edge_ids)
+            },
+            |(db, edge_ids)| {
+                // Benchmark: Update all edges
+                db.write(|tx| {
+                    for edge_id in &edge_ids {
+                        tx.update_edge(
+                            *edge_id,
+                            PropertyMapBuilder::new().insert("weight", 1i64).build(),
+                        )?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 }
 
