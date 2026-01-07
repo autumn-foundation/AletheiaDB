@@ -71,12 +71,28 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
         });
     });
 
-    // GroupCommit mode
-    group.bench_function("group_commit", |b| {
-        let db = create_db_with_mode(DurabilityMode::GroupCommit {
-            max_delay_ms: 10,
-            max_batch_size: 100,
+    // GroupCommit default (2ms, 200 batch)
+    group.bench_function("group_commit_default", |b| {
+        let db = create_db_with_mode(DurabilityMode::group_commit_default());
+        let mut counter = 0u64;
+
+        b.iter(|| {
+            db.write(|tx| {
+                tx.create_node(
+                    "Benchmark",
+                    PropertyMapBuilder::new()
+                        .insert("counter", black_box(counter) as i64)
+                        .build(),
+                )
+            })
+            .unwrap();
+            counter += 1;
         });
+    });
+
+    // GroupCommit fast (1ms, 500 batch) - high throughput
+    group.bench_function("group_commit_fast", |b| {
+        let db = create_db_with_mode(DurabilityMode::fast());
         let mut counter = 0u64;
 
         b.iter(|| {
