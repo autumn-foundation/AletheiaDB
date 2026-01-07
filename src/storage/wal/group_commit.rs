@@ -134,6 +134,9 @@ impl GroupCommitCoordinator {
         let timeout =
             Duration::from_millis(self.config.max_delay_ms * 10).max(Duration::from_secs(2));
 
+        // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
+        // and this wait (rare but possible on fast systems), this loop exits immediately since
+        // flushed_epoch > epoch, and we return Ok(()) without waiting.
         while state.flushed_epoch <= epoch {
             let (new_state, timeout_result) = self
                 .flush_complete

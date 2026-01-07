@@ -3,6 +3,7 @@
 //! This module provides the [`DurabilityMode`] enum which controls when data
 //! is synced to disk, and [`WriteOptions`] for per-transaction overrides.
 
+use crate::utils::error::{Result, StorageError};
 use std::time::Duration;
 
 /// Durability mode controlling when data is synced to disk.
@@ -106,8 +107,46 @@ impl DurabilityMode {
     /// ```ignore
     /// let mode = DurabilityMode::async_mode(100); // Flush every 100ms
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `flush_interval_ms` is 0 or > 60000ms.
     pub const fn async_mode(flush_interval_ms: u64) -> Self {
+        // Const assertions - will panic in debug builds
+        assert!(
+            flush_interval_ms > 0,
+            "flush_interval_ms must be greater than 0"
+        );
+        assert!(
+            flush_interval_ms <= 60_000,
+            "flush_interval_ms must be <= 60000ms (1 minute)"
+        );
         DurabilityMode::Async { flush_interval_ms }
+    }
+
+    /// Create a new Async mode with validation.
+    ///
+    /// Returns an error if the flush interval is out of valid range (1-60000ms).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfig`] if validation fails.
+    pub fn async_mode_validated(flush_interval_ms: u64) -> Result<Self> {
+        if flush_interval_ms == 0 {
+            return Err(StorageError::InvalidConfig {
+                field: "flush_interval_ms".to_string(),
+                reason: "must be greater than 0".to_string(),
+            }
+            .into());
+        }
+        if flush_interval_ms > 60_000 {
+            return Err(StorageError::InvalidConfig {
+                field: "flush_interval_ms".to_string(),
+                reason: "must be <= 60000ms (1 minute)".to_string(),
+            }
+            .into());
+        }
+        Ok(DurabilityMode::Async { flush_interval_ms })
     }
 
     /// Create a new GroupCommit mode with the specified parameters.
@@ -126,11 +165,73 @@ impl DurabilityMode {
     /// // High throughput: 10ms delay, large batches
     /// let mode = DurabilityMode::group_commit(10, 200);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if parameters are out of valid range.
     pub const fn group_commit(max_delay_ms: u64, max_batch_size: usize) -> Self {
+        // Const assertions - will panic in debug builds
+        assert!(max_delay_ms > 0, "max_delay_ms must be greater than 0");
+        assert!(
+            max_delay_ms <= 1000,
+            "max_delay_ms must be <= 1000ms (1 second)"
+        );
+        assert!(
+            max_batch_size > 0,
+            "max_batch_size must be greater than 0"
+        );
+        assert!(
+            max_batch_size <= 10_000,
+            "max_batch_size must be <= 10000"
+        );
         DurabilityMode::GroupCommit {
             max_delay_ms,
             max_batch_size,
         }
+    }
+
+    /// Create a new GroupCommit mode with validation.
+    ///
+    /// Returns an error if parameters are out of valid range:
+    /// - max_delay_ms: 1-1000ms
+    /// - max_batch_size: 1-10000
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidConfig`] if validation fails.
+    pub fn group_commit_validated(max_delay_ms: u64, max_batch_size: usize) -> Result<Self> {
+        if max_delay_ms == 0 {
+            return Err(StorageError::InvalidConfig {
+                field: "max_delay_ms".to_string(),
+                reason: "must be greater than 0".to_string(),
+            }
+            .into());
+        }
+        if max_delay_ms > 1000 {
+            return Err(StorageError::InvalidConfig {
+                field: "max_delay_ms".to_string(),
+                reason: "must be <= 1000ms (1 second)".to_string(),
+            }
+            .into());
+        }
+        if max_batch_size == 0 {
+            return Err(StorageError::InvalidConfig {
+                field: "max_batch_size".to_string(),
+                reason: "must be greater than 0".to_string(),
+            }
+            .into());
+        }
+        if max_batch_size > 10_000 {
+            return Err(StorageError::InvalidConfig {
+                field: "max_batch_size".to_string(),
+                reason: "must be <= 10000".to_string(),
+            }
+            .into());
+        }
+        Ok(DurabilityMode::GroupCommit {
+            max_delay_ms,
+            max_batch_size,
+        })
     }
 
     /// Returns the default GroupCommit configuration (10ms, 200 transactions).
@@ -347,5 +448,98 @@ mod tests {
         let opts = WriteOptions::new();
         let effective = opts.effective_durability(DurabilityMode::Synchronous);
         assert_eq!(effective, DurabilityMode::Synchronous);
+    }
+
+    #[test]
+    fn test_async_mode_validated_success() {
+        let mode = DurabilityMode::async_mode_validated(100).unwrap();
+        assert_eq!(
+            mode,
+            DurabilityMode::Async {
+                flush_interval_ms: 100
+            }
+        );
+    }
+
+    #[test]
+    fn test_async_mode_validated_zero_fails() {
+        let result = DurabilityMode::async_mode_validated(0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("flush_interval_ms"));
+        assert!(err.to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_async_mode_validated_too_large_fails() {
+        let result = DurabilityMode::async_mode_validated(60_001);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("flush_interval_ms"));
+        assert!(err.to_string().contains("60000ms"));
+    }
+
+    #[test]
+    fn test_async_mode_validated_boundary_values() {
+        // Min valid value
+        assert!(DurabilityMode::async_mode_validated(1).is_ok());
+        // Max valid value
+        assert!(DurabilityMode::async_mode_validated(60_000).is_ok());
+    }
+
+    #[test]
+    fn test_group_commit_validated_success() {
+        let mode = DurabilityMode::group_commit_validated(10, 200).unwrap();
+        assert_eq!(
+            mode,
+            DurabilityMode::GroupCommit {
+                max_delay_ms: 10,
+                max_batch_size: 200
+            }
+        );
+    }
+
+    #[test]
+    fn test_group_commit_validated_zero_delay_fails() {
+        let result = DurabilityMode::group_commit_validated(0, 200);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("max_delay_ms"));
+        assert!(err.to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_group_commit_validated_delay_too_large_fails() {
+        let result = DurabilityMode::group_commit_validated(1001, 200);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("max_delay_ms"));
+        assert!(err.to_string().contains("1000ms"));
+    }
+
+    #[test]
+    fn test_group_commit_validated_zero_batch_fails() {
+        let result = DurabilityMode::group_commit_validated(10, 0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("max_batch_size"));
+        assert!(err.to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_group_commit_validated_batch_too_large_fails() {
+        let result = DurabilityMode::group_commit_validated(10, 10_001);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("max_batch_size"));
+        assert!(err.to_string().contains("10000"));
+    }
+
+    #[test]
+    fn test_group_commit_validated_boundary_values() {
+        // Min valid values
+        assert!(DurabilityMode::group_commit_validated(1, 1).is_ok());
+        // Max valid values
+        assert!(DurabilityMode::group_commit_validated(1000, 10_000).is_ok());
     }
 }
