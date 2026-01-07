@@ -16,7 +16,7 @@ use crate::index::vector::hnsw::HnswConfig;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
-use crate::storage::wal::{WalConfig, WriteAheadLog};
+use crate::storage::wal::{DurabilityMode, WalConfig, WriteAheadLog, WriteOptions};
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::{MutexExt, RwLockExt};
 use std::sync::{Arc, Mutex, RwLock};
@@ -26,6 +26,17 @@ use std::sync::{Arc, Mutex, RwLock};
 /// This is the primary entry point for interacting with the database.
 /// It coordinates between current storage (for fast current-state queries)
 /// and historical storage (for temporal queries).
+///
+/// # Durability Modes
+///
+/// GallifreyDB supports three durability modes for write transactions:
+///
+/// - **Synchronous** (default): Each commit waits for fsync. Maximum durability.
+/// - **Async**: Commits return immediately, background thread syncs. Fast but risk of data loss.
+/// - **GroupCommit**: Multiple commits share one fsync. ACID durability with high throughput.
+///
+/// Use [`with_wal_config`](Self::with_wal_config) to configure the default mode,
+/// or [`write_with_options`](Self::write_with_options) for per-transaction overrides.
 pub struct GallifreyDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
     current: Arc<CurrentStorage>,
@@ -45,6 +56,8 @@ pub struct GallifreyDB {
     node_id_gen: Arc<Mutex<IdGenerator>>,
     edge_id_gen: Arc<Mutex<IdGenerator>>,
     version_id_gen: Arc<Mutex<IdGenerator>>,
+    /// Default durability mode for write transactions
+    default_durability: DurabilityMode,
 }
 
 impl GallifreyDB {
@@ -55,21 +68,61 @@ impl GallifreyDB {
 
     /// Create a new database with custom anchor configuration.
     pub fn with_config(config: AnchorConfig) -> Self {
-        // Create WAL with default config (can be made configurable later)
-        let wal = WriteAheadLog::new(WalConfig::default()).expect("Failed to create WAL");
+        Self::with_full_config(config, WalConfig::default())
+    }
+
+    /// Create a new database with custom WAL configuration.
+    ///
+    /// This allows configuring the durability mode and other WAL settings.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::{GallifreyDB, WalConfig, DurabilityMode};
+    ///
+    /// // High-throughput ACID mode with group commit
+    /// let db = GallifreyDB::with_wal_config(
+    ///     WalConfig::default()
+    ///         .with_durability_mode(DurabilityMode::group_commit(10, 200))
+    /// );
+    ///
+    /// // Bulk loading mode with async durability
+    /// let db = GallifreyDB::with_wal_config(
+    ///     WalConfig::default()
+    ///         .with_durability_mode(DurabilityMode::async_mode(100))
+    /// );
+    /// ```
+    pub fn with_wal_config(wal_config: WalConfig) -> Self {
+        Self::with_full_config(AnchorConfig::default(), wal_config)
+    }
+
+    /// Create a new database with both anchor and WAL configuration.
+    pub fn with_full_config(anchor_config: AnchorConfig, wal_config: WalConfig) -> Self {
+        let durability_mode = wal_config.durability_mode;
+        let wal = WriteAheadLog::new(wal_config).expect("Failed to create WAL");
+        let wal = Arc::new(Mutex::new(wal));
+
+        // Start the background flush thread for Async and GroupCommit modes
+        WriteAheadLog::start_flush_thread(Arc::clone(&wal));
 
         GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
-            historical: Arc::new(RwLock::new(HistoricalStorage::with_config(config))),
+            historical: Arc::new(RwLock::new(HistoricalStorage::with_config(anchor_config))),
             temporal_indexes: Arc::new(RwLock::new(TemporalIndexes::new())),
-            wal: Arc::new(Mutex::new(wal)),
+            wal,
             current_timestamp: Arc::new(Mutex::new(time::now())),
             tx_id_gen: Arc::new(TxIdGenerator::new()),
             visibility_manager: Arc::new(TxVisibilityManager::new()),
             node_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             edge_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
+            default_durability: durability_mode,
         }
+    }
+
+    /// Get the default durability mode for this database.
+    pub fn default_durability(&self) -> DurabilityMode {
+        self.default_durability
     }
 
     /// Open an existing database from a checkpoint.
@@ -240,6 +293,88 @@ impl GallifreyDB {
         let result = f(&mut tx)?;
         tx.commit()?;
         Ok(result)
+    }
+
+    /// Execute a write operation with custom durability options.
+    ///
+    /// This allows overriding the database's default durability mode for
+    /// specific transactions. Useful for bulk loading (Async mode) or
+    /// critical operations (Synchronous mode override).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::{GallifreyDB, WriteOptions, DurabilityMode};
+    ///
+    /// let db = GallifreyDB::new();
+    ///
+    /// // Use Async mode for bulk loading (faster but less durable)
+    /// let options = WriteOptions::new()
+    ///     .with_durability(DurabilityMode::async_mode(100));
+    ///
+    /// db.write_with_options(options, |tx| {
+    ///     for item in bulk_data {
+    ///         tx.create_node("Item", item.into())?;
+    ///     }
+    ///     Ok(())
+    /// })?;
+    /// ```
+    pub fn write_with_options<F, T>(&self, options: WriteOptions, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut WriteTransaction) -> Result<T>,
+    {
+        let mut tx = self.write_transaction_with_options(options)?;
+        let result = f(&mut tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Create a write transaction with custom durability options.
+    ///
+    /// This is the low-level API for creating transactions with specific
+    /// durability settings. The transaction must be manually committed or
+    /// rolled back.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let options = WriteOptions::new()
+    ///     .with_durability(DurabilityMode::Synchronous);
+    ///
+    /// let mut tx = db.write_transaction_with_options(options)?;
+    /// tx.create_node("Critical", props)?;
+    /// tx.commit()?;
+    /// ```
+    pub fn write_transaction_with_options(
+        &self,
+        options: WriteOptions,
+    ) -> Result<WriteTransaction> {
+        let tx_id = self.tx_id_gen.next();
+        let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
+
+        // Register as active
+        self.visibility_manager.register_active(tx_id);
+
+        // Capture snapshot
+        let snapshot = self.visibility_manager.capture_snapshot(snapshot_timestamp);
+
+        // Determine effective durability mode
+        let durability = options.effective_durability(self.default_durability);
+
+        Ok(WriteTransaction::new_with_durability(
+            tx_id,
+            snapshot,
+            Arc::clone(&self.current),
+            Arc::clone(&self.historical),
+            Arc::clone(&self.temporal_indexes),
+            Arc::clone(&self.wal),
+            Arc::clone(&self.current_timestamp),
+            Arc::clone(&self.visibility_manager),
+            Arc::clone(&self.node_id_gen),
+            Arc::clone(&self.edge_id_gen),
+            Arc::clone(&self.version_id_gen),
+            durability,
+        ))
     }
 
     /// Create a node with the given label and properties.
