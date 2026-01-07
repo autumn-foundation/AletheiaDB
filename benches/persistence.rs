@@ -21,7 +21,6 @@ fn bench_wal_append(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = WalConfig {
                 wal_dir: temp_dir.path().to_path_buf(),
-                sync_on_write: false, // Disable sync for benchmark
                 ..Default::default()
             };
             let mut wal = WriteAheadLog::new(config).unwrap();
@@ -67,7 +66,6 @@ fn bench_wal_throughput(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let config = WalConfig {
                 wal_dir: temp_dir.path().to_path_buf(),
-                sync_on_write: false,
                 ..Default::default()
             };
             let mut wal = WriteAheadLog::new(config).unwrap();
@@ -97,7 +95,6 @@ fn bench_wal_with_sync(c: &mut Criterion) {
                 let temp_dir = TempDir::new().unwrap();
                 let config = WalConfig {
                     wal_dir: temp_dir.path().to_path_buf(),
-                    sync_on_write: *sync_enabled,
                     ..Default::default()
                 };
                 let mut wal = WriteAheadLog::new(config).unwrap();
@@ -140,7 +137,6 @@ fn bench_checkpoint_creation(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
                 wal_dir: temp_dir.path().join("wal"),
-                sync_on_write: false,
                 ..Default::default()
             };
             let mut wal = WriteAheadLog::new(wal_config).unwrap();
@@ -184,7 +180,6 @@ fn bench_checkpoint_load(c: &mut Criterion) {
 
         let wal_config = WalConfig {
             wal_dir: temp_dir.path().join("wal"),
-            sync_on_write: false,
             ..Default::default()
         };
         let mut wal = WriteAheadLog::new(wal_config).unwrap();
@@ -224,7 +219,6 @@ fn bench_recovery(c: &mut Criterion) {
             // Setup: Create WAL with entries
             let wal_config = WalConfig {
                 wal_dir: temp_dir.path().join("wal"),
-                sync_on_write: false,
                 ..Default::default()
             };
             let mut wal = WriteAheadLog::new(wal_config.clone()).unwrap();
@@ -285,7 +279,6 @@ fn bench_checkpoint_frequency(c: &mut Criterion) {
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
                 wal_dir: temp_dir.path().join("wal"),
-                sync_on_write: false,
                 ..Default::default()
             };
             let mut wal = WriteAheadLog::new(wal_config).unwrap();

@@ -209,13 +209,6 @@ pub struct WalConfig {
     pub wal_dir: PathBuf,
     /// Maximum size of a WAL segment before rotation (in bytes)
     pub segment_size: usize,
-    /// Whether to fsync after every write (slower but more durable).
-    ///
-    /// **Deprecated**: Use `durability_mode` instead. This field is kept for
-    /// backward compatibility and is ignored when `durability_mode` is set
-    /// to anything other than `Synchronous`.
-    #[deprecated(since = "0.2.0", note = "Use `durability_mode` instead")]
-    pub sync_on_write: bool,
     /// Number of WAL segments to keep for recovery
     pub segments_to_retain: usize,
     /// Durability mode controlling when data is synced to disk.
@@ -230,9 +223,11 @@ impl Default for WalConfig {
         WalConfig {
             wal_dir: PathBuf::from("gallifreydb/wal"),
             segment_size: 64 * 1024 * 1024, // 64MB
-            sync_on_write: true,
             segments_to_retain: 10,
-            durability_mode: DurabilityMode::Synchronous,
+            // GroupCommit by default: ACID-compliant with much better performance
+            // than Synchronous. Use Synchronous only for critical financial transactions
+            // that need minimum individual transaction latency.
+            durability_mode: DurabilityMode::group_commit_default(),
         }
     }
 }
@@ -1945,7 +1940,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false,
             ..Default::default()
         };
 
@@ -1992,7 +1986,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false, // Faster for tests
             ..Default::default()
         };
 
@@ -2018,7 +2011,6 @@ mod tests {
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
             segment_size: 100, // Very small for testing rotation
-            sync_on_write: false,
             ..Default::default()
         };
 
@@ -2046,7 +2038,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false,
             ..Default::default()
         };
 
@@ -2083,7 +2074,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false,
             ..Default::default()
         };
 
@@ -2120,7 +2110,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false,
             ..Default::default()
         };
 
@@ -2193,7 +2182,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false,
             ..Default::default()
         };
 
@@ -2262,7 +2250,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false,
             ..Default::default()
         };
 
@@ -2326,7 +2313,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false,
             ..Default::default()
         };
 
@@ -2380,7 +2366,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false,
             ..Default::default()
         };
 
@@ -2441,7 +2426,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: true,
             ..Default::default()
         };
 
@@ -2484,7 +2468,6 @@ mod tests {
         {
             let config = WalConfig {
                 wal_dir: wal_dir.clone(),
-                sync_on_write: true,
                 ..Default::default()
             };
             let mut wal = WriteAheadLog::new(config)?;
@@ -2552,7 +2535,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: true,
             ..Default::default()
         };
 
@@ -2595,7 +2577,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: true,
             ..Default::default()
         };
 
@@ -2831,7 +2812,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: true,
             ..Default::default()
         };
 
@@ -2886,7 +2866,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: true,
             ..Default::default()
         };
 
@@ -2941,7 +2920,6 @@ mod tests {
         // Create config with very small segment size to force rotation
         let config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: true,
             segment_size: 256, // Very small to force rotation
             segments_to_retain: 5,
             durability_mode: DurabilityMode::Synchronous,

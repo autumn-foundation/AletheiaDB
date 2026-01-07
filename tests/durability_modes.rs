@@ -27,7 +27,6 @@ fn create_db_with_mode(mode: DurabilityMode) -> GallifreyDB {
     let config = WalConfig {
         wal_dir: path,
         segment_size: 10 * 1024 * 1024,
-        sync_on_write: false, // Managed by durability mode
         segments_to_retain: 3,
         durability_mode: mode,
     };
@@ -478,7 +477,6 @@ fn test_async_data_flushed_on_shutdown() {
         let config = WalConfig {
             wal_dir: wal_path.clone(),
             segment_size: 10 * 1024 * 1024,
-            sync_on_write: false,
             segments_to_retain: 3,
             durability_mode: DurabilityMode::Async {
                 flush_interval_ms: 60000, // Very long - won't naturally flush

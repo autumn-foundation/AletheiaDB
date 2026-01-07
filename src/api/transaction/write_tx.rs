@@ -1251,7 +1251,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false, // Faster for tests
             ..Default::default()
         };
         let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
@@ -1750,7 +1749,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false, // Faster for tests
             ..Default::default()
         };
         let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
@@ -2001,7 +1999,6 @@ mod conflict_detection_tests {
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
                 wal_dir: temp_dir.path().to_path_buf(),
-                sync_on_write: false,
                 ..Default::default()
             };
             let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
@@ -2443,7 +2440,6 @@ mod timestamp_ordering_tests {
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
                 wal_dir: temp_dir.path().to_path_buf(),
-                sync_on_write: false,
                 ..Default::default()
             };
             let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
