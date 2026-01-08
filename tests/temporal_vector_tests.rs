@@ -10,6 +10,7 @@ fn create_test_index() -> Result<TemporalVectorIndex> {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1000),
         retention_policy: RetentionPolicy::KeepN(100),
         max_snapshots: 100,
+        full_snapshot_interval: 10,
         hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
     };
     TemporalVectorIndex::new(config)
@@ -20,6 +21,7 @@ fn create_test_index_with_snapshots() -> Result<TemporalVectorIndex> {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(2), // Create snapshot every 2 transactions
         retention_policy: RetentionPolicy::KeepN(10),
         max_snapshots: 10,
+        full_snapshot_interval: 10,
         hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
     };
     TemporalVectorIndex::new(config)
@@ -152,6 +154,7 @@ fn test_prune_snapshots() -> Result<()> {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
         retention_policy: RetentionPolicy::KeepN(2), // Keep only 2 snapshots
         max_snapshots: 10,
+        full_snapshot_interval: 10,
         hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
     };
     let index = TemporalVectorIndex::new(config)?;
@@ -188,7 +191,7 @@ fn test_get_snapshot_info() -> Result<()> {
 
     index.create_manual_snapshot()?;
 
-    let info = index.get_snapshot_info();
+    let info = index.get_snapshot_info()?;
     assert!(!info.is_empty(), "Should have snapshot info");
 
     Ok(())
