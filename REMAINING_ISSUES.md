@@ -49,6 +49,8 @@ impl TemporalIndexes {
 
 ## 🟡 Medium: End-to-End Temporal Reconstruction Benchmarks
 
+**GitHub Issue**: #276
+
 **Location**: CLAUDE.md defines target for time-travel reconstruction (<10ms)
 
 **Issue**: New benchmarks test index queries but not the full end-to-end paths mentioned in CLAUDE.md line 32:
@@ -74,6 +76,8 @@ fn bench_end_to_end_reconstruction(c: &mut Criterion) {
 ---
 
 ## 🟡 Medium: Deduplication Policy Internal-Only Flag
+
+**GitHub Issue**: #277
 
 **Location**: `EntityTimeline::insert_batch()` line 103
 
