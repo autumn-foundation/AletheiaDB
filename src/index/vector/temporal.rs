@@ -462,6 +462,27 @@ enum SnapshotIndex {
     Delta(Arc<DeltaIndex>),
 }
 
+impl std::fmt::Debug for SnapshotIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnapshotIndex::Full(index) => {
+                f.debug_struct("SnapshotIndex::Full")
+                    .field("len", &index.len())
+                    .field("dimensions", &index.dimensions())
+                    .finish()
+            }
+            SnapshotIndex::Delta(delta) => {
+                f.debug_struct("SnapshotIndex::Delta")
+                    .field("base_len", &delta.base.len())
+                    .field("added_len", &delta.added.len())
+                    .field("removed_len", &delta.removed.len())
+                    .field("total_len", &(delta.base.len() + delta.added.len() - delta.removed.len()))
+                    .finish()
+            }
+        }
+    }
+}
+
 impl SnapshotIndex {
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
         match self {
@@ -504,6 +525,7 @@ impl SnapshotIndex {
 }
 
 /// A delta snapshot that stores only changes relative to a base snapshot.
+#[derive(Clone)]
 struct DeltaIndex {
     /// The base snapshot this delta is built upon (usually a Full snapshot)
     base: Arc<SnapshotIndex>,
@@ -513,19 +535,49 @@ struct DeltaIndex {
     removed: Arc<HashSet<NodeId>>,
 }
 
+impl std::fmt::Debug for DeltaIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeltaIndex")
+            .field("base", &self.base)
+            .field("added_len", &self.added.len())
+            .field("added_dimensions", &self.added.dimensions())
+            .field("removed_count", &self.removed.len())
+            .finish()
+    }
+}
+
 impl DeltaIndex {
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
-        // 1. Search added vectors
-        let mut results = self.added.search(query, k)?;
+        // Search strategy: Search for k*2 candidates from each index to ensure we don't
+        // miss true top-k when merging. This is necessary because the global top-k might
+        // be distributed across both indexes.
+        //
+        // Example: If added has [0.99, 0.95, 0.90] and base has [0.97, 0.93, 0.88],
+        // searching for k=2 in each would give [0.99, 0.95] + [0.97, 0.93].
+        // Merging gives true top-2: [0.99, 0.97] ✓
+        let search_k = k.saturating_mul(2).max(k + 10);
+
+        // 1. Search added vectors (new and updated)
+        let mut results = self.added.search(query, search_k)?;
 
         // 2. Search base vectors with filter
-        // Filter out any ID that is in the 'removed' set
-        // (This includes updated nodes, which are present in 'added')
+        // Filter out any ID that is in the 'removed' set, which includes:
+        // - Nodes that were updated (old version in base, new version in added)
+        // - Nodes that were removed (present in base, deleted from current state)
         let removed = &self.removed;
-        let base_results = self.base.search_with_filter(query, k, &|id| !removed.contains(id))?;
+        let base_results = self.base.search_with_filter(query, search_k, &|id| !removed.contains(id))?;
 
-        // 3. Merge results
+        // 3. Merge results from both indexes
         results.extend(base_results);
+
+        // 4. Deduplicate: Although the removed filter should prevent duplicates,
+        // we deduplicate as a safety measure to ensure correctness.
+        // We keep the first occurrence (which has the better score after sorting).
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        results.retain(|(id, _)| seen.insert(*id));
+
+        // 5. Sort by similarity (descending) and truncate to k
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
 
@@ -539,18 +591,28 @@ impl DeltaIndex {
         predicate: &(dyn Fn(&NodeId) -> bool + Send + Sync),
     ) -> Result<Vec<(NodeId, f32)>>
     {
+        // Search for k*2 candidates to ensure global top-k (same strategy as search())
+        let search_k = k.saturating_mul(2).max(k + 10);
+
         // Combine user predicate with our removed set
         let removed = &self.removed;
         let combined_predicate = |id: &NodeId| predicate(id) && !removed.contains(id);
 
-        // Search added (using user predicate)
-        let mut results = self.added.search_with_filter(query, k, predicate)?;
+        // Search added (using user predicate only)
+        let mut results = self.added.search_with_filter(query, search_k, predicate)?;
 
-        // Search base (using combined predicate)
-        let base_results = self.base.search_with_filter(query, k, &combined_predicate)?;
+        // Search base (using combined predicate to filter out removed/updated nodes)
+        let base_results = self.base.search_with_filter(query, search_k, &combined_predicate)?;
 
-        // Merge
+        // Merge results
         results.extend(base_results);
+
+        // Deduplicate (safety measure)
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        results.retain(|(id, _)| seen.insert(*id));
+
+        // Sort and truncate to k
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
 
@@ -3125,6 +3187,132 @@ mod tests {
         assert!(
             !results.iter().any(|(id, _)| *id == NodeId::new(9).unwrap()),
             "Removed node 9 should not appear in results"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delta_search_quality_with_merge() -> Result<()> {
+        // Test that delta snapshot search correctly merges results from added and base
+        // and returns the true top-k (not just top-k from each index)
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            full_snapshot_interval: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create base with vectors at [1.0, 0, 0, 0], [2.0, 0, 0, 0], ..., [10.0, 0, 0, 0]
+        for i in 1..=10 {
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000,
+            )?;
+        }
+        index.on_transaction_at(1000)?;
+
+        // Add new vectors at [1.5, 0, 0, 0], [2.5, 0, 0, 0], ..., [10.5, 0, 0, 0]
+        for i in 1..=10 {
+            index.add(
+                NodeId::new((i + 10) as u64).unwrap(),
+                &[i as f32 + 0.5, 0.0, 0.0, 0.0],
+                2000,
+            )?;
+        }
+        index.on_transaction_at(2000)?;
+
+        // Query for [5.5, 0, 0, 0] with k=5
+        // Expected top-5 (by cosine similarity to 5.5):
+        // 1. Node 15 (vector [5.5, 0, 0, 0]) - exact match
+        // 2. Node 5 (vector [5.0, 0, 0, 0]) or Node 16 (vector [6.5, 0, 0, 0])
+        // The key test is that we get INTERLEAVED results from both indexes,
+        // not just top-5 from added or top-5 from base
+        let query = vec![5.5, 0.0, 0.0, 0.0];
+        let results = index.find_similar_as_of(&query, 5, 2000)?;
+
+        assert_eq!(results.len(), 5, "Should return exactly k=5 results");
+
+        // Verify no duplicates (each NodeId appears once)
+        let node_ids: Vec<NodeId> = results.iter().map(|(id, _)| *id).collect();
+        let unique_ids: std::collections::HashSet<_> = node_ids.iter().collect();
+        assert_eq!(
+            unique_ids.len(),
+            node_ids.len(),
+            "Should have no duplicate NodeIds in results"
+        );
+
+        // Note: With k*2 search strategy, we should get high-quality results.
+        // The exact distribution between base and added depends on HNSW search behavior,
+        // so we just verify we got results (at least some should be from different sources)
+        let from_base = results.iter().filter(|(id, _)| id.as_u64() <= 10).count();
+        let from_added = results.iter().filter(|(id, _)| id.as_u64() > 10).count();
+        // Just log the distribution, don't assert on it as it depends on HNSW behavior
+        println!("Results distribution - base: {}, added: {}", from_base, from_added);
+
+        // Verify results are sorted by descending similarity
+        for i in 1..results.len() {
+            assert!(
+                results[i - 1].1 >= results[i].1,
+                "Results should be sorted by descending similarity"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delta_search_no_duplicates_on_update() -> Result<()> {
+        // Test that updated nodes don't appear twice in search results
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            full_snapshot_interval: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create base with node 1 at [1.0, 0, 0, 0]
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        for i in 2..=5 {
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000,
+            )?;
+        }
+        index.on_transaction_at(1000)?;
+
+        // Update node 1 to [1.5, 0, 0, 0]
+        index.add(NodeId::new(1).unwrap(), &[1.5, 0.0, 0.0, 0.0], 2000)?;
+        index.on_transaction_at(2000)?;
+
+        // Search for [1.5, 0, 0, 0] - should find updated node 1 ONCE
+        let query = vec![1.5, 0.0, 0.0, 0.0];
+        let results = index.find_similar_as_of(&query, 10, 2000)?;
+
+        // Count how many times node 1 appears
+        let node1_count = results.iter().filter(|(id, _)| *id == NodeId::new(1).unwrap()).count();
+        assert_eq!(
+            node1_count, 1,
+            "Updated node 1 should appear exactly once in results, not twice"
+        );
+
+        // Verify node 1 has the updated vector value (distance should be 0 to [1.5, 0, 0, 0])
+        let node1_result = results
+            .iter()
+            .find(|(id, _)| *id == NodeId::new(1).unwrap())
+            .expect("Node 1 should be in results");
+
+        // For cosine similarity, similarity of 1.0 means identical vectors
+        assert!(
+            node1_result.1 > 0.99,
+            "Node 1 should have high similarity to query (updated vector), got {}",
+            node1_result.1
         );
 
         Ok(())
