@@ -674,7 +674,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal);
+                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::CreateEdge {
                     edge_id,
@@ -710,7 +710,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal);
+                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::UpdateNode {
                     node_id,
@@ -740,7 +740,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal);
+                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::UpdateEdge {
                     edge_id,
@@ -776,7 +776,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal);
+                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::DeleteNode { node_id } => {
                     // Get the node before deleting
@@ -827,7 +827,7 @@ impl WriteTransaction {
                         *node_id,
                         tombstone_version_id,
                         tombstone_temporal,
-                    );
+                    )?;
 
                     // Delete from current storage
                     self.current
@@ -884,7 +884,7 @@ impl WriteTransaction {
                         *edge_id,
                         tombstone_version_id,
                         tombstone_temporal,
-                    );
+                    )?;
 
                     // Delete from current storage
                     self.current.delete_edge_direct(*edge_id)?;

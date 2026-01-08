@@ -37,7 +37,30 @@
 
 use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
+use crate::utils::error::{Result, StorageError};
 use dashmap::DashMap;
+
+/// Threshold for distinguishing point queries from range queries (in ticks).
+/// Queries with range < POINT_QUERY_THRESHOLD are considered "point queries"
+/// and pre-allocate less capacity (typically return 1-2 versions).
+const POINT_QUERY_THRESHOLD_TICKS: i64 = 1000;
+
+/// Configuration for temporal indexes.
+#[derive(Debug, Clone)]
+pub struct TemporalIndexConfig {
+    /// Maximum versions allowed per entity (default: 1,000,000).
+    /// Prevents OOM attacks from malicious or buggy clients creating
+    /// unbounded version histories.
+    pub max_versions_per_entity: usize,
+}
+
+impl Default for TemporalIndexConfig {
+    fn default() -> Self {
+        Self {
+            max_versions_per_entity: 1_000_000,
+        }
+    }
+}
 
 /// Entry in the timeline index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,10 +132,10 @@ impl EntityTimeline {
         let cutoff = self.versions.partition_point(|e| e.start < range.end());
 
         // Adaptive pre-allocation heuristic:
-        // - Point/small range queries (< 1000 ticks) typically return 1-2 versions → cap at 4
+        // - Point/small range queries (< POINT_QUERY_THRESHOLD_TICKS) typically return 1-2 versions → cap at 4
         // - Large range queries can return many versions → cap at 16
         let range_size = range.end() - range.start();
-        let estimated_capacity = if range_size < 1000 {
+        let estimated_capacity = if range_size < POINT_QUERY_THRESHOLD_TICKS {
             cutoff.min(4) // Point query or small range
         } else {
             cutoff.min(16) // Large range query
@@ -140,54 +163,78 @@ struct EntityTimelines {
 /// This implementation uses a per-entity timeline index with sorted vectors,
 /// providing O(log N) lookup and cache-friendly scanning. It leverages `DashMap`
 /// for fine-grained concurrency, avoiding global bottlenecks during writes.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TemporalIndexes {
     /// Combined index for both valid and transaction timelines.
     index: DashMap<EntityId, EntityTimelines>,
+    /// Configuration for temporal indexes.
+    config: TemporalIndexConfig,
+}
+
+impl Default for TemporalIndexes {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TemporalIndexes {
-    /// Create a new empty temporal index.
+    /// Create a new empty temporal index with default configuration.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_config(TemporalIndexConfig::default())
+    }
+
+    /// Create a new empty temporal index with custom configuration.
+    pub fn with_config(config: TemporalIndexConfig) -> Self {
+        Self {
+            index: DashMap::new(),
+            config,
+        }
     }
 
     /// Insert a node version into the temporal indexes.
+    ///
+    /// Returns an error if the entity exceeds the configured version limit.
     pub fn insert_node_version(
         &self,
         node_id: NodeId,
         version_id: VersionId,
         temporal: BiTemporalInterval,
-    ) {
-        self.insert_version(EntityId::Node(node_id), version_id, temporal);
+    ) -> Result<()> {
+        self.insert_version(EntityId::Node(node_id), version_id, temporal)
     }
 
     /// Insert an edge version into the temporal indexes.
+    ///
+    /// Returns an error if the entity exceeds the configured version limit.
     pub fn insert_edge_version(
         &self,
         edge_id: EdgeId,
         version_id: VersionId,
         temporal: BiTemporalInterval,
-    ) {
-        self.insert_version(EntityId::Edge(edge_id), version_id, temporal);
+    ) -> Result<()> {
+        self.insert_version(EntityId::Edge(edge_id), version_id, temporal)
     }
 
     /// Insert multiple node versions into the temporal indexes efficiently.
+    ///
+    /// Returns an error if the entity exceeds the configured version limit.
     pub fn insert_node_versions_batch(
         &self,
         node_id: NodeId,
         versions: Vec<(VersionId, BiTemporalInterval)>,
-    ) {
-        self.insert_versions_batch(EntityId::Node(node_id), versions);
+    ) -> Result<()> {
+        self.insert_versions_batch(EntityId::Node(node_id), versions)
     }
 
     /// Insert multiple edge versions into the temporal indexes efficiently.
+    ///
+    /// Returns an error if the entity exceeds the configured version limit.
     pub fn insert_edge_versions_batch(
         &self,
         edge_id: EdgeId,
         versions: Vec<(VersionId, BiTemporalInterval)>,
-    ) {
-        self.insert_versions_batch(EntityId::Edge(edge_id), versions);
+    ) -> Result<()> {
+        self.insert_versions_batch(EntityId::Edge(edge_id), versions)
     }
 
     /// Insert a version into both temporal indexes.
@@ -196,8 +243,19 @@ impl TemporalIndexes {
         entity_id: EntityId,
         version_id: VersionId,
         temporal: BiTemporalInterval,
-    ) {
+    ) -> Result<()> {
         let mut timelines = self.index.entry(entity_id).or_default();
+
+        // Check version limit before inserting (DoS protection)
+        let current_count = timelines.valid.versions.len();
+        if current_count >= self.config.max_versions_per_entity {
+            return Err(StorageError::CapacityExceeded {
+                resource: format!("versions for entity {:?}", entity_id),
+                current: current_count,
+                limit: self.config.max_versions_per_entity,
+            }
+            .into());
+        }
 
         let valid = temporal.valid_time();
         timelines
@@ -206,6 +264,8 @@ impl TemporalIndexes {
 
         let tx = temporal.transaction_time();
         timelines.tx.insert(tx.start(), tx.end(), version_id);
+
+        Ok(())
     }
 
     /// Helper for batch insertion of versions.
@@ -213,9 +273,23 @@ impl TemporalIndexes {
         &self,
         entity_id: EntityId,
         versions: Vec<(VersionId, BiTemporalInterval)>,
-    ) {
+    ) -> Result<()> {
         if versions.is_empty() {
-            return;
+            return Ok(());
+        }
+
+        let mut timelines = self.index.entry(entity_id).or_default();
+
+        // Check version limit before batch insert (DoS protection)
+        let current_count = timelines.valid.versions.len();
+        let new_count = current_count + versions.len();
+        if new_count > self.config.max_versions_per_entity {
+            return Err(StorageError::CapacityExceeded {
+                resource: format!("versions for entity {:?}", entity_id),
+                current: new_count,
+                limit: self.config.max_versions_per_entity,
+            }
+            .into());
         }
 
         let mut valid_entries = Vec::with_capacity(versions.len());
@@ -237,9 +311,10 @@ impl TemporalIndexes {
             });
         }
 
-        let mut timelines = self.index.entry(entity_id).or_default();
         timelines.valid.insert_batch(valid_entries);
         timelines.tx.insert_batch(tx_entries);
+
+        Ok(())
     }
 
     /// Find all node versions that overlap with the given valid time range.
@@ -319,31 +394,37 @@ mod tests {
         let v3 = VersionId::new(102).unwrap();
 
         // v1: [0, 1000)
-        indexes.insert_node_version(
-            node_id,
-            v1,
-            BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
+            )
+            .unwrap();
 
         // v2: [1000, 2000)
-        indexes.insert_node_version(
-            node_id,
-            v2,
-            BiTemporalInterval::new(
-                TimeRange::new(1000, 2000),
-                TimeRange::new(0, Timestamp::MAX),
-            ),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000, 2000),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            )
+            .unwrap();
 
         // v3: [2000, 3000)
-        indexes.insert_node_version(
-            node_id,
-            v3,
-            BiTemporalInterval::new(
-                TimeRange::new(2000, 3000),
-                TimeRange::new(0, Timestamp::MAX),
-            ),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v3,
+                BiTemporalInterval::new(
+                    TimeRange::new(2000, 3000),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            )
+            .unwrap();
 
         // Test overlap logic: Query [500, 1500)
         // v1 overlaps (500 to 1000)
@@ -365,16 +446,20 @@ mod tests {
         // Overlapping intervals (should be possible in valid time)
         let v1 = VersionId::new(1).unwrap();
         let v2 = VersionId::new(2).unwrap();
-        indexes.insert_node_version(
-            node_id,
-            v1,
-            BiTemporalInterval::new(TimeRange::new(0, 2000), TimeRange::from(0)),
-        );
-        indexes.insert_node_version(
-            node_id,
-            v2,
-            BiTemporalInterval::new(TimeRange::new(1000, 3000), TimeRange::from(0)),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(TimeRange::new(0, 2000), TimeRange::from(0)),
+            )
+            .unwrap();
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(TimeRange::new(1000, 3000), TimeRange::from(0)),
+            )
+            .unwrap();
 
         // Query point at 1500 (both should match)
         let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(1500));
@@ -401,16 +486,20 @@ mod tests {
         let v1 = VersionId::new(1).unwrap();
         let v2 = VersionId::new(2).unwrap();
         // v1: [0, 1000), v2: [1000, 2000)
-        indexes.insert_node_version(
-            node_id,
-            v1,
-            BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::from(0)),
-        );
-        indexes.insert_node_version(
-            node_id,
-            v2,
-            BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::from(0)),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::from(0)),
+            )
+            .unwrap();
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::from(0)),
+            )
+            .unwrap();
 
         // Query point at 1000 (only v2 because [start, end) is inclusive-exclusive)
         // Use [1000, 1001) to represent the point 1000
@@ -446,7 +535,9 @@ mod tests {
             ),
         ];
 
-        indexes.insert_node_versions_batch(node_id, versions);
+        indexes
+            .insert_node_versions_batch(node_id, versions)
+            .unwrap();
 
         let results =
             indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(5, 25));
@@ -468,24 +559,28 @@ mod tests {
         let v2 = VersionId::new(101).unwrap();
 
         // v1: tx [1000, MAX)
-        indexes.insert_edge_version(
-            edge_id,
-            v1,
-            BiTemporalInterval::new(
-                TimeRange::new(0, Timestamp::MAX),
-                TimeRange::new(1000, Timestamp::MAX),
-            ),
-        );
+        indexes
+            .insert_edge_version(
+                edge_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(0, Timestamp::MAX),
+                    TimeRange::new(1000, Timestamp::MAX),
+                ),
+            )
+            .unwrap();
 
         // v2: tx [2000, MAX)
-        indexes.insert_edge_version(
-            edge_id,
-            v2,
-            BiTemporalInterval::new(
-                TimeRange::new(0, Timestamp::MAX),
-                TimeRange::new(2000, Timestamp::MAX),
-            ),
-        );
+        indexes
+            .insert_edge_version(
+                edge_id,
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(0, Timestamp::MAX),
+                    TimeRange::new(2000, Timestamp::MAX),
+                ),
+            )
+            .unwrap();
 
         // Query: [1500, 2500)
         let results = indexes
@@ -505,8 +600,12 @@ mod tests {
         let v1 = VersionId::new(100).unwrap();
         let v2 = VersionId::new(101).unwrap();
 
-        indexes.insert_node_version(node1, v1, BiTemporalInterval::current(1000));
-        indexes.insert_node_version(node2, v2, BiTemporalInterval::current(1000));
+        indexes
+            .insert_node_version(node1, v1, BiTemporalInterval::current(1000))
+            .unwrap();
+        indexes
+            .insert_node_version(node2, v2, BiTemporalInterval::current(1000))
+            .unwrap();
 
         let results =
             indexes.find_node_versions_in_valid_time_range(node1, TimeRange::new(0, 2000));
@@ -520,11 +619,13 @@ mod tests {
     fn test_clear() {
         let indexes = TemporalIndexes::new();
 
-        indexes.insert_node_version(
-            NodeId::new(1).unwrap(),
-            VersionId::new(100).unwrap(),
-            BiTemporalInterval::current(1000),
-        );
+        indexes
+            .insert_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100).unwrap(),
+                BiTemporalInterval::current(1000),
+            )
+            .unwrap();
 
         assert!(indexes.version_count() > 0);
 
@@ -555,31 +656,37 @@ mod tests {
 
         // Insert in non-chronological order to test retroactive insertion
         // v1 at t=0
-        indexes.insert_node_version(
-            node_id,
-            v1,
-            BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
+            )
+            .unwrap();
 
         // v3 at t=20000 (far future)
-        indexes.insert_node_version(
-            node_id,
-            v3,
-            BiTemporalInterval::new(
-                TimeRange::new(20000, 21000),
-                TimeRange::new(0, Timestamp::MAX),
-            ),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v3,
+                BiTemporalInterval::new(
+                    TimeRange::new(20000, 21000),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            )
+            .unwrap();
 
         // v2 at t=10000 (retroactive - inserted between v1 and v3)
-        indexes.insert_node_version(
-            node_id,
-            v2,
-            BiTemporalInterval::new(
-                TimeRange::new(10000, 11000),
-                TimeRange::new(0, Timestamp::MAX),
-            ),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(10000, 11000),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            )
+            .unwrap();
 
         // Verify correct sort order is maintained
         let entity_id = EntityId::Node(node_id);
@@ -626,21 +733,25 @@ mod tests {
         let v2 = VersionId::new(101).unwrap();
 
         // Insert v1 normally
-        indexes.insert_node_version(
-            node_id,
-            v1,
-            BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
+            )
+            .unwrap();
 
         // Insert v2 normally
-        indexes.insert_node_version(
-            node_id,
-            v2,
-            BiTemporalInterval::new(
-                TimeRange::new(1000, 2000),
-                TimeRange::new(0, Timestamp::MAX),
-            ),
-        );
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000, 2000),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            )
+            .unwrap();
 
         // Simulate recovery scenario: batch insert including duplicate v1 (with different timing)
         // This would cause memory leak without deduplication
@@ -714,7 +825,8 @@ mod tests {
                                 TimeRange::new((v * 1000) as i64, ((v + 1) * 1000) as i64),
                                 TimeRange::new(0, Timestamp::MAX),
                             ),
-                        );
+                        )
+                        .unwrap();
                     }
                 })
             })
@@ -780,7 +892,8 @@ mod tests {
                                 ),
                                 TimeRange::new(0, Timestamp::MAX),
                             ),
-                        );
+                        )
+                        .unwrap();
                     }
                 })
             })
@@ -835,14 +948,16 @@ mod tests {
         // Insert 100K versions
         for i in 0..version_count {
             let version_id = VersionId::new(i).unwrap();
-            indexes.insert_node_version(
-                node_id,
-                version_id,
-                BiTemporalInterval::new(
-                    TimeRange::new((i * 100) as i64, ((i + 1) * 100) as i64),
-                    TimeRange::new(0, Timestamp::MAX),
-                ),
-            );
+            indexes
+                .insert_node_version(
+                    node_id,
+                    version_id,
+                    BiTemporalInterval::new(
+                        TimeRange::new((i * 100) as i64, ((i + 1) * 100) as i64),
+                        TimeRange::new(0, Timestamp::MAX),
+                    ),
+                )
+                .unwrap();
         }
 
         // Query a small range in the middle - should be fast

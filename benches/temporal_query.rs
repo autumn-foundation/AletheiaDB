@@ -20,14 +20,16 @@ fn bench_valid_at_query(c: &mut Criterion) {
             let end = (i + 1) * 1000;
             let v_id = VersionId::new(i as u64).unwrap();
 
-            indexes.insert_node_version(
-                node_id,
-                v_id,
-                BiTemporalInterval::new(
-                    TimeRange::new(start, end),
-                    TimeRange::from(0), // Tx time is irrelevant for this test
-                ),
-            );
+            indexes
+                .insert_node_version(
+                    node_id,
+                    v_id,
+                    BiTemporalInterval::new(
+                        TimeRange::new(start, end),
+                        TimeRange::from(0), // Tx time is irrelevant for this test
+                    ),
+                )
+                .unwrap();
         }
 
         // Query for a time in the middle of the history
@@ -70,14 +72,16 @@ fn bench_insert_performance(c: &mut Criterion) {
                             let start = i * 1000;
                             let end = (i + 1) * 1000;
                             let v_id = VersionId::new(i as u64).unwrap();
-                            indexes.insert_node_version(
-                                node_id,
-                                v_id,
-                                BiTemporalInterval::new(
-                                    TimeRange::new(start, end),
-                                    TimeRange::from(0),
-                                ),
-                            );
+                            indexes
+                                .insert_node_version(
+                                    node_id,
+                                    v_id,
+                                    BiTemporalInterval::new(
+                                        TimeRange::new(start, end),
+                                        TimeRange::from(0),
+                                    ),
+                                )
+                                .unwrap();
                         }
                         black_box(indexes)
                     },
@@ -108,14 +112,16 @@ fn bench_insert_performance(c: &mut Criterion) {
                             let start = i * 1000;
                             let end = (i + 1) * 1000;
                             let v_id = VersionId::new(i as u64).unwrap();
-                            indexes.insert_node_version(
-                                node_id,
-                                v_id,
-                                BiTemporalInterval::new(
-                                    TimeRange::new(start, end),
-                                    TimeRange::from(0),
-                                ),
-                            );
+                            indexes
+                                .insert_node_version(
+                                    node_id,
+                                    v_id,
+                                    BiTemporalInterval::new(
+                                        TimeRange::new(start, end),
+                                        TimeRange::from(0),
+                                    ),
+                                )
+                                .unwrap();
                         }
                         black_box(indexes)
                     },
@@ -158,7 +164,8 @@ fn bench_concurrent_write_throughput(c: &mut Criterion) {
                                                 ),
                                                 TimeRange::from(0),
                                             ),
-                                        );
+                                        )
+                                        .unwrap();
                                     }
                                 })
                             })
@@ -202,7 +209,8 @@ fn bench_concurrent_write_throughput(c: &mut Criterion) {
                                                 ),
                                                 TimeRange::from(0),
                                             ),
-                                        );
+                                        )
+                                        .unwrap();
                                     }
                                 })
                             })
@@ -236,14 +244,16 @@ fn bench_read_latency_under_write_contention(c: &mut Criterion) {
                 let node_id = NodeId::new(1).unwrap();
                 for i in 0..10_000 {
                     let version_id = VersionId::new(i).unwrap();
-                    indexes.insert_node_version(
-                        node_id,
-                        version_id,
-                        BiTemporalInterval::new(
-                            TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64),
-                            TimeRange::from(0),
-                        ),
-                    );
+                    indexes
+                        .insert_node_version(
+                            node_id,
+                            version_id,
+                            BiTemporalInterval::new(
+                                TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64),
+                                TimeRange::from(0),
+                            ),
+                        )
+                        .unwrap();
                 }
 
                 // Query range in the middle
@@ -270,7 +280,8 @@ fn bench_read_latency_under_write_contention(c: &mut Criterion) {
                                                 ),
                                                 TimeRange::from(0),
                                             ),
-                                        );
+                                        )
+                                        .unwrap();
                                     }
                                 })
                             })
