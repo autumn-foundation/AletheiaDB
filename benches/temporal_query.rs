@@ -8,7 +8,7 @@ fn bench_valid_at_query(c: &mut Criterion) {
 
     // Test with 100, 1K, 10K versions per entity
     for version_count in [100, 1000, 10000] {
-        let mut indexes = TemporalIndexes::new();
+        let indexes = TemporalIndexes::new();
         let node_id = NodeId::new(1).unwrap();
 
         // Insert sequential versions
