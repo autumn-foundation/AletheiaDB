@@ -41,8 +41,8 @@ pub struct GallifreyDB {
     current: Arc<CurrentStorage>,
     /// Historical version storage (temporal path) - RwLock-protected for concurrent reads
     historical: Arc<RwLock<HistoricalStorage>>,
-    /// Temporal indexes for efficient time-based queries - RwLock-protected for concurrent reads
-    temporal_indexes: Arc<RwLock<TemporalIndexes>>,
+    /// Temporal indexes for efficient time-based queries - Uses DashMap internally for fine-grained locking
+    temporal_indexes: Arc<TemporalIndexes>,
     /// Write-Ahead Log for durability - Mutex-protected for write safety
     wal: Arc<Mutex<WriteAheadLog>>,
     /// Current logical timestamp for transaction time - Mutex-protected for thread-safe increment
@@ -107,7 +107,7 @@ impl GallifreyDB {
         GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::with_config(anchor_config))),
-            temporal_indexes: Arc::new(RwLock::new(TemporalIndexes::new())),
+            temporal_indexes: Arc::new(TemporalIndexes::new()),
             wal,
             current_timestamp: Arc::new(Mutex::new(time::now())),
             tx_id_gen: Arc::new(TxIdGenerator::new()),

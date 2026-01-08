@@ -181,6 +181,12 @@ harness = false
 path = "benches/concurrent_reads.rs"
 required-features = []
 
+[[bench]]
+name = "temporal_query"
+harness = false
+path = "benches/temporal_query.rs"
+required-features = []
+
 # Patch libhoney-rust to use git version with updated dependencies
 # This overrides the crates.io version for ALL dependencies (including tracing-honeycomb)
 # Reason: crates.io v0.1.6 uses reqwest 0.10 with known CVEs

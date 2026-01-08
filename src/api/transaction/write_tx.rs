@@ -54,7 +54,7 @@ pub struct WriteTransaction {
     // Shared references to storage (Arc for zero-copy sharing)
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
-    temporal_indexes: Arc<RwLock<TemporalIndexes>>,
+    temporal_indexes: Arc<TemporalIndexes>,
     wal: Arc<Mutex<WriteAheadLog>>,
     current_timestamp: Arc<Mutex<Timestamp>>,
     visibility_manager: Arc<TxVisibilityManager>,
@@ -76,7 +76,7 @@ impl WriteTransaction {
         snapshot: TransactionSnapshot,
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
-        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
+        temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -107,7 +107,7 @@ impl WriteTransaction {
         snapshot: TransactionSnapshot,
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
-        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
+        temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -668,10 +668,10 @@ impl WriteTransaction {
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
         let temporal = BiTemporalInterval::current(commit_timestamp);
 
-        // Acquire locks once before processing all operations.
-        // This reduces lock overhead from 2N acquisitions (per operation) to just 2 (total).
+        // Acquire lock on historical storage once before processing all operations.
+        // TemporalIndexes uses DashMap internally, so no outer lock needed.
         let mut historical = self.historical.write_or_err()?;
-        let mut temporal_indexes = self.temporal_indexes.write_or_err()?;
+        let temporal_indexes = &self.temporal_indexes;
 
         // Pre-generate all tombstone version IDs at once to reduce lock contention
         // on the ID generator. Count delete operations and generate IDs in batch.
@@ -730,7 +730,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal);
+                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::CreateEdge {
                     edge_id,
@@ -766,7 +766,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal);
+                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::UpdateNode {
                     node_id,
@@ -796,7 +796,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal);
+                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::UpdateEdge {
                     edge_id,
@@ -832,7 +832,7 @@ impl WriteTransaction {
                     )?;
 
                     // Index in temporal indexes
-                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal);
+                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::DeleteNode { node_id } => {
                     // Get the node before deleting
@@ -883,7 +883,7 @@ impl WriteTransaction {
                         *node_id,
                         tombstone_version_id,
                         tombstone_temporal,
-                    );
+                    )?;
 
                     // Delete from current storage
                     self.current
@@ -940,7 +940,7 @@ impl WriteTransaction {
                         *edge_id,
                         tombstone_version_id,
                         tombstone_temporal,
-                    );
+                    )?;
 
                     // Delete from current storage
                     self.current.delete_edge_direct(*edge_id)?;
@@ -956,9 +956,10 @@ impl WriteTransaction {
             num_deletes
         );
 
-        // Explicitly drop locks before rebuilding adjacency to document lock release point
+        // Release historical write lock before rebuilding adjacency to avoid holding multiple
+        // exclusive locks simultaneously. TemporalIndexes uses fine-grained DashMap locking
+        // internally, so no explicit lock release needed (automatically released after inserts).
         drop(historical);
-        drop(temporal_indexes);
 
         // Rebuild adjacency indexes once after all edge operations
         // This is much more efficient than rebuilding after each operation
@@ -1337,7 +1338,7 @@ mod tests {
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
         let current = Arc::new(CurrentStorage::new());
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
@@ -1835,7 +1836,7 @@ mod tests {
     fn test_interleaved_create_update_delete_operations() {
         let current = Arc::new(CurrentStorage::new());
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-        let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
@@ -2070,7 +2071,7 @@ mod conflict_detection_tests {
     struct TestHarness {
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
-        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
+        temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -2086,7 +2087,7 @@ mod conflict_detection_tests {
         fn new() -> Self {
             let current = Arc::new(CurrentStorage::new());
             let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-            let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
+            let temporal_indexes = Arc::new(TemporalIndexes::new());
 
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
@@ -2512,7 +2513,7 @@ mod timestamp_ordering_tests {
     struct TestHarness {
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
-        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
+        temporal_indexes: Arc<TemporalIndexes>,
         wal: Arc<Mutex<WriteAheadLog>>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
@@ -2527,7 +2528,7 @@ mod timestamp_ordering_tests {
         fn new() -> Self {
             let current = Arc::new(CurrentStorage::new());
             let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-            let temporal_indexes = Arc::new(RwLock::new(TemporalIndexes::new()));
+            let temporal_indexes = Arc::new(TemporalIndexes::new());
 
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {

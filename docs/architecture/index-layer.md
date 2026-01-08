@@ -251,56 +251,73 @@ graph TB
     IN_Q --> IN_I
 ```
 
-## Temporal Indexes (BTreeMap)
+## Temporal Indexes (DashMap + Sorted Vectors)
 
 ### Purpose
 
-Efficient range queries for time-travel operations.
+Efficient range queries for time-travel operations with built-in DoS protection through per-entity version limits.
 
 ### Structure
 
 ```mermaid
 classDiagram
     class TemporalIndexes {
-        -valid_time_index: BTreeMap~TemporalKey, Vec~VersionId~~
-        -transaction_time_index: BTreeMap~TemporalKey, Vec~VersionId~~
-        +insert_node_version(NodeVersion)
-        +insert_edge_version(EdgeVersion)
+        -index: DashMap~EntityId, EntityTimelines~
+        -config: TemporalIndexConfig
+        +insert_node_version(NodeId, VersionId, BiTemporalInterval) Result~()~
+        +insert_edge_version(EdgeId, VersionId, BiTemporalInterval) Result~()~
+        +insert_node_versions_batch(NodeId, Vec) Result~()~
+        +insert_edge_versions_batch(EdgeId, Vec) Result~()~
         +find_versions_at_time(EntityId, Timestamp) Vec~VersionId~
         +find_versions_in_range(EntityId, TimeRange) Vec~VersionId~
     }
 
-    class TemporalKey {
-        +entity_id: EntityId
-        +timestamp: Timestamp
+    class TemporalIndexConfig {
+        +max_versions_per_entity: usize
+        +default() TemporalIndexConfig
     }
 
-    TemporalIndexes --> TemporalKey
+    class EntityTimelines {
+        +valid: Timeline
+        +transaction: Timeline
+    }
+
+    TemporalIndexes --> TemporalIndexConfig
+    TemporalIndexes --> EntityTimelines
 ```
 
 ### Index Organization
 
 ```mermaid
 graph TB
-    subgraph "BTreeMap Structure"
-        ROOT["Root"]
-        N1["Node 1<br/>keys < 1000"]
-        N2["Node 2<br/>1000 ≤ keys < 2000"]
-        N3["Node 3<br/>keys ≥ 2000"]
+    subgraph "DashMap + Timeline Structure"
+        DM["DashMap<br/>EntityId → EntityTimelines"]
 
-        ROOT --> N1
-        ROOT --> N2
-        ROOT --> N3
+        subgraph "Entity 1 Timeline"
+            ET1["EntityTimelines"]
+            VT1["Valid Time Timeline<br/>Sorted Vec<TimelineEntry>"]
+            TT1["Transaction Time Timeline<br/>Sorted Vec<TimelineEntry>"]
+            ET1 --> VT1
+            ET1 --> TT1
+        end
 
-        L1["(Entity:1, T:100)"]
-        L2["(Entity:1, T:500)"]
-        L3["(Entity:2, T:300)"]
+        subgraph "Entity 2 Timeline"
+            ET2["EntityTimelines"]
+            VT2["Valid Time Timeline<br/>Sorted Vec<TimelineEntry>"]
+            TT2["Transaction Time Timeline<br/>Sorted Vec<TimelineEntry>"]
+            ET2 --> VT2
+            ET2 --> TT2
+        end
 
-        N1 --> L1
-        N1 --> L2
-        N1 --> L3
+        DM --> ET1
+        DM --> ET2
     end
 ```
+
+**Key Features:**
+- **DashMap**: Fine-grained locking per entity (parallel writes to different entities)
+- **Sorted Vectors**: Binary search + cache-friendly scanning within entity
+- **DoS Protection**: `TemporalIndexConfig.max_versions_per_entity` (default: 1M)
 
 ### Query Patterns
 
@@ -345,11 +362,16 @@ graph LR
 
 ### Performance Characteristics
 
-| Operation | Complexity | Typical Use |
-|-----------|------------|-------------|
-| Insert | O(log n) | On version creation |
-| Point lookup | O(log n) | Time-travel query |
-| Range scan | O(log n + k) | History query |
+| Operation | Complexity | Typical Use | Notes |
+|-----------|------------|-------------|-------|
+| Insert (chronological) | O(1) amortized | Version creation | Append to sorted vector |
+| Insert (retroactive) | O(N) | WAL replay | Binary search + shift |
+| Batch insert | O(M log M + N) | Bulk operations | M = batch size, N = total versions |
+| Point lookup | O(log N + K) | Time-travel query | Binary search + scan K overlaps |
+| Range scan | O(log N + K) | History query | Binary search + linear scan |
+| Version limit check | O(1) | Every insert | DoS protection |
+
+**N** = versions per entity, **K** = overlapping versions (typically 1-2)
 
 ## Index Synchronization
 
