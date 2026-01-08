@@ -76,4 +76,5 @@ pub use index::{
     vector::{DistanceMetric, HnswConfig},
 };
 pub use storage::CurrentStorage;
+pub use storage::wal::{DurabilityMode, WriteOptions};
 pub use utils::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};

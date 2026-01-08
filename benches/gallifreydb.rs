@@ -4,9 +4,26 @@
 //! - Fast path: Current state queries (should match current_state.rs performance)
 //! - Slow path: Time-travel queries with version reconstruction
 //! - Version creation: Overhead of maintaining temporal history
+//!
+//! NOTE: These benchmarks use Async durability mode to isolate graph performance
+//! from WAL flush overhead. See durability_modes.rs for durability-focused benchmarks.
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::{GallifreyDB, NodeId, PropertyMapBuilder};
+use gallifreydb::{
+    GallifreyDB, NodeId, PropertyMapBuilder, WriteOps,
+    storage::wal::{DurabilityMode, WalConfig},
+};
+
+/// Create a test database configured for benchmarking (Async mode, no waiting).
+fn create_benchmark_db() -> GallifreyDB {
+    let wal_config = WalConfig {
+        durability_mode: DurabilityMode::Async {
+            flush_interval_ms: 100,
+        }, // Async mode for benchmarks
+        ..Default::default()
+    };
+    GallifreyDB::with_wal_config(wal_config)
+}
 
 /// Create a test database with versioned history.
 ///
@@ -15,9 +32,7 @@ fn create_versioned_graph(
     node_count: usize,
     versions_per_node: usize,
 ) -> (GallifreyDB, Vec<NodeId>) {
-    use gallifreydb::api::transaction::WriteOps;
-
-    let db = GallifreyDB::new();
+    let db = create_benchmark_db();
     let mut node_ids = Vec::new();
 
     // Create initial nodes
@@ -64,7 +79,7 @@ fn create_versioned_graph(
 fn bench_node_creation_with_versioning(c: &mut Criterion) {
     c.bench_function("gallifreydb_node_creation", |b| {
         b.iter_batched(
-            GallifreyDB::new,
+            create_benchmark_db,
             |db| {
                 let props = PropertyMapBuilder::new()
                     .insert("name", "Alice")
@@ -83,7 +98,7 @@ fn bench_edge_creation_with_versioning(c: &mut Criterion) {
     c.bench_function("gallifreydb_edge_creation", |b| {
         b.iter_batched(
             || {
-                let db = GallifreyDB::new();
+                let db = create_benchmark_db();
                 let n1 = db
                     .create_node("Person", PropertyMapBuilder::new().build())
                     .unwrap();

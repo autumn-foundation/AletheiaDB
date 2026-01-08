@@ -14,8 +14,9 @@ GallifreyDB tracks both **valid time** (when facts were true in reality) and **t
 - **Hybrid Storage**: Separate current state (fast path) from historical data (temporal path)
 - **Anchor+Delta Compression**: 5-6X storage reduction while maintaining query performance
 - **ACID Transactions**: Full snapshot isolation with write conflict detection
-- **Write-Ahead Log (WAL)**: Crash recovery with versioned binary format
-- **Vector Storage**: Embeddings support for semantic search (Phase 1 complete)
+- **Write-Ahead Log (WAL)**: Crash recovery with versioned binary format (v2)
+- **Vector Search**: HNSW indexing for k-NN semantic search with temporal versioning
+- **Production Observability**: Distributed tracing, metrics, and profiling (optional)
 - **High Performance**: Sub-microsecond traversals (~22ns node lookup, ~23ns edge traversal)
 - **LLM-Friendly API**: Natural query patterns for reasoning about temporal knowledge
 
@@ -54,7 +55,7 @@ just test
 # Run tests
 just test
 
-# Check code coverage (must meet 80% threshold)
+# Check code coverage (must meet 85% threshold)
 just coverage-check
 
 # Generate coverage report (HTML)
@@ -81,6 +82,40 @@ just bench-tables
 
 See `justfile` for all available commands.
 
+## Feature Flags
+
+GallifreyDB uses Cargo feature flags for optional functionality:
+
+### Observability Features
+```toml
+[dependencies]
+gallifreydb = { version = "0.1", features = ["observability"] }
+```
+
+| Feature | Description | Dependencies |
+|---------|-------------|--------------|
+| `observability` | Core observability (tracing + metrics) | `tracing`, `tracing-subscriber` |
+| `observability-tracy` | Tracy CPU profiling integration | `tracing-tracy`, `tracy-client` |
+| `observability-honeycomb` | Honeycomb distributed tracing | `tracing-honeycomb`, `libhoney-rust` |
+| `observability-prometheus` | Prometheus metrics HTTP server | `metrics`, `metrics-exporter-prometheus` |
+
+### Embedding Provider Features
+```toml
+[dependencies]
+gallifreydb = { version = "0.1", features = ["embedding-openai"] }
+```
+
+| Feature | Description | Dependencies |
+|---------|-------------|--------------|
+| `embeddings` | Core embedding types and service | `tokio`, `async-trait`, `serde` |
+| `embedding-openai` | OpenAI embedding provider | `embeddings`, `reqwest` |
+| `embedding-huggingface` | HuggingFace embedding provider | `embeddings`, `reqwest` |
+| `embedding-ollama` | Ollama local embedding provider | `embeddings`, `reqwest` |
+| `embedding-onnx` | ONNX local inference (⚠️ placeholder) | `embeddings`, `ort`, `tokenizers` |
+| `embedding-all` | Enable all embedding providers | All of the above |
+
+**Note**: Embedding features are **completely optional** and add zero overhead when disabled. The database core has no embedding dependencies.
+
 ## Performance & Benchmarks
 
 GallifreyDB is designed for high performance with minimal temporal overhead. View live benchmark results:
@@ -102,40 +137,54 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 
 ## Project Status
 
-**Current Phase**: Core Complete, Vector Search in Progress
+**Current Phase**: Core Complete, Vector Search (Phase 1-2) Complete, Observability Active
 
-### Core Features (Complete)
+### Core Features (Complete ✅)
 - [x] Core ID types (NodeId, EdgeId, VersionId)
 - [x] Temporal primitives (BiTemporalInterval, TimeRange)
 - [x] Property system with Arc-based deduplication
 - [x] String interning for memory efficiency
 - [x] Error types and Result handling
-- [x] Test coverage infrastructure (80% threshold)
-- [x] Tracy profiling integration
+- [x] Test coverage infrastructure (85%+ threshold enforced)
 - [x] Current storage layer with CSR adjacency indexes
 - [x] Historical storage with anchor+delta compression
 - [x] ACID transactions with snapshot isolation
-- [x] Write conflict detection (Issue #8)
-- [x] Write-Ahead Log (WAL) with versioned format
-- [x] Persistence layer with recovery
+- [x] Write conflict detection
+- [x] Write-Ahead Log (WAL) v2 with versioned binary format
+- [x] Persistence layer with recovery and migration
 - [x] Time-travel queries (as_of, get_node_at_time)
 - [x] Public API with read/write transactions
 
-### Vector Storage (Phase 1 Complete)
+### Vector Search (Phase 1-2 Complete ✅)
 - [x] Vector type with validation (VS-001 to VS-010)
 - [x] Similarity functions: cosine, Euclidean, dot product
 - [x] Vector normalization utilities
 - [x] Distance metric abstraction
 - [x] Property-attached vector embeddings
-- [x] Historical vector versioning
+- [x] Historical vector versioning (temporal vectors)
+- [x] HNSW indexing for k-NN search
+- [x] Auto-indexing on create/update with rollback
+- [x] Vector similarity search API
+- [x] Optional embedding providers (OpenAI, HuggingFace, Ollama, ONNX)
 
-### In Progress
-- [ ] Vector indexing (HNSW integration)
-- [ ] Graph + Vector hybrid queries
-- [ ] Temporal vector drift tracking
+### Observability (Complete ✅)
+- [x] Structured logging with `tracing`
+- [x] Tracy profiler integration for CPU profiling
+- [x] Honeycomb distributed tracing (via git dependency - [see #271](https://github.com/madmax983/GallifreyDB/issues/271))
+- [x] Prometheus metrics HTTP server (stub - [see #272](https://github.com/madmax983/GallifreyDB/issues/272))
+- [x] Critical error detection (lock poisons, timestamp violations, WAL checksum failures)
+- [x] Error categorization metrics
+
+### In Progress / Planned
+- [ ] Vector Search Phase 3: Temporal vector queries (semantic time-travel)
+- [ ] Vector Search Phase 4: Hybrid graph+vector queries
+- [ ] Vector Search Phase 5: Streaming and incremental updates
+- [ ] Custom Honeycomb client wrapper ([#271](https://github.com/madmax983/GallifreyDB/issues/271))
+- [ ] Comprehensive Prometheus metrics suite ([#272](https://github.com/madmax983/GallifreyDB/issues/272))
 - [ ] MCP Server for Claude integration
+- [ ] GraphQL/REST API layer
 
-**Test Coverage**: 455+ tests passing, coverage tracking enabled
+**Test Coverage**: 671+ tests passing, 86%+ line coverage (enforced: 85% minimum)
 
 ## Architecture
 
@@ -285,6 +334,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 See **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** for complete documentation.
 
+### Production Observability (Optional)
+
+GallifreyDB includes comprehensive observability features for production deployments:
+
+```bash
+# Enable in Cargo.toml:
+features = [
+    "observability",              # Core: structured logging + metrics
+    "observability-tracy",        # Tracy CPU profiling
+    "observability-honeycomb",    # Honeycomb distributed tracing
+    "observability-prometheus",   # Prometheus metrics HTTP server
+]
+```
+
+**Basic usage:**
+
+```rust
+use gallifreydb::observability;
+
+fn main() {
+    // Initialize observability (call once at startup)
+    let config = observability::Config::from_env();
+    observability::init(config);
+
+    let db = gallifreydb::GallifreyDB::new();
+
+    // Metrics automatically collected
+    // Check for critical errors
+    let metrics = observability::metrics();
+    if metrics.has_critical_errors() {
+        panic!("Data corruption detected!");
+    }
+}
+```
+
+**Environment Variables:**
+- `RUST_LOG`: Control log level (e.g., `gallifreydb=debug`)
+- `HONEYCOMB_API_KEY`: Enable Honeycomb tracing
+- `HONEYCOMB_DATASET`: Dataset name (default: "gallifreydb")
+- `PROMETHEUS_BIND_ADDR`: Prometheus HTTP endpoint (e.g., "127.0.0.1:9090")
+
+**Critical Metrics** (should NEVER be >0):
+- `lock_poison_count`: Thread panicked while holding lock
+- `timestamp_violations`: Transaction time not monotonic
+- `wal_checksum_failures`: WAL corruption detected
+
+**Backends:**
+- **Stdout**: Structured JSON logging (always available)
+- **Tracy**: CPU profiling with flamegraphs and zone tracking
+- **Honeycomb**: Distributed tracing for span analysis (⚠️ uses git dependency, [see #271](https://github.com/madmax983/GallifreyDB/issues/271))
+- **Prometheus**: `/metrics` HTTP endpoint (⚠️ stub implementation, [see #272](https://github.com/madmax983/GallifreyDB/issues/272))
+
+Run the demo:
+```bash
+export HONEYCOMB_API_KEY="your-key"
+export PROMETHEUS_BIND_ADDR="127.0.0.1:9090"
+cargo run --example observability_demo --all-features
+```
+
 ## Performance
 
 | Operation | Target | Achieved |
@@ -299,13 +407,24 @@ Run benchmarks with `just bench` to verify on your hardware.
 
 ## Documentation
 
+### Core Documentation
 - **[CLAUDE.md](CLAUDE.md)** - Architecture principles and development guidelines
 - **[TESTING.md](TESTING.md)** - Testing, coverage, and profiling guide
-- **[WORKTREE_WORKFLOW.md](WORKTREE_WORKFLOW.md)** - Parallel development workflow
-- **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture
-- **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide (optional)
-- **[docs/adr/0016-embedding-providers.md](docs/adr/0016-embedding-providers.md)** - Embedding architecture decisions
+- **[WORKTREE_WORKFLOW.md](WORKTREE_WORKFLOW.md)** - Parallel development workflow with git worktrees
 - **[justfile](justfile)** - Available development commands
+
+### Feature Documentation
+- **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture (Phases 1-5)
+- **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide (optional providers)
+- **[docs/WAL.md](docs/WAL.md)** - Write-Ahead Log format and migration guide
+- **[docs/CODING_STANDARDS.md](docs/CODING_STANDARDS.md)** - Rust coding standards and best practices
+
+### Architecture Decision Records
+- **[docs/adr/0016-embedding-providers.md](docs/adr/0016-embedding-providers.md)** - Embedding provider architecture
+
+### Examples
+- `examples/observability_demo.rs` - Production observability features
+- `examples/doctor_who_demo.rs` - Temporal graph modeling example
 
 ## Use Cases
 
@@ -336,9 +455,10 @@ Track how your knowledge graph changes:
 
 All contributions must:
 - Pass all tests
-- Maintain ≥80% code coverage
+- Maintain ≥85% code coverage (line, function, and region)
 - Follow coding guidelines in CLAUDE.md
 - Include appropriate documentation
+- Never commit directly to trunk (use worktrees and PRs)
 
 ## Testing
 

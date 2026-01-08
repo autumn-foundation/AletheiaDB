@@ -6,11 +6,13 @@ This document describes the architecture of GallifreyDB's configurable durabilit
 
 GallifreyDB supports three durability modes that trade off write latency against durability guarantees:
 
-| Mode | Write Latency | Throughput | Data at Risk |
-|------|---------------|------------|--------------|
-| **Synchronous** | ~1.5ms | ~600/sec | None |
-| **Batched** | ~60µs | ~15K/sec | Up to 100 ops or 10ms |
-| **Async** | ~6µs | ~100K+/sec | ~10ms |
+| Mode | Write Latency | Throughput | Data at Risk | ACID |
+|------|---------------|------------|--------------|------|
+| **Synchronous** | ~1.5ms | ~600/sec | None | ✅ Full |
+| **GroupCommit** | ~30-60ms* | ~15K/sec | None | ✅ Full |
+| **Async** | ~6µs | ~100K+/sec | ~flush_interval | ❌ Eventual |
+
+*GroupCommit latency = max_delay_ms (default 10ms) + thread scheduling overhead. Provides full ACID by waiting for batch flush.
 
 ## Data Flow Diagrams
 
@@ -34,35 +36,36 @@ sequenceDiagram
     Note over App,Disk: Blocks until disk confirms
 ```
 
-### Batched Mode
+### GroupCommit Mode
 
 ```mermaid
 sequenceDiagram
     participant App as Application
     participant TX as Transaction
-    participant WAL as WAL Buffer
-    participant Timer as Sync Timer
+    participant Coord as GroupCommitCoordinator
+    participant BG as Background Flush Thread
     participant Disk as Disk
 
     App->>TX: write(data)
-    TX->>WAL: append(entry)
-    WAL->>WAL: increment counter
-    WAL-->>TX: buffered
-    TX-->>App: committed (fast)
+    TX->>Coord: register_transaction()
+    Coord-->>TX: epoch=0
+    TX->>TX: append to WAL
 
-    Note over WAL: Counter < batch_size
+    Note over TX: CRITICAL: Release WAL lock
 
-    App->>TX: write(data)
-    TX->>WAL: append(entry)
-    WAL->>WAL: counter == batch_size
+    TX->>TX: wait_for_flush(epoch=0)
+    Note over TX: Blocks here until epoch flushed
 
-    WAL->>Disk: fsync()
-    Disk-->>WAL: confirmed
-    WAL->>WAL: reset counter
+    BG->>BG: Wake (max_delay_ms timer)
+    BG->>Disk: fsync() entire batch
+    Disk-->>BG: confirmed
+    BG->>Coord: mark_flushed(epoch=0)
+    Coord->>Coord: Advance to epoch=1
+    Coord-->>TX: epoch=0 flushed!
 
-    Note over Timer: Or max_delay expires
-    Timer->>WAL: trigger sync
-    WAL->>Disk: fsync()
+    TX-->>App: committed (ACID guaranteed)
+
+    Note over App,Disk: Multiple transactions in same epoch<br/>share single fsync - amortized cost
 ```
 
 ### Async Mode
@@ -101,14 +104,20 @@ graph TB
 
     subgraph "Durability Modes"
         SYNC[Synchronous Handler]
-        BATCH[Batched Handler]
+        GC[GroupCommit Handler]
         ASYNC[Async Handler]
     end
 
-    subgraph "Sync Infrastructure"
-        TIMER[Batch Timer]
-        BGTHREAD[Background Thread]
-        BUFFER[Ring Buffer]
+    subgraph "GroupCommit Infrastructure"
+        COORD[GroupCommitCoordinator]
+        EPOCH[Epoch Tracker]
+        CV[Condition Variable]
+        GCTHREAD[Background Flush Thread]
+    end
+
+    subgraph "Async Infrastructure"
+        SIGNAL[FlushSignal]
+        ASYNCTHREAD[Background Flush Thread]
     end
 
     subgraph "Storage"
@@ -120,15 +129,21 @@ graph TB
     TX --> WAL
 
     WAL --> SYNC
-    WAL --> BATCH
+    WAL --> GC
     WAL --> ASYNC
 
     SYNC --> FILE
-    BATCH --> TIMER
-    BATCH --> FILE
-    ASYNC --> BUFFER
-    BUFFER --> BGTHREAD
-    BGTHREAD --> FILE
+
+    GC --> COORD
+    COORD --> EPOCH
+    COORD --> CV
+    CV -.wait.-> TX
+    GCTHREAD --> COORD
+    GCTHREAD --> FILE
+
+    ASYNC --> SIGNAL
+    SIGNAL --> ASYNCTHREAD
+    ASYNCTHREAD --> FILE
 
     FILE --> DISK
 ```
@@ -139,17 +154,23 @@ graph TB
 
 ```rust
 pub enum DurabilityMode {
-    /// Every commit waits for fsync
+    /// Every commit waits for its own fsync
+    /// Latency: ~1.5ms | Throughput: ~600/sec | ACID: ✅
     Synchronous,
 
-    /// Batch multiple commits before fsync
-    Batched {
-        batch_size: usize,      // default: 100
-        max_delay_ms: u64,      // default: 10
+    /// Multiple commits wait for shared fsync (epoch-based)
+    /// Latency: ~max_delay_ms | Throughput: ~15K/sec | ACID: ✅
+    /// CRITICAL: Transactions BLOCK until their epoch is flushed
+    GroupCommit {
+        max_delay_ms: u64,      // default: 10ms
+        max_batch_size: usize,  // default: 200
     },
 
-    /// Background thread handles fsync
-    Async,
+    /// Background thread handles fsync, commits return immediately
+    /// Latency: ~6µs | Throughput: ~100K+/sec | ACID: ❌ (eventual)
+    Async {
+        flush_interval_ms: u64, // default: 10ms
+    },
 }
 ```
 
@@ -157,48 +178,190 @@ pub enum DurabilityMode {
 
 ```mermaid
 graph LR
-    subgraph "Global Config"
-        GC[default_durability: Batched]
+    subgraph "Global Config (WalConfig)"
+        GC[default_durability: GroupCommit]
     end
 
-    subgraph "Transaction Options"
-        TO1[None → use global]
-        TO2[Some(Sync) → override]
-        TO3[Some(Async) → override]
+    subgraph "Per-Transaction Override (WriteOptions)"
+        TO1[None → use global default]
+        TO2[Some\(Synchronous\) → override for critical txn]
+        TO3[Some\(Async\) → override for bulk import]
+        TO4[Some\(GroupCommit\) → override params]
     end
 
     subgraph "Effective Mode"
-        EFF[Resolved Durability]
+        EFF[Resolved Durability Mode]
     end
 
     GC --> TO1
     TO1 --> EFF
     TO2 --> EFF
     TO3 --> EFF
+    TO4 --> EFF
+
+    Note1[Example: Bulk import uses Async<br/>while rest of DB uses GroupCommit]
+    Note2[Example: Financial txn uses Sync<br/>while rest of DB uses GroupCommit]
 ```
 
-## Batched Mode Internals
+## GroupCommit Mode Internals
+
+### Epoch-Based Coordination
+
+GroupCommit uses an **epoch-based** system where transactions register with the current epoch and wait for that epoch to flush:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Idle
+    [*] --> Epoch_0
 
-    Idle --> Buffering: append(entry)
-    Buffering --> Buffering: append(entry)\n[count < batch_size]
-    Buffering --> Syncing: count >= batch_size
-    Buffering --> Syncing: timer expired
-    Syncing --> Idle: fsync complete
+    Epoch_0 --> Epoch_0: register_transaction()\n[batch_count++]
+    Epoch_0 --> Flushing_0: batch_count >= max_batch_size\nOR max_delay_ms timer
+    Flushing_0 --> Epoch_1: mark_flushed()\n[wake all waiters]
 
-    note right of Buffering
-        Writes return immediately
-        Entries buffered in memory
+    Epoch_1 --> Epoch_1: register_transaction()
+    Epoch_1 --> Flushing_1: trigger condition
+    Flushing_1 --> Epoch_2: mark_flushed()
+
+    note right of Epoch_0
+        Multiple transactions accumulate
+        All assigned epoch 0
+        Transactions WAIT for flush
     end note
 
-    note right of Syncing
-        Single fsync for entire batch
-        Much more efficient
+    note right of Flushing_0
+        Background thread fsyncs
+        Single fsync for ALL epoch 0 txns
+        Amortized cost across batch
     end note
 ```
+
+### Transaction Wait Flow
+
+```mermaid
+sequenceDiagram
+    participant TX1 as Transaction 1
+    participant TX2 as Transaction 2
+    participant Coord as Coordinator
+    participant BG as Flush Thread
+
+    TX1->>Coord: register() → epoch=0
+    TX2->>Coord: register() → epoch=0
+
+    par TX1 waits
+        TX1->>Coord: wait_for_flush(0)
+        Note over TX1: BLOCKED
+    and TX2 waits
+        TX2->>Coord: wait_for_flush(0)
+        Note over TX2: BLOCKED
+    end
+
+    BG->>BG: max_delay_ms expires
+    BG->>BG: fsync() - flushes both TX1 and TX2
+    BG->>Coord: mark_flushed(epoch=0)
+    Coord->>Coord: flushed_epoch = 1<br/>current_epoch = 1
+
+    par Notify waiters
+        Coord-->>TX1: epoch 0 flushed!
+        Coord-->>TX2: epoch 0 flushed!
+    end
+
+    TX1-->>TX1: Return to application
+    TX2-->>TX2: Return to application
+
+    Note over TX1,TX2: ACID guaranteed - data on disk
+```
+
+### Critical Implementation Details
+
+#### Race Condition Fix (Commit 6bd42ff)
+
+**Problem:** There was a race between releasing the WAL lock after `commit_with_mode()` and re-acquiring it to get the coordinator reference:
+
+```rust
+// BUGGY CODE (race condition):
+let epoch = wal.commit_with_mode(...)?;
+// WAL lock released here
+let coordinator = self.wal.lock_or_err()?.group_commit_coordinator().cloned();
+// ^ coordinator could be None if WAL reconfigured!
+if let Some(gc) = coordinator {
+    gc.wait_for_flush(epoch)?;  // Might skip wait!
+}
+```
+
+**Impact:** Silent durability violation if transaction registered with coordinator but coordinator was cleared before wait.
+
+**Fix:** Clone coordinator reference **before** releasing WAL lock:
+
+```rust
+// SAFE CODE (no race):
+let epoch = wal.commit_with_mode(...)?;
+let gc = wal.group_commit_coordinator().cloned();  // Clone BEFORE lock release
+// WAL lock released here
+if let Some(gc) = gc {
+    gc.wait_for_flush(epoch)?;  // Always waits on correct coordinator
+}
+```
+
+```mermaid
+sequenceDiagram
+    participant TX as Transaction
+    participant WAL as WAL (locked)
+    participant Coord as Coordinator
+
+    TX->>WAL: commit_with_mode()
+    WAL->>Coord: register_transaction() → epoch
+    WAL-->>TX: epoch
+
+    Note over TX,WAL: CRITICAL SECTION - still holding lock
+
+    TX->>WAL: group_commit_coordinator()
+    WAL-->>TX: Arc<Coordinator>
+    TX->>TX: clone coordinator
+
+    Note over TX: NOW safe to release lock
+
+    TX->>TX: Release WAL lock
+    TX->>Coord: wait_for_flush(epoch)
+    Note over Coord: No race - we have our coordinator
+```
+
+#### Piggybacking Optimization
+
+**Concept:** Synchronous commits can "piggyback" pending async data by triggering an immediate flush before their own fsync.
+
+```mermaid
+sequenceDiagram
+    participant Async as Async Transaction
+    participant Sync as Sync Transaction
+    participant WAL as WAL
+    participant Signal as FlushSignal
+    participant BG as Background Thread
+
+    Async->>WAL: write() with Async mode
+    WAL->>WAL: buffer entry
+    WAL-->>Async: return (no fsync)
+    Note over WAL: has_pending_data = true
+
+    Sync->>WAL: write() with Synchronous mode
+    WAL->>WAL: Check has_pending_data?
+
+    alt Pending data exists
+        WAL->>Signal: request_flush()
+        Signal->>BG: wake up!
+        BG->>WAL: fsync() pending data
+        Note over BG: Async data flushed "for free"
+    end
+
+    WAL->>WAL: fsync() sync transaction
+    WAL-->>Sync: return
+
+    Note over Async,BG: Async data durably flushed<br/>without waiting for timer
+```
+
+**Benefits:**
+- Async writes get durability "for free" when sync writes occur
+- Reduces time window for data loss
+- No performance penalty for sync writes
+- Opportunistic optimization
 
 ## Async Mode Internals
 
@@ -260,73 +423,92 @@ flowchart TD
 
 ```mermaid
 graph LR
-    subgraph "Latency (log scale)"
-        SYNC_L[Sync: 1.5ms]
-        BATCH_L[Batched: 60µs]
-        ASYNC_L[Async: 6µs]
+    subgraph "Latency"
+        SYNC_L[Sync: ~1.5ms]
+        GC_L[GroupCommit: ~10-50ms]
+        ASYNC_L[Async: ~6µs]
     end
 
     subgraph "Throughput"
-        SYNC_T[600/sec]
-        BATCH_T[15K/sec]
-        ASYNC_T[100K+/sec]
+        SYNC_T[~600/sec]
+        GC_T[~15K/sec]
+        ASYNC_T[~100K+/sec]
     end
 
-    SYNC_L -.->|25x faster| BATCH_L
-    BATCH_L -.->|10x faster| ASYNC_L
+    subgraph "ACID Compliance"
+        SYNC_A[✅ Full]
+        GC_A[✅ Full]
+        ASYNC_A[❌ Eventual]
+    end
 
-    SYNC_T -.->|25x more| BATCH_T
-    BATCH_T -.->|7x more| ASYNC_T
+    SYNC_L -.->|Higher latency but..| GC_L
+    GC_L -.->|Much higher latency but..| ASYNC_L
+
+    SYNC_T -.->|25x more| GC_T
+    GC_T -.->|7x more| ASYNC_T
+
+    SYNC_A -.->|Same ACID| GC_A
+    GC_A -.->|Loses ACID| ASYNC_A
+
+    Note[GroupCommit: Best balance<br/>ACID + High throughput]
 ```
 
 ## Use Case Decision Tree
 
 ```mermaid
 flowchart TD
-    A[Choose Durability Mode] --> B{Financial/Audit data?}
-    B -->|Yes| SYNC[Use Synchronous]
+    A[Choose Durability Mode] --> B{Need ACID guarantees?}
+    B -->|Yes| C{Can tolerate 10-50ms latency?}
 
-    B -->|No| C{Bulk import?}
-    C -->|Yes| ASYNC[Use Async]
+    C -->|No| SYNC[Use Synchronous]
+    C -->|Yes| GC[Use GroupCommit]
 
-    C -->|No| D{High throughput needed?}
-    D -->|Yes| E{Can tolerate 10ms loss?}
-    E -->|Yes| ASYNC
-    E -->|No| BATCH[Use Batched]
+    B -->|No| D{Bulk import / High throughput?}
+    D -->|Yes| ASYNC[Use Async]
+    D -->|No| GC2[Use GroupCommit\nBest default]
 
-    D -->|No| BATCH
-
-    SYNC --> SYNC_DESC[Zero data loss\n~600 writes/sec]
-    BATCH --> BATCH_DESC[Balanced\n~15K writes/sec]
-    ASYNC --> ASYNC_DESC[Maximum speed\n~100K+ writes/sec]
+    SYNC --> SYNC_DESC[Individual fsync per txn<br/>~1.5ms latency<br/>~600 writes/sec<br/>✅ ACID]
+    GC --> GC_DESC[Shared fsync across batch<br/>~10-50ms latency<br/>~15K writes/sec<br/>✅ ACID]
+    GC2 --> GC_DESC
+    ASYNC --> ASYNC_DESC[Background fsync<br/>~6µs latency<br/>~100K+ writes/sec<br/>❌ Eventual consistency]
 ```
 
 ## Graceful Shutdown
 
-All modes ensure pending writes are synced on shutdown:
+All modes ensure pending writes are synced on shutdown using `FlushGuard`:
 
 ```mermaid
 sequenceDiagram
     participant App as Application
     participant DB as GallifreyDB
     participant WAL as WAL
+    participant Guard as FlushGuard
     participant BG as Background Thread
 
     App->>DB: shutdown()
     DB->>WAL: close()
 
-    alt Batched Mode
-        WAL->>WAL: flush pending batch
-        WAL->>WAL: fsync()
+    alt GroupCommit Mode
+        WAL->>Guard: drop(FlushGuard)
+        Guard->>BG: signal shutdown
+        BG->>BG: Final flush
+        BG->>BG: fsync() all pending
+        BG->>BG: Exit thread
+        Guard->>Guard: join() thread
+        Note over Guard: Blocks until thread complete
     else Async Mode
-        WAL->>BG: signal shutdown
-        BG->>BG: drain buffer
-        BG->>WAL: fsync()
-        BG-->>WAL: shutdown complete
+        WAL->>Guard: drop(FlushGuard)
+        Guard->>BG: signal shutdown
+        BG->>BG: Final flush
+        BG->>BG: fsync() all pending
+        BG->>BG: Exit thread
+        Guard->>Guard: join() thread
     end
 
     WAL-->>DB: closed
     DB-->>App: shutdown complete
+
+    Note over App,BG: FlushGuard RAII ensures<br/>no data loss on shutdown
 ```
 
 ## Related Documentation
