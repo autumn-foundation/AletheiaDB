@@ -122,6 +122,50 @@ impl GroupCommitCoordinator {
         (epoch, should_flush)
     }
 
+    /// Register a transaction for async batched commit (non-blocking).
+    ///
+    /// Similar to `register_transaction()`, but intended for AsyncBatched mode
+    /// where transactions return immediately without waiting for durability.
+    ///
+    /// Returns the epoch number that can be optionally used for durability tracking.
+    /// If the batch is full, returns `true` in the second element to signal
+    /// that an immediate flush should be triggered.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (epoch_to_wait_for, should_trigger_flush)
+    ///
+    /// # Difference from register_transaction
+    ///
+    /// The behavior is identical - both register the transaction and return
+    /// an epoch. The key difference is the calling pattern:
+    /// - `register_transaction()`: Caller MUST wait via `wait_for_flush(epoch)`
+    /// - `register_async()`: Caller MAY wait if durability proof needed, but typically doesn't
+    ///
+    /// # Panics
+    ///
+    /// Panics if the coordinator lock is poisoned. This is an unrecoverable state
+    /// indicating the coordinator is broken and cannot safely coordinate commits.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let coordinator = GroupCommitCoordinator::new(10, 100);
+    ///
+    /// // Transaction returns immediately (doesn't block)
+    /// let (epoch, should_trigger) = coordinator.register_async();
+    ///
+    /// // Optionally wait for durability later if needed
+    /// if need_durability_proof {
+    ///     coordinator.wait_for_flush(epoch)?;
+    /// }
+    /// ```
+    pub fn register_async(&self) -> (u64, bool) {
+        // Reuse existing register_transaction logic
+        // The only difference is semantic - the caller's intention
+        self.register_transaction()
+    }
+
     /// Wait for the specified epoch to be flushed.
     ///
     /// This blocks until the epoch has been durably flushed. If the flush
@@ -445,5 +489,51 @@ mod tests {
         let coord = GroupCommitCoordinator::with_defaults();
         assert_eq!(coord.max_delay(), Duration::from_millis(10));
         // Can't easily test max_batch_size without registering 200 transactions
+    }
+
+    // register_async() tests for AsyncBatched mode
+    #[test]
+    fn test_register_async_returns_immediately() {
+        let coord = GroupCommitCoordinator::new(10, 100);
+
+        // Register without blocking
+        let (epoch, should_flush) = coord.register_async();
+        assert_eq!(epoch, 0);
+        assert!(!should_flush);
+
+        // Second registration
+        let (epoch2, _) = coord.register_async();
+        assert_eq!(epoch2, 0); // Same epoch
+    }
+
+    #[test]
+    fn test_register_async_signals_batch_full() {
+        let coord = GroupCommitCoordinator::new(10, 3);
+
+        coord.register_async();
+        coord.register_async();
+        let (_, should_flush) = coord.register_async();
+
+        assert!(should_flush, "should signal flush when batch is full");
+    }
+
+    #[test]
+    fn test_optional_wait_after_async_register() {
+        let coord = Arc::new(GroupCommitCoordinator::new(100, 100));
+        let coord_clone = Arc::clone(&coord);
+
+        let (epoch, _) = coord.register_async();
+
+        // Spawn thread to flush
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            coord_clone.mark_flushed(Ok(()));
+        });
+
+        // Application can choose to wait for durability
+        let result = coord.wait_for_flush(epoch);
+        assert!(result.is_ok());
+
+        handle.join().unwrap();
     }
 }

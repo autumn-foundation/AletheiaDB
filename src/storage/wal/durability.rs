@@ -84,6 +84,54 @@ pub enum DurabilityMode {
         /// When reached, flush happens immediately regardless of delay.
         max_batch_size: usize,
     },
+
+    /// Async mode with batched fsync and optional durability tracking.
+    ///
+    /// Combines the low latency of Async mode with the intelligent batching
+    /// of GroupCommit mode. Transactions return immediately after writing to
+    /// the OS cache (no fsync wait), but fsync is batched using configurable
+    /// thresholds for efficiency.
+    ///
+    /// - **Latency**: ~10-100µs per commit (no fsync wait, like Async)
+    /// - **Throughput**: Very high (10,000+ tx/sec)
+    /// - **Durability**: NOT ACID - eventually durable with tracking
+    /// - **Data Loss Risk**: Up to `max_batch_size` operations OR `max_delay_ms`
+    ///   window on crash (similar to Async but with smarter batching)
+    /// - **Use case**: High-throughput apps that need batching efficiency but
+    ///   don't want to block on fsync. Optionally track durability via epochs.
+    ///
+    /// # Difference from Other Modes
+    ///
+    /// - **vs Async**: Smarter batching (size + delay triggers) instead of just timer
+    /// - **vs GroupCommit**: Returns immediately (no wait), but same batching logic
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::{GallifreyDB, DurabilityMode};
+    ///
+    /// let mode = DurabilityMode::async_batched_validated(10, 100)?;
+    /// let db = GallifreyDB::with_mode(mode);
+    ///
+    /// // Writes return in <100µs (no fsync wait)
+    /// let node_id = db.write(|tx| {
+    ///     tx.create_node("FastWrite", properties)
+    /// })?;
+    ///
+    /// // Node immediately visible (in memory)
+    /// let node = db.get_node(node_id)?;
+    ///
+    /// // Background thread batches fsyncs efficiently
+    /// ```
+    AsyncBatched {
+        /// Maximum time to wait before forcing fsync (1-1000ms).
+        /// When elapsed, batch is flushed regardless of size.
+        max_delay_ms: u64,
+
+        /// Maximum operations to batch before forcing fsync (1-10000).
+        /// When reached, batch is flushed regardless of delay.
+        max_batch_size: usize,
+    },
 }
 
 impl Default for DurabilityMode {
@@ -234,6 +282,86 @@ impl DurabilityMode {
         }
     }
 
+    /// Create a new AsyncBatched mode with validation.
+    ///
+    /// Returns an error if parameters are out of valid range:
+    /// - max_delay_ms: 1-1000ms
+    /// - max_batch_size: 1-10000
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::WalError`] if validation fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::storage::wal::DurabilityMode;
+    ///
+    /// // Create with custom parameters
+    /// let mode = DurabilityMode::async_batched_validated(10, 100)?;
+    ///
+    /// // 10ms max delay, 100 operations max batch size
+    /// ```
+    pub fn async_batched_validated(max_delay_ms: u64, max_batch_size: usize) -> Result<Self> {
+        if max_delay_ms == 0 {
+            return Err(StorageError::WalError {
+                reason: "max_delay_ms must be greater than 0".to_string(),
+            }
+            .into());
+        }
+        if max_delay_ms > 1000 {
+            return Err(StorageError::WalError {
+                reason: "max_delay_ms must be <= 1000ms (1 second)".to_string(),
+            }
+            .into());
+        }
+        if max_batch_size == 0 {
+            return Err(StorageError::WalError {
+                reason: "max_batch_size must be greater than 0".to_string(),
+            }
+            .into());
+        }
+        if max_batch_size > 10_000 {
+            return Err(StorageError::WalError {
+                reason: "max_batch_size must be <= 10000".to_string(),
+            }
+            .into());
+        }
+        Ok(DurabilityMode::AsyncBatched {
+            max_delay_ms,
+            max_batch_size,
+        })
+    }
+
+    /// Returns the default AsyncBatched configuration (10ms, 100 transactions).
+    ///
+    /// This provides very low latency (<100µs) with efficient batching,
+    /// suitable for high-throughput applications that can tolerate a small
+    /// data loss window on crash.
+    ///
+    /// - **Latency**: <100µs per transaction (returns immediately)
+    /// - **Throughput**: 10,000+ tx/sec
+    /// - **Durability**: Eventually durable (NOT ACID)
+    /// - **Data at Risk**: Up to 100 operations or 10ms window
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::{GallifreyDB, WalConfig, DurabilityMode};
+    ///
+    /// let config = WalConfig {
+    ///     durability_mode: DurabilityMode::async_batched_default(),
+    ///     ..Default::default()
+    /// };
+    /// let db = GallifreyDB::with_wal_config(config);
+    /// ```
+    pub const fn async_batched_default() -> Self {
+        DurabilityMode::AsyncBatched {
+            max_delay_ms: 10,
+            max_batch_size: 100,
+        }
+    }
+
     /// Returns a high-throughput GroupCommit configuration (1ms, 500 transactions).
     ///
     /// Optimized for maximum write throughput while maintaining ACID guarantees.
@@ -266,7 +394,9 @@ impl DurabilityMode {
     pub const fn needs_background_thread(&self) -> bool {
         matches!(
             self,
-            DurabilityMode::Async { .. } | DurabilityMode::GroupCommit { .. }
+            DurabilityMode::Async { .. }
+                | DurabilityMode::GroupCommit { .. }
+                | DurabilityMode::AsyncBatched { .. }
         )
     }
 
@@ -278,6 +408,9 @@ impl DurabilityMode {
                 Some(Duration::from_millis(*flush_interval_ms))
             }
             DurabilityMode::GroupCommit { max_delay_ms, .. } => {
+                Some(Duration::from_millis(*max_delay_ms))
+            }
+            DurabilityMode::AsyncBatched { max_delay_ms, .. } => {
                 Some(Duration::from_millis(*max_delay_ms))
             }
         }
@@ -570,5 +703,85 @@ mod tests {
         assert!(DurabilityMode::group_commit_validated(1, 1).is_ok());
         // Max valid values
         assert!(DurabilityMode::group_commit_validated(1000, 10_000).is_ok());
+    }
+
+    // AsyncBatched mode tests
+    #[test]
+    fn test_async_batched_constructor() {
+        let mode = DurabilityMode::async_batched_validated(10, 100).unwrap();
+        assert!(matches!(
+            mode,
+            DurabilityMode::AsyncBatched {
+                max_delay_ms: 10,
+                max_batch_size: 100
+            }
+        ));
+    }
+
+    #[test]
+    fn test_async_batched_validation_zero_delay_fails() {
+        let result = DurabilityMode::async_batched_validated(0, 200);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("max_delay_ms"));
+        assert!(err.to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_async_batched_validation_zero_batch_fails() {
+        let result = DurabilityMode::async_batched_validated(10, 0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("max_batch_size"));
+        assert!(err.to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_async_batched_validation_boundary_values() {
+        // Min valid values
+        assert!(DurabilityMode::async_batched_validated(1, 1).is_ok());
+        // Max valid values
+        assert!(DurabilityMode::async_batched_validated(1000, 10_000).is_ok());
+        // Just beyond max
+        assert!(DurabilityMode::async_batched_validated(1001, 10).is_err());
+        assert!(DurabilityMode::async_batched_validated(10, 10_001).is_err());
+    }
+
+    #[test]
+    fn test_async_batched_default() {
+        let mode = DurabilityMode::async_batched_default();
+        assert!(matches!(
+            mode,
+            DurabilityMode::AsyncBatched {
+                max_delay_ms: 10,
+                max_batch_size: 100
+            }
+        ));
+    }
+
+    #[test]
+    fn test_async_batched_needs_background_thread() {
+        let mode = DurabilityMode::async_batched_validated(10, 100).unwrap();
+        assert!(mode.needs_background_thread());
+    }
+
+    #[test]
+    fn test_async_batched_does_not_wait_for_durability() {
+        let mode = DurabilityMode::async_batched_validated(10, 100).unwrap();
+        // Key difference from GroupCommit - AsyncBatched returns immediately!
+        assert!(!mode.waits_for_durability());
+    }
+
+    #[test]
+    fn test_async_batched_not_acid_durable() {
+        let mode = DurabilityMode::async_batched_validated(10, 100).unwrap();
+        // Eventually durable, but not ACID (data loss window possible)
+        assert!(!mode.is_acid_durable());
+    }
+
+    #[test]
+    fn test_async_batched_flush_interval() {
+        let mode = DurabilityMode::async_batched_validated(42, 100).unwrap();
+        assert_eq!(mode.flush_interval(), Some(Duration::from_millis(42)));
     }
 }
