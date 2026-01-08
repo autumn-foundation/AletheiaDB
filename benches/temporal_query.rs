@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::id::{NodeId, VersionId};
-use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
+use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
 use gallifreydb::index::temporal::TemporalIndexes;
 
 fn bench_valid_at_query(c: &mut Criterion) {
