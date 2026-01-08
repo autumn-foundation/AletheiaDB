@@ -491,6 +491,156 @@ impl GallifreyDB {
         ))
     }
 
+    /// Get multiple nodes as they existed at a specific point in bi-temporal space.
+    ///
+    /// This is more efficient than calling `get_node_at_time` in a loop because it
+    /// acquires the historical storage lock only once for all queries.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_ids` - Slice of node IDs to query
+    /// * `valid_time` - The valid time to query
+    /// * `transaction_time` - The transaction time to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of (NodeId, Option<Node>) pairs, where None indicates the node
+    /// did not exist at the specified time. Results are returned in the same
+    /// order as the input node_ids.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Query 100 nodes at a historical point with single lock acquisition
+    /// let node_ids = vec![node1, node2, /* ... */, node100];
+    /// let results = db.get_nodes_at_time(&node_ids, valid_time, tx_time)?;
+    ///
+    /// for (node_id, node_opt) in results {
+    ///     if let Some(node) = node_opt {
+    ///         println!("Node {} existed with properties: {:?}", node_id, node.properties());
+    ///     } else {
+    ///         println!("Node {} did not exist at this time", node_id);
+    ///     }
+    /// }
+    /// ```
+    pub fn get_nodes_at_time(
+        &self,
+        node_ids: &[NodeId],
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Result<Vec<(NodeId, Option<Node>)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_nodes_at_time").entered();
+
+        // Single lock acquisition for all queries
+        let historical = self.historical.read_or_err()?;
+
+        // Process each node ID
+        let results = node_ids
+            .iter()
+            .map(|&node_id| {
+                // Find the version valid at this time
+                let node = historical
+                    .find_node_version_at_time(node_id, valid_time, transaction_time)
+                    .and_then(|version_id| {
+                        // Get the version
+                        let version = historical.get_node_version(version_id)?;
+
+                        // Reconstruct properties
+                        let properties = historical.reconstruct_node_properties(version_id).ok()?;
+
+                        // Build node from version
+                        Some(Node::new(
+                            version.node_id,
+                            version.label,
+                            properties,
+                            version.id,
+                        ))
+                    });
+
+                (node_id, node)
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Get multiple edges as they existed at a specific point in bi-temporal space.
+    ///
+    /// This is more efficient than calling `get_edge_at_time` in a loop because it
+    /// acquires the historical storage lock only once for all queries.
+    ///
+    /// # Arguments
+    ///
+    /// * `edge_ids` - Slice of edge IDs to query
+    /// * `valid_time` - The valid time to query
+    /// * `transaction_time` - The transaction time to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of (EdgeId, Option<Edge>) pairs, where None indicates the edge
+    /// did not exist at the specified time. Results are returned in the same
+    /// order as the input edge_ids.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Query multiple edges at a historical point with single lock acquisition
+    /// let edge_ids = vec![edge1, edge2, edge3];
+    /// let results = db.get_edges_at_time(&edge_ids, valid_time, tx_time)?;
+    ///
+    /// for (edge_id, edge_opt) in results {
+    ///     if let Some(edge) = edge_opt {
+    ///         println!("Edge {} existed: {} -> {}", edge_id, edge.source, edge.target);
+    ///     } else {
+    ///         println!("Edge {} did not exist at this time", edge_id);
+    ///     }
+    /// }
+    /// ```
+    pub fn get_edges_at_time(
+        &self,
+        edge_ids: &[EdgeId],
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Result<Vec<(EdgeId, Option<Edge>)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_edges_at_time").entered();
+
+        // Single lock acquisition for all queries
+        let historical = self.historical.read_or_err()?;
+
+        // Process each edge ID
+        let results = edge_ids
+            .iter()
+            .map(|&edge_id| {
+                // Find the version valid at this time
+                let edge = historical
+                    .find_edge_version_at_time(edge_id, valid_time, transaction_time)
+                    .and_then(|version_id| {
+                        // Get the version
+                        let version = historical.get_edge_version(version_id)?;
+
+                        // Reconstruct properties
+                        let properties = historical.reconstruct_edge_properties(version_id).ok()?;
+
+                        // Build edge from version
+                        Some(Edge::new(
+                            version.edge_id,
+                            version.label,
+                            version.source,
+                            version.target,
+                            properties,
+                            version.id,
+                        ))
+                    });
+
+                (edge_id, edge)
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     // ========================================================================
     // Vector Indexing API (VS-030)
     // ========================================================================
@@ -1637,6 +1787,349 @@ mod tests {
 
         // Verify total count
         assert_eq!(db.node_count(), 10);
+    }
+
+    // ==================== Batch Temporal Query Tests ====================
+
+    #[test]
+    fn test_get_nodes_at_time_basic() {
+        let db = GallifreyDB::new();
+
+        // Create multiple nodes at time T1
+        let props1 = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+        let props2 = PropertyMapBuilder::new()
+            .insert("name", "Bob")
+            .insert("age", 25i64)
+            .build();
+        let props3 = PropertyMapBuilder::new()
+            .insert("name", "Charlie")
+            .insert("age", 35i64)
+            .build();
+
+        let node1 = db.create_node("Person", props1).unwrap();
+        let node2 = db.create_node("Person", props2).unwrap();
+        let node3 = db.create_node("Person", props3).unwrap();
+
+        let t1 = *db.current_timestamp.lock().unwrap();
+
+        // Query all three nodes at time T1 using batch API
+        let node_ids = vec![node1, node2, node3];
+        let results = db.get_nodes_at_time(&node_ids, t1, t1).unwrap();
+
+        // Should return all three nodes
+        assert_eq!(results.len(), 3);
+
+        // Verify each result
+        for (id, node_opt) in &results {
+            let node = node_opt.as_ref().expect("Node should exist");
+            assert_eq!(node.id, *id);
+
+            if *id == node1 {
+                assert_eq!(
+                    node.get_property("name").and_then(|v| v.as_str()),
+                    Some("Alice")
+                );
+            } else if *id == node2 {
+                assert_eq!(
+                    node.get_property("name").and_then(|v| v.as_str()),
+                    Some("Bob")
+                );
+            } else if *id == node3 {
+                assert_eq!(
+                    node.get_property("name").and_then(|v| v.as_str()),
+                    Some("Charlie")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_nodes_at_time_mixed_results() {
+        let db = GallifreyDB::new();
+
+        // Create two nodes
+        let node1 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let node2 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+
+        let t1 = *db.current_timestamp.lock().unwrap();
+
+        // Query including a non-existent node
+        let non_existent = NodeId::new(9999).unwrap();
+        let node_ids = vec![node1, non_existent, node2];
+        let results = db.get_nodes_at_time(&node_ids, t1, t1).unwrap();
+
+        // Should return 3 results, with one being None
+        assert_eq!(results.len(), 3);
+
+        // First result should be Some
+        assert!(results[0].1.is_some());
+        assert_eq!(results[0].0, node1);
+
+        // Second result should be None (non-existent node)
+        assert!(results[1].1.is_none());
+        assert_eq!(results[1].0, non_existent);
+
+        // Third result should be Some
+        assert!(results[2].1.is_some());
+        assert_eq!(results[2].0, node2);
+    }
+
+    #[test]
+    fn test_get_nodes_at_time_empty_batch() {
+        let db = GallifreyDB::new();
+
+        let t1 = *db.current_timestamp.lock().unwrap();
+
+        // Query with empty node list
+        let results = db.get_nodes_at_time(&[], t1, t1).unwrap();
+
+        // Should return empty results
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_get_nodes_at_time_after_deletion() {
+        let db = GallifreyDB::new();
+
+        // Create nodes
+        let node1 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let node2 = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+
+        let t_after_create = *db.current_timestamp.lock().unwrap();
+
+        // Delete node1
+        db.write(|tx| {
+            tx.delete_node(node1)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let t_after_delete = *db.current_timestamp.lock().unwrap();
+
+        // Query at time after deletion - node1 should not be found
+        let node_ids = vec![node1, node2];
+        let results = db
+            .get_nodes_at_time(&node_ids, t_after_delete, t_after_delete)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].1.is_none()); // node1 was deleted
+        assert!(results[1].1.is_some()); // node2 still exists
+
+        // Query at time before deletion - both should exist
+        let results = db
+            .get_nodes_at_time(&node_ids, t_after_create, t_after_create)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].1.is_some()); // node1 existed
+        assert!(results[1].1.is_some()); // node2 existed
+    }
+
+    #[test]
+    fn test_get_edges_at_time_basic() {
+        let db = GallifreyDB::new();
+
+        // Create nodes
+        let alice = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let bob = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let charlie = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create edges
+        let edge1 = db
+            .create_edge(
+                alice,
+                bob,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("since", 2020i64).build(),
+            )
+            .unwrap();
+        let edge2 = db
+            .create_edge(
+                bob,
+                charlie,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("since", 2021i64).build(),
+            )
+            .unwrap();
+        let edge3 = db
+            .create_edge(
+                alice,
+                charlie,
+                "WORKS_WITH",
+                PropertyMapBuilder::new().insert("since", 2022i64).build(),
+            )
+            .unwrap();
+
+        let t1 = *db.current_timestamp.lock().unwrap();
+
+        // Query all three edges at time T1 using batch API
+        let edge_ids = vec![edge1, edge2, edge3];
+        let results = db.get_edges_at_time(&edge_ids, t1, t1).unwrap();
+
+        // Should return all three edges
+        assert_eq!(results.len(), 3);
+
+        // Verify each result
+        for (id, edge_opt) in &results {
+            let edge = edge_opt.as_ref().expect("Edge should exist");
+            assert_eq!(edge.id, *id);
+
+            if *id == edge1 {
+                assert_eq!(edge.source, alice);
+                assert_eq!(edge.target, bob);
+                assert_eq!(
+                    edge.get_property("since").and_then(|v| v.as_int()),
+                    Some(2020)
+                );
+            } else if *id == edge2 {
+                assert_eq!(edge.source, bob);
+                assert_eq!(edge.target, charlie);
+                assert_eq!(
+                    edge.get_property("since").and_then(|v| v.as_int()),
+                    Some(2021)
+                );
+            } else if *id == edge3 {
+                assert_eq!(edge.source, alice);
+                assert_eq!(edge.target, charlie);
+                assert_eq!(
+                    edge.get_property("since").and_then(|v| v.as_int()),
+                    Some(2022)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_edges_at_time_mixed_results() {
+        let db = GallifreyDB::new();
+
+        // Create nodes and edges
+        let alice = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let bob = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let edge1 = db
+            .create_edge(
+                alice,
+                bob,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("since", 2020i64).build(),
+            )
+            .unwrap();
+
+        let t1 = *db.current_timestamp.lock().unwrap();
+
+        // Query including a non-existent edge
+        let non_existent = EdgeId::new(9999).unwrap();
+        let edge_ids = vec![edge1, non_existent];
+        let results = db.get_edges_at_time(&edge_ids, t1, t1).unwrap();
+
+        // Should return 2 results, with one being None
+        assert_eq!(results.len(), 2);
+
+        // First result should be Some
+        assert!(results[0].1.is_some());
+        assert_eq!(results[0].0, edge1);
+
+        // Second result should be None (non-existent edge)
+        assert!(results[1].1.is_none());
+        assert_eq!(results[1].0, non_existent);
+    }
+
+    #[test]
+    fn test_get_edges_at_time_empty_batch() {
+        let db = GallifreyDB::new();
+
+        let t1 = *db.current_timestamp.lock().unwrap();
+
+        // Query with empty edge list
+        let results = db.get_edges_at_time(&[], t1, t1).unwrap();
+
+        // Should return empty results
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_get_edges_at_time_after_deletion() {
+        let db = GallifreyDB::new();
+
+        // Create nodes and edges
+        let alice = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let bob = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let edge1 = db
+            .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge2 = db
+            .create_edge(bob, alice, "WORKS_WITH", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let t_after_create = *db.current_timestamp.lock().unwrap();
+
+        // Delete edge1
+        db.write(|tx| {
+            tx.delete_edge(edge1)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let t_after_delete = *db.current_timestamp.lock().unwrap();
+
+        // Query at time after deletion - edge1 should not be found
+        let edge_ids = vec![edge1, edge2];
+        let results = db
+            .get_edges_at_time(&edge_ids, t_after_delete, t_after_delete)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].1.is_none()); // edge1 was deleted
+        assert!(results[1].1.is_some()); // edge2 still exists
+
+        // Query at time before deletion - both should exist
+        let results = db
+            .get_edges_at_time(&edge_ids, t_after_create, t_after_create)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].1.is_some()); // edge1 existed
+        assert!(results[1].1.is_some()); // edge2 existed
     }
 
     #[test]
