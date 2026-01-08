@@ -199,7 +199,7 @@ impl WriteTransaction {
         // - Synchronous: Hold locks through fsync (current behavior, safe but slow)
         // - Async: Release locks after flush to OS cache (fast, background syncs)
         // - GroupCommit: Release locks after flush, wait for epoch (ACID + fast)
-        let (commit_timestamp, wait_epoch) = {
+        let (commit_timestamp, wait_epoch, coordinator) = {
             let mut ts = self
                 .current_timestamp
                 .lock()
@@ -223,7 +223,13 @@ impl WriteTransaction {
             // Mode-aware commit: returns epoch to wait for (GroupCommit) or None
             let epoch = wal.commit_with_mode(self.durability_mode)?;
 
-            (commit, epoch)
+            // RACE CONDITION FIX: Clone the coordinator reference BEFORE releasing WAL lock.
+            // This ensures we wait on the same coordinator we registered with, even if
+            // the WAL's coordinator field is cleared between now and the wait (e.g., during
+            // shutdown or future dynamic reconfiguration). Prevents silent durability violation.
+            let gc = wal.group_commit_coordinator().cloned();
+
+            (commit, epoch, gc)
             // Both locks released here - MUST release before waiting for epoch!
         };
 
@@ -232,9 +238,10 @@ impl WriteTransaction {
         // The flush thread needs the WAL lock to call mark_flushed(), so holding it
         // here would cause a deadlock where we wait for flush thread, but flush thread
         // waits for the WAL lock we're holding.
+        //
+        // RACE CONDITION SAFETY: We cloned the coordinator reference above while holding
+        // the WAL lock, guaranteeing we wait on the same coordinator we registered with.
         if let Some(epoch) = wait_epoch {
-            let coordinator = self.wal.lock_or_err()?.group_commit_coordinator().cloned();
-
             if let Some(gc) = coordinator {
                 gc.wait_for_flush(epoch)?;
             }

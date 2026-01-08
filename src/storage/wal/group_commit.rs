@@ -127,19 +127,30 @@ impl GroupCommitCoordinator {
     /// This blocks until the epoch has been durably flushed. If the flush
     /// failed, the error is propagated to all waiting transactions.
     ///
+    /// # Timeout Calculation
+    ///
+    /// The timeout is a **deadlock detection mechanism**, not a performance target.
+    /// It's designed to catch stuck flush threads, not to enforce timing.
+    ///
+    /// Formula: `(max_delay_ms * 10) + 200ms` with bounds [500ms, 5s]
+    /// - 10x multiplier: Allows for thread scheduling overhead
+    /// - +200ms: Fixed overhead for thread startup, especially in CI
+    /// - Minimum 500ms: Handles very fast configs (e.g., 1ms) in slow CI
+    /// - Maximum 5s: Prevents indefinite waiting on stuck threads
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The flush for this epoch failed
-    /// - The wait times out (10x max_delay_ms with 2 second minimum for thread startup)
+    /// - The wait times out (indicates stuck flush thread)
     pub fn wait_for_flush(&self, epoch: u64) -> Result<(), Error> {
         let mut state = self.state.lock_or_err()?;
 
-        // Timeout scaling:
-        // - 100x max_delay for reasonable headroom (e.g., 1ms delay → 100ms timeout)
-        // - Minimum 500ms for CI system thread startup delays
-        // - Maximum 5s to avoid blocking production workloads too long on stuck threads
-        let timeout = Duration::from_millis(self.config.max_delay_ms * 100)
+        // Deadlock detection timeout (NOT a performance SLA)
+        // See method docs for rationale
+        let base_timeout = Duration::from_millis(self.config.max_delay_ms * 10)
+            + Duration::from_millis(200);
+        let timeout = base_timeout
             .max(Duration::from_millis(500))
             .min(Duration::from_secs(5));
 
