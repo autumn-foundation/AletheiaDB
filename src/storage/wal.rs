@@ -487,24 +487,27 @@ impl WriteAheadLog {
 
                     // Clone the current sync handle (handles segment rotation correctly)
                     // NOTE: try_clone() on already-cloned FDs is cheap - reuses file description
-                    wal_guard.sync_handle.as_ref().and_then(|h| h.try_clone().ok())
+                    wal_guard
+                        .sync_handle
+                        .as_ref()
+                        .and_then(|h| h.try_clone().ok())
                 }; // Lock released - parallel writes can now pile up
 
                 // Phase 2: Sync to disk (slow, ms) - no lock held!
                 // NOTE: sync_handle may be None for fresh WAL instances before first write.
                 // This is normal - we skip the sync and let the flush complete successfully.
-                if let Some(ref sync_handle) = sync_handle_for_iteration {
-                    if let Err(e) = sync_handle.sync_data() {
-                        // Mark flush as failed if using GroupCommit
-                        if let Some(ref gc) = group_commit_clone {
-                            let err = Error::Storage(StorageError::IoError(format!(
-                                "fsync failed: {}",
-                                e
-                            )));
-                            gc.mark_flushed(Err(err));
-                        }
-                        return;
+                if let Some(ref sync_handle) = sync_handle_for_iteration
+                    && let Err(e) = sync_handle.sync_data()
+                {
+                    // Mark flush as failed if using GroupCommit
+                    if let Some(ref gc) = group_commit_clone {
+                        let err = Error::Storage(StorageError::IoError(format!(
+                            "fsync failed: {}",
+                            e
+                        )));
+                        gc.mark_flushed(Err(err));
                     }
+                    return;
                 }
                 // If no sync handle (fresh WAL), skip sync but continue to notify waiters
 

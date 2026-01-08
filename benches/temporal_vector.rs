@@ -461,7 +461,7 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
                 let all_snapshots_vectors: Vec<Vec<Vec<f32>>> = (0..10)
                     .map(|snapshot_idx| {
                         (0..vector_count)
-                            .map(|i| gen_vector(384, (snapshot_idx + i) as usize))
+                            .map(|i| gen_vector(384, snapshot_idx + i))
                             .collect()
                     })
                     .collect();

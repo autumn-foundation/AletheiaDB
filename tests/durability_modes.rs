@@ -714,9 +714,9 @@ fn test_segment_rotation_with_background_thread() {
 
     // First verify nodes exist in memory (sanity check)
     for (i, node_id) in node_ids.iter().enumerate() {
-        let node = db.get_node(*node_id).unwrap_or_else(|_| {
-            panic!("Node {} not found in memory - write failed!", i)
-        });
+        let node = db
+            .get_node(*node_id)
+            .unwrap_or_else(|_| panic!("Node {} not found in memory - write failed!", i));
         assert_eq!(get_label(&node), "RotationTest");
     }
 
