@@ -983,4 +983,252 @@ mod tests {
             "Should find all versions in full range query"
         );
     }
+
+    #[test]
+    fn test_dos_protection_version_limit_node() {
+        // Create index with very low limit for testing
+        let config = TemporalIndexConfig {
+            max_versions_per_entity: 10,
+        };
+        let indexes = TemporalIndexes::with_config(config);
+        let node_id = NodeId::new(1).unwrap();
+
+        // Insert up to the limit - should succeed
+        for i in 0..10 {
+            let version_id = VersionId::new(i).unwrap();
+            let result = indexes.insert_node_version(
+                node_id,
+                version_id,
+                BiTemporalInterval::new(
+                    TimeRange::new((i * 100) as i64, ((i + 1) * 100) as i64),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            );
+            assert!(result.is_ok(), "Insert {} should succeed", i);
+        }
+
+        // Insert one more - should fail with CapacityExceeded
+        let version_id = VersionId::new(10).unwrap();
+        let result = indexes.insert_node_version(
+            node_id,
+            version_id,
+            BiTemporalInterval::new(
+                TimeRange::new(1000, 1100),
+                TimeRange::new(0, Timestamp::MAX),
+            ),
+        );
+
+        assert!(result.is_err(), "Insert beyond limit should fail");
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("Capacity") || err_str.contains("exceeded"),
+            "Error should mention capacity: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("versions for entity"),
+            "Error should identify the entity: {}",
+            err_str
+        );
+
+        // Verify the entity still has exactly 10 versions
+        let entity_id = EntityId::Node(node_id);
+        let timelines = indexes.index.get(&entity_id).unwrap();
+        assert_eq!(
+            timelines.valid.versions.len(),
+            10,
+            "Should have exactly 10 versions after rejection"
+        );
+    }
+
+    #[test]
+    fn test_dos_protection_version_limit_edge() {
+        // Create index with very low limit for testing
+        let config = TemporalIndexConfig {
+            max_versions_per_entity: 5,
+        };
+        let indexes = TemporalIndexes::with_config(config);
+        let edge_id = EdgeId::new(1).unwrap();
+
+        // Insert up to the limit - should succeed
+        for i in 0..5 {
+            let version_id = VersionId::new(i).unwrap();
+            let result = indexes.insert_edge_version(
+                edge_id,
+                version_id,
+                BiTemporalInterval::new(
+                    TimeRange::new((i * 100) as i64, ((i + 1) * 100) as i64),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            );
+            assert!(result.is_ok(), "Insert {} should succeed", i);
+        }
+
+        // Insert one more - should fail
+        let version_id = VersionId::new(5).unwrap();
+        let result = indexes.insert_edge_version(
+            edge_id,
+            version_id,
+            BiTemporalInterval::new(TimeRange::new(500, 600), TimeRange::new(0, Timestamp::MAX)),
+        );
+
+        assert!(result.is_err(), "Insert beyond limit should fail");
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("Capacity") || err_str.contains("exceeded"),
+            "Error should mention capacity: {}",
+            err_str
+        );
+    }
+
+    #[test]
+    fn test_dos_protection_different_entities_independent() {
+        // Verify that limits are per-entity, not global
+        let config = TemporalIndexConfig {
+            max_versions_per_entity: 5,
+        };
+        let indexes = TemporalIndexes::with_config(config);
+
+        let node1 = NodeId::new(1).unwrap();
+        let node2 = NodeId::new(2).unwrap();
+
+        // Fill node1 to its limit
+        for i in 0..5 {
+            indexes
+                .insert_node_version(
+                    node1,
+                    VersionId::new(i).unwrap(),
+                    BiTemporalInterval::new(
+                        TimeRange::new((i * 100) as i64, ((i + 1) * 100) as i64),
+                        TimeRange::new(0, Timestamp::MAX),
+                    ),
+                )
+                .unwrap();
+        }
+
+        // node2 should still be able to insert (independent limit)
+        for i in 0..5 {
+            let result = indexes.insert_node_version(
+                node2,
+                VersionId::new(100 + i).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new((i * 100) as i64, ((i + 1) * 100) as i64),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            );
+            assert!(
+                result.is_ok(),
+                "node2 insert {} should succeed (independent limit)",
+                i
+            );
+        }
+
+        // But node1 should still be at its limit
+        let result = indexes.insert_node_version(
+            node1,
+            VersionId::new(10).unwrap(),
+            BiTemporalInterval::new(TimeRange::new(500, 600), TimeRange::new(0, Timestamp::MAX)),
+        );
+        assert!(result.is_err(), "node1 should still be at limit");
+    }
+
+    #[test]
+    fn test_dos_protection_batch_insert_respects_limit() {
+        let config = TemporalIndexConfig {
+            max_versions_per_entity: 10,
+        };
+        let indexes = TemporalIndexes::with_config(config);
+        let node_id = NodeId::new(1).unwrap();
+
+        // Insert 8 versions normally
+        for i in 0..8 {
+            indexes
+                .insert_node_version(
+                    node_id,
+                    VersionId::new(i).unwrap(),
+                    BiTemporalInterval::new(
+                        TimeRange::new((i * 100) as i64, ((i + 1) * 100) as i64),
+                        TimeRange::new(0, Timestamp::MAX),
+                    ),
+                )
+                .unwrap();
+        }
+
+        // Try to batch insert 5 more (would exceed limit of 10)
+        let batch = vec![
+            (
+                VersionId::new(8).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new(800, 900),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            ),
+            (
+                VersionId::new(9).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new(900, 1000),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            ),
+            (
+                VersionId::new(10).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new(1000, 1100),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            ),
+        ];
+
+        let result = indexes.insert_node_versions_batch(node_id, batch);
+
+        // Batch should fail because it would exceed limit
+        assert!(result.is_err(), "Batch insert exceeding limit should fail");
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("Capacity") || err_str.contains("exceeded"),
+            "Error should mention capacity: {}",
+            err_str
+        );
+
+        // Verify we still have only 8 versions (batch was rejected atomically)
+        let entity_id = EntityId::Node(node_id);
+        let timelines = indexes.index.get(&entity_id).unwrap();
+        assert_eq!(
+            timelines.valid.versions.len(),
+            8,
+            "Should still have 8 versions after batch rejection"
+        );
+    }
+
+    #[test]
+    fn test_dos_protection_default_limit_reasonable() {
+        // Verify the default limit is 1,000,000 (reasonable for production)
+        let config = TemporalIndexConfig::default();
+        assert_eq!(
+            config.max_versions_per_entity, 1_000_000,
+            "Default limit should be 1 million"
+        );
+
+        // Verify we can create indexes with default config
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+
+        // Should be able to insert many versions
+        for i in 0..1000 {
+            let result = indexes.insert_node_version(
+                node_id,
+                VersionId::new(i).unwrap(),
+                BiTemporalInterval::new(
+                    TimeRange::new((i * 100) as i64, ((i + 1) * 100) as i64),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            );
+            assert!(
+                result.is_ok(),
+                "Insert {} should succeed with default limit",
+                i
+            );
+        }
+    }
 }
