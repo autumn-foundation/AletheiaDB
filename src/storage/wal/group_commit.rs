@@ -148,8 +148,8 @@ impl GroupCommitCoordinator {
 
         // Deadlock detection timeout (NOT a performance SLA)
         // See method docs for rationale
-        let base_timeout = Duration::from_millis(self.config.max_delay_ms * 10)
-            + Duration::from_millis(200);
+        let base_timeout =
+            Duration::from_millis(self.config.max_delay_ms * 10) + Duration::from_millis(200);
         let timeout = base_timeout
             .max(Duration::from_millis(500))
             .min(Duration::from_secs(5));

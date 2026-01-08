@@ -241,10 +241,10 @@ impl WriteTransaction {
         //
         // RACE CONDITION SAFETY: We cloned the coordinator reference above while holding
         // the WAL lock, guaranteeing we wait on the same coordinator we registered with.
-        if let Some(epoch) = wait_epoch {
-            if let Some(gc) = coordinator {
-                gc.wait_for_flush(epoch)?;
-            }
+        if let Some(epoch) = wait_epoch
+            && let Some(gc) = coordinator
+        {
+            gc.wait_for_flush(epoch)?;
         }
 
         // Apply all changes atomically
