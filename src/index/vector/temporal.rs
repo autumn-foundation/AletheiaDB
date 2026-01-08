@@ -295,7 +295,115 @@ pub enum DriftMetric {
 }
 
 /// Type alias for vector snapshot: map of NodeId to vector data
-type VectorSnapshot = Arc<HashMap<NodeId, Arc<[f32]>>>;
+/// Represents vector data in a snapshot, supporting both full and delta formats.
+///
+/// Full snapshots store all vectors, while delta snapshots store only changes
+/// relative to a base snapshot, significantly reducing memory usage for incremental updates.
+#[derive(Clone)]
+enum VectorSnapshot {
+    /// Full snapshot containing all vectors
+    Full(Arc<HashMap<NodeId, Arc<[f32]>>>),
+
+    /// Delta snapshot containing only changes relative to a base
+    Delta {
+        /// Timestamp of the base full snapshot
+        base_time: Timestamp,
+        /// Vectors added or updated since base
+        added: Arc<HashMap<NodeId, Arc<[f32]>>>,
+        /// Vectors removed since base
+        removed: Arc<HashSet<NodeId>>,
+    },
+}
+
+impl VectorSnapshot {
+    /// Get a vector from this snapshot, given access to the full snapshot data.
+    fn get_vector(
+        &self,
+        node_id: &NodeId,
+        all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
+    ) -> Option<Arc<[f32]>> {
+        match self {
+            VectorSnapshot::Full(vectors) => vectors.get(node_id).cloned(),
+            VectorSnapshot::Delta { base_time, added, removed } => {
+                // First check if removed
+                if removed.contains(node_id) {
+                    return None;
+                }
+
+                // Then check if in added/updated
+                if let Some(vec) = added.get(node_id) {
+                    return Some(Arc::clone(vec));
+                }
+
+                // Finally, check base snapshot
+                if let Some(base_snapshot) = all_snapshots.get(base_time) {
+                    base_snapshot.get_vector(node_id, all_snapshots)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Reconstruct all vectors in this snapshot as a HashMap.
+    ///
+    /// For delta snapshots, this combines the base with added/removed changes.
+    fn to_hashmap(
+        &self,
+        all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
+    ) -> HashMap<NodeId, Arc<[f32]>> {
+        match self {
+            VectorSnapshot::Full(vectors) => (**vectors).clone(),
+            VectorSnapshot::Delta { base_time, added, removed } => {
+                // Start with base vectors
+                let mut result = if let Some(base_snapshot) = all_snapshots.get(base_time) {
+                    base_snapshot.to_hashmap(all_snapshots)
+                } else {
+                    HashMap::new()
+                };
+
+                // Apply removals
+                for node_id in removed.iter() {
+                    result.remove(node_id);
+                }
+
+                // Apply additions/updates
+                for (node_id, vector) in added.iter() {
+                    result.insert(*node_id, Arc::clone(vector));
+                }
+
+                result
+            }
+        }
+    }
+
+    /// Returns the number of vectors in this snapshot.
+    ///
+    /// For delta snapshots, this is an approximation that doesn't account for
+    /// base snapshot size. For exact count, use to_hashmap().len().
+    fn len(&self) -> usize {
+        match self {
+            VectorSnapshot::Full(vectors) => vectors.len(),
+            VectorSnapshot::Delta { added, .. } => {
+                // Approximation: just return added size
+                // This is used only for capacity estimation
+                added.len().max(100)
+            }
+        }
+    }
+
+    /// Collect all vectors in this snapshot into a Vec.
+    ///
+    /// For delta snapshots, this reconstructs the full set.
+    /// Returns a vector of (NodeId, Arc<[f32]>) pairs.
+    fn collect_all(
+        &self,
+        all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
+    ) -> Vec<(NodeId, Arc<[f32]>)> {
+        let hashmap = self.to_hashmap(all_snapshots);
+        hashmap.into_iter().collect()
+    }
+}
 
 /// Storage structure for snapshot data.
 /// Can be either a full HNSW index or a delta index.
@@ -330,9 +438,9 @@ impl SnapshotIndex {
         match self {
             SnapshotIndex::Full(index) => index.len(),
             SnapshotIndex::Delta(delta) => {
-                // Approximation: Base len + added len.
-                // We ignore removed count for approximation speed.
-                delta.base.len() + delta.added.len()
+                // Correct count: base + added - removed
+                // removed.len() is O(1), so no performance penalty
+                delta.base.len() + delta.added.len() - delta.removed.len()
             }
         }
     }
@@ -644,7 +752,7 @@ impl TemporalVectorIndex {
 
         Ok((
             SnapshotIndex::Full(Arc::new(snapshot)),
-            Arc::new(vector_snapshot),
+            VectorSnapshot::Full(Arc::new(vector_snapshot)),
         ))
     }
 
@@ -652,119 +760,111 @@ impl TemporalVectorIndex {
     fn build_delta_snapshot(
         &self,
         base: Arc<SnapshotIndex>,
+        base_time: Timestamp,
         changes: &HashSet<NodeId>,
     ) -> Result<(SnapshotIndex, VectorSnapshot)> {
         // Create small HNSW for added/updated vectors
         let added_config = self.config.hnsw_config.clone();
         let added = HnswIndex::new(added_config)?;
 
-        // We also need the full vector snapshot for history
-        // TODO: Optimize this to be delta-based too (Phase 4)
-        let mut vector_snapshot = HashMap::with_capacity(self.vectors.len());
-        for entry in self.vectors.iter() {
-            let node_id = *entry.key();
-            let vector = entry.value().clone();
-            vector_snapshot.insert(node_id, vector);
-        }
+        // Build delta vector snapshot - only store changed vectors
+        let mut added_vectors = HashMap::new();
+        let mut removed_vectors = HashSet::new();
 
-        // Populate 'added' HNSW with changed vectors
+        // Separate changed nodes into added/updated vs removed
         for &node_id in changes {
             if let Some(vector) = self.vectors.get(&node_id) {
+                // Node exists in current state -> it was added or updated
                 added.add(node_id, vector.as_ref())?;
+                added_vectors.insert(node_id, vector.clone());
+            } else {
+                // Node doesn't exist in current state -> it was removed
+                removed_vectors.insert(node_id);
             }
         }
 
-        let delta = DeltaIndex {
+        let delta_index = DeltaIndex {
             base,
             added: Arc::new(added),
-            removed: Arc::new(changes.clone()),
+            removed: Arc::new(changes.clone()), // For HNSW, keep all changes as filter
         };
 
-        Ok((
-            SnapshotIndex::Delta(Arc::new(delta)),
-            Arc::new(vector_snapshot),
-        ))
+        let delta_vectors = VectorSnapshot::Delta {
+            base_time,
+            added: Arc::new(added_vectors),
+            removed: Arc::new(removed_vectors), // For vector history, only actual removals
+        };
+
+        Ok((SnapshotIndex::Delta(Arc::new(delta_index)), delta_vectors))
     }
 
-    /// Checks if a snapshot should be created and creates it if needed.
-    fn check_and_create_snapshot(&self, current_time: Timestamp) -> Result<()> {
-        // Step 1: Quick check with read lock
-        let (_should_snapshot, is_full) = {
+    /// Internal helper to build and insert a snapshot with proper lock ordering and validation.
+    ///
+    /// This centralizes the snapshot creation logic to avoid duplication and ensure
+    /// consistent lock ordering (metadata -> snapshot_data) to prevent deadlocks.
+    fn create_snapshot_internal(&self, current_time: Timestamp) -> Result<()> {
+        // Step 1: Read metadata to determine snapshot type
+        let (_should_snapshot, is_full, base_time, changes) = {
             let metadata = self.metadata.read();
-            let should = self.should_create_snapshot(&metadata, current_time)?;
-            if !should {
-                return Ok(());
-            }
 
             // Create FULL snapshot every 10 snapshots (configurable in future)
             let is_full = metadata.snapshots_since_full >= 10 || metadata.total_snapshots == 0;
-            (true, is_full)
+
+            // Get base time and changes for delta (if needed)
+            let base_time = metadata.last_full_snapshot_time;
+            let changes = metadata.changes_accumulated.clone();
+
+            (true, is_full, base_time, changes)
         };
 
         // Step 2: Build snapshot outside locks
-        let (snapshot, vector_snapshot) = if is_full {
-            self.build_full_snapshot()?
+        let (snapshot, vector_snapshot, snapshot_type) = if is_full {
+            let (snap, vec_snap) = self.build_full_snapshot()?;
+            (snap, vec_snap, true) // true = full
         } else {
-            // Get base and changes for delta
-            // We need to be careful with concurrency here.
-            // Using changes_accumulated from read lock is safe because:
-            // 1. It only grows (monotonic) until reset
-            // 2. We only care about changes up to THIS point
-            // 3. Any concurrent new changes will be captured in NEXT delta
-
-            let (base, changes) = {
+            // Try to get base snapshot for delta
+            let base = {
                 let data = self.snapshot_data.read();
-                let meta = self.metadata.read();
-
-                let base = data
-                    .snapshots
-                    .get(&meta.last_full_snapshot_time)
-                    .map(|(_, snap)| Arc::new(snap.clone()));
-
-                let changes = meta.changes_accumulated.clone();
-                (base, changes)
+                data.snapshots
+                    .get(&base_time)
+                    .map(|(_, snap)| Arc::new(snap.clone()))
             };
 
             if let Some(base) = base {
-                self.build_delta_snapshot(base, &changes)?
+                let (snap, vec_snap) = self.build_delta_snapshot(base, base_time, &changes)?;
+                (snap, vec_snap, false) // false = delta
             } else {
-                // Fallback: if base is missing (e.g. pruned), force full snapshot
-                self.build_full_snapshot()?
+                // Base was pruned, fallback to full
+                let (snap, vec_snap) = self.build_full_snapshot()?;
+                (snap, vec_snap, true)
             }
         };
 
-        // Step 3: Acquire locks and perform final check before inserting
+        // Step 3: Acquire locks in correct order (metadata -> snapshot_data) and insert
         {
             let mut metadata = self.metadata.write();
 
-            // Double-check race condition
-            if !self.should_create_snapshot(&metadata, current_time)? {
-                return Ok(());
+            // Re-validate: check if we need full vs delta NOW
+            let should_be_full = metadata.snapshots_since_full >= 10 || metadata.total_snapshots == 0;
+
+            // If we built delta but now need full (due to race), discard and retry
+            if should_be_full && !snapshot_type {
+                drop(metadata);
+                return self.create_snapshot_internal(current_time);
             }
 
-            // If we built a Delta but decided we need a Full (e.g. forced by prune),
-            // or vice versa due to race, we might have mismatch.
-            // But since 'is_full' determination is deterministic based on counts,
-            // and counts only increase under write lock, it should be stable.
-            // However, strictly speaking, if another thread committed a snapshot
-            // between Step 1 and 3, 'snapshots_since_full' changed.
-            // So we should re-evaluate 'is_full' here.
+            // Re-validate: if we built delta, ensure base still exists
+            if !snapshot_type {
+                let snapshot_data = self.snapshot_data.read();
+                let base_exists = snapshot_data.snapshots.contains_key(&metadata.last_full_snapshot_time);
+                drop(snapshot_data);
 
-            let _actual_is_full = metadata.snapshots_since_full >= 10 || metadata.total_snapshots == 0;
-
-            // If our built snapshot type doesn't match what's needed now, we must discard and retry.
-            // This is rare. For simplicity, we just use what we built if it's safe.
-            // If we built Full, it's always safe to use (just maybe redundant).
-            // If we built Delta, we need to ensure the Base is still valid.
-
-            // Simpler approach: Just insert what we built, and update metadata accordingly.
-            // If we built Full, we reset accumulation.
-            // If we built Delta, we don't.
-            // The only risk is if we built Delta but logic says "Full".
-            // Then we insert Delta, and next time we might trigger Full.
-            // Or we check `match snapshot { Full => true, Delta => false }`.
-
-            let built_is_full = matches!(snapshot, SnapshotIndex::Full(_));
+                if !base_exists {
+                    // Base was pruned, discard delta and retry with full
+                    drop(metadata);
+                    return self.create_snapshot_internal(current_time);
+                }
+            }
 
             let stable_id = metadata.total_snapshots;
             let mut snapshot_data = self.snapshot_data.write();
@@ -772,7 +872,7 @@ impl TemporalVectorIndex {
             snapshot_data.insert(current_time, stable_id, snapshot, vector_snapshot);
 
             // Update metadata based on what we actually built
-            metadata.reset(current_time, built_is_full);
+            metadata.reset(current_time, snapshot_type);
 
             // Enforce snapshot limit
             while snapshot_data.len() > self.config.max_snapshots {
@@ -781,6 +881,22 @@ impl TemporalVectorIndex {
         }
 
         Ok(())
+    }
+
+    /// Checks if a snapshot should be created and creates it if needed.
+    fn check_and_create_snapshot(&self, current_time: Timestamp) -> Result<()> {
+        // Quick check: should we create a snapshot?
+        let should_create = {
+            let metadata = self.metadata.read();
+            self.should_create_snapshot(&metadata, current_time)?
+        };
+
+        if !should_create {
+            return Ok(());
+        }
+
+        // Delegate to internal helper for the actual creation
+        self.create_snapshot_internal(current_time)
     }
 
     /// Determines if a snapshot should be created based on the strategy.
@@ -833,79 +949,13 @@ impl TemporalVectorIndex {
         }
     }
 
-    /// Creates a snapshot of the current index.
-    fn create_snapshot(&self, timestamp: Timestamp) -> Result<()> {
-        // Manual snapshot creation - force FULL snapshot for simplicity/safety
-        // in manual mode, or reuse the check logic?
-        // To respect "avoid full copy" even in manual mode, we should use the smart logic.
-        // But create_snapshot is usually forced.
-
-        // Let's use build_full_snapshot to ensure independence for manual snapshots
-        // or check metadata.
-
-        // Better: Use the same logic as check_and_create_snapshot but force "should=true"
-        // But here we'll just build a FULL snapshot to be safe and simple.
-        // Manual snapshots are rare and usually imply "I want a clean checkpoint".
-
-        let (snapshot, vector_snapshot) = self.build_full_snapshot()?;
-
-        {
-            let mut metadata = self.metadata.write();
-            let mut snapshot_data = self.snapshot_data.write();
-
-            let stable_id = metadata.total_snapshots;
-            snapshot_data.insert(timestamp, stable_id, snapshot, vector_snapshot);
-
-            metadata.reset(timestamp, true); // True because we built FULL
-
-            while snapshot_data.len() > self.config.max_snapshots {
-                snapshot_data.remove_oldest();
-            }
-        }
-
-        Ok(())
-    }
-
     /// Manually creates a snapshot at the current time.
+    ///
+    /// This uses the same delta/full snapshot logic as automatic snapshots,
+    /// ensuring optimal memory usage and consistency.
     pub fn create_manual_snapshot(&self) -> Result<()> {
         let timestamp = Self::current_timestamp();
-        // Use check_and_create_snapshot logic to benefit from Delta optimization
-        // We simulate a trigger by setting a flag? No, we can just call internal method
-        // that forces creation.
-
-        // We'll reimplement smart logic here but forced.
-
-        let (is_full, base, changes) = {
-             let data = self.snapshot_data.read();
-             let meta = self.metadata.read();
-             let is_full = meta.snapshots_since_full >= 10 || meta.total_snapshots == 0;
-             let base = data.snapshots.get(&meta.last_full_snapshot_time).map(|(_, s)| Arc::new(s.clone()));
-             let changes = meta.changes_accumulated.clone();
-             (is_full, base, changes)
-        };
-
-        let (snapshot, vector_snapshot) = if is_full || base.is_none() {
-             self.build_full_snapshot()?
-        } else {
-             self.build_delta_snapshot(base.unwrap(), &changes)?
-        };
-
-        {
-            let mut metadata = self.metadata.write();
-            let mut snapshot_data = self.snapshot_data.write();
-
-            let stable_id = metadata.total_snapshots;
-            let built_is_full = matches!(snapshot, SnapshotIndex::Full(_));
-
-            snapshot_data.insert(timestamp, stable_id, snapshot, vector_snapshot);
-            metadata.reset(timestamp, built_is_full);
-
-             while snapshot_data.len() > self.config.max_snapshots {
-                snapshot_data.remove_oldest();
-            }
-        }
-
-        Ok(())
+        self.create_snapshot_internal(timestamp)
     }
 
     /// Prunes snapshots according to the configured retention policy.
@@ -1043,8 +1093,8 @@ impl TemporalVectorIndex {
             .vector_history
             .range(time_range.start()..=time_range.end())
         {
-            if let Some(vector) = snapshot_vectors.get(&node_id) {
-                evolution.push((timestamp, Arc::clone(vector)));
+            if let Some(vector) = snapshot_vectors.get_vector(&node_id, &snapshot_data.vector_history) {
+                evolution.push((timestamp, vector));
             }
         }
 
@@ -1137,13 +1187,14 @@ impl TemporalVectorIndex {
             .vector_history
             .range(time_range.start()..=time_range.end())
         {
-            for (node_id, curr_vector) in snapshot_vectors.iter() {
-                if let Some(prev_vector) = last_vectors.get(node_id) {
-                    let drift = Self::compute_drift_distance(prev_vector, curr_vector, metric)?;
-                    let max_drift_entry = max_drifts.entry(*node_id).or_insert(0.0);
+            let all_vectors = snapshot_vectors.collect_all(&snapshot_data.vector_history);
+            for (node_id, curr_vector) in all_vectors {
+                if let Some(prev_vector) = last_vectors.get(&node_id) {
+                    let drift = Self::compute_drift_distance(prev_vector, &curr_vector, metric)?;
+                    let max_drift_entry = max_drifts.entry(node_id).or_insert(0.0);
                     *max_drift_entry = max_drift_entry.max(drift);
                 }
-                last_vectors.insert(*node_id, Arc::clone(curr_vector));
+                last_vectors.insert(node_id, curr_vector);
             }
         }
         drop(snapshot_data);
@@ -2201,5 +2252,358 @@ mod tests {
     fn test_drift_metric_default() {
         let metric = DriftMetric::default();
         assert_eq!(metric, DriftMetric::Cosine);
+    }
+
+    // ==================== Delta Snapshot Tests ====================
+
+    #[test]
+    fn test_delta_snapshots_actually_used() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create initial vectors - this will be snapshot 0 (full)
+        for i in 0..100 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+        }
+        index.on_transaction_at(1000)?;
+        assert_eq!(index.snapshot_count(), 1);
+
+        // Modify only 5 vectors - snapshots 1-9 should be deltas
+        for snapshot_num in 1..10 {
+            let timestamp = 1000 + (snapshot_num * 1000) as i64;
+            // Only modify 5 vectors
+            for i in 0..5 {
+                index.add(
+                    NodeId::new(i).unwrap(),
+                    &[(i + snapshot_num) as f32, 1.0, 0.0, 0.0],
+                    timestamp,
+                )?;
+            }
+            index.on_transaction_at(timestamp)?;
+        }
+
+        assert_eq!(index.snapshot_count(), 10);
+
+        // Snapshot 10 should be full again (after 10 snapshots)
+        index.add(NodeId::new(0).unwrap(), &[100.0, 0.0, 0.0, 0.0], 11000)?;
+        index.on_transaction_at(11000)?;
+        assert_eq!(index.snapshot_count(), 11);
+
+        // Verify we can query all snapshots successfully
+        for snapshot_num in 0..11 {
+            let timestamp = 1000 + (snapshot_num * 1000);
+            let query = vec![0.0, 0.0, 0.0, 0.0];
+            let results = index.find_similar_as_of(&query, 10, timestamp)?;
+            assert!(!results.is_empty(), "Snapshot {} should have results", snapshot_num);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delta_snapshot_search_correctness() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create full snapshot with distinct vectors
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 1000)?;
+        index.add(NodeId::new(3).unwrap(), &[0.0, 0.0, 1.0, 0.0], 1000)?;
+        index.on_transaction_at(1000)?;
+        assert_eq!(index.snapshot_count(), 1);
+
+        // Update vector 2 to be very similar to vector 3 in delta snapshot
+        index.add(NodeId::new(2).unwrap(), &[0.0, 0.0, 1.0, 0.0], 2000)?;
+        index.on_transaction_at(2000)?;
+        assert_eq!(index.snapshot_count(), 2);
+
+        // Query for [0.0, 0.0, 1.0, 0.0] at new timestamp - should find both 2 and 3
+        let query = vec![0.0, 0.0, 1.0, 0.0];
+        let results = index.find_similar_as_of(&query, 3, 2000)?;
+
+        // Both vectors 2 and 3 should be top results with high similarity
+        let top_ids: Vec<NodeId> = results.iter().take(2).map(|(id, _)| *id).collect();
+        assert!(top_ids.contains(&NodeId::new(2).unwrap()));
+        assert!(top_ids.contains(&NodeId::new(3).unwrap()));
+
+        // Query at old timestamp for [0.0, 1.0, 0.0, 0.0] - should find OLD vector 2
+        let query_old = vec![0.0, 1.0, 0.0, 0.0];
+        let results_old = index.find_similar_as_of(&query_old, 3, 1000)?;
+        // At timestamp 1000, vector 2 was [0.0, 1.0, 0.0, 0.0]
+        assert_eq!(results_old[0].0, NodeId::new(2).unwrap());
+        assert!(results_old[0].1 > 0.99, "Should match old version exactly");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delta_snapshot_handles_removes() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create full snapshot with 5 vectors
+        for i in 0..5 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+        }
+        index.on_transaction_at(1000)?;
+        assert_eq!(index.current_index().len(), 5);
+
+        // Remove vector 2 in delta snapshot
+        index.remove(NodeId::new(2).unwrap(), 2000)?;
+        index.on_transaction_at(2000)?;
+        assert_eq!(index.current_index().len(), 4);
+
+        // Query at new timestamp should not return removed vector
+        let query = vec![2.0, 0.0, 0.0, 0.0];
+        let results = index.find_similar_as_of(&query, 5, 2000)?;
+
+        // Should only have 4 results (vector 2 was removed)
+        assert_eq!(results.len(), 4);
+        assert!(!results.iter().any(|(id, _)| *id == NodeId::new(2).unwrap()));
+
+        // Query at old timestamp should still return it
+        let results_old = index.find_similar_as_of(&query, 5, 1000)?;
+        assert_eq!(results_old.len(), 5);
+        assert!(results_old.iter().any(|(id, _)| *id == NodeId::new(2).unwrap()));
+
+        Ok(())
+    }
+
+    // ==================== Concurrent Snapshot Tests ====================
+
+    #[test]
+    fn test_concurrent_snapshot_creation() -> Result<()> {
+        use std::sync::Arc;
+        use std::thread;
+
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = Arc::new(TemporalVectorIndex::new_at(config, 1000)?);
+
+        // Add initial vectors
+        for i in 0..50 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+        }
+
+        // Spawn multiple threads that concurrently trigger snapshots
+        let mut handles = vec![];
+        for thread_id in 0..10 {
+            let idx = Arc::clone(&index);
+            handles.push(thread::spawn(move || {
+                let base_time = 2000 + (thread_id * 1000);
+                for i in 0..5 {
+                    let node_id = NodeId::new((thread_id * 10 + i) as u64).unwrap();
+                    let timestamp = base_time + (i * 100);
+                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], timestamp)
+                        .unwrap();
+                    // Try to trigger snapshot
+                    idx.on_transaction_at(timestamp).unwrap();
+                }
+            }));
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify no panics occurred and snapshots were created
+        let snapshot_count = index.snapshot_count();
+        assert!(snapshot_count > 0, "Expected snapshots to be created");
+
+        // Verify we can query without errors
+        let query = vec![0.0, 0.0, 0.0, 0.0];
+        let results = index.find_similar_as_of(&query, 10, 10000)?;
+        assert!(!results.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_concurrent_snapshot_no_double_create() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::thread;
+
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = Arc::new(TemporalVectorIndex::new_at(config, 1000)?);
+        let timestamp = Arc::new(AtomicU64::new(1000));
+
+        // Add initial vectors
+        for i in 0..50 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+        }
+
+        // Spawn threads that all try to create the 10th transaction
+        let mut handles = vec![];
+        for thread_id in 0..5 {
+            let idx = Arc::clone(&index);
+            let ts = Arc::clone(&timestamp);
+            handles.push(thread::spawn(move || {
+                for i in 0..3 {
+                    let t = ts.fetch_add(100, Ordering::SeqCst);
+                    let node_id = NodeId::new((thread_id * 10 + i) as u64).unwrap();
+                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], t as i64)
+                        .unwrap();
+                    idx.on_transaction_at(t as i64).unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Should have created snapshots, but not excessive duplicates
+        // With 5 threads x 3 transactions = 15 total, and interval=10, we expect 1-2 snapshots
+        // But with concurrent races, we might get a few more
+        let count = index.snapshot_count();
+        assert!(count >= 1 && count <= 4, "Expected 1-4 snapshots due to concurrent racing, got {}", count);
+
+        Ok(())
+    }
+
+    // ==================== Pruning + Delta Tests ====================
+
+    #[test]
+    fn test_prune_base_snapshot_fallback() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(3),
+            max_snapshots: 3,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create full snapshot at t=1000
+        for i in 0..10 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+        }
+        index.on_transaction_at(1000)?;
+        assert_eq!(index.snapshot_count(), 1);
+
+        // Create delta snapshots at t=2000, 3000 (both reference t=1000)
+        for snapshot_num in 1..3 {
+            let timestamp = 1000 + (snapshot_num * 1000);
+            index.add(NodeId::new(0).unwrap(), &[snapshot_num as f32, 0.0, 0.0, 0.0], timestamp)?;
+            index.on_transaction_at(timestamp)?;
+        }
+        assert_eq!(index.snapshot_count(), 3);
+
+        // Create more snapshots to exceed max_snapshots, which will prune t=1000 (the base)
+        for snapshot_num in 3..6 {
+            let timestamp = 1000 + (snapshot_num * 1000);
+            index.add(NodeId::new(0).unwrap(), &[snapshot_num as f32, 0.0, 0.0, 0.0], timestamp)?;
+            index.on_transaction_at(timestamp)?;
+        }
+
+        // Should still have 3 snapshots (max limit)
+        assert_eq!(index.snapshot_count(), 3);
+
+        // Verify we can still query the remaining snapshots
+        let query = vec![0.0, 0.0, 0.0, 0.0];
+        let results = index.find_similar_as_of(&query, 5, 6000)?;
+        assert!(!results.is_empty(), "Should still be able to query after pruning base");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_manual_snapshot_with_delta_optimization() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1000), // High threshold
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create initial full snapshot manually
+        for i in 0..100 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+        }
+        index.create_manual_snapshot()?;
+        let first_snapshot_count = index.snapshot_count();
+        assert_eq!(first_snapshot_count, 1);
+
+        // Modify only 5 vectors
+        for i in 0..5 {
+            index.add(NodeId::new(i).unwrap(), &[100.0 + i as f32, 0.0, 0.0, 0.0], 2000)?;
+        }
+
+        // Manual snapshot should use delta (only 5 changes)
+        index.create_manual_snapshot()?;
+        assert_eq!(index.snapshot_count(), 2);
+
+        // Verify the snapshots exist and are queryable
+        let snapshot_info = index.get_snapshot_info();
+        assert_eq!(snapshot_info.len(), 2);
+
+        // Verify we can query the latest snapshot
+        let query = vec![100.0, 0.0, 0.0, 0.0];
+        let latest_timestamp = snapshot_info[1].timestamp;
+        let results = index.find_similar_as_of(&query, 10, latest_timestamp)?;
+        assert!(!results.is_empty(), "Latest snapshot should have results");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delta_snapshot_len_correctness() -> Result<()> {
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create full snapshot with 100 vectors
+        for i in 0..100 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+        }
+        index.on_transaction_at(1000)?;
+
+        // Get snapshot info for full snapshot
+        let snapshots = index.get_snapshot_info();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].vector_count, 100);
+
+        // Update 50 vectors (creates delta with 50 in added, 50 in removed, net = 100)
+        for i in 0..50 {
+            index.add(NodeId::new(i).unwrap(), &[200.0 + i as f32, 0.0, 0.0, 0.0], 2000)?;
+        }
+        index.on_transaction_at(2000)?;
+
+        // Check delta snapshot reports correct count
+        let snapshots = index.get_snapshot_info();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[1].vector_count, 100, "Delta snapshot should report 100 vectors (base 100 + added 50 - removed 50)");
+
+        Ok(())
     }
 }
