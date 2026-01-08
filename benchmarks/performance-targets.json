@@ -1,0 +1,40 @@
+{
+  "description": "GallifreyDB Performance Targets - Single source of truth for performance goals",
+  "targets": [
+    {
+      "metric": "Current-state single-hop traversal",
+      "target": "<1µs",
+      "rationale": "Zero temporal overhead for non-temporal queries"
+    },
+    {
+      "metric": "Current-state 3-hop traversal",
+      "target": "<100µs",
+      "rationale": "Competitive with non-temporal graph databases"
+    },
+    {
+      "metric": "Time-travel at anchor",
+      "target": "<100µs",
+      "rationale": "Direct anchor lookup with minimal overhead"
+    },
+    {
+      "metric": "Time-travel with deltas (avg 5)",
+      "target": "<1ms",
+      "rationale": "Delta application for mid-range historical queries"
+    },
+    {
+      "metric": "Time-travel worst case (9 deltas)",
+      "target": "<5ms",
+      "rationale": "Acceptable for compliance and audit queries"
+    },
+    {
+      "metric": "Batch insertion throughput",
+      "target": ">100k edges/sec",
+      "rationale": "Support high-volume data ingestion"
+    },
+    {
+      "metric": "Storage overhead",
+      "target": "<2X vs non-temporal",
+      "rationale": "Acceptable overhead for bi-temporal tracking"
+    }
+  ]
+}

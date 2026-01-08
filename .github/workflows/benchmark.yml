@@ -54,81 +54,84 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run current_state benchmarks
-        run: cargo bench --bench current_state -- --output-format bencher | tee current_state_output.txt
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Run gallifreydb benchmarks
-        run: cargo bench --bench gallifreydb -- --output-format bencher | tee gallifreydb_output.txt
+      - name: Run all benchmarks once
+        run: |
+          echo "Running all benchmarks..."
+          # Run benchmarks and capture output for github-action-benchmark 'cargo' tool support
+          cargo bench --all-features --bench concurrent_reads --bench current_state --bench gallifreydb --bench hnsw_index --bench id_generation --bench persistence --bench string_interning --bench temporal_vector --bench transactions --bench vector_similarity -- --quick | tee output.txt
 
-      - name: Store benchmark results
+      - name: Generate benchmark JSON
+        run: |
+          python scripts/generate_benchmark_tables.py \
+            --input target/criterion \
+            --output benchmark-data.json \
+            --format json
+
+      - name: Store historical benchmark results
         uses: benchmark-action/github-action-benchmark@v1
         if: github.event_name != 'pull_request'
         with:
           name: GallifreyDB Benchmarks
-          tool: 'cargo'
-          output-file-path: gallifreydb_output.txt
+          tool: 'customSmallerIsBetter'
+          output-file-path: benchmark-data.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
           # Show alert with commit comment on detecting possible performance regression
           alert-threshold: '150%'
           comment-on-alert: true
           fail-on-alert: false
+          # Store in dev/bench for historical charts
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
 
-      - name: Upload benchmark artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-results
-          path: |
-            current_state_output.txt
-            gallifreydb_output.txt
-            target/criterion/
-
-  benchmark-pr:
-    name: Benchmark PR Comparison
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - name: Checkout code
+      - name: Fetch historical data for regression changes
+        if: github.event_name == 'pull_request'
         uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          ref: gh-pages
+          path: gh-pages-history
+        continue-on-error: true # Might fail if gh-pages branch doesn't exist yet
 
-      - name: Run benchmarks on PR
+      - name: Generate benchmark HTML tables & PR Summary
         run: |
-          echo "## 🚀 Benchmark Results" > benchmark_results.md
-          echo "" >> benchmark_results.md
-          echo "### Current State Benchmarks" >> benchmark_results.md
-          echo '```' >> benchmark_results.md
-          cargo bench --bench current_state 2>&1 | grep -E "(test|time:|ns/iter)" | head -n 50 >> benchmark_results.md || echo "No benchmark output captured" >> benchmark_results.md
-          echo '```' >> benchmark_results.md
-          echo "" >> benchmark_results.md
-          echo "### GallifreyDB Benchmarks" >> benchmark_results.md
-          echo '```' >> benchmark_results.md
-          cargo bench --bench gallifreydb 2>&1 | grep -E "(test|time:|ns/iter)" | head -n 50 >> benchmark_results.md || echo "No benchmark output captured" >> benchmark_results.md
-          echo '```' >> benchmark_results.md
-          echo "" >> benchmark_results.md
-          echo "---" >> benchmark_results.md
-          echo "*Benchmarks run on ubuntu-latest*" >> benchmark_results.md
+          echo "Generating benchmark reports..."
+          
+          # 1. HTML Report (for GH Pages)
+          python scripts/generate_benchmark_tables.py \
+            --input target/criterion \
+            --output benchmark-results \
+            --format html
 
-          # Also output to step summary
-          cat benchmark_results.md >> $GITHUB_STEP_SUMMARY
+          # 2. PR Summary (Markdown for Step Summary & PR Comment)
+          HIST_ARG=""
+          if [ -d "gh-pages-history/dev/bench" ]; then
+             if [ -f "gh-pages-history/dev/bench/data.js" ]; then
+                HIST_ARG="--history gh-pages-history/dev/bench/data.js"
+             fi
+          fi
+          
+          python scripts/generate_benchmark_tables.py \
+            --input target/criterion \
+            --output benchmark-summary.md \
+            --format pr-comment \
+            $HIST_ARG
+          
+          cat benchmark-summary.md >> $GITHUB_STEP_SUMMARY
 
       - name: Comment benchmark results on PR
-        uses: actions/github-script@v7
         if: github.event_name == 'pull_request'
-        continue-on-error: true  # Don't fail the workflow if commenting fails (e.g., fork PRs)
+        uses: actions/github-script@v7
+        continue-on-error: true
         with:
           script: |
             const fs = require('fs');
             try {
-              const summary = fs.readFileSync('benchmark_results.md', 'utf8');
+              const summary = fs.readFileSync('benchmark-summary.md', 'utf8');
               await github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
@@ -138,5 +141,46 @@ jobs:
               console.log('Successfully posted benchmark results as PR comment');
             } catch (error) {
               console.log('Could not post PR comment:', error.message);
-              console.log('Benchmark results are available in the workflow summary above.');
             }
+
+      - name: Checkout gh-pages to preserve historical data
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages-existing
+
+      - name: Prepare GitHub Pages deployment
+        if: github.event_name != 'pull_request'
+        run: |
+          # Start with existing gh-pages content to preserve historical data
+          mkdir -p gh-pages
+          if [ -d "gh-pages-existing/dev" ]; then
+            cp -r gh-pages-existing/dev gh-pages/ || echo "No existing dev/ directory"
+          fi
+
+          # Add our generated benchmark tables
+          mkdir -p gh-pages/benchmarks
+          cp -r benchmark-results/* gh-pages/benchmarks/
+
+          # Copy Criterion's detailed HTML reports
+          mkdir -p gh-pages/benchmarks/criterion
+          cp -r target/criterion/report/* gh-pages/benchmarks/criterion/ || echo "No Criterion report found"
+
+      - name: Deploy to GitHub Pages
+        if: github.event_name != 'pull_request'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gh-pages
+          publish_branch: gh-pages
+          keep_files: true  # Preserve historical benchmark data
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark-results/
+            target/criterion/
+            output.txt

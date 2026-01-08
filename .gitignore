@@ -43,4 +43,13 @@ nul
 agents/
 
 # Proptest regression files
+# Proptest regression files
 proptest-regressions/
+
+# Python
+__pycache__/
+*.pyc
+
+# Benchmark output
+/benchmark-results/
+/benchmark-data.json
