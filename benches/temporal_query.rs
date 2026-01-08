@@ -315,11 +315,183 @@ fn bench_read_latency_under_write_contention(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_concurrent_read_same_entity(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_reads_same_entity");
+
+    // This benchmark measures the scenario where RwLock would provide benefit:
+    // Multiple threads reading the same entity's timeline concurrently.
+    // With current DashMap implementation, readers contend on DashMap's internal shard lock.
+    // With RwLock pattern (DashMap<EntityId, Arc<RwLock<EntityTimelines>>>),
+    // multiple readers could access the timeline concurrently.
+
+    // Setup: Pre-populate with varying history sizes
+    for version_count in [100, 1000, 10000] {
+        let indexes = Arc::new(TemporalIndexes::new());
+        let node_id = NodeId::new(1).unwrap();
+
+        // Insert versions
+        for i in 0..version_count {
+            let version_id = VersionId::new(i).unwrap();
+            indexes
+                .insert_node_version(
+                    node_id,
+                    version_id,
+                    BiTemporalInterval::new(
+                        TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64),
+                        TimeRange::from(0),
+                    ),
+                )
+                .unwrap();
+        }
+
+        // Benchmark concurrent reads with varying thread counts
+        for num_readers in [2, 4, 8, 16] {
+            group.bench_with_input(
+                BenchmarkId::new(
+                    format!("{}_versions", version_count),
+                    format!("{}_readers", num_readers),
+                ),
+                &(num_readers, Arc::clone(&indexes)),
+                |b, (readers, idx)| {
+                    b.iter(|| {
+                        // Spawn multiple reader threads querying the same entity
+                        let handles: Vec<_> = (0..*readers)
+                            .map(|reader_id| {
+                                let idx_clone = Arc::clone(idx);
+                                thread::spawn(move || {
+                                    // Each reader performs 50 queries
+                                    let mut results = Vec::new();
+                                    for q in 0..50 {
+                                        // Query different time points across the history
+                                        let time = ((reader_id * 50 + q) * 1000) as i64;
+                                        let range = TimeRange::new(time, time + 1);
+                                        let r = idx_clone
+                                            .find_node_versions_in_valid_time_range(node_id, range);
+                                        results.push(r);
+                                    }
+                                    results
+                                })
+                            })
+                            .collect();
+
+                        // Wait for all readers
+                        let all_results: Vec<_> =
+                            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+                        black_box(all_results)
+                    })
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_mixed_read_write_same_entity(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mixed_read_write_same_entity");
+
+    // This benchmark simulates LLM reasoning queries:
+    // - Many concurrent readers (LLM queries)
+    // - Occasional writers (new knowledge updates)
+    // This is where RwLock would shine: readers don't block each other.
+
+    for num_readers in [4, 8] {
+        for num_writers in [0, 1, 2] {
+            let indexes = Arc::new(TemporalIndexes::new());
+            let node_id = NodeId::new(1).unwrap();
+
+            // Pre-populate with 1000 versions
+            for i in 0..1000 {
+                let version_id = VersionId::new(i).unwrap();
+                indexes
+                    .insert_node_version(
+                        node_id,
+                        version_id,
+                        BiTemporalInterval::new(
+                            TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64),
+                            TimeRange::from(0),
+                        ),
+                    )
+                    .unwrap();
+            }
+
+            group.bench_with_input(
+                BenchmarkId::new(
+                    format!("{}_readers", num_readers),
+                    format!("{}_writers", num_writers),
+                ),
+                &(num_readers, num_writers, Arc::clone(&indexes)),
+                |b, (readers, writers, idx)| {
+                    b.iter(|| {
+                        let mut reader_handles = Vec::new();
+                        let mut writer_handles = Vec::new();
+
+                        // Spawn reader threads
+                        for reader_id in 0..*readers {
+                            let idx_clone = Arc::clone(idx);
+                            reader_handles.push(thread::spawn(move || {
+                                let mut results = Vec::new();
+                                for q in 0..25 {
+                                    let time = ((reader_id * 25 + q) * 1000) as i64;
+                                    let range = TimeRange::new(time, time + 1);
+                                    let r = idx_clone
+                                        .find_node_versions_in_valid_time_range(node_id, range);
+                                    results.push(r);
+                                }
+                                results
+                            }));
+                        }
+
+                        // Spawn writer threads
+                        for writer_id in 0..*writers {
+                            let idx_clone = Arc::clone(idx);
+                            writer_handles.push(thread::spawn(move || {
+                                for w in 0..10 {
+                                    let version_id =
+                                        VersionId::new(1000 + writer_id * 10 + w).unwrap();
+                                    idx_clone
+                                        .insert_node_version(
+                                            node_id,
+                                            version_id,
+                                            BiTemporalInterval::new(
+                                                TimeRange::new(
+                                                    ((1000 + writer_id * 10 + w) * 1000) as i64,
+                                                    ((1001 + writer_id * 10 + w) * 1000) as i64,
+                                                ),
+                                                TimeRange::from(0),
+                                            ),
+                                        )
+                                        .unwrap();
+                                }
+                            }));
+                        }
+
+                        // Wait for all threads
+                        for h in reader_handles {
+                            h.join().unwrap();
+                        }
+                        for h in writer_handles {
+                            h.join().unwrap();
+                        }
+
+                        black_box(())
+                    })
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_valid_at_query,
     bench_insert_performance,
     bench_concurrent_write_throughput,
-    bench_read_latency_under_write_contention
+    bench_read_latency_under_write_contention,
+    bench_concurrent_read_same_entity,
+    bench_mixed_read_write_same_entity
 );
 criterion_main!(benches);

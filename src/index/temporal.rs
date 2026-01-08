@@ -163,6 +163,33 @@ struct EntityTimelines {
 /// This implementation uses a per-entity timeline index with sorted vectors,
 /// providing O(log N) lookup and cache-friendly scanning. It leverages `DashMap`
 /// for fine-grained concurrency, avoiding global bottlenecks during writes.
+///
+/// # Concurrency Design
+///
+/// The current implementation uses `DashMap<EntityId, EntityTimelines>` directly.
+/// An alternative considered was `DashMap<EntityId, Arc<RwLock<EntityTimelines>>>`,
+/// which would allow multiple concurrent readers of the same entity.
+///
+/// **Decision**: We chose the current direct storage approach because:
+///
+/// 1. **DashMap already provides concurrent reads**: DashMap uses shard-level `RwLock`
+///    internally, so multiple readers can access different entities in the same shard
+///    concurrently without blocking each other.
+///
+/// 2. **Memory efficiency**: Direct storage avoids per-entity `Arc` and `RwLock`
+///    allocations, reducing memory overhead significantly (especially for databases
+///    with millions of entities).
+///
+/// 3. **API simplicity**: Direct access via `.get()` is simpler than nested locking
+///    with `.get()?.read()`.
+///
+/// 4. **Rare benefit**: The scenario where per-entity RwLock helps (many threads
+///    reading the exact same entity simultaneously) is uncommon. Most workloads
+///    access different entities or different shards.
+///
+/// **When to revisit**: If profiling shows >50% of queries targeting the same entity
+/// with >8 concurrent readers causing measurable contention, consider the RwLock pattern.
+/// See `docs/RWLOCK_ANALYSIS.md` for detailed analysis.
 #[derive(Debug)]
 pub struct TemporalIndexes {
     /// Combined index for both valid and transaction timelines.
