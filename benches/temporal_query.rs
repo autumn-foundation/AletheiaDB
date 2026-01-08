@@ -222,10 +222,87 @@ fn bench_concurrent_write_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_read_latency_under_write_contention(c: &mut Criterion) {
+    let mut group = c.benchmark_group("read_under_write_contention");
+
+    // Test read performance while writes are happening to the same entity
+    for num_writers in [0, 2, 4] {
+        group.bench_with_input(
+            BenchmarkId::new("concurrent_writers", num_writers),
+            &num_writers,
+            |b, &writers| {
+                // Setup: Pre-populate with 10K versions
+                let indexes = Arc::new(TemporalIndexes::new());
+                let node_id = NodeId::new(1).unwrap();
+                for i in 0..10_000 {
+                    let version_id = VersionId::new(i).unwrap();
+                    indexes.insert_node_version(
+                        node_id,
+                        version_id,
+                        BiTemporalInterval::new(
+                            TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64),
+                            TimeRange::from(0),
+                        ),
+                    );
+                }
+
+                // Query range in the middle
+                let query_range = TimeRange::new(5_000_000, 5_001_000);
+
+                b.iter_batched(
+                    || {
+                        // Spawn background writers
+                        let writer_handles: Vec<_> = (0..writers)
+                            .map(|thread_id| {
+                                let idx = Arc::clone(&indexes);
+                                thread::spawn(move || {
+                                    // Each writer inserts 100 versions retroactively
+                                    for v in 0..100 {
+                                        let version_id =
+                                            VersionId::new(10_000 + thread_id * 100 + v).unwrap();
+                                        idx.insert_node_version(
+                                            node_id,
+                                            version_id,
+                                            BiTemporalInterval::new(
+                                                TimeRange::new(
+                                                    ((thread_id * 100 + v) * 1000) as i64,
+                                                    (((thread_id * 100 + v) + 1) * 1000) as i64,
+                                                ),
+                                                TimeRange::from(0),
+                                            ),
+                                        );
+                                    }
+                                })
+                            })
+                            .collect();
+                        (Arc::clone(&indexes), writer_handles)
+                    },
+                    |(idx, handles)| {
+                        // Benchmark: Read query while writers are active
+                        let results =
+                            idx.find_node_versions_in_valid_time_range(node_id, query_range);
+
+                        // Wait for writers to finish
+                        for h in handles {
+                            h.join().unwrap();
+                        }
+
+                        black_box(results)
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_valid_at_query,
     bench_insert_performance,
-    bench_concurrent_write_throughput
+    bench_concurrent_write_throughput,
+    bench_read_latency_under_write_contention
 );
 criterion_main!(benches);
