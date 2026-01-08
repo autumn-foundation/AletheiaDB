@@ -480,9 +480,6 @@ impl WriteAheadLog {
 
         let flush_guard = FlushGuard::spawn(
             move || {
-                #[cfg(feature = "observability")]
-                let flush_start = std::time::Instant::now();
-
                 // Phase 1: Flush to OS page cache (fast, µs)
                 {
                     let mut wal_guard: std::sync::MutexGuard<'_, WriteAheadLog> =
@@ -503,9 +500,6 @@ impl WriteAheadLog {
                 //
                 // NOTE: sync_handle may be None for fresh WAL instances before first write.
                 // This is normal - we skip the sync and let the flush complete successfully.
-                #[cfg(feature = "observability")]
-                let had_sync_handle = sync_handle_for_thread.is_some();
-
                 if let Some(ref sync_handle) = sync_handle_for_thread {
                     if let Err(e) = sync_handle.sync_data() {
                         // Mark flush as failed if using GroupCommit
@@ -533,19 +527,8 @@ impl WriteAheadLog {
                     gc.mark_flushed(Ok(()));
                 }
 
-                #[cfg(feature = "observability")]
-                {
-                    let flush_duration_us = flush_start.elapsed().as_micros() as u64;
-                    let mode = format!("{:?}", mode);
-
-                    tracing::info!(
-                        flush_duration_us,
-                        had_sync_handle,
-                        mode = %mode,
-                        interval_ms = interval.as_millis() as u64,
-                        "Background flush iteration completed"
-                    );
-                }
+                // NOTE: Background flush observability metrics removed to prevent log spam.
+                // See GitHub issue #274 for tracking proper observability implementation.
             },
             interval,
         );
@@ -1350,19 +1333,8 @@ impl WriteAheadLog {
                 // Piggyback optimization: Wake background thread to flush pending async data
                 // before we do our own fsync. This reduces the data-at-risk window for async
                 // writes without slowing down the synchronous commit.
-                #[cfg(feature = "observability")]
-                let had_pending = self.has_pending_data;
-
                 if let Some(signal) = &self.flush_signal {
                     signal.request_flush();
-
-                    #[cfg(feature = "observability")]
-                    if had_pending {
-                        tracing::info!(
-                            had_pending_data = true,
-                            "Synchronous commit piggybacking async data"
-                        );
-                    }
                 }
 
                 // Immediate full flush (current behavior)
