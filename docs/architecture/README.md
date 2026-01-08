@@ -430,7 +430,7 @@ gallifreydb/
 │   │
 │   ├── index/              # Query indexes
 │   │   ├── current.rs      # CurrentIndexes (DashMap)
-│   │   ├── temporal.rs     # TemporalIndexes (BTree)
+│   │   ├── temporal.rs     # TemporalIndexes (DashMap + sorted vectors)
 │   │   └── adjacency.rs    # AdjacencyIndex (CSR)
 │   │
 │   ├── api/                # Transaction API

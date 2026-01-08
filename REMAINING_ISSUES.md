@@ -2,9 +2,11 @@
 
 This document tracks issues identified during code review that require more extensive changes beyond the current performance optimization scope.
 
-## 🔴 Critical: Per-Entity Version Limits (DoS Prevention)
+## ✅ Critical: Per-Entity Version Limits (DoS Prevention) - COMPLETED
 
-**Location**: `EntityTimeline::insert()` (temporal.rs lines 59-74)
+**Status**: ✅ Implemented in commit ccba94b
+
+**Location**: `EntityTimeline::insert()` (temporal.rs)
 
 **Issue**: No limit on `versions.len()` per entity. A malicious or buggy client could create millions of versions for a single entity, causing OOM.
 
@@ -15,9 +17,41 @@ This document tracks issues identified during code review that require more exte
 - Add `StorageError::VersionLimitExceeded` variant
 - Update all callsites to handle the error
 
-**API Impact**: Breaking change - requires updating all callsites that use temporal indexes
+**API Impact**: ⚠️ BREAKING CHANGE - All callsites updated
 
-**Example Implementation**:
+### Migration Guide
+
+**Before (old API):**
+```rust
+temporal_indexes.insert_node_version(node_id, version_id, temporal);
+```
+
+**After (new API):**
+```rust
+temporal_indexes.insert_node_version(node_id, version_id, temporal)?;
+// Or in tests:
+temporal_indexes.insert_node_version(node_id, version_id, temporal).unwrap();
+```
+
+**Changed Methods:**
+- `insert_node_version()` now returns `Result<()>`
+- `insert_edge_version()` now returns `Result<()>`
+- `insert_node_versions_batch()` now returns `Result<()>`
+- `insert_edge_versions_batch()` now returns `Result<()>`
+
+**Error Handling:**
+```rust
+match temporal_indexes.insert_node_version(node_id, version_id, temporal) {
+    Ok(()) => { /* Success */ },
+    Err(e) if e.to_string().contains("CapacityExceeded") => {
+        // Hit per-entity version limit (1M default)
+        eprintln!("Version limit exceeded for entity {:?}", node_id);
+    },
+    Err(e) => return Err(e),
+}
+```
+
+**Implementation Details**:
 ```rust
 pub struct TemporalIndexConfig {
     /// Maximum versions per entity (default: 1,000,000)
