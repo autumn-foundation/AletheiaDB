@@ -262,6 +262,13 @@ pub enum TemporalError {
         /// The end timestamp
         end: Timestamp,
     },
+    /// Invalid timestamp (exceeds valid range).
+    InvalidTimestamp {
+        /// The invalid timestamp
+        timestamp: Timestamp,
+        /// Why the timestamp is invalid
+        reason: String,
+    },
     /// Temporal paradox detected (e.g., deleting before creating).
     TemporalParadox {
         /// Description of the paradox
@@ -308,6 +315,9 @@ impl fmt::Display for TemporalError {
             }
             TemporalError::InvalidTimeRange { start, end } => {
                 write!(f, "Invalid time range: start={} > end={}", start, end)
+            }
+            TemporalError::InvalidTimestamp { timestamp, reason } => {
+                write!(f, "Invalid timestamp {}: {}", timestamp, reason)
             }
             TemporalError::TemporalParadox { reason } => {
                 write!(f, "Temporal paradox: {}", reason)

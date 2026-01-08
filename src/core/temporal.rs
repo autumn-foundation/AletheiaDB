@@ -24,6 +24,16 @@ pub type Timestamp = i64;
 /// Used for open-ended time ranges that extend to the present.
 pub const TIMESTAMP_MAX: Timestamp = i64::MAX;
 
+/// Maximum valid timestamp value for user data.
+///
+/// Similar to MAX_VALID_ID, this reserves the upper 1000 i64 values for internal use
+/// (sentinel values, metadata). Timestamps exceeding this value are rejected to prevent
+/// DoS attacks and ensure system integrity.
+///
+/// The reserved range provides a safety margin without meaningfully restricting the
+/// timestamp space (still covers ~290,000 years before/after epoch).
+pub const MAX_VALID_TIMESTAMP: Timestamp = i64::MAX - 1000;
+
 /// Represents a continuous range of time [start, end).
 ///
 /// The range includes the start timestamp but excludes the end timestamp.
