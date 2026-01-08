@@ -97,7 +97,7 @@ jobs:
           tool: 'customSmallerIsBetter'
           output-file-path: benchmark-data.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
+          auto-push: false
           # Show alert with commit comment on detecting possible performance regression
           alert-threshold: '150%'
           comment-on-alert: true
@@ -105,6 +105,21 @@ jobs:
           # Store in dev/bench for historical charts
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
+          save-data-file: true
+          # Generate the benchmark data file locally instead of pushing
+          # We'll deploy it with peaceiris/actions-gh-pages in a later step
+
+      - name: Verify benchmark data generation
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "Checking for benchmark-action generated files..."
+          if [ -d "dev/bench" ]; then
+            echo "✓ dev/bench directory found"
+            ls -la dev/bench/ || echo "Directory exists but is empty"
+          else
+            echo "⚠ dev/bench directory NOT found - benchmark-action may not have generated files"
+            echo "This could cause missing historical data on GitHub Pages"
+          fi
 
       - name: Fetch historical data for regression changes
         if: github.event_name == 'pull_request'
@@ -170,19 +185,40 @@ jobs:
       - name: Prepare GitHub Pages deployment
         if: github.event_name != 'pull_request'
         run: |
-          # Start with existing gh-pages content to preserve historical data
+          echo "Preparing GitHub Pages deployment..."
+
+          # Start with ALL existing gh-pages content to preserve everything
           mkdir -p gh-pages
-          if [ -d "gh-pages-existing/dev" ]; then
-            cp -r gh-pages-existing/dev gh-pages/ || echo "No existing dev/ directory"
+          if [ -d "gh-pages-existing" ]; then
+            echo "Copying existing gh-pages content..."
+            # Copy everything except .git directory
+            rsync -av --exclude='.git' gh-pages-existing/ gh-pages/ || cp -r gh-pages-existing/* gh-pages/ || echo "No existing content"
           fi
 
-          # Add our generated benchmark tables
+          # Add benchmark-action generated data (historical tracking)
+          # The benchmark-action with save-data-file creates files in dev/bench
+          if [ -d "dev/bench" ]; then
+            echo "Copying benchmark-action generated data..."
+            mkdir -p gh-pages/dev/bench
+            cp -r dev/bench/* gh-pages/dev/bench/
+          fi
+
+          # Add our custom HTML benchmark tables
+          echo "Copying custom benchmark HTML tables..."
           mkdir -p gh-pages/benchmarks
           cp -r benchmark-results/* gh-pages/benchmarks/
 
           # Copy Criterion's detailed HTML reports
+          echo "Copying Criterion HTML reports..."
           mkdir -p gh-pages/benchmarks/criterion
-          cp -r target/criterion/report/* gh-pages/benchmarks/criterion/ || echo "No Criterion report found"
+          if [ -d "target/criterion/report" ]; then
+            cp -r target/criterion/report/* gh-pages/benchmarks/criterion/
+          else
+            echo "Warning: No Criterion report found at target/criterion/report"
+          fi
+
+          echo "GitHub Pages content prepared successfully"
+          ls -la gh-pages/
 
       - name: Deploy to GitHub Pages
         if: github.event_name != 'pull_request'
@@ -191,7 +227,9 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./gh-pages
           publish_branch: gh-pages
-          keep_files: true  # Preserve historical benchmark data
+          keep_files: false  # We manually merged all content, so don't keep separate files
+          force_orphan: false  # Don't create orphan commits, preserve history
+          commit_message: 'deploy: Update benchmarks and documentation'
 
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v4
