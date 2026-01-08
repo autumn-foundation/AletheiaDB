@@ -4,6 +4,7 @@
 //! - Synchronous: fsync per commit (baseline)
 //! - Async: Background flush thread
 //! - GroupCommit: Batched fsync with ACID guarantees
+//! - AsyncBatched: Async with intelligent batching (<100µs target)
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::{
@@ -114,6 +115,46 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
         });
     });
 
+    // AsyncBatched default (10ms, 100 batch) - low latency target
+    group.bench_function("async_batched_default", |b| {
+        let (db, _guard) = create_db_with_mode(DurabilityMode::async_batched_default());
+        let mut counter = 0u64;
+
+        b.iter(|| {
+            db.write(|tx| {
+                tx.create_node(
+                    "Benchmark",
+                    PropertyMapBuilder::new()
+                        .insert("counter", black_box(counter) as i64)
+                        .build(),
+                )
+            })
+            .unwrap();
+            counter += 1;
+        });
+    });
+
+    // AsyncBatched aggressive (5ms, 50 batch) - ultra-low latency
+    group.bench_function("async_batched_aggressive", |b| {
+        let (db, _guard) = create_db_with_mode(
+            DurabilityMode::async_batched_validated(5, 50).unwrap(),
+        );
+        let mut counter = 0u64;
+
+        b.iter(|| {
+            db.write(|tx| {
+                tx.create_node(
+                    "Benchmark",
+                    PropertyMapBuilder::new()
+                        .insert("counter", black_box(counter) as i64)
+                        .build(),
+                )
+            })
+            .unwrap();
+            counter += 1;
+        });
+    });
+
     group.finish();
 }
 
@@ -133,6 +174,13 @@ fn bench_batch_throughput(c: &mut Criterion) {
         (
             "group_commit",
             DurabilityMode::GroupCommit {
+                max_delay_ms: 10,
+                max_batch_size: 100,
+            },
+        ),
+        (
+            "async_batched",
+            DurabilityMode::AsyncBatched {
                 max_delay_ms: 10,
                 max_batch_size: 100,
             },
@@ -178,6 +226,13 @@ fn bench_concurrent_writes(c: &mut Criterion) {
         (
             "group_commit",
             DurabilityMode::GroupCommit {
+                max_delay_ms: 10,
+                max_batch_size: 20,
+            },
+        ),
+        (
+            "async_batched",
+            DurabilityMode::AsyncBatched {
                 max_delay_ms: 10,
                 max_batch_size: 20,
             },
@@ -336,6 +391,50 @@ fn bench_per_transaction_override(c: &mut Criterion) {
         });
     });
 
+    // AsyncBatched DB with Synchronous override
+    group.bench_function("async_batched_db_sync_override", |b| {
+        let (db, _guard) = create_db_with_mode(DurabilityMode::async_batched_default());
+        let options = WriteOptions {
+            durability_mode: Some(DurabilityMode::Synchronous),
+        };
+        let mut counter = 0u64;
+
+        b.iter(|| {
+            db.write_with_options(options.clone(), |tx| {
+                tx.create_node(
+                    "Override",
+                    PropertyMapBuilder::new()
+                        .insert("counter", black_box(counter) as i64)
+                        .build(),
+                )
+            })
+            .unwrap();
+            counter += 1;
+        });
+    });
+
+    // Synchronous DB with AsyncBatched override
+    group.bench_function("sync_db_async_batched_override", |b| {
+        let (db, _guard) = create_db_with_mode(DurabilityMode::Synchronous);
+        let options = WriteOptions {
+            durability_mode: Some(DurabilityMode::async_batched_default()),
+        };
+        let mut counter = 0u64;
+
+        b.iter(|| {
+            db.write_with_options(options.clone(), |tx| {
+                tx.create_node(
+                    "Override",
+                    PropertyMapBuilder::new()
+                        .insert("counter", black_box(counter) as i64)
+                        .build(),
+                )
+            })
+            .unwrap();
+            counter += 1;
+        });
+    });
+
     group.finish();
 }
 
@@ -381,6 +480,138 @@ fn bench_mixed_workload(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("90_async_batched_10_sync", |b| {
+        let (db, _guard) = create_db_with_mode(DurabilityMode::async_batched_default());
+        let sync_options = WriteOptions {
+            durability_mode: Some(DurabilityMode::Synchronous),
+        };
+
+        b.iter(|| {
+            for i in 0..100 {
+                if i % 10 == 0 {
+                    // 10% critical transactions use Synchronous
+                    db.write_with_options(sync_options.clone(), |tx| {
+                        tx.create_node(
+                            "Critical",
+                            PropertyMapBuilder::new()
+                                .insert("id", black_box(i) as i64)
+                                .build(),
+                        )
+                    })
+                    .unwrap();
+                } else {
+                    // 90% regular transactions use AsyncBatched
+                    db.write(|tx| {
+                        tx.create_node(
+                            "Regular",
+                            PropertyMapBuilder::new()
+                                .insert("id", black_box(i) as i64)
+                                .build(),
+                        )
+                    })
+                    .unwrap();
+                }
+            }
+        });
+    });
+
+    group.bench_function("90_async_batched_10_group_commit", |b| {
+        let (db, _guard) = create_db_with_mode(DurabilityMode::async_batched_default());
+        let gc_options = WriteOptions {
+            durability_mode: Some(DurabilityMode::group_commit_default()),
+        };
+
+        b.iter(|| {
+            for i in 0..100 {
+                if i % 10 == 0 {
+                    // 10% critical transactions use GroupCommit (ACID)
+                    db.write_with_options(gc_options.clone(), |tx| {
+                        tx.create_node(
+                            "Critical",
+                            PropertyMapBuilder::new()
+                                .insert("id", black_box(i) as i64)
+                                .build(),
+                        )
+                    })
+                    .unwrap();
+                } else {
+                    // 90% regular transactions use AsyncBatched
+                    db.write(|tx| {
+                        tx.create_node(
+                            "Regular",
+                            PropertyMapBuilder::new()
+                                .insert("id", black_box(i) as i64)
+                                .build(),
+                        )
+                    })
+                    .unwrap();
+                }
+            }
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmark AsyncBatched batch size sensitivity
+fn bench_async_batched_batch_sizes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("async_batched_batch_sizes");
+    group.throughput(Throughput::Elements(100));
+
+    for batch_size in &[10, 50, 100, 200, 500] {
+        group.bench_function(BenchmarkId::from_parameter(batch_size), |b| {
+            let (db, _guard) = create_db_with_mode(DurabilityMode::AsyncBatched {
+                max_delay_ms: 50,
+                max_batch_size: *batch_size,
+            });
+
+            b.iter(|| {
+                for i in 0..100 {
+                    db.write(|tx| {
+                        tx.create_node(
+                            "BatchTest",
+                            PropertyMapBuilder::new()
+                                .insert("id", black_box(i) as i64)
+                                .build(),
+                        )
+                    })
+                    .unwrap();
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark AsyncBatched max_delay sensitivity
+fn bench_async_batched_delays(c: &mut Criterion) {
+    let mut group = c.benchmark_group("async_batched_delays");
+    group.throughput(Throughput::Elements(100));
+
+    for delay_ms in &[1, 5, 10, 20, 50] {
+        group.bench_function(BenchmarkId::from_parameter(delay_ms), |b| {
+            let (db, _guard) = create_db_with_mode(DurabilityMode::AsyncBatched {
+                max_delay_ms: *delay_ms,
+                max_batch_size: 100,
+            });
+
+            b.iter(|| {
+                for i in 0..100 {
+                    db.write(|tx| {
+                        tx.create_node(
+                            "DelayTest",
+                            PropertyMapBuilder::new()
+                                .insert("id", black_box(i) as i64)
+                                .build(),
+                        )
+                    })
+                    .unwrap();
+                }
+            });
+        });
+    }
+
     group.finish();
 }
 
@@ -391,6 +622,8 @@ criterion_group!(
     bench_concurrent_writes,
     bench_group_commit_batch_sizes,
     bench_group_commit_delays,
+    bench_async_batched_batch_sizes,
+    bench_async_batched_delays,
     bench_per_transaction_override,
     bench_mixed_workload,
 );
