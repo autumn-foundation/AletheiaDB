@@ -162,6 +162,16 @@ impl WriteTransaction {
     /// - **Async**: Returns after flush to OS cache (background thread syncs)
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     pub fn commit(mut self) -> Result<()> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!(
+            "transaction_commit",
+            tx_id = %self.tx_id
+        )
+        .entered();
+
+        #[cfg(feature = "observability")]
+        let commit_start = std::time::Instant::now();
+
         // Check transaction state
         if self.state != TxState::Active {
             return Err(TransactionError::InvalidState {
@@ -195,18 +205,31 @@ impl WriteTransaction {
         //    greater than this commit, so visibility check (commit_ts < snapshot_ts)
         //    will correctly include this commit in future reads.
         //
+        //    greater than this commit, so visibility check (commit_ts < snapshot_ts)
+        //    will correctly include this commit in future reads.
+        //
         // DURABILITY MODES:
         // - Synchronous: Hold locks through fsync (current behavior, safe but slow)
         // - Async: Release locks after flush to OS cache (fast, background syncs)
         // - GroupCommit: Release locks after flush, wait for epoch (ACID + fast)
         let (commit_timestamp, wait_epoch, coordinator) = {
+            #[cfg(feature = "observability")]
+            let ts_lock_start = std::time::Instant::now();
+
             let mut ts = self
                 .current_timestamp
                 .lock()
                 .expect("timestamp lock poisoned - unrecoverable state");
+
+            #[cfg(feature = "observability")]
+            let ts_lock_acquired = std::time::Instant::now();
+
             *ts += 1; // Pre-increment for conflict detection
             let commit = *ts;
             *ts += 1; // Post-increment for visibility of this commit
+
+            #[cfg(feature = "observability")]
+            let wal_lock_start = std::time::Instant::now();
 
             // Acquire WAL lock once and hold through logging.
             // CRITICAL: We release this lock BEFORE waiting for GroupCommit epoch flush
@@ -216,18 +239,68 @@ impl WriteTransaction {
                 .lock()
                 .expect("WAL lock poisoned - unrecoverable state");
 
+            #[cfg(feature = "observability")]
+            let wal_lock_acquired = std::time::Instant::now();
+
             // Log operations to WAL while holding both locks.
             // This must happen BEFORE applying changes for durability.
             self.log_operations_to_wal(&mut wal, commit)?;
 
+            #[cfg(feature = "observability")]
+            let wal_logged = std::time::Instant::now();
+
             // Mode-aware commit: returns epoch to wait for (GroupCommit) or None
             let epoch = wal.commit_with_mode(self.durability_mode)?;
+
+            #[cfg(feature = "observability")]
+            let wal_commit_completed = std::time::Instant::now();
 
             // RACE CONDITION FIX: Clone the coordinator reference BEFORE releasing WAL lock.
             // This ensures we wait on the same coordinator we registered with, even if
             // the WAL's coordinator field is cleared between now and the wait (e.g., during
             // shutdown or future dynamic reconfiguration). Prevents silent durability violation.
             let gc = wal.group_commit_coordinator().cloned();
+
+            #[cfg(feature = "observability")]
+            {
+                // Record detailed breakdown for Honeycomb
+                let ts_lock_wait_us =
+                    ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
+                let wal_lock_wait_us =
+                    wal_lock_acquired.duration_since(wal_lock_start).as_micros() as u64;
+                let wal_log_us = wal_logged.duration_since(wal_lock_acquired).as_micros() as u64;
+                let wal_commit_us = wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
+                let total_locked_us =
+                    wal_commit_completed.duration_since(ts_lock_start).as_micros() as u64;
+
+                // Calculate total commit duration for Honeycomb queries
+                let total_commit_us = commit_start.elapsed().as_micros() as u64;
+                let operations_count = self.buffer.operations().len();
+
+                tracing::info!(
+                    ts_lock_wait_us,
+                    wal_lock_wait_us,
+                    wal_log_us,
+                    wal_commit_us,
+                    total_locked_us,
+                    total_commit_us,
+                    operations_count,
+                    commit_ts = %commit,
+                    durability_mode = ?self.durability_mode,
+                    "Transaction commit breakdown"
+                );
+
+                // Warn if commit serialization exceeds threshold (known bottleneck)
+                if total_locked_us > 10000 {
+                    tracing::warn!(
+                        total_locked_us,
+                        wal_commit_us,
+                        tx_id = %self.tx_id,
+                        durability_mode = ?self.durability_mode,
+                        "Slow commit detected - serialization bottleneck"
+                    );
+                }
+            }
 
             (commit, epoch, gc)
             // Both locks released here - MUST release before waiting for epoch!
@@ -262,6 +335,16 @@ impl WriteTransaction {
 
         // Mark as committed
         self.state = TxState::Committed;
+
+        #[cfg(feature = "observability")]
+        {
+            let total_commit_us = commit_start.elapsed().as_micros() as u64;
+            tracing::debug!(
+                total_commit_us,
+                tx_id = %self.tx_id,
+                "Transaction committed"
+            );
+        }
 
         Ok(())
     }

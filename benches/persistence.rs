@@ -308,9 +308,18 @@ fn bench_checkpoint_frequency(c: &mut Criterion) {
     group.finish();
 }
 
+fn configure_criterion() -> Criterion {
+    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
+        .map(|s| s.parse().unwrap_or(50))
+        .unwrap_or(50);
+
+    Criterion::default().sample_size(sample_size)
+}
+
 criterion_group!(
-    benches,
-    bench_wal_append,
+    name = benches;
+    config = configure_criterion();
+    targets = bench_wal_append,
     bench_wal_throughput,
     bench_wal_with_sync,
     bench_checkpoint_creation,

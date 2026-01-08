@@ -62,16 +62,23 @@ jobs:
       - name: Run all benchmarks once
         run: |
           echo "Running all benchmarks..."
-          # Run benchmarks - Criterion automatically generates JSON in target/criterion/
-          cargo bench --all-features
+          # Run benchmarks and capture output for github-action-benchmark 'cargo' tool support
+          cargo bench --all-features --bench concurrent_reads --bench current_state --bench gallifreydb --bench hnsw_index --bench id_generation --bench persistence --bench string_interning --bench temporal_vector --bench transactions --bench vector_similarity -- --quick | tee output.txt
+
+      - name: Generate benchmark JSON
+        run: |
+          python scripts/generate_benchmark_tables.py \
+            --input target/criterion \
+            --output benchmark-data.json \
+            --format json
 
       - name: Store historical benchmark results
         uses: benchmark-action/github-action-benchmark@v1
         if: github.event_name != 'pull_request'
         with:
           name: GallifreyDB Benchmarks
-          tool: 'criterion'
-          output-file-path: target/criterion/
+          tool: 'customSmallerIsBetter'
+          output-file-path: benchmark-data.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
           # Show alert with commit comment on detecting possible performance regression
@@ -82,12 +89,59 @@ jobs:
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
 
-      - name: Generate benchmark HTML tables
+      - name: Fetch historical data for regression changes
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages-history
+        continue-on-error: true # Might fail if gh-pages branch doesn't exist yet
+
+      - name: Generate benchmark HTML tables & PR Summary
         run: |
-          echo "Generating benchmark HTML tables..."
+          echo "Generating benchmark reports..."
+          
+          # 1. HTML Report (for GH Pages)
           python scripts/generate_benchmark_tables.py \
             --input target/criterion \
-            --output benchmark-results
+            --output benchmark-results \
+            --format html
+
+          # 2. PR Summary (Markdown for Step Summary & PR Comment)
+          HIST_ARG=""
+          if [ -d "gh-pages-history/dev/bench" ]; then
+             if [ -f "gh-pages-history/dev/bench/data.js" ]; then
+                HIST_ARG="--history gh-pages-history/dev/bench/data.js"
+             fi
+          fi
+          
+          python scripts/generate_benchmark_tables.py \
+            --input target/criterion \
+            --output benchmark-summary.md \
+            --format pr-comment \
+            $HIST_ARG
+          
+          cat benchmark-summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment benchmark results on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const summary = fs.readFileSync('benchmark-summary.md', 'utf8');
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: summary
+              });
+              console.log('Successfully posted benchmark results as PR comment');
+            } catch (error) {
+              console.log('Could not post PR comment:', error.message);
+            }
 
       - name: Checkout gh-pages to preserve historical data
         if: github.event_name != 'pull_request'
@@ -129,68 +183,4 @@ jobs:
           path: |
             benchmark-results/
             target/criterion/
-
-  benchmark-pr:
-    name: Benchmark PR Comparison
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Run all benchmarks
-        run: |
-          echo "Running benchmarks for PR..."
-          cargo bench --all-features
-
-      - name: Generate PR comment from benchmarks
-        run: |
-          python scripts/generate_benchmark_tables.py \
-            --input target/criterion \
-            --output benchmark_results.md \
-            --format pr-comment
-
-          # Also output to step summary
-          cat benchmark_results.md >> $GITHUB_STEP_SUMMARY
-
-      - name: Comment benchmark results on PR
-        uses: actions/github-script@v7
-        continue-on-error: true  # Don't fail the workflow if commenting fails (e.g., fork PRs)
-        with:
-          script: |
-            const fs = require('fs');
-            try {
-              const summary = fs.readFileSync('benchmark_results.md', 'utf8');
-              await github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: summary
-              });
-              console.log('Successfully posted benchmark results as PR comment');
-            } catch (error) {
-              console.log('Could not post PR comment:', error.message);
-              console.log('Benchmark results are available in the workflow summary above.');
-            }
-
-      - name: Upload PR benchmark artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr-benchmark-results
-          path: |
-            benchmark-results/
-            target/criterion/
+            output.txt
