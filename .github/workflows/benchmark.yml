@@ -61,9 +61,26 @@ jobs:
 
       - name: Run all benchmarks once
         run: |
+          set -o pipefail  # Ensure piped commands propagate failures
           echo "Running all benchmarks..."
           # Run benchmarks and capture output for github-action-benchmark 'cargo' tool support
           cargo bench --all-features --bench concurrent_reads --bench current_state --bench gallifreydb --bench hnsw_index --bench id_generation --bench persistence --bench string_interning --bench temporal_vector --bench transactions --bench vector_similarity -- --quick | tee output.txt
+
+          # Verify that Criterion generated output
+          if [ ! -d "target/criterion" ]; then
+            echo "ERROR: target/criterion directory not found after running benchmarks"
+            echo "Benchmark execution may have failed. Check output.txt for details."
+            exit 1
+          fi
+
+          # Verify that we have some benchmark results
+          BENCH_COUNT=$(find target/criterion -name "estimates.json" | wc -l)
+          echo "Found $BENCH_COUNT benchmark results in target/criterion"
+          if [ "$BENCH_COUNT" -eq 0 ]; then
+            echo "ERROR: No benchmark results (estimates.json files) found in target/criterion"
+            echo "Benchmarks may have failed to run properly. Check output.txt for details."
+            exit 1
+          fi
 
       - name: Generate benchmark JSON
         run: |
