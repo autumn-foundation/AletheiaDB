@@ -56,6 +56,8 @@ pub enum DurabilityMode {
     /// - **Latency**: ~10-100µs per commit (no fsync wait)
     /// - **Throughput**: Very high (10,000+ tx/sec)
     /// - **Durability**: NOT ACID - possible data loss window
+    /// - **Data Loss Risk**: Up to `flush_interval_ms` of recent commits on crash
+    ///   (e.g., 100ms interval = up to 100ms of data at risk)
     /// - **Use case**: Bulk data loading, ETL pipelines, non-critical data
     Async {
         /// How often the background thread flushes (in milliseconds).
@@ -97,22 +99,21 @@ impl Default for DurabilityMode {
 impl DurabilityMode {
     /// Create a new Async mode with the specified flush interval.
     ///
+    /// **INTERNAL USE ONLY** - Use [`async_mode_validated()`](Self::async_mode_validated)
+    /// for external calls to ensure validation in release builds.
+    ///
     /// # Arguments
     ///
     /// * `flush_interval_ms` - How often to flush in milliseconds.
     ///   Typical values: 100ms for bulk loading, 1000ms for background ETL.
     ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mode = DurabilityMode::async_mode(100); // Flush every 100ms
-    /// ```
-    ///
     /// # Panics
     ///
     /// Panics in debug builds if `flush_interval_ms` is 0 or > 60000ms.
-    pub const fn async_mode(flush_interval_ms: u64) -> Self {
-        // Const assertions - will panic in debug builds
+    /// In release builds, invalid values are NOT validated (security issue).
+    #[allow(dead_code)] // Kept for internal const construction
+    pub(crate) const fn async_mode(flush_interval_ms: u64) -> Self {
+        // Const assertions - will panic in debug builds only
         assert!(
             flush_interval_ms > 0,
             "flush_interval_ms must be greater than 0"
@@ -149,26 +150,21 @@ impl DurabilityMode {
 
     /// Create a new GroupCommit mode with the specified parameters.
     ///
+    /// **INTERNAL USE ONLY** - Use [`group_commit_validated()`](Self::group_commit_validated)
+    /// for external calls to ensure validation in release builds.
+    ///
     /// # Arguments
     ///
     /// * `max_delay_ms` - Maximum wait time for batching (default: 10ms)
     /// * `max_batch_size` - Maximum transactions per batch (default: 200)
     ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Low latency: 2ms delay, small batches
-    /// let mode = DurabilityMode::group_commit(2, 50);
-    ///
-    /// // High throughput: 10ms delay, large batches
-    /// let mode = DurabilityMode::group_commit(10, 200);
-    /// ```
-    ///
     /// # Panics
     ///
     /// Panics in debug builds if parameters are out of valid range.
-    pub const fn group_commit(max_delay_ms: u64, max_batch_size: usize) -> Self {
-        // Const assertions - will panic in debug builds
+    /// In release builds, invalid values are NOT validated (security issue).
+    #[allow(dead_code)] // Kept for internal const construction
+    pub(crate) const fn group_commit(max_delay_ms: u64, max_batch_size: usize) -> Self {
+        // Const assertions - will panic in debug builds only
         assert!(max_delay_ms > 0, "max_delay_ms must be greater than 0");
         assert!(
             max_delay_ms <= 1000,

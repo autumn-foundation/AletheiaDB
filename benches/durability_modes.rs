@@ -14,17 +14,22 @@ use std::sync::Arc;
 use std::thread;
 use tempfile::TempDir;
 
-/// Helper to create a database with a specific durability mode
-fn create_db_with_mode(mode: DurabilityMode) -> GallifreyDB {
+/// Helper to create a database with a specific durability mode.
+///
+/// Returns both the database and the TempDir guard. The guard must be kept
+/// alive for the duration of the benchmark to prevent the directory from
+/// being cleaned up prematurely. When the guard is dropped, the directory
+/// is automatically cleaned up.
+fn create_db_with_mode(mode: DurabilityMode) -> (GallifreyDB, TempDir) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
-    let path = temp_dir.keep();
     let config = WalConfig {
-        wal_dir: path,
+        wal_dir: temp_dir.path().to_path_buf(),
         segment_size: 10 * 1024 * 1024,
         segments_to_retain: 3,
         durability_mode: mode,
     };
-    GallifreyDB::with_wal_config(config)
+    let db = GallifreyDB::with_wal_config(config);
+    (db, temp_dir)
 }
 
 /// Benchmark single transaction latency for each mode
@@ -33,7 +38,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
 
     // Synchronous (baseline)
     group.bench_function("synchronous", |b| {
-        let db = create_db_with_mode(DurabilityMode::Synchronous);
+        let (db, _guard) = create_db_with_mode(DurabilityMode::Synchronous);
         let mut counter = 0u64;
 
         b.iter(|| {
@@ -52,7 +57,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
 
     // Async mode
     group.bench_function("async", |b| {
-        let db = create_db_with_mode(DurabilityMode::Async {
+        let (db, _guard) = create_db_with_mode(DurabilityMode::Async {
             flush_interval_ms: 100,
         });
         let mut counter = 0u64;
@@ -73,7 +78,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
 
     // GroupCommit default (2ms, 200 batch)
     group.bench_function("group_commit_default", |b| {
-        let db = create_db_with_mode(DurabilityMode::group_commit_default());
+        let (db, _guard) = create_db_with_mode(DurabilityMode::group_commit_default());
         let mut counter = 0u64;
 
         b.iter(|| {
@@ -92,7 +97,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
 
     // GroupCommit fast (1ms, 500 batch) - high throughput
     group.bench_function("group_commit_fast", |b| {
-        let db = create_db_with_mode(DurabilityMode::fast());
+        let (db, _guard) = create_db_with_mode(DurabilityMode::fast());
         let mut counter = 0u64;
 
         b.iter(|| {
@@ -136,7 +141,7 @@ fn bench_batch_throughput(c: &mut Criterion) {
 
     for (name, mode) in modes {
         group.bench_function(name, |b| {
-            let db = create_db_with_mode(mode);
+            let (db, _guard) = create_db_with_mode(mode);
 
             b.iter(|| {
                 for i in 0..1000 {
@@ -181,7 +186,8 @@ fn bench_concurrent_writes(c: &mut Criterion) {
 
     for (name, mode) in modes {
         group.bench_function(name, |b| {
-            let db = Arc::new(create_db_with_mode(mode));
+            let (db, _guard) = create_db_with_mode(mode);
+            let db = Arc::new(db);
 
             b.iter(|| {
                 let mut handles = Vec::new();
@@ -223,7 +229,7 @@ fn bench_group_commit_batch_sizes(c: &mut Criterion) {
 
     for batch_size in &[10, 50, 100, 200, 500] {
         group.bench_function(BenchmarkId::from_parameter(batch_size), |b| {
-            let db = create_db_with_mode(DurabilityMode::GroupCommit {
+            let (db, _guard) = create_db_with_mode(DurabilityMode::GroupCommit {
                 max_delay_ms: 50,
                 max_batch_size: *batch_size,
             });
@@ -254,7 +260,7 @@ fn bench_group_commit_delays(c: &mut Criterion) {
 
     for delay_ms in &[1, 5, 10, 20, 50] {
         group.bench_function(BenchmarkId::from_parameter(delay_ms), |b| {
-            let db = create_db_with_mode(DurabilityMode::GroupCommit {
+            let (db, _guard) = create_db_with_mode(DurabilityMode::GroupCommit {
                 max_delay_ms: *delay_ms,
                 max_batch_size: 100,
             });
@@ -284,7 +290,7 @@ fn bench_per_transaction_override(c: &mut Criterion) {
 
     // Async DB with Synchronous override
     group.bench_function("async_db_sync_override", |b| {
-        let db = create_db_with_mode(DurabilityMode::Async {
+        let (db, _guard) = create_db_with_mode(DurabilityMode::Async {
             flush_interval_ms: 100,
         });
         let options = WriteOptions {
@@ -308,7 +314,7 @@ fn bench_per_transaction_override(c: &mut Criterion) {
 
     // Synchronous DB with Async override
     group.bench_function("sync_db_async_override", |b| {
-        let db = create_db_with_mode(DurabilityMode::Synchronous);
+        let (db, _guard) = create_db_with_mode(DurabilityMode::Synchronous);
         let options = WriteOptions {
             durability_mode: Some(DurabilityMode::Async {
                 flush_interval_ms: 100,
@@ -339,7 +345,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
     group.throughput(Throughput::Elements(100));
 
     group.bench_function("90_async_10_sync", |b| {
-        let db = create_db_with_mode(DurabilityMode::Async {
+        let (db, _guard) = create_db_with_mode(DurabilityMode::Async {
             flush_interval_ms: 100,
         });
         let sync_options = WriteOptions {
