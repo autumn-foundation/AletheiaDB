@@ -48,7 +48,7 @@ num_cpus = { version = "1.16", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
-criterion-table = "0.3"
+criterion-table = "0.4"
 proptest = "1.4"
 rand = "0.8"
 tempfile = "3.8"
