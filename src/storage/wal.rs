@@ -447,22 +447,12 @@ impl WriteAheadLog {
         use std::fs::File;
         use std::time::Duration;
 
-        // Get the durability mode, group commit coordinator, and pre-clone the sync handle
-        // while holding the lock. This avoids creating a new FD on every flush iteration.
-        let (mode, group_commit, sync_handle_for_thread): (
-            DurabilityMode,
-            Option<Arc<GroupCommitCoordinator>>,
-            Option<File>,
-        ) = {
+        // Get the durability mode and group commit coordinator
+        let (mode, group_commit): (DurabilityMode, Option<Arc<GroupCommitCoordinator>>) = {
             let wal_guard = wal.lock().expect("WAL lock poisoned");
-            let sync_handle_clone = wal_guard
-                .sync_handle
-                .as_ref()
-                .and_then(|h| h.try_clone().ok());
             (
                 wal_guard.config.durability_mode,
                 wal_guard.group_commit.clone(),
-                sync_handle_clone,
             )
         };
 
@@ -480,27 +470,30 @@ impl WriteAheadLog {
 
         let flush_guard = FlushGuard::spawn(
             move || {
-                // Phase 1: Flush to OS page cache (fast, µs)
-                {
+                // Phase 1: Flush to OS page cache and get current sync handle
+                // CRITICAL: We must get the sync handle on each iteration to handle segment rotation.
+                // If we held a pre-cloned handle, it would become stale after rotation and we'd
+                // be fsyncing the wrong (old/deleted) segment file!
+                let sync_handle_for_iteration: Option<File> = {
                     let mut wal_guard: std::sync::MutexGuard<'_, WriteAheadLog> =
                         match wal_clone.lock() {
                             Ok(guard) => guard,
                             Err(_) => return,
                         };
+
                     if let Err(_e) = wal_guard.flush_to_os() {
                         // Log error in production, but continue
                     }
-                } // Lock released - parallel writes can now pile up
+
+                    // Clone the current sync handle (handles segment rotation correctly)
+                    // NOTE: try_clone() on already-cloned FDs is cheap - reuses file description
+                    wal_guard.sync_handle.as_ref().and_then(|h| h.try_clone().ok())
+                }; // Lock released - parallel writes can now pile up
 
                 // Phase 2: Sync to disk (slow, ms) - no lock held!
-                // Use the pre-cloned sync handle to avoid creating a new FD on every flush.
-                // CRITICAL: The sync_handle was cloned once at thread startup, avoiding FD
-                // exhaustion under high flush frequency. Since all cloned FDs share the same
-                // file description, sync_data() flushes all writes made through any handle.
-                //
                 // NOTE: sync_handle may be None for fresh WAL instances before first write.
                 // This is normal - we skip the sync and let the flush complete successfully.
-                if let Some(ref sync_handle) = sync_handle_for_thread {
+                if let Some(ref sync_handle) = sync_handle_for_iteration {
                     if let Err(e) = sync_handle.sync_data() {
                         // Mark flush as failed if using GroupCommit
                         if let Some(ref gc) = group_commit_clone {

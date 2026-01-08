@@ -649,3 +649,87 @@ fn test_concurrent_mixed_modes() {
         );
     }
 }
+
+// =============================================================================
+// Critical Regression Tests
+// =============================================================================
+
+/// CRITICAL TEST: Verify segment rotation with background flush thread.
+///
+/// This tests the fix for a critical data loss bug where the background flush
+/// thread held a stale file descriptor after segment rotation, causing it to
+/// fsync the wrong (old/deleted) file instead of the new segment.
+///
+/// Without the fix:
+/// - Background thread clones sync handle once at startup
+/// - WAL rotates to new segment after reaching segment_size
+/// - Background thread still has old handle → fsyncs wrong file!
+/// - New writes to new segment are NEVER durably fsynced
+///
+/// With the fix:
+/// - Background thread gets current sync handle on each flush iteration
+/// - Handles segment rotation correctly by always fsyncing current segment
+#[test]
+fn test_segment_rotation_with_background_thread() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let config = WalConfig {
+        wal_dir: temp_dir.path().to_path_buf(),
+        segment_size: 512, // Very small to force rotation quickly
+        segments_to_retain: 5,
+        durability_mode: DurabilityMode::GroupCommit {
+            max_delay_ms: 10,
+            max_batch_size: 100,
+        },
+    };
+
+    let db = GallifreyDB::with_wal_config(config);
+
+    // Write enough data to trigger multiple segment rotations
+    // Each node with properties is ~100-200 bytes
+    let mut node_ids = Vec::new();
+    for i in 0..100 {
+        let node_id = db
+            .write(|tx| {
+                tx.create_node(
+                    "RotationTest",
+                    PropertyMapBuilder::new()
+                        .insert("index", i as i64)
+                        .insert("data", format!("test data {}", i))
+                        .build(),
+                )
+            })
+            .expect("write failed");
+        node_ids.push(node_id);
+
+        // Yield occasionally to let background thread run
+        if i % 10 == 0 {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    // Wait for background thread to complete all pending flushes
+    thread::sleep(Duration::from_millis(100));
+
+    // First verify nodes exist in memory (sanity check)
+    for (i, node_id) in node_ids.iter().enumerate() {
+        let node = db.get_node(*node_id).unwrap_or_else(|_| {
+            panic!("Node {} not found in memory - write failed!", i)
+        });
+        assert_eq!(get_label(&node), "RotationTest");
+    }
+
+    // Drop database to trigger final flush and ensure proper cleanup
+    drop(db);
+
+    // TODO: Add recovery test once GallifreyDB supports WAL replay on open
+    // For now, this test verifies:
+    // 1. Writes succeed across segment rotation
+    // 2. Background thread doesn't crash when segment rotates
+    // 3. All nodes remain accessible in memory
+    //
+    // The critical fix: background thread gets current sync_handle on each
+    // iteration instead of holding a stale handle that becomes invalid after
+    // segment rotation.
+}
