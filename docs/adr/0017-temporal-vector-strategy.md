@@ -1,7 +1,8 @@
 # ADR-0017: Temporal Vector Index Strategy
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-01-05
+**Updated:** 2026-01-08 (Delta snapshot optimization)
 **Deciders:** GallifreyDB Core Team
 **Categories:** index, vector, temporal
 
@@ -81,8 +82,16 @@ pub struct TemporalVectorConfig {
     /// Snapshot creation strategy
     pub snapshot_strategy: SnapshotStrategy,
 
-    /// Maximum number of snapshots to retain
-    pub max_snapshots: usize,  // Default: 100
+    /// Snapshot retention policy (default: KeepN(100))
+    pub retention_policy: RetentionPolicy,
+
+    /// Maximum number of snapshots to retain (default: 100)
+    pub max_snapshots: usize,
+
+    /// Interval for creating full snapshots vs delta snapshots (default: 10)
+    /// Every Nth snapshot will be a full snapshot, others will be delta snapshots
+    /// This mirrors the anchor+delta pattern used for property storage
+    pub full_snapshot_interval: usize,
 
     /// Base HNSW configuration
     pub hnsw_config: HnswConfig,
@@ -481,7 +490,9 @@ pub fn create_checkpoint(&self) -> Result<()> {
 pub fn default_temporal_vector_config() -> TemporalVectorConfig {
     TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(10),  // Mirror anchor interval
+        retention_policy: RetentionPolicy::KeepN(100),
         max_snapshots: 100,  // ~100 anchors for 1000 versions
+        full_snapshot_interval: 10,  // Mirror anchor+delta pattern
         hnsw_config: HnswConfig::default(),
     }
 }
@@ -596,6 +607,7 @@ impl GallifreyDB {
     pub fn create_vector_snapshot(&self) -> Result<()>;
 
     /// Get snapshot metadata (for monitoring)
+    /// Returns Result due to timestamp calculation which may fail
     pub fn get_snapshot_info(&self) -> Result<Vec<SnapshotInfo>>;
 }
 
@@ -619,7 +631,9 @@ let config = TemporalVectorConfig {
         time_interval: Duration::from_secs(3600),  // Hourly
         change_threshold: 0.1,  // 10% changed
     },
+    retention_policy: RetentionPolicy::KeepN(100),
     max_snapshots: 100,
+    full_snapshot_interval: 10,  // Full snapshot every 10 snapshots
     hnsw_config: HnswConfig::new(384, DistanceMetric::Cosine),
 };
 db.enable_temporal_vector_index("embedding", config)?;

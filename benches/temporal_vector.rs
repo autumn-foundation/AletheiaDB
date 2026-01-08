@@ -23,6 +23,7 @@ fn create_temporal_index(dimensions: usize) -> TemporalVectorIndex {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
         retention_policy: RetentionPolicy::KeepN(100),
         max_snapshots: 100,
+        full_snapshot_interval: 10,
         hnsw_config,
     };
     TemporalVectorIndex::new(config).unwrap()
@@ -52,6 +53,7 @@ fn bench_snapshot_creation(c: &mut Criterion) {
                     snapshot_strategy: snapshot_strategy.clone(),
                     retention_policy: RetentionPolicy::KeepN(10),
                     max_snapshots: 100,
+        full_snapshot_interval: 10,
                     hnsw_config,
                 };
                 let index = TemporalVectorIndex::new(config).unwrap();
