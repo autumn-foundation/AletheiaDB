@@ -2,6 +2,8 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use gallifreydb::core::id::{NodeId, VersionId};
 use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
 use gallifreydb::index::temporal::TemporalIndexes;
+use std::sync::Arc;
+use std::thread;
 
 fn bench_valid_at_query(c: &mut Criterion) {
     let mut group = c.benchmark_group("valid_at_query");
@@ -48,5 +50,182 @@ fn bench_valid_at_query(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_valid_at_query);
+fn bench_insert_performance(c: &mut Criterion) {
+    let mut group = c.benchmark_group("temporal_insert");
+
+    // Benchmark 1: Append-only inserts (common case - chronological)
+    for version_count in [100, 1000, 10000] {
+        group.bench_with_input(
+            BenchmarkId::new("append_only", version_count),
+            &version_count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        // Setup: Create fresh indexes
+                        (TemporalIndexes::new(), NodeId::new(1).unwrap())
+                    },
+                    |(indexes, node_id)| {
+                        // Benchmark: Insert chronologically
+                        for i in 0..count {
+                            let start = i * 1000;
+                            let end = (i + 1) * 1000;
+                            let v_id = VersionId::new(i as u64).unwrap();
+                            indexes.insert_node_version(
+                                node_id,
+                                v_id,
+                                BiTemporalInterval::new(
+                                    TimeRange::new(start, end),
+                                    TimeRange::from(0),
+                                ),
+                            );
+                        }
+                        black_box(indexes)
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    // Benchmark 2: Retroactive inserts (worst case - random order)
+    for version_count in [100, 1000, 10000] {
+        group.bench_with_input(
+            BenchmarkId::new("retroactive", version_count),
+            &version_count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        // Setup: Create fresh indexes and random order
+                        use rand::seq::SliceRandom;
+                        let mut rng = rand::thread_rng();
+                        let mut order: Vec<i64> = (0..count).collect();
+                        order.shuffle(&mut rng);
+                        (TemporalIndexes::new(), NodeId::new(1).unwrap(), order)
+                    },
+                    |(indexes, node_id, order)| {
+                        // Benchmark: Insert in random order (retroactive)
+                        for &i in &order {
+                            let start = i * 1000;
+                            let end = (i + 1) * 1000;
+                            let v_id = VersionId::new(i as u64).unwrap();
+                            indexes.insert_node_version(
+                                node_id,
+                                v_id,
+                                BiTemporalInterval::new(
+                                    TimeRange::new(start, end),
+                                    TimeRange::from(0),
+                                ),
+                            );
+                        }
+                        black_box(indexes)
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_concurrent_write_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_writes");
+
+    // Benchmark concurrent writes to different entities (optimal case)
+    for num_threads in [2, 4, 8] {
+        group.bench_with_input(
+            BenchmarkId::new("different_entities", num_threads),
+            &num_threads,
+            |b, &threads| {
+                b.iter_batched(
+                    || Arc::new(TemporalIndexes::new()),
+                    |indexes| {
+                        let handles: Vec<_> = (0..threads)
+                            .map(|thread_id| {
+                                let idx = Arc::clone(&indexes);
+                                thread::spawn(move || {
+                                    let node_id = NodeId::new(thread_id + 1).unwrap();
+                                    for v in 0..100 {
+                                        let version_id =
+                                            VersionId::new(thread_id * 100 + v).unwrap();
+                                        idx.insert_node_version(
+                                            node_id,
+                                            version_id,
+                                            BiTemporalInterval::new(
+                                                TimeRange::new(
+                                                    (v * 1000) as i64,
+                                                    ((v + 1) * 1000) as i64,
+                                                ),
+                                                TimeRange::from(0),
+                                            ),
+                                        );
+                                    }
+                                })
+                            })
+                            .collect();
+
+                        for h in handles {
+                            h.join().unwrap();
+                        }
+                        black_box(indexes)
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    // Benchmark concurrent writes to the same entity (contention case)
+    for num_threads in [2, 4, 8] {
+        group.bench_with_input(
+            BenchmarkId::new("same_entity_contention", num_threads),
+            &num_threads,
+            |b, &threads| {
+                b.iter_batched(
+                    || Arc::new(TemporalIndexes::new()),
+                    |indexes| {
+                        let node_id = NodeId::new(1).unwrap(); // Same entity
+                        let handles: Vec<_> = (0..threads)
+                            .map(|thread_id| {
+                                let idx = Arc::clone(&indexes);
+                                thread::spawn(move || {
+                                    for v in 0..100 {
+                                        let version_id =
+                                            VersionId::new(thread_id * 100 + v).unwrap();
+                                        idx.insert_node_version(
+                                            node_id,
+                                            version_id,
+                                            BiTemporalInterval::new(
+                                                TimeRange::new(
+                                                    ((thread_id * 100 + v) * 1000) as i64,
+                                                    (((thread_id * 100 + v) + 1) * 1000) as i64,
+                                                ),
+                                                TimeRange::from(0),
+                                            ),
+                                        );
+                                    }
+                                })
+                            })
+                            .collect();
+
+                        for h in handles {
+                            h.join().unwrap();
+                        }
+                        black_box(indexes)
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_valid_at_query,
+    bench_insert_performance,
+    bench_concurrent_write_throughput
+);
 criterion_main!(benches);

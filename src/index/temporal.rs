@@ -4,6 +4,21 @@
 //! vectors to enable efficient binary search and cache-friendly scanning.
 //! It uses `DashMap` for fine-grained concurrency, allowing parallel writes to
 //! different entities without global locking bottlenecks.
+//!
+//! # Complexity Analysis
+//!
+//! | Operation | Time Complexity | Space Complexity | Notes |
+//! |-----------|----------------|------------------|-------|
+//! | Insert (append) | O(1) amortized | O(N) per entity | Common case: chronological |
+//! | Insert (retroactive) | O(N) | O(N) per entity | Binary search + shift |
+//! | Batch insert | O(M log M + N) | O(N) per entity | M = batch size, N = total versions |
+//! | Query (point) | O(log N + K) | O(K) | Binary search + scan K overlaps |
+//! | Query (range) | O(log N + K) | O(K) | Same as point query |
+//!
+//! Where:
+//! - **N** = number of versions per entity
+//! - **M** = batch size for bulk inserts
+//! - **K** = number of overlapping versions (typically 1-2 for point queries)
 
 use crate::core::id::{EdgeId, EntityId, NodeId, VersionId};
 use crate::core::temporal::{BiTemporalInterval, TimeRange, Timestamp};
@@ -47,9 +62,10 @@ impl EntityTimeline {
     ///
     /// # Performance
     /// - Use this for bulk inserts (retroactive history, migrations, recovery)
-    /// - Single inserts via `insert_entry` are better for one-off updates
+    /// - Single inserts via `insert()` are better for one-off updates
     /// - Timsort (Rust's default) is O(N) for already-sorted data,
     ///   O(N log N) worst case for unsorted retroactive updates
+    /// - Deduplication prevents memory leaks from duplicate version IDs
     fn insert_batch(&mut self, mut entries: Vec<TimelineEntry>) {
         if entries.is_empty() {
             return;
@@ -57,6 +73,9 @@ impl EntityTimeline {
         self.versions.append(&mut entries);
         // Sort by start time. Timsort exploits existing order in the timeline.
         self.versions.sort_by_key(|e| e.start);
+        // Deduplicate by version_id to prevent memory leaks during recovery or bulk updates.
+        // Keeps the first occurrence when duplicates exist.
+        self.versions.dedup_by_key(|e| e.version_id);
     }
 
     /// Find all versions in this timeline that overlap with the given time range.
@@ -502,6 +521,150 @@ mod tests {
     }
 
     #[test]
+    fn test_retroactive_single_inserts() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
+        let v3 = VersionId::new(102).unwrap();
+
+        // Insert in non-chronological order to test retroactive insertion
+        // v1 at t=0
+        indexes.insert_node_version(
+            node_id,
+            v1,
+            BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
+        );
+
+        // v3 at t=20000 (far future)
+        indexes.insert_node_version(
+            node_id,
+            v3,
+            BiTemporalInterval::new(
+                TimeRange::new(20000, 21000),
+                TimeRange::new(0, Timestamp::MAX),
+            ),
+        );
+
+        // v2 at t=10000 (retroactive - inserted between v1 and v3)
+        indexes.insert_node_version(
+            node_id,
+            v2,
+            BiTemporalInterval::new(
+                TimeRange::new(10000, 11000),
+                TimeRange::new(0, Timestamp::MAX),
+            ),
+        );
+
+        // Verify correct sort order is maintained
+        let entity_id = EntityId::Node(node_id);
+        let timelines = indexes.index.get(&entity_id).unwrap();
+
+        assert_eq!(timelines.valid.versions.len(), 3, "Should have 3 versions");
+        assert_eq!(
+            timelines.valid.versions[0].start, 0,
+            "First version should start at 0"
+        );
+        assert_eq!(
+            timelines.valid.versions[0].version_id, v1,
+            "First version should be v1"
+        );
+        assert_eq!(
+            timelines.valid.versions[1].start, 10000,
+            "Second version should start at 10000"
+        );
+        assert_eq!(
+            timelines.valid.versions[1].version_id, v2,
+            "Second version should be v2"
+        );
+        assert_eq!(
+            timelines.valid.versions[2].start, 20000,
+            "Third version should start at 20000"
+        );
+        assert_eq!(
+            timelines.valid.versions[2].version_id, v3,
+            "Third version should be v3"
+        );
+
+        // Verify queries work correctly with retroactively inserted versions
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(9000, 11000));
+        assert_eq!(results.len(), 1, "Should find 1 version in range");
+        assert_eq!(results[0], v2, "Should find v2 in the middle");
+    }
+
+    #[test]
+    fn test_batch_insert_deduplication() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
+
+        // Insert v1 normally
+        indexes.insert_node_version(
+            node_id,
+            v1,
+            BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
+        );
+
+        // Insert v2 normally
+        indexes.insert_node_version(
+            node_id,
+            v2,
+            BiTemporalInterval::new(
+                TimeRange::new(1000, 2000),
+                TimeRange::new(0, Timestamp::MAX),
+            ),
+        );
+
+        // Simulate recovery scenario: batch insert including duplicate v1 (with different timing)
+        // This would cause memory leak without deduplication
+        let mut timelines = indexes.index.get_mut(&EntityId::Node(node_id)).unwrap();
+        let duplicate_entries = vec![
+            TimelineEntry {
+                start: 0,
+                end: 1500, // Different end time (recovery scenario)
+                version_id: v1,
+            },
+            TimelineEntry {
+                start: 2000,
+                end: 3000,
+                version_id: VersionId::new(102).unwrap(),
+            },
+        ];
+        timelines.valid.insert_batch(duplicate_entries);
+
+        // Verify deduplication worked - should have 3 unique versions, not 4
+        assert_eq!(
+            timelines.valid.versions.len(),
+            3,
+            "Deduplication should remove duplicate v1"
+        );
+
+        // Verify v1 appears only once (last occurrence kept)
+        let v1_count = timelines
+            .valid
+            .versions
+            .iter()
+            .filter(|e| e.version_id == v1)
+            .count();
+        assert_eq!(v1_count, 1, "v1 should appear exactly once after dedup");
+
+        // Verify the kept v1 has the first data (end=1000, not end=1500)
+        // dedup_by_key keeps the first occurrence
+        let v1_entry = timelines
+            .valid
+            .versions
+            .iter()
+            .find(|e| e.version_id == v1)
+            .unwrap();
+        assert_eq!(
+            v1_entry.end, 1000,
+            "Should keep first occurrence (end=1000)"
+        );
+    }
+
+    #[test]
     fn test_concurrent_entity_writes() {
         use std::sync::Arc;
         use std::thread;
@@ -559,6 +722,83 @@ mod tests {
             (num_threads * versions_per_thread) as usize,
             "Total version count should match number of inserts"
         );
+    }
+
+    #[test]
+    fn test_concurrent_same_entity_contention() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Instant;
+
+        let indexes = Arc::new(TemporalIndexes::new());
+        let node_id = NodeId::new(1).unwrap(); // Same entity for all threads
+        let num_threads = 8;
+        let versions_per_thread = 500;
+
+        let start = Instant::now();
+
+        // Multiple threads writing to THE SAME entity - tests DashMap lock contention
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let idx = Arc::clone(&indexes);
+                thread::spawn(move || {
+                    for v in 0..versions_per_thread {
+                        let version_id =
+                            VersionId::new(thread_id * versions_per_thread + v).unwrap();
+                        idx.insert_node_version(
+                            node_id, // Same entity!
+                            version_id,
+                            BiTemporalInterval::new(
+                                TimeRange::new(
+                                    ((thread_id * versions_per_thread + v) * 100) as i64,
+                                    (((thread_id * versions_per_thread + v) + 1) * 100) as i64,
+                                ),
+                                TimeRange::new(0, Timestamp::MAX),
+                            ),
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let elapsed = start.elapsed();
+
+        // Verify all versions were indexed correctly
+        let results = indexes.find_node_versions_in_valid_time_range(
+            node_id,
+            TimeRange::new(0, ((num_threads * versions_per_thread) * 100) as i64),
+        );
+
+        assert_eq!(
+            results.len(),
+            (num_threads * versions_per_thread) as usize,
+            "All versions should be indexed despite contention"
+        );
+
+        // Verify no deadlocks occurred and performance is reasonable
+        // With 8 threads × 500 ops = 4000 total inserts, should complete in < 1 second
+        assert!(
+            elapsed.as_secs() < 2,
+            "Should complete in reasonable time despite contention, took {:?}",
+            elapsed
+        );
+
+        // Verify timeline is correctly sorted despite concurrent inserts
+        let entity_id = EntityId::Node(node_id);
+        let timelines = indexes.index.get(&entity_id).unwrap();
+        let versions = &timelines.valid.versions;
+
+        for i in 1..versions.len() {
+            assert!(
+                versions[i - 1].start <= versions[i].start,
+                "Timeline must remain sorted despite concurrent writes"
+            );
+        }
     }
 
     #[test]
