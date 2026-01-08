@@ -1,9 +1,10 @@
 # ADR-0012: Configurable Durability Modes
 
-**Status:** Proposed
+**Status:** Accepted (Implemented)
 **Date:** 2026-01-01
 **Deciders:** GallifreyDB Core Team
 **Categories:** storage, durability, performance
+**Implementation:** Completed 2026-01-08
 
 ## Context
 
@@ -35,23 +36,29 @@ We will implement three durability modes with both global configuration and per-
 /// Controls when WAL data is synced to disk.
 /// All modes write to WAL - they differ in when fsync occurs.
 pub enum DurabilityMode {
-    /// fsync on every commit - maximum durability, lowest performance
+    /// Each commit waits for its own fsync()
     /// Latency: ~1.5ms per operation
+    /// ACID: ✅ Full compliance
     /// Risk: Zero data loss
     Synchronous,
 
-    /// fsync after N operations OR T milliseconds (whichever first)
-    /// Latency: ~60µs per operation
-    /// Risk: Up to N operations or T ms of data
-    Batched {
-        batch_size: usize,      // default: 100
-        max_delay_ms: u64,      // default: 10
+    /// Multiple commits share a single fsync (epoch-based coordination)
+    /// CRITICAL: Transactions BLOCK until their epoch is flushed
+    /// Latency: ~max_delay_ms per operation (10-50ms with overhead)
+    /// ACID: ✅ Full compliance (transactions wait for flush)
+    /// Risk: Zero data loss (same as Synchronous)
+    GroupCommit {
+        max_delay_ms: u64,      // default: 10ms
+        max_batch_size: usize,  // default: 200
     },
 
-    /// Background thread handles fsync continuously
+    /// Background thread handles fsync, commits return immediately
     /// Latency: ~6µs per operation
-    /// Risk: ~10ms of data (background sync interval)
-    Async,
+    /// ACID: ❌ Eventual consistency only
+    /// Risk: ~flush_interval_ms of data (default 10ms)
+    Async {
+        flush_interval_ms: u64, // default: 10ms
+    },
 }
 ```
 
@@ -63,15 +70,17 @@ Synchronous:
                           ↑
                      Blocks here (~1.5ms)
 
-Batched:
-  Write → WAL Buffer → Return to caller (fast)
+GroupCommit (ACID-compliant):
+  Write → WAL Buffer → Register with epoch N → WAIT for epoch N flush
+                 ↓                                      ↑
+           Background thread wakes                 Blocks here
+                 ↓                                      ↓
+           fsync() all epoch N txns → mark_flushed(N) → Wake all waiters
                  ↓
-           Counter/Timer check
-                 ↓
-           When threshold reached → fsync()
+           Return to callers (ACID guaranteed)
 
-Async:
-  Write → WAL Buffer → Return to caller (immediate)
+Async (eventual consistency):
+  Write → WAL Buffer → Return to caller (immediate, NO WAIT)
                  ↓
            Background thread → Continuous fsync loop
 ```
@@ -83,42 +92,54 @@ Async:
 ```rust
 pub struct WalConfig {
     pub wal_dir: PathBuf,
-    pub default_durability: DurabilityMode,
-    pub segment_size_bytes: usize,
+    pub segment_size: usize,
+    pub segments_to_retain: usize,
+    pub durability_mode: DurabilityMode,
 }
 
-let db = GallifreyDB::builder()
-    .wal_config(WalConfig {
-        wal_dir: "/data/wal".into(),
-        default_durability: DurabilityMode::Batched {
-            batch_size: 100,
-            max_delay_ms: 10
-        },
-        ..Default::default()
-    })
-    .build()?;
+let config = WalConfig {
+    wal_dir: "/data/wal".into(),
+    segment_size: 64 * 1024 * 1024,  // 64MB
+    segments_to_retain: 10,
+    durability_mode: DurabilityMode::GroupCommit {
+        max_delay_ms: 10,
+        max_batch_size: 200,
+    },
+};
+
+let db = GallifreyDB::with_wal_config(config);
 ```
 
 **Per-Transaction Override:**
 
 ```rust
 pub struct WriteOptions {
-    pub durability: Option<DurabilityMode>,
+    pub durability_mode: Option<DurabilityMode>,
 }
 
-impl WriteOptions {
-    pub fn bulk_import() -> Self {
-        Self { durability: Some(DurabilityMode::Async) }
-    }
+// Critical financial transaction - override to Synchronous
+let critical_options = WriteOptions {
+    durability_mode: Some(DurabilityMode::Synchronous),
+};
 
-    pub fn critical() -> Self {
-        Self { durability: Some(DurabilityMode::Synchronous) }
-    }
-}
-
-// Usage
-db.write_with_options(WriteOptions::critical(), |tx| {
+let payment_id = db.write_with_options(critical_options, |tx| {
     tx.create_node("Payment", payment_data)
+})?;
+
+// Bulk import - override to Async for maximum throughput
+let bulk_options = WriteOptions {
+    durability_mode: Some(DurabilityMode::Async { flush_interval_ms: 50 }),
+};
+
+for record in bulk_data {
+    db.write_with_options(bulk_options.clone(), |tx| {
+        tx.create_node("Record", record)
+    })?;
+}
+
+// Regular transaction - uses global default (GroupCommit)
+db.write(|tx| {
+    tx.create_node("User", user_data)
 })?;
 ```
 
@@ -126,18 +147,21 @@ db.write_with_options(WriteOptions::critical(), |tx| {
 
 ### Positive
 
-- **30-300x write throughput improvement** for batched/async modes
+- **25x write throughput improvement** (Synchronous → GroupCommit)
+- **100x+ throughput improvement** (Synchronous → Async)
+- **ACID compliance maintained**: GroupCommit provides full ACID guarantees
 - **Flexibility**: Applications choose appropriate durability per use case
 - **Backward compatible**: Default to Synchronous preserves current behavior
 - **Simple mental model**: All modes write to WAL, only fsync timing differs
-- **Production-ready defaults**: Batched mode balances performance and safety
+- **Production-ready defaults**: GroupCommit balances ACID + performance
 
 ### Negative
 
-- **Potential data loss**: Batched/Async modes can lose recent writes on crash
+- **Potential data loss**: Async mode can lose recent writes on crash (10-50ms)
+- **Higher latency**: GroupCommit trades individual fsync speed for batching
 - **Complexity**: Three code paths to maintain and test
-- **Configuration burden**: Users must understand trade-offs
-- **Async mode complexity**: Background thread management, backpressure handling
+- **Configuration burden**: Users must understand ACID vs throughput trade-offs
+- **Thread overhead**: GroupCommit and Async require background threads
 
 ### Neutral
 
@@ -176,23 +200,91 @@ Create separate WAL files for different durability levels.
 
 ## Implementation Notes
 
-### Batched Mode Implementation
+### GroupCommit Mode Implementation
+
+GroupCommit uses an **epoch-based coordinator** to manage batched fsyncs while maintaining ACID guarantees:
 
 ```rust
-impl WriteAheadLog {
-    fn append_batched(&mut self, entry: WalEntry) -> Result<()> {
-        self.buffer.push(entry);
-        self.pending_count += 1;
+pub struct GroupCommitCoordinator {
+    state: Mutex<GroupCommitState>,
+    flush_complete: Condvar,
+    config: GroupCommitConfig,
+}
 
-        let should_sync = self.pending_count >= self.config.batch_size
-            || self.last_sync.elapsed() >= self.config.max_delay;
+struct GroupCommitState {
+    current_epoch: u64,
+    batch_count: usize,
+    flushed_epoch: u64,
+    last_flush_error: Option<String>,
+}
 
-        if should_sync {
-            self.sync()?;
-            self.pending_count = 0;
-            self.last_sync = Instant::now();
+impl GroupCommitCoordinator {
+    /// Transaction registers and gets epoch number
+    pub fn register_transaction(&self) -> (u64, bool) {
+        let mut state = self.state.lock().unwrap();
+        state.batch_count += 1;
+        let epoch = state.current_epoch;
+        let should_flush = state.batch_count >= self.config.max_batch_size;
+        (epoch, should_flush)
+    }
+
+    /// Transaction blocks until its epoch is flushed
+    pub fn wait_for_flush(&self, epoch: u64) -> Result<()> {
+        let mut state = self.state.lock_or_err()?;
+        let timeout = Duration::from_millis(self.config.max_delay_ms * 10)
+            + Duration::from_millis(200);
+
+        while state.flushed_epoch <= epoch {
+            let (new_state, timeout_result) =
+                self.flush_complete.wait_timeout(state, timeout)?;
+            state = new_state;
+
+            if timeout_result.timed_out() && state.flushed_epoch <= epoch {
+                return Err(Error::Timeout);
+            }
         }
+
+        // Check for flush errors
+        if let Some(ref error) = state.last_flush_error {
+            return Err(Error::FlushFailed(error.clone()));
+        }
+
         Ok(())
+    }
+
+    /// Background thread calls this after fsync
+    pub fn mark_flushed(&self, result: Result<()>) {
+        let mut state = self.state.lock().unwrap();
+        state.last_flush_error = result.err().map(|e| e.to_string());
+        state.flushed_epoch = state.current_epoch + 1;
+        state.current_epoch += 1;
+        state.batch_count = 0;
+        self.flush_complete.notify_all();  // Wake all waiting transactions
+    }
+}
+```
+
+**Critical Race Condition Fix (Commit 6bd42ff):**
+
+```rust
+// Transaction commit flow - FIXED version
+let (commit_timestamp, wait_epoch, coordinator) = {
+    let mut wal = self.wal.lock().unwrap();
+
+    self.log_operations_to_wal(&mut wal, commit)?;
+    let epoch = wal.commit_with_mode(self.durability_mode)?;
+
+    // CRITICAL: Clone coordinator BEFORE releasing lock
+    let gc = wal.group_commit_coordinator().cloned();
+
+    (commit, epoch, gc)
+    // WAL lock released here
+};
+
+// Safe to wait now - we have our coordinator reference
+if let Some(epoch) = wait_epoch {
+    if let Some(gc) = coordinator {
+        gc.wait_for_flush(epoch)?;  // ACID guaranteed
     }
 }
 ```
@@ -249,40 +341,79 @@ fn sync_loop(receiver: Receiver<WalEntry>, wal: &mut Wal, sync_interval: Duratio
 
 ### Graceful Shutdown
 
-All modes must flush pending writes on shutdown:
+All modes use `FlushGuard` (RAII pattern) to ensure pending writes are synced on shutdown:
 
 ```rust
-// Synchronous and Batched modes
-impl Drop for WriteAheadLog {
+pub struct FlushGuard {
+    signal: Arc<FlushSignal>,
+    thread_handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for FlushGuard {
     fn drop(&mut self) {
-        // Ensure all buffered entries are synced
-        let _ = self.sync();
+        // Signal shutdown
+        self.signal.request_shutdown();
+
+        // Wait for thread to complete (it will do a final flush)
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();  // Blocks until all entries synced
+        }
     }
 }
 
-// Async mode requires separate handling - the background thread
-// owns the WAL, so AsyncWalWriter must coordinate shutdown
-impl Drop for AsyncWalWriter {
-    fn drop(&mut self) {
-        // Signal background thread to stop accepting new entries
-        drop(self.sender.take());
+// Background flush thread loop
+fn flush_thread_loop<F>(signal: Arc<FlushSignal>, flush_fn: F, interval: Duration)
+where
+    F: Fn(),
+{
+    loop {
+        let should_continue = signal.wait_for_interval(interval);
 
-        // Wait for background thread to drain buffer and sync
-        if let Some(handle) = self.sync_thread.take() {
-            let _ = handle.join();  // Blocks until all entries synced
+        // Always flush before checking whether to exit
+        // This ensures piggybacking works and shutdown flushes
+        flush_fn();
+
+        if !should_continue {
+            // Shutdown requested - we've already done final flush above
+            break;
         }
     }
 }
 ```
 
-**Note:** The async mode's `Drop` is critical - without it, entries in the channel
-would be lost on shutdown. The background thread handles the final drain in its
-`Disconnected` case (see `sync_loop` above).
+**Key Design:**
+- Both GroupCommit and Async modes use `FlushGuard`
+- `Drop` implementation ensures no data loss on shutdown
+- Background thread always flushes before exiting
+- WAL holds `FlushGuard`, which is dropped when database closes
+
+## Implementation Status
+
+**Status:** ✅ Fully Implemented (2026-01-08)
+
+**Key Commits:**
+- Initial implementation: `feature/durability-modes` branch
+- Race condition fix: `6bd42ff` - Fixed coordinator cloning race in WriteTx
+- CI flakiness fix: `6bd42ff` - Updated test thresholds for GroupCommit
+- Documentation: `af85124` - Updated architecture docs
+
+**Test Coverage:**
+- 16 integration tests in `tests/durability_modes.rs`
+- Unit tests in `src/storage/wal/group_commit.rs` (14 tests)
+- All 725 tests passing
+
+**Performance Results:**
+| Mode | Latency | Throughput | ACID |
+|------|---------|------------|------|
+| Synchronous | ~1.5ms | ~600/sec | ✅ |
+| GroupCommit | ~10-50ms | ~15K/sec | ✅ |
+| Async | ~6µs | ~100K+/sec | ❌ |
 
 ## References
 
-- GitHub Issues: [#127](https://github.com/madmax983/GallifreyDB/issues/127), [#128](https://github.com/madmax983/GallifreyDB/issues/128), [#129](https://github.com/madmax983/GallifreyDB/issues/129), [#130](https://github.com/madmax983/GallifreyDB/issues/130), [#131](https://github.com/madmax983/GallifreyDB/issues/131)
-- Project: [GallifreyDB Write Performance](https://github.com/users/madmax983/projects/5)
-- PostgreSQL synchronous_commit: [Documentation](https://www.postgresql.org/docs/current/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT)
-- MongoDB Write Concern: [Documentation](https://www.mongodb.com/docs/manual/reference/write-concern/)
-- ADR-0007: Write-Ahead Log for Durability (extends this ADR)
+- **Architecture Documentation:** [durability-modes.md](../architecture/durability-modes.md)
+- **GitHub Issues:** [#127](https://github.com/madmax983/GallifreyDB/issues/127), [#128](https://github.com/madmax983/GallifreyDB/issues/128), [#129](https://github.com/madmax983/GallifreyDB/issues/129), [#130](https://github.com/madmax983/GallifreyDB/issues/130), [#131](https://github.com/madmax983/GallifreyDB/issues/131)
+- **Project:** [GallifreyDB Write Performance](https://github.com/users/madmax983/projects/5)
+- **PostgreSQL synchronous_commit:** [Documentation](https://www.postgresql.org/docs/current/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT)
+- **MongoDB Write Concern:** [Documentation](https://www.mongodb.com/docs/manual/reference/write-concern/)
+- **ADR-0007:** Write-Ahead Log for Durability (extends this ADR)

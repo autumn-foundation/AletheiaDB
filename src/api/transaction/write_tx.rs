@@ -22,7 +22,7 @@ use crate::index::temporal::TemporalIndexes;
 use crate::storage::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::storage::wal::{WalOperation, WriteAheadLog};
+use crate::storage::wal::{DurabilityMode, WalOperation, WriteAheadLog};
 use crate::utils::error::{Result, StorageError, TransactionError};
 use crate::utils::lock::{MutexExt, RwLockExt};
 use std::sync::{Arc, Mutex, RwLock};
@@ -63,10 +63,13 @@ pub struct WriteTransaction {
     node_id_gen: Arc<Mutex<IdGenerator>>,
     edge_id_gen: Arc<Mutex<IdGenerator>>,
     version_id_gen: Arc<Mutex<IdGenerator>>,
+
+    /// Durability mode for this transaction's commit
+    durability_mode: DurabilityMode,
 }
 
 impl WriteTransaction {
-    /// Create a new write transaction.
+    /// Create a new write transaction with default durability mode (Synchronous).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         tx_id: TxId,
@@ -80,6 +83,38 @@ impl WriteTransaction {
         node_id_gen: Arc<Mutex<IdGenerator>>,
         edge_id_gen: Arc<Mutex<IdGenerator>>,
         version_id_gen: Arc<Mutex<IdGenerator>>,
+    ) -> Self {
+        Self::new_with_durability(
+            tx_id,
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+            DurabilityMode::Synchronous,
+        )
+    }
+
+    /// Create a new write transaction with a specific durability mode.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_durability(
+        tx_id: TxId,
+        snapshot: TransactionSnapshot,
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<RwLock<TemporalIndexes>>,
+        wal: Arc<Mutex<WriteAheadLog>>,
+        current_timestamp: Arc<Mutex<Timestamp>>,
+        visibility_manager: Arc<TxVisibilityManager>,
+        node_id_gen: Arc<Mutex<IdGenerator>>,
+        edge_id_gen: Arc<Mutex<IdGenerator>>,
+        version_id_gen: Arc<Mutex<IdGenerator>>,
+        durability_mode: DurabilityMode,
     ) -> Self {
         WriteTransaction {
             tx_id,
@@ -96,6 +131,7 @@ impl WriteTransaction {
             node_id_gen,
             edge_id_gen,
             version_id_gen,
+            durability_mode,
         }
     }
 
@@ -120,6 +156,11 @@ impl WriteTransaction {
     /// This validates all buffered writes and applies them atomically
     /// to the storage. If validation fails or any operation fails,
     /// the transaction is rolled back.
+    ///
+    /// The durability behavior depends on the transaction's durability mode:
+    /// - **Synchronous**: Waits for fsync (maximum durability, default)
+    /// - **Async**: Returns after flush to OS cache (background thread syncs)
+    /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     pub fn commit(mut self) -> Result<()> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!(
@@ -149,24 +190,10 @@ impl WriteTransaction {
         // Detect write-write conflicts (Snapshot Isolation)
         self.detect_conflicts()?;
 
-        // Acquire commit timestamp and hold lock through WAL flush.
+        // Acquire commit timestamp and perform mode-aware WAL flush.
         //
-        // CRITICAL: We must hold the timestamp lock until WAL is flushed to prevent
-        // a race condition where transactions commit out-of-order:
-        //
-        // Without holding the lock:
-        //   T1: gets timestamp 100, releases lock
-        //   T2: gets timestamp 101, logs WAL, flushes, applies → COMMITTED
-        //   T1: logs WAL, flushes, applies → COMMITTED (but timestamp 100 < 101!)
-        //
-        // This violates the invariant that transaction time is monotonic with
-        // actual commit order. By holding the lock through flush, we ensure
-        // timestamps are assigned in the same order as commits become durable.
-        //
-        // PERFORMANCE NOTE: This serializes all commits since we hold both locks
-        // through WAL logging and flushing. For high-throughput workloads, consider
-        // implementing group commit (batching multiple transactions per WAL flush)
-        // while maintaining timestamp ordering.
+        // CRITICAL: We must hold the timestamp lock until WAL logging is complete
+        // to prevent a race condition where transactions commit out-of-order.
         //
         // Timestamp management for Snapshot Isolation:
         //
@@ -178,10 +205,14 @@ impl WriteTransaction {
         //    greater than this commit, so visibility check (commit_ts < snapshot_ts)
         //    will correctly include this commit in future reads.
         //
-        // This double-increment ensures proper ordering for both:
-        // - Conflict detection (commits after my snapshot must fail)
-        // - Visibility (commits before my snapshot must be visible)
-        let commit_timestamp = {
+        //    greater than this commit, so visibility check (commit_ts < snapshot_ts)
+        //    will correctly include this commit in future reads.
+        //
+        // DURABILITY MODES:
+        // - Synchronous: Hold locks through fsync (current behavior, safe but slow)
+        // - Async: Release locks after flush to OS cache (fast, background syncs)
+        // - GroupCommit: Release locks after flush, wait for epoch (ACID + fast)
+        let (commit_timestamp, wait_epoch, coordinator) = {
             #[cfg(feature = "observability")]
             let ts_lock_start = std::time::Instant::now();
 
@@ -200,8 +231,9 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let wal_lock_start = std::time::Instant::now();
 
-            // Acquire WAL lock once and hold through both logging and flush.
-            // This prevents any race condition between operations.
+            // Acquire WAL lock once and hold through logging.
+            // CRITICAL: We release this lock BEFORE waiting for GroupCommit epoch flush
+            // to prevent deadlock (flush thread needs WAL lock to mark epochs complete).
             let mut wal = self
                 .wal
                 .lock()
@@ -217,23 +249,31 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let wal_logged = std::time::Instant::now();
 
-            // Flush WAL to ensure durability while still holding both locks.
-            // This guarantees that lower timestamps are durable before higher ones.
-            wal.flush()?;
+            // Mode-aware commit: returns epoch to wait for (GroupCommit) or None
+            let epoch = wal.commit_with_mode(self.durability_mode)?;
+
+            #[cfg(feature = "observability")]
+            let wal_commit_completed = std::time::Instant::now();
+
+            // RACE CONDITION FIX: Clone the coordinator reference BEFORE releasing WAL lock.
+            // This ensures we wait on the same coordinator we registered with, even if
+            // the WAL's coordinator field is cleared between now and the wait (e.g., during
+            // shutdown or future dynamic reconfiguration). Prevents silent durability violation.
+            let gc = wal.group_commit_coordinator().cloned();
 
             #[cfg(feature = "observability")]
             {
-                let flush_completed = std::time::Instant::now();
-
                 // Record detailed breakdown for Honeycomb
                 let ts_lock_wait_us =
                     ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
                 let wal_lock_wait_us =
                     wal_lock_acquired.duration_since(wal_lock_start).as_micros() as u64;
                 let wal_log_us = wal_logged.duration_since(wal_lock_acquired).as_micros() as u64;
-                let wal_flush_us = flush_completed.duration_since(wal_logged).as_micros() as u64;
-                let total_locked_us =
-                    flush_completed.duration_since(ts_lock_start).as_micros() as u64;
+                let wal_commit_us =
+                    wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
+                let total_locked_us = wal_commit_completed
+                    .duration_since(ts_lock_start)
+                    .as_micros() as u64;
 
                 // Calculate total commit duration for Honeycomb queries
                 let total_commit_us = commit_start.elapsed().as_micros() as u64;
@@ -243,28 +283,44 @@ impl WriteTransaction {
                     ts_lock_wait_us,
                     wal_lock_wait_us,
                     wal_log_us,
-                    wal_flush_us,
+                    wal_commit_us,
                     total_locked_us,
                     total_commit_us,
                     operations_count,
                     commit_ts = %commit,
+                    durability_mode = ?self.durability_mode,
                     "Transaction commit breakdown"
                 );
 
-                // Warn if commit serialization exceeds threshold (known bottleneck from line 156-159)
+                // Warn if commit serialization exceeds threshold (known bottleneck)
                 if total_locked_us > 10000 {
                     tracing::warn!(
                         total_locked_us,
-                        wal_flush_us,
+                        wal_commit_us,
                         tx_id = %self.tx_id,
-                        "Slow commit detected - serialization bottleneck (see write_tx.rs:156-159)"
+                        durability_mode = ?self.durability_mode,
+                        "Slow commit detected - serialization bottleneck"
                     );
                 }
             }
 
-            commit
-            // Both locks released here, after WAL is durable
+            (commit, epoch, gc)
+            // Both locks released here - MUST release before waiting for epoch!
         };
+
+        // For GroupCommit mode, wait for the epoch to be flushed.
+        // CRITICAL DEADLOCK PREVENTION: WAL lock MUST be released before this wait!
+        // The flush thread needs the WAL lock to call mark_flushed(), so holding it
+        // here would cause a deadlock where we wait for flush thread, but flush thread
+        // waits for the WAL lock we're holding.
+        //
+        // RACE CONDITION SAFETY: We cloned the coordinator reference above while holding
+        // the WAL lock, guaranteeing we wait on the same coordinator we registered with.
+        if let Some(epoch) = wait_epoch
+            && let Some(gc) = coordinator
+        {
+            gc.wait_for_flush(epoch)?;
+        }
 
         // Apply all changes atomically
         self.apply_changes(commit_timestamp)?;
@@ -1287,7 +1343,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false, // Faster for tests
             ..Default::default()
         };
         let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
@@ -1786,7 +1841,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal_config = WalConfig {
             wal_dir: temp_dir.path().to_path_buf(),
-            sync_on_write: false, // Faster for tests
             ..Default::default()
         };
         let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
@@ -2037,7 +2091,6 @@ mod conflict_detection_tests {
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
                 wal_dir: temp_dir.path().to_path_buf(),
-                sync_on_write: false,
                 ..Default::default()
             };
             let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
@@ -2479,7 +2532,6 @@ mod timestamp_ordering_tests {
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
                 wal_dir: temp_dir.path().to_path_buf(),
-                sync_on_write: false,
                 ..Default::default()
             };
             let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));

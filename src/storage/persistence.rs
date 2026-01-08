@@ -1059,7 +1059,6 @@ mod tests {
         // Create WAL with some entries
         let wal_config = crate::storage::wal::WalConfig {
             wal_dir: wal_dir.clone(),
-            sync_on_write: true,
             ..Default::default()
         };
         let mut wal = crate::storage::wal::WriteAheadLog::new(wal_config)?;
