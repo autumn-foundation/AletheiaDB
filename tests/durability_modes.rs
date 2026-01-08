@@ -733,3 +733,403 @@ fn test_segment_rotation_with_background_thread() {
     // iteration instead of holding a stale handle that becomes invalid after
     // segment rotation.
 }
+
+// =============================================================================
+// AsyncBatched Mode Tests
+// =============================================================================
+
+#[test]
+fn test_async_batched_mode_returns_immediately() {
+    // Baseline: measure synchronous latency (10 writes to avoid excessive CI time)
+    let sync_db = create_db_with_mode(DurabilityMode::Synchronous);
+    let sync_start = Instant::now();
+    for i in 0..10 {
+        sync_db
+            .write(|tx| {
+                tx.create_node(
+                    "SyncRecord",
+                    PropertyMapBuilder::new().insert("index", i as i64).build(),
+                )
+            })
+            .expect("sync write failed");
+    }
+    let sync_elapsed = sync_start.elapsed();
+
+    // Test: async batched should be much faster
+    let db = create_db_with_mode(DurabilityMode::AsyncBatched {
+        max_delay_ms: 10,
+        max_batch_size: 100,
+    });
+
+    let options = WriteOptions {
+        durability_mode: Some(DurabilityMode::AsyncBatched {
+            max_delay_ms: 10,
+            max_batch_size: 100,
+        }),
+    };
+
+    let async_start = Instant::now();
+    let mut node_ids = Vec::new();
+
+    // Write same number of nodes - should return much faster than sync
+    for i in 0..10 {
+        let node_id = db
+            .write_with_options(options.clone(), |tx| {
+                tx.create_node(
+                    "FastWrite",
+                    PropertyMapBuilder::new().insert("index", i as i64).build(),
+                )
+            })
+            .expect("async batched write failed");
+        node_ids.push(node_id);
+    }
+
+    let async_elapsed = async_start.elapsed();
+
+    // AsyncBatched should be at least 2x faster than sync (ratio-based, CI-resilient)
+    // Even on heavily loaded systems, async (no fsync wait) should outperform sync (10 fsyncs)
+    let max_async_time = sync_elapsed / 2;
+    assert!(
+        async_elapsed < max_async_time,
+        "AsyncBatched writes not significantly faster than sync: async={:?}, sync={:?}, threshold={:?}",
+        async_elapsed,
+        sync_elapsed,
+        max_async_time
+    );
+
+    // All nodes should be immediately visible (data in memory/WAL buffer)
+    for node_id in node_ids {
+        let node = db.get_node(node_id).expect("lookup failed");
+        assert_eq!(get_label(&node), "FastWrite");
+    }
+}
+
+#[test]
+fn test_async_batched_triggers_on_batch_size() {
+    let db = Arc::new(create_db_with_mode(DurabilityMode::AsyncBatched {
+        max_delay_ms: 5000, // Very long delay
+        max_batch_size: 5,  // Small batch
+    }));
+
+    let options = WriteOptions {
+        durability_mode: Some(DurabilityMode::AsyncBatched {
+            max_delay_ms: 5000,
+            max_batch_size: 5,
+        }),
+    };
+
+    let start = Instant::now();
+    let mut handles = Vec::new();
+
+    // Write exactly batch_size transactions
+    for i in 0..5 {
+        let db = Arc::clone(&db);
+        let options = options.clone();
+        let handle = thread::spawn(move || {
+            db.write_with_options(options, |tx| {
+                tx.create_node(
+                    "BatchItem",
+                    PropertyMapBuilder::new().insert("idx", i as i64).build(),
+                )
+            })
+            .expect("write failed")
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all writes
+    let node_ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let elapsed = start.elapsed();
+
+    // Should complete quickly (batch triggered), not wait for 5s timer
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "Batch size didn't trigger flush: {:?}",
+        elapsed
+    );
+
+    // All nodes should be visible
+    for node_id in node_ids {
+        let node = db.get_node(node_id).expect("lookup failed");
+        assert_eq!(get_label(&node), "BatchItem");
+    }
+}
+
+#[test]
+fn test_async_batched_triggers_on_max_delay() {
+    let db = create_db_with_mode(DurabilityMode::AsyncBatched {
+        max_delay_ms: 30,
+        max_batch_size: 10000, // Very large batch
+    });
+
+    let options = WriteOptions {
+        durability_mode: Some(DurabilityMode::AsyncBatched {
+            max_delay_ms: 30,
+            max_batch_size: 10000,
+        }),
+    };
+
+    let node_id = db
+        .write_with_options(options, |tx| {
+            tx.create_node(
+                "TimerTrigger",
+                PropertyMapBuilder::new().insert("test", true).build(),
+            )
+        })
+        .expect("write failed");
+
+    // Write completes immediately (no fsync wait)
+    let node = db.get_node(node_id).expect("node should exist");
+    assert_eq!(get_label(&node), "TimerTrigger");
+
+    // Wait for timer to trigger flush
+    thread::sleep(Duration::from_millis(100));
+
+    // Node still visible after flush
+    let node = db.get_node(node_id).expect("node should exist after flush");
+    assert_eq!(get_label(&node), "TimerTrigger");
+}
+
+#[test]
+fn test_async_batched_eventual_durability() {
+    let db = create_db_with_mode(DurabilityMode::AsyncBatched {
+        max_delay_ms: 20,
+        max_batch_size: 100,
+    });
+
+    let options = WriteOptions {
+        durability_mode: Some(DurabilityMode::AsyncBatched {
+            max_delay_ms: 20,
+            max_batch_size: 100,
+        }),
+    };
+
+    let mut node_ids = Vec::new();
+    for i in 0..10 {
+        let node_id = db
+            .write_with_options(options.clone(), |tx| {
+                tx.create_node(
+                    "EventuallyDurable",
+                    PropertyMapBuilder::new().insert("index", i as i64).build(),
+                )
+            })
+            .expect("write failed");
+        node_ids.push(node_id);
+    }
+
+    // All immediately visible (in memory)
+    for node_id in &node_ids {
+        let node = db.get_node(*node_id).expect("node should exist");
+        assert_eq!(get_label(&node), "EventuallyDurable");
+    }
+
+    // Wait for background flush
+    thread::sleep(Duration::from_millis(100));
+
+    // Still visible after flush
+    for node_id in &node_ids {
+        let node = db
+            .get_node(*node_id)
+            .expect("node should exist after flush");
+        assert_eq!(get_label(&node), "EventuallyDurable");
+    }
+}
+
+#[test]
+fn test_async_batched_graceful_shutdown() {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let wal_path = temp_dir.path().to_path_buf();
+
+    let node_id;
+    {
+        let config = WalConfig {
+            wal_dir: wal_path.clone(),
+            segment_size: 10 * 1024 * 1024,
+            segments_to_retain: 3,
+            durability_mode: DurabilityMode::AsyncBatched {
+                max_delay_ms: 60000, // Won't naturally flush
+                max_batch_size: 10000,
+            },
+        };
+        let db = GallifreyDB::with_wal_config(config);
+
+        let options = WriteOptions {
+            durability_mode: Some(DurabilityMode::AsyncBatched {
+                max_delay_ms: 60000,
+                max_batch_size: 10000,
+            }),
+        };
+
+        node_id = db
+            .write_with_options(options, |tx| {
+                tx.create_node(
+                    "PendingOnShutdown",
+                    PropertyMapBuilder::new()
+                        .insert("should_persist", true)
+                        .build(),
+                )
+            })
+            .expect("write failed");
+
+        // Verify node exists before drop
+        let node = db.get_node(node_id).expect("node should exist before drop");
+        assert_eq!(get_label(&node), "PendingOnShutdown");
+
+        // db dropped here - FlushGuard should ensure final flush
+    }
+
+    // Note: WAL replay not yet implemented, but FlushGuard ensures
+    // final flush on shutdown for pending AsyncBatched data.
+}
+
+#[test]
+fn test_async_batched_concurrent_writers() {
+    let db = Arc::new(create_db_with_mode(DurabilityMode::AsyncBatched {
+        max_delay_ms: 20,
+        max_batch_size: 10,
+    }));
+
+    let options = WriteOptions {
+        durability_mode: Some(DurabilityMode::AsyncBatched {
+            max_delay_ms: 20,
+            max_batch_size: 10,
+        }),
+    };
+
+    let node_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+
+    // Spawn many concurrent writers
+    for i in 0..20 {
+        let db = Arc::clone(&db);
+        let options = options.clone();
+        let node_count = Arc::clone(&node_count);
+        let handle = thread::spawn(move || {
+            let node_id = db
+                .write_with_options(options, |tx| {
+                    tx.create_node(
+                        "ConcurrentWrite",
+                        PropertyMapBuilder::new().insert("thread", i as i64).build(),
+                    )
+                })
+                .expect("write failed");
+            node_count.fetch_add(1, Ordering::SeqCst);
+            node_id
+        });
+        handles.push(handle);
+    }
+
+    let node_ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(node_count.load(Ordering::SeqCst), 20);
+
+    // All nodes visible
+    for node_id in node_ids {
+        let node = db.get_node(node_id).expect("node should exist");
+        assert_eq!(get_label(&node), "ConcurrentWrite");
+    }
+}
+
+#[test]
+fn test_mixed_async_batched_and_sync() {
+    let db = Arc::new(create_db_with_mode(DurabilityMode::AsyncBatched {
+        max_delay_ms: 5000,
+        max_batch_size: 100,
+    }));
+
+    // Write async batched data
+    let async_options = WriteOptions {
+        durability_mode: Some(DurabilityMode::AsyncBatched {
+            max_delay_ms: 5000,
+            max_batch_size: 100,
+        }),
+    };
+
+    let async_node = db
+        .write_with_options(async_options, |tx| {
+            tx.create_node(
+                "AsyncData",
+                PropertyMapBuilder::new().insert("pending", true).build(),
+            )
+        })
+        .expect("async write failed");
+
+    // Write sync data - should piggyback async data
+    let sync_options = WriteOptions {
+        durability_mode: Some(DurabilityMode::Synchronous),
+    };
+
+    let sync_node = db
+        .write_with_options(sync_options, |tx| {
+            tx.create_node(
+                "SyncData",
+                PropertyMapBuilder::new().insert("urgent", true).build(),
+            )
+        })
+        .expect("sync write failed");
+
+    // Both visible
+    assert_eq!(
+        get_label(&db.get_node(async_node).expect("lookup")),
+        "AsyncData"
+    );
+    assert_eq!(
+        get_label(&db.get_node(sync_node).expect("lookup")),
+        "SyncData"
+    );
+}
+
+#[test]
+fn test_async_batched_with_segment_rotation() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let config = WalConfig {
+        wal_dir: temp_dir.path().to_path_buf(),
+        segment_size: 512, // Very small to force rotation
+        segments_to_retain: 5,
+        durability_mode: DurabilityMode::AsyncBatched {
+            max_delay_ms: 10,
+            max_batch_size: 100,
+        },
+    };
+
+    let db = GallifreyDB::with_wal_config(config);
+
+    let options = WriteOptions {
+        durability_mode: Some(DurabilityMode::AsyncBatched {
+            max_delay_ms: 10,
+            max_batch_size: 100,
+        }),
+    };
+
+    // Write enough to trigger rotations
+    let mut node_ids = Vec::new();
+    for i in 0..100 {
+        let node_id = db
+            .write_with_options(options.clone(), |tx| {
+                tx.create_node(
+                    "RotationTest",
+                    PropertyMapBuilder::new()
+                        .insert("index", i as i64)
+                        .insert("data", format!("test data {}", i))
+                        .build(),
+                )
+            })
+            .expect("write failed");
+        node_ids.push(node_id);
+
+        if i % 10 == 0 {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    thread::sleep(Duration::from_millis(100));
+
+    // All nodes should be visible
+    for (i, node_id) in node_ids.iter().enumerate() {
+        let node = db
+            .get_node(*node_id)
+            .unwrap_or_else(|_| panic!("Node {} not found", i));
+        assert_eq!(get_label(&node), "RotationTest");
+    }
+}
