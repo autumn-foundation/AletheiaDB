@@ -233,59 +233,18 @@ fn bench_find_neighbors(c: &mut Criterion) {
     });
 }
 
-/// Benchmark concurrent read performance (lock-free advantage).
-///
-/// This benchmark demonstrates the benefit of lock-free adjacency reads
-/// by measuring throughput with multiple concurrent readers.
-///
-/// Uses scoped threads to avoid thread creation/destruction overhead,
-/// which would mask the nanosecond-scale improvements from lock-free reads.
-fn bench_concurrent_reads(c: &mut Criterion) {
-    use std::sync::Arc;
-    use std::thread;
+fn configure_criterion() -> Criterion {
+    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
+        .map(|s| s.parse().unwrap_or(50))
+        .unwrap_or(50);
 
-    let storage = Arc::new(create_test_graph(1000, 10));
-    // Wrap node_ids in Arc to avoid cloning the Vec for each thread
-    let node_ids: Arc<Vec<_>> = Arc::new(
-        (0..100)
-            .map(|i| gallifreydb::NodeId::new(i).unwrap())
-            .collect(),
-    );
-
-    c.bench_function("concurrent_reads_4_threads", |b| {
-        b.iter(|| {
-            // Use scoped threads to avoid thread spawn/join overhead
-            thread::scope(|s| {
-                let handles: Vec<_> = (0..4)
-                    .map(|_| {
-                        let storage_clone = Arc::clone(&storage);
-                        let nodes = Arc::clone(&node_ids);
-
-                        s.spawn(move || {
-                            let mut total_edges = 0;
-                            // 25 iterations per thread = 100 total per benchmark iteration
-                            for _ in 0..25 {
-                                for node_id in &*nodes {
-                                    let edges = storage_clone.get_outgoing_edges(*node_id);
-                                    total_edges += edges.len();
-                                }
-                            }
-                            total_edges
-                        })
-                    })
-                    .collect();
-
-                // Wait for all threads and sum results
-                let total: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
-                black_box(total)
-            })
-        });
-    });
+    Criterion::default().sample_size(sample_size)
 }
 
 criterion_group!(
-    benches,
-    bench_single_hop_traversal,
+    name = benches;
+    config = configure_criterion();
+    targets = bench_single_hop_traversal,
     bench_multi_hop_traversal,
     bench_node_lookup,
     bench_edge_lookup,
@@ -294,7 +253,6 @@ criterion_group!(
     bench_edge_creation,
     bench_degree_queries,
     bench_find_neighbors,
-    bench_concurrent_reads,
 );
 
 criterion_main!(benches);

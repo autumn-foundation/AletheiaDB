@@ -303,9 +303,18 @@ fn bench_batch_operations(c: &mut Criterion) {
     group.finish();
 }
 
+fn configure_criterion() -> Criterion {
+    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
+        .map(|s| s.parse().unwrap_or(50))
+        .unwrap_or(50);
+
+    Criterion::default().sample_size(sample_size)
+}
+
 criterion_group!(
-    benches,
-    bench_node_creation_with_versioning,
+    name = benches;
+    config = configure_criterion();
+    targets = bench_node_creation_with_versioning,
     bench_edge_creation_with_versioning,
     bench_current_state_queries,
     bench_single_hop_traversal,

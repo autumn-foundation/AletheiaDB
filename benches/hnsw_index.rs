@@ -13,7 +13,6 @@ use gallifreydb::index::vector::hnsw::{HnswConfig, HnswIndex};
 use gallifreydb::index::vector::{DistanceMetric, VectorIndex};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 // ============================================================================
 // Helper Functions
@@ -87,9 +86,7 @@ fn bench_index_creation(c: &mut Criterion) {
 
 fn bench_vector_addition_single(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_addition_single");
-    // Reduced sample size (50) due to slower insertion operations (~8-12µs each)
-    // to keep total benchmark time reasonable while maintaining statistical significance
-    group.sample_size(50);
+    // Default sample size via config (10 for PRs, 100 for main)
 
     for &dimensions in &[128, 384, 768] {
         let config = HnswConfig::new(dimensions, DistanceMetric::Cosine).with_capacity(1000);
@@ -129,9 +126,7 @@ fn bench_vector_addition_single(c: &mut Criterion) {
 
 fn bench_vector_addition_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_addition_batch");
-    // Reduced sample size (20) for batch operations which are significantly slower
-    // (100+ vectors per iteration) to keep total runtime manageable
-    group.sample_size(20);
+    // Default sample size via config (10 for PRs, 100 for main)
 
     for &batch_size in &[10, 50, 100, 500] {
         let dimensions = 384;
@@ -166,7 +161,7 @@ fn bench_vector_addition_batch(c: &mut Criterion) {
 
 fn bench_knn_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("knn_search");
-    group.measurement_time(Duration::from_secs(10));
+    // Configured via configure_criterion()
 
     let dimensions = 384;
     let index_size = 1000;
@@ -190,9 +185,7 @@ fn bench_knn_search(c: &mut Criterion) {
 
 fn bench_knn_search_index_size(c: &mut Criterion) {
     let mut group = c.benchmark_group("knn_search_index_size");
-    // Reduced sample size (30) due to index creation overhead for large datasets
-    // (creating 10k-vector index takes significant time)
-    group.sample_size(30);
+    // Default sample size via config (10 for PRs, 100 for main)
 
     let dimensions = 384;
     let k = 10;
@@ -219,9 +212,7 @@ fn bench_knn_search_index_size(c: &mut Criterion) {
 
 fn bench_hnsw_parameter_m(c: &mut Criterion) {
     let mut group = c.benchmark_group("hnsw_param_m");
-    // Reduced sample size (20) due to index creation overhead
-    // (building 1000-vector index multiple times for different M values)
-    group.sample_size(20);
+    // Default sample size via config (10 for PRs, 100 for main)
 
     let dimensions = 384;
     let index_size = 1000;
@@ -247,8 +238,7 @@ fn bench_hnsw_parameter_ef_construction(c: &mut Criterion) {
     let mut group = c.benchmark_group("hnsw_param_ef_construction");
     // Very reduced sample size (10) for extremely slow operations
     // (building full index with different ef_construction values, extended measurement time)
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(15));
+    // Configured via configure_criterion()
 
     let dimensions = 384;
     let batch_size = 100;
@@ -340,21 +330,36 @@ fn bench_distance_metrics(c: &mut Criterion) {
 // Benchmark Groups
 // ============================================================================
 
+fn configure_criterion() -> Criterion {
+    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
+        .map(|s| s.parse().unwrap_or(50))
+        .unwrap_or(50);
+
+    Criterion::default().sample_size(sample_size)
+}
+
 criterion_group!(
-    index_ops,
-    bench_index_creation,
+    name = index_ops;
+    config = configure_criterion();
+    targets = bench_index_creation,
     bench_vector_addition_single,
     bench_vector_addition_batch,
 );
 
-criterion_group!(search_ops, bench_knn_search, bench_knn_search_index_size,);
+criterion_group!(
+    name = search_ops;
+    config = configure_criterion();
+    targets = bench_knn_search,
+    bench_knn_search_index_size,
+);
 
 criterion_group!(
-    parameter_tuning,
-    bench_hnsw_parameter_m,
+    name = tuning_ops;
+    config = configure_criterion();
+    targets = bench_hnsw_parameter_m,
     bench_hnsw_parameter_ef_construction,
     bench_hnsw_parameter_ef_search,
     bench_distance_metrics,
 );
 
-criterion_main!(index_ops, search_ops, parameter_tuning);
+criterion_main!(index_ops, search_ops, tuning_ops);

@@ -26,6 +26,7 @@ class BenchmarkResult:
     """Represents a single benchmark result."""
     name: str
     mean: float
+    mean_ns: float  # Raw mean in nanoseconds for comparison
     std_dev: float
     median: float
     unit: str
@@ -54,6 +55,7 @@ def parse_criterion_estimates(estimates_path: Path) -> Optional[BenchmarkResult]
         return BenchmarkResult(
             name=bench_name,
             mean=mean,
+            mean_ns=mean_ns,
             std_dev=std_dev,
             median=median,
             unit=unit
@@ -313,8 +315,87 @@ def generate_index_page(all_results: dict[str, list[BenchmarkResult]], output_di
     print(f"Generated index page: {index_path}")
 
 
-def generate_pr_comment(all_results: dict[str, list[BenchmarkResult]], output_path: Path) -> None:
+    print(f"Generated index page: {index_path}")
+
+
+def parse_history_data(history_path: Path) -> dict[str, float]:
+    """Parse historical benchmark data from data.js."""
+    try:
+        with open(history_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # data.js typically starts with "window.BENCHMARK_DATA = "
+        prefix = "window.BENCHMARK_DATA = "
+        if content.startswith(prefix):
+            json_str = content[len(prefix):]
+            data = json.loads(json_str)
+            
+            latest_values = {}
+            for bench_name, entries in data.get('entries', {}).items():
+                if entries:
+                    # Get the most recent entry
+                    last_entry = entries[-1]
+                    # Check if 'value' exists (github-action-benchmark format)
+                    if 'value' in last_entry:
+                         latest_values[bench_name] = float(last_entry['value'])
+            
+            return latest_values
+    except Exception as e:
+        print(f"Warning: Failed to parse historical data: {e}", file=sys.stderr)
+    
+    return {}
+
+
+def generate_pr_comment(all_results: dict[str, list[BenchmarkResult]], output_path: Path, history: dict[str, float]) -> None:
     """Generate a markdown summary for PR comments."""
+    
+    regressions = []
+    improvements = []
+    
+    # Flatten results
+    current_results = []
+    for suite_name, results in all_results.items():
+        current_results.extend(results)
+    
+    # Compare with history
+    threshold = 0.10 # 10%
+    
+    for bench in current_results:
+        if bench.name in history:
+            old_val_ns = history[bench.name]
+            new_val_ns = bench.mean_ns
+            
+            if old_val_ns > 0:
+                diff_percent = (new_val_ns - old_val_ns) / old_val_ns
+                
+                # Slower = Regression (positive diff)
+                if diff_percent > threshold:
+                    regressions.append((bench, diff_percent))
+                # Faster = Improvement (negative diff)
+                elif diff_percent < -threshold:
+                    improvements.append((bench, diff_percent))
+
+    md = """## 🚀 Benchmark Results
+    
+Benchmarks have been run for this PR.
+"""
+
+    if regressions:
+        md += "\n### ⚠️ Regressions (>10% Slower)\n\n"
+        md += "| Benchmark | Current | Previous | Change |\n"
+        md += "|-----------|---------|----------|--------|\n"
+        for bench, diff in regressions:
+            old_val_fmt, _ = format_time(history[bench.name])
+            md += f"| {bench.name} | {bench.mean:.2f} {bench.unit} | {old_val_fmt:.2f} {bench.unit} | 🔴 +{diff:.1%} |\n"
+            
+    if improvements:
+        md += "\n### ✅ Improvements (>10% Faster)\n\n"
+        md += "| Benchmark | Current | Previous | Change |\n"
+        md += "|-----------|---------|----------|--------|\n"
+        for bench, diff in improvements:
+            old_val_fmt, _ = format_time(history[bench.name])
+            md += f"| {bench.name} | {bench.mean:.2f} {bench.unit} | {old_val_fmt:.2f} {bench.unit} | 🟢 {diff:.1%} |\n"
+
     # Get top benchmarks from each suite
     top_benchmarks = []
     for suite_name, results in all_results.items():
@@ -325,11 +406,8 @@ def generate_pr_comment(all_results: dict[str, list[BenchmarkResult]], output_pa
     # Sort all top benchmarks and take top 10 overall
     top_benchmarks = sorted(top_benchmarks, key=lambda r: r.mean)[:10]
 
-    md = """## 🚀 Benchmark Results
-
-Benchmarks have been run for this PR. Top performers:
-
-### Performance Summary
+    md += """
+### 📊 Performance Summary (Top 10)
 
 | Benchmark | Mean | Std Dev |
 |-----------|------|---------|
@@ -346,10 +424,30 @@ Benchmarks have been run for this PR. Top performers:
 📈 [Historical trends](https://madmax983.github.io/GallifreyDB/dev/bench/)
 """
 
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(md)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
         f.write(md)
 
     print(f"Generated PR comment: {output_path}")
+
+
+def generate_json_output(all_results: dict[str, list[BenchmarkResult]], output_path: Path) -> None:
+    """Generate JSON output compatible with github-action-benchmark customSmallerIsBetter."""
+    
+    json_data = []
+    for suite_name, results in all_results.items():
+        for bench in results:
+            json_data.append({
+                "name": bench.name,
+                "unit": "ns",
+                "value": bench.mean_ns
+            })
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(json_data, f, indent=2)
+
 
 
 def main():
@@ -369,9 +467,15 @@ def main():
     parser.add_argument(
         '--format',
         type=str,
-        choices=['html', 'pr-comment'],
+        choices=['html', 'pr-comment', 'json'],
         default='html',
-        help='Output format: html (default) or pr-comment (markdown for PR comments)'
+        help='Output format: html (default), pr-comment (markdown), or json (for github-action-benchmark)'
+    )
+
+    parser.add_argument(
+        '--history',
+        type=Path,
+        help='Path to historical data.js file for comparison'
     )
 
     args = parser.parse_args()
@@ -384,6 +488,9 @@ def main():
     # Create output directory only for HTML format
     if args.format == 'html':
         args.output.mkdir(parents=True, exist_ok=True)
+    elif args.format in ['pr-comment', 'json']:
+        # Ensure parent directory exists for file outputs
+        args.output.parent.mkdir(parents=True, exist_ok=True)
 
     # Collect benchmark results
     print(f"Collecting benchmark results from {args.input}...")
@@ -397,6 +504,13 @@ def main():
     for suite, results in all_results.items():
         print(f"  - {suite}: {len(results)} benchmarks")
 
+    # Parse historical data if provided
+    history = {}
+    if args.history and args.history.exists():
+        print(f"Parsing historical data from {args.history}...")
+        history = parse_history_data(args.history)
+        print(f"Found {len(history)} historical benchmarks")
+
     # Generate output based on format
     if args.format == 'html':
         print(f"\nGenerating HTML tables in {args.output}...")
@@ -404,10 +518,12 @@ def main():
         print("\nDone! Open benchmark-results/index.html to view results")
     elif args.format == 'pr-comment':
         print(f"\nGenerating PR comment...")
-        # Ensure parent directory exists
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        generate_pr_comment(all_results, args.output)
+        generate_pr_comment(all_results, args.output, history)
         print(f"\nDone! PR comment written to {args.output}")
+    elif args.format == 'json':
+        print(f"\nGenerating JSON for github-action-benchmark...")
+        generate_json_output(all_results, args.output)
+        print(f"\nDone! JSON written to {args.output}")
 
     return 0
 

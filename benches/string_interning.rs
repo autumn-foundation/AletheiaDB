@@ -218,9 +218,18 @@ fn bench_hot_path(c: &mut Criterion) {
     group.finish();
 }
 
+fn configure_criterion() -> Criterion {
+    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
+        .map(|s| s.parse().unwrap_or(50))
+        .unwrap_or(50);
+
+    Criterion::default().sample_size(sample_size)
+}
+
 criterion_group!(
-    benches,
-    bench_single_string_access,
+    name = benches;
+    config = configure_criterion();
+    targets = bench_single_string_access,
     bench_string_length,
     bench_string_comparison,
     bench_multiple_accesses,
