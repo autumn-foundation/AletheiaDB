@@ -4,6 +4,7 @@
 //! background flush thread used by [`Async`](super::DurabilityMode::Async) and
 //! [`GroupCommit`](super::DurabilityMode::GroupCommit) durability modes.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -54,6 +55,8 @@ pub struct FlushSignal {
     state: Mutex<FlushSignalState>,
     /// Condition variable for waking the thread
     condvar: Condvar,
+    /// Atomic flag indicating thread has completed (for defensive cleanup)
+    completed: AtomicBool,
 }
 
 struct FlushSignalState {
@@ -72,6 +75,7 @@ impl FlushSignal {
                 flush_requested: false,
             }),
             condvar: Condvar::new(),
+            completed: AtomicBool::new(false),
         }
     }
 
@@ -180,6 +184,9 @@ impl FlushGuard {
                 break;
             }
         }
+
+        // Mark thread as completed before exiting
+        signal.completed.store(true, Ordering::Release);
     }
 }
 
@@ -188,8 +195,29 @@ impl Drop for FlushGuard {
         // Signal shutdown
         self.signal.request_shutdown();
 
+        // Defensive: Check if thread already completed
+        // This handles rare race conditions where thread exits before drop is called
+        if self.signal.completed.load(Ordering::Acquire) {
+            // Thread already exited cleanly, just clean up the handle
+            let _ = self.thread_handle.take();
+            return;
+        }
+
         // Wait for thread to complete (it will do a final flush)
         if let Some(handle) = self.thread_handle.take() {
+            // Use a short timeout-based wait loop for defensive safety
+            // This prevents indefinite blocking if there's a race condition
+            for _ in 0..50 {
+                // 50 * 10ms = 500ms total max wait
+                if self.signal.completed.load(Ordering::Acquire) {
+                    // Thread completed, join should succeed immediately
+                    let _ = handle.join();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            // If we get here, thread is taking too long. Try one final join.
             // Ignore join errors (thread may have panicked)
             let _ = handle.join();
         }
