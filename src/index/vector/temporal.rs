@@ -144,6 +144,10 @@ const MAX_SNAPSHOT_RETRIES: usize = 3;
 /// Mirrors the full_snapshot_interval default value.
 const MAX_DELTA_CHAIN_DEPTH: usize = 10;
 
+/// Minimum capacity estimate for HashMap pre-allocation (default: 100)
+/// Used when estimating capacity for vector collections to avoid excessive resizing.
+const MIN_CAPACITY_ESTIMATE: usize = 100;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TemporalVectorConfig {
     /// Snapshot creation strategy
@@ -357,6 +361,8 @@ impl VectorSnapshot {
             // 1. Corrupted snapshot state (delta-of-delta chains)
             // 2. Misconfiguration (full_snapshot_interval too large)
             if depth >= MAX_DELTA_CHAIN_DEPTH {
+                // NOTE: Using eprintln! until logging framework is added to project.
+                // This should be replaced with log::warn! or tracing::warn! when available.
                 eprintln!(
                     "WARNING: Delta chain depth exceeded {} for node {:?}. \
                      This may indicate corrupted snapshot state or misconfiguration.",
@@ -430,7 +436,7 @@ impl VectorSnapshot {
             VectorSnapshot::Delta { added, .. } => {
                 // Approximation: just return added size
                 // This is used only for capacity estimation
-                added.len().max(100)
+                added.len().max(MIN_CAPACITY_ESTIMATE)
             }
         }
     }
@@ -494,6 +500,7 @@ impl SnapshotIndex {
             SnapshotIndex::Delta(delta) => delta.added.dimensions(),
         }
     }
+
 }
 
 /// A delta snapshot that stores only changes relative to a base snapshot.
@@ -808,9 +815,16 @@ impl TemporalVectorIndex {
     ///
     /// CRITICAL: This function validates that the base is a Full snapshot to prevent
     /// delta-of-delta chains, which would cause unbounded traversal depth and poor performance.
+    ///
+    /// # Parameters
+    /// - `base`: The base SnapshotIndex (must be Full)
+    /// - `base_vectors`: The VectorSnapshot for the base (used for membership testing)
+    /// - `base_time`: Timestamp of the base snapshot
+    /// - `changes`: Set of all NodeIds that changed since the base
     fn build_delta_snapshot(
         &self,
         base: Arc<SnapshotIndex>,
+        base_vectors: &VectorSnapshot,
         base_time: Timestamp,
         changes: &HashSet<NodeId>,
     ) -> Result<(SnapshotIndex, VectorSnapshot)> {
@@ -834,22 +848,54 @@ impl TemporalVectorIndex {
         let mut added_vectors = HashMap::new();
         let mut removed_vectors = HashSet::new();
 
+        // For DeltaIndex.removed: only nodes that WERE in base and are now invalid
+        // This is crucial for correct len() calculation
+        let mut invalidated_in_base = HashSet::new();
+
+        // We need access to all snapshots to check containment in base
+        // Since we're inside write lock, we can't easily access snapshot_data
+        // Instead, we'll use a simpler heuristic: check if node was in base by seeing
+        // if it's been modified (for updates) or removed (for removals)
+        // For pure additions, they weren't in base, so don't include them
+
         // Separate changed nodes into added/updated vs removed
         for &node_id in changes {
             if let Some(vector) = self.vectors.get(&node_id) {
                 // Node exists in current state -> it was added or updated
                 added.add(node_id, vector.as_ref())?;
                 added_vectors.insert(node_id, vector.clone());
+
+                // Check if this node was in the base (update) or is new (addition)
+                // Since we only build deltas against Full snapshots (validated above),
+                // base_vectors should always be Full, so we can check without all_snapshots
+                let was_in_base = match base_vectors {
+                    VectorSnapshot::Full(vectors) => vectors.contains_key(&node_id),
+                    VectorSnapshot::Delta { .. } => {
+                        // This should never happen due to validation above,
+                        // but if it does, conservatively assume it was in base
+                        true
+                    }
+                };
+
+                if was_in_base {
+                    // Node was in base and is now updated -> invalidate old version
+                    invalidated_in_base.insert(node_id);
+                }
             } else {
                 // Node doesn't exist in current state -> it was removed
                 removed_vectors.insert(node_id);
+                // Removals are always invalidations of base (if they were there)
+                invalidated_in_base.insert(node_id);
             }
         }
 
+        // FIXED: Use invalidated_in_base instead of changes for DeltaIndex.removed
+        // This ensures only nodes that were actually in the base are filtered out,
+        // preventing incorrect len() calculations for pure additions
         let delta_index = DeltaIndex {
             base,
             added: Arc::new(added),
-            removed: Arc::new(changes.clone()), // For HNSW, keep all changes as filter
+            removed: Arc::new(invalidated_in_base),
         };
 
         let delta_vectors = VectorSnapshot::Delta {
@@ -914,14 +960,24 @@ impl TemporalVectorIndex {
             let (snap, vec_snap) = self.build_full_snapshot()?;
             (snap, vec_snap, true) // true = full
         } else {
-            // Try to get base snapshot for delta
-            let base = {
+            // Try to get base snapshot for delta (both index and vectors)
+            let base_opt = {
                 let data = self.snapshot_data.read();
-                data.snapshots.get(&base_time).map(|(_, snap)| snap.clone())
+                let base_snap = data.snapshots.get(&base_time).map(|(_, snap)| snap.clone());
+                let base_vecs = data.vector_history.get(&base_time).cloned();
+                match (base_snap, base_vecs) {
+                    (Some(snap), Some(vecs)) => Some((snap, vecs)),
+                    _ => None,
+                }
             };
 
-            if let Some(base) = base {
-                let (snap, vec_snap) = self.build_delta_snapshot(Arc::new(base), base_time, &changes)?;
+            if let Some((base, base_vectors)) = base_opt {
+                let (snap, vec_snap) = self.build_delta_snapshot(
+                    Arc::new(base),
+                    &base_vectors,
+                    base_time,
+                    &changes,
+                )?;
                 (snap, vec_snap, false) // false = delta
             } else {
                 // Base was pruned, fallback to full
@@ -2960,6 +3016,117 @@ mod tests {
 
         // Test passes if no panic occurred during snapshot creation
         // (The retry logic prevents infinite loops)
+        Ok(())
+    }
+
+    #[test]
+    fn test_delta_snapshot_len_with_pure_additions() -> Result<()> {
+        // This test verifies the fix for the critical len() bug where pure additions
+        // were incorrectly included in DeltaIndex.removed, causing incorrect counts
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            full_snapshot_interval: 100, // High value to ensure delta snapshots
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create full snapshot with 3 nodes at t=1000
+        for i in 0..3 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+        }
+        index.on_transaction_at(1000)?;
+
+        // Verify base snapshot has 3 nodes
+        let snapshot_info = index.get_snapshot_info()?;
+        assert_eq!(snapshot_info.len(), 1);
+        assert_eq!(snapshot_info[0].vector_count, 3, "Base should have 3 nodes");
+
+        // Add 2 NEW nodes at t=2000 (pure additions, not updates)
+        for i in 3..5 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000)?;
+        }
+        index.on_transaction_at(2000)?;
+
+        // Verify delta snapshot reports correct count
+        let snapshot_info = index.get_snapshot_info()?;
+        assert_eq!(snapshot_info.len(), 2, "Should have 2 snapshots");
+
+        // CRITICAL TEST: Delta snapshot should report 5 total nodes (3 from base + 2 new)
+        // Before fix: would incorrectly report 3 (because added.len=2 and removed.len=2)
+        // After fix: correctly reports 5 (base=3 + added=2 - removed=0)
+        assert_eq!(
+            snapshot_info[1].vector_count,
+            5,
+            "Delta snapshot should report 5 nodes (3 from base + 2 additions)"
+        );
+
+        // Verify we can actually query and find all 5 nodes
+        let query = vec![0.0, 0.0, 0.0, 0.0];
+        let results = index.find_similar_as_of(&query, 10, 2000)?;
+        assert_eq!(
+            results.len(),
+            5,
+            "Should find all 5 nodes when querying at t=2000"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delta_snapshot_len_with_mixed_operations() -> Result<()> {
+        // Test len() correctness with a mix of additions, updates, and removals
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepAll,
+            max_snapshots: 100,
+            full_snapshot_interval: 100,
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Create full snapshot with 10 nodes at t=1000
+        for i in 0..10 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+        }
+        index.on_transaction_at(1000)?;
+        assert_eq!(index.get_snapshot_info()?[0].vector_count, 10);
+
+        // At t=2000: update 3 nodes, add 2 new nodes, remove 1 node
+        // Updates: nodes 0, 1, 2 -> new values
+        for i in 0..3 {
+            index.add(NodeId::new(i).unwrap(), &[100.0 + i as f32, 0.0, 0.0, 0.0], 2000)?;
+        }
+        // Additions: nodes 10, 11
+        for i in 10..12 {
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000)?;
+        }
+        // Removal: node 9
+        index.remove(NodeId::new(9).unwrap(), 2000)?;
+        index.on_transaction_at(2000)?;
+
+        // Expected final count: 10 - 1 (removed) + 2 (added) = 11
+        // Updates don't change count (old version replaced by new)
+        let snapshot_info = index.get_snapshot_info()?;
+        assert_eq!(snapshot_info.len(), 2);
+        assert_eq!(
+            snapshot_info[1].vector_count,
+            11,
+            "Delta should report 11 nodes (10 base - 1 removed + 2 added)"
+        );
+
+        // Verify query results match
+        let query = vec![0.0, 0.0, 0.0, 0.0];
+        let results = index.find_similar_as_of(&query, 20, 2000)?;
+        assert_eq!(results.len(), 11, "Should find 11 nodes when querying");
+
+        // Verify removed node 9 is not in results
+        assert!(
+            !results.iter().any(|(id, _)| *id == NodeId::new(9).unwrap()),
+            "Removed node 9 should not appear in results"
+        );
+
         Ok(())
     }
 }
