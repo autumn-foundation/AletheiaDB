@@ -269,9 +269,11 @@ impl WriteTransaction {
                 let wal_lock_wait_us =
                     wal_lock_acquired.duration_since(wal_lock_start).as_micros() as u64;
                 let wal_log_us = wal_logged.duration_since(wal_lock_acquired).as_micros() as u64;
-                let wal_commit_us = wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
-                let total_locked_us =
-                    wal_commit_completed.duration_since(ts_lock_start).as_micros() as u64;
+                let wal_commit_us =
+                    wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
+                let total_locked_us = wal_commit_completed
+                    .duration_since(ts_lock_start)
+                    .as_micros() as u64;
 
                 // Calculate total commit duration for Honeycomb queries
                 let total_commit_us = commit_start.elapsed().as_micros() as u64;
