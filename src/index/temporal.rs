@@ -44,12 +44,18 @@ impl EntityTimeline {
     }
 
     /// Insert multiple versions at once and sort. Efficient for large retroactive updates.
+    ///
+    /// # Performance
+    /// - Use this for bulk inserts (retroactive history, migrations, recovery)
+    /// - Single inserts via `insert_entry` are better for one-off updates
+    /// - Timsort (Rust's default) is O(N) for already-sorted data,
+    ///   O(N log N) worst case for unsorted retroactive updates
     fn insert_batch(&mut self, mut entries: Vec<TimelineEntry>) {
         if entries.is_empty() {
             return;
         }
         self.versions.append(&mut entries);
-        // Timsort is O(N) for already sorted data and efficient for partially sorted data.
+        // Sort by start time. Timsort exploits existing order in the timeline.
         self.versions.sort_by_key(|e| e.start);
     }
 
@@ -58,8 +64,16 @@ impl EntityTimeline {
         // Find versions starting before the query range ends.
         let cutoff = self.versions.partition_point(|e| e.start < range.end());
 
-        // Scan candidate versions. Pre-allocate assuming a subset will match.
-        let mut results = Vec::with_capacity(cutoff.min(16));
+        // Adaptive pre-allocation heuristic:
+        // - Point/small range queries (< 1000 ticks) typically return 1-2 versions → cap at 4
+        // - Large range queries can return many versions → cap at 16
+        let range_size = range.end() - range.start();
+        let estimated_capacity = if range_size < 1000 {
+            cutoff.min(4) // Point query or small range
+        } else {
+            cutoff.min(16) // Large range query
+        };
+        let mut results = Vec::with_capacity(estimated_capacity);
         for entry in &self.versions[..cutoff] {
             if entry.end > range.start() {
                 results.push(entry.version_id);
@@ -140,9 +154,11 @@ impl TemporalIndexes {
         temporal: BiTemporalInterval,
     ) {
         let mut timelines = self.index.entry(entity_id).or_default();
-        
+
         let valid = temporal.valid_time();
-        timelines.valid.insert(valid.start(), valid.end(), version_id);
+        timelines
+            .valid
+            .insert(valid.start(), valid.end(), version_id);
 
         let tx = temporal.transaction_time();
         timelines.tx.insert(tx.start(), tx.end(), version_id);
@@ -305,8 +321,16 @@ mod tests {
         // Overlapping intervals (should be possible in valid time)
         let v1 = VersionId::new(1).unwrap();
         let v2 = VersionId::new(2).unwrap();
-        indexes.insert_node_version(node_id, v1, BiTemporalInterval::new(TimeRange::new(0, 2000), TimeRange::from(0)));
-        indexes.insert_node_version(node_id, v2, BiTemporalInterval::new(TimeRange::new(1000, 3000), TimeRange::from(0)));
+        indexes.insert_node_version(
+            node_id,
+            v1,
+            BiTemporalInterval::new(TimeRange::new(0, 2000), TimeRange::from(0)),
+        );
+        indexes.insert_node_version(
+            node_id,
+            v2,
+            BiTemporalInterval::new(TimeRange::new(1000, 3000), TimeRange::from(0)),
+        );
 
         // Query point at 1500 (both should match)
         let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(1500));
@@ -333,17 +357,27 @@ mod tests {
         let v1 = VersionId::new(1).unwrap();
         let v2 = VersionId::new(2).unwrap();
         // v1: [0, 1000), v2: [1000, 2000)
-        indexes.insert_node_version(node_id, v1, BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::from(0)));
-        indexes.insert_node_version(node_id, v2, BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::from(0)));
+        indexes.insert_node_version(
+            node_id,
+            v1,
+            BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::from(0)),
+        );
+        indexes.insert_node_version(
+            node_id,
+            v2,
+            BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::from(0)),
+        );
 
         // Query point at 1000 (only v2 because [start, end) is inclusive-exclusive)
         // Use [1000, 1001) to represent the point 1000
-        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(1000, 1001));
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(1000, 1001));
         assert_eq!(results.len(), 1);
         assert!(results.contains(&v2));
 
         // Query range [500, 1000) (only v1 because 1000 is exclusive)
-        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(500, 1000));
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(500, 1000));
         assert_eq!(results.len(), 1);
         assert!(results.contains(&v1));
     }
@@ -352,18 +386,28 @@ mod tests {
     fn test_batch_insertion() {
         let indexes = TemporalIndexes::new();
         let node_id = NodeId::new(1).unwrap();
-        
+
         let versions = vec![
-            (VersionId::new(1).unwrap(), BiTemporalInterval::new(TimeRange::new(0, 10), TimeRange::from(0))),
-            (VersionId::new(3).unwrap(), BiTemporalInterval::new(TimeRange::new(20, 30), TimeRange::from(0))),
-            (VersionId::new(2).unwrap(), BiTemporalInterval::new(TimeRange::new(10, 20), TimeRange::from(0))),
+            (
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::new(TimeRange::new(0, 10), TimeRange::from(0)),
+            ),
+            (
+                VersionId::new(3).unwrap(),
+                BiTemporalInterval::new(TimeRange::new(20, 30), TimeRange::from(0)),
+            ),
+            (
+                VersionId::new(2).unwrap(),
+                BiTemporalInterval::new(TimeRange::new(10, 20), TimeRange::from(0)),
+            ),
         ];
-        
+
         indexes.insert_node_versions_batch(node_id, versions);
-        
-        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(5, 25));
+
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(5, 25));
         assert_eq!(results.len(), 3);
-        
+
         // Verify sort order internally (though opaque to API)
         let timelines = indexes.index.get(&EntityId::Node(node_id)).unwrap();
         assert_eq!(timelines.valid.versions[0].start, 0);
@@ -443,5 +487,120 @@ mod tests {
         indexes.clear();
 
         assert_eq!(indexes.version_count(), 0);
+    }
+
+    #[test]
+    fn test_empty_timeline_query() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+
+        // Query an entity with no versions
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(0, 1000));
+
+        assert_eq!(results.len(), 0, "Empty timeline should return no results");
+    }
+
+    #[test]
+    fn test_concurrent_entity_writes() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let indexes = Arc::new(TemporalIndexes::new());
+        let num_threads = 10;
+        let versions_per_thread = 1000;
+
+        // Spawn multiple threads writing to different entities
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let idx = Arc::clone(&indexes);
+                thread::spawn(move || {
+                    let node_id = NodeId::new(thread_id + 1).unwrap();
+                    for v in 0..versions_per_thread {
+                        let version_id =
+                            VersionId::new(thread_id * versions_per_thread + v).unwrap();
+                        idx.insert_node_version(
+                            node_id,
+                            version_id,
+                            BiTemporalInterval::new(
+                                TimeRange::new((v * 1000) as i64, ((v + 1) * 1000) as i64),
+                                TimeRange::new(0, Timestamp::MAX),
+                            ),
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Verify all versions were indexed correctly
+        for thread_id in 0..num_threads {
+            let node_id = NodeId::new(thread_id + 1).unwrap();
+            let results = indexes.find_node_versions_in_valid_time_range(
+                node_id,
+                TimeRange::new(0, (versions_per_thread * 1000) as i64),
+            );
+            assert_eq!(
+                results.len(),
+                versions_per_thread as usize,
+                "Thread {} should have {} versions",
+                thread_id,
+                versions_per_thread
+            );
+        }
+
+        // Verify total version count (only counts valid timeline)
+        assert_eq!(
+            indexes.version_count(),
+            (num_threads * versions_per_thread) as usize,
+            "Total version count should match number of inserts"
+        );
+    }
+
+    #[test]
+    fn test_very_large_history() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_count = 100_000;
+
+        // Insert 100K versions
+        for i in 0..version_count {
+            let version_id = VersionId::new(i).unwrap();
+            indexes.insert_node_version(
+                node_id,
+                version_id,
+                BiTemporalInterval::new(
+                    TimeRange::new((i * 100) as i64, ((i + 1) * 100) as i64),
+                    TimeRange::new(0, Timestamp::MAX),
+                ),
+            );
+        }
+
+        // Query a small range in the middle - should be fast
+        let results = indexes
+            .find_node_versions_in_valid_time_range(node_id, TimeRange::new(5_000_000, 5_001_000));
+
+        // Should find ~10 versions in this range
+        assert!(
+            results.len() >= 10 && results.len() <= 11,
+            "Should find ~10 versions in 1000-tick range, found {}",
+            results.len()
+        );
+
+        // Query the entire timeline - should return all versions
+        let all_results = indexes.find_node_versions_in_valid_time_range(
+            node_id,
+            TimeRange::new(0, (version_count * 100) as i64),
+        );
+
+        assert_eq!(
+            all_results.len(),
+            version_count as usize,
+            "Should find all versions in full range query"
+        );
     }
 }
