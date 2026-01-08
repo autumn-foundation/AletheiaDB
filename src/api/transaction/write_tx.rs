@@ -956,8 +956,9 @@ impl WriteTransaction {
             num_deletes
         );
 
-        // Explicitly drop historical lock before rebuilding adjacency to document lock release point
-        // TemporalIndexes doesn't hold an outer lock (uses DashMap internally)
+        // Release historical write lock before rebuilding adjacency to avoid holding multiple
+        // exclusive locks simultaneously. TemporalIndexes uses fine-grained DashMap locking
+        // internally, so no explicit lock release needed (automatically released after inserts).
         drop(historical);
 
         // Rebuild adjacency indexes once after all edge operations

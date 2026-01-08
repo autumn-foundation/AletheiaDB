@@ -107,10 +107,22 @@ impl EntityTimeline {
     /// - Pre-allocates capacity to avoid multiple reallocations during append
     ///
     /// # Deduplication Policy for Recovery
-    /// When duplicate version IDs exist after merge, **first occurrence wins**.
-    /// This is correct for idempotent WAL replay: if a version is replayed twice,
-    /// the first insertion is kept. For non-idempotent scenarios where latest data
-    /// should win, callers must deduplicate before calling this method.
+    ///
+    /// After merging and sorting by `start` time, consecutive entries with duplicate
+    /// `version_id` are removed. The **first occurrence in the sorted vector** is kept,
+    /// which corresponds to the version with the earliest `start` time.
+    ///
+    /// **Rationale**: This is correct for idempotent WAL replay. If a version is
+    /// replayed multiple times, all replayed entries have identical start times, so
+    /// keeping the first occurrence (arbitrary among identical entries) is safe.
+    ///
+    /// **Important**: This method assumes duplicate `version_id` values represent
+    /// the same logical version being inserted multiple times. If duplicates represent
+    /// different versions (corrections), callers MUST use unique version IDs or
+    /// deduplicate before calling this method.
+    ///
+    /// **Future**: If use cases emerge requiring "latest-wins" semantics, we may add
+    /// a `DeduplicationPolicy` enum. See `docs/DEDUPLICATION_POLICY.md` for analysis.
     fn insert_batch(&mut self, mut entries: Vec<TimelineEntry>) {
         if entries.is_empty() {
             return;
@@ -221,6 +233,13 @@ impl TemporalIndexes {
     /// Insert a node version into the temporal indexes.
     ///
     /// Returns an error if the entity exceeds the configured version limit.
+    ///
+    /// # Performance Notes
+    ///
+    /// Retroactive inserts (inserting versions out of chronological order) require
+    /// O(N) vector shifting to maintain sorted order. Under high contention to the
+    /// same entity, consider using `insert_node_versions_batch()` to amortize
+    /// sorting costs across multiple versions.
     pub fn insert_node_version(
         &self,
         node_id: NodeId,
@@ -233,6 +252,13 @@ impl TemporalIndexes {
     /// Insert an edge version into the temporal indexes.
     ///
     /// Returns an error if the entity exceeds the configured version limit.
+    ///
+    /// # Performance Notes
+    ///
+    /// Retroactive inserts (inserting versions out of chronological order) require
+    /// O(N) vector shifting to maintain sorted order. Under high contention to the
+    /// same entity, consider using `insert_edge_versions_batch()` to amortize
+    /// sorting costs across multiple versions.
     pub fn insert_edge_version(
         &self,
         edge_id: EdgeId,
@@ -1009,6 +1035,52 @@ mod tests {
             version_count as usize,
             "Should find all versions in full range query"
         );
+    }
+
+    #[test]
+    fn test_same_start_time_different_versions() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(1).unwrap();
+        let v2 = VersionId::new(2).unwrap();
+
+        // Both versions start at time 1000 (e.g., two corrections recorded simultaneously)
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::from(0)),
+            )
+            .unwrap();
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(TimeRange::new(1000, 3000), TimeRange::from(0)),
+            )
+            .unwrap();
+
+        // Query at time 1500 should return both versions
+        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(1500));
+        assert_eq!(
+            results.len(),
+            2,
+            "Both versions should be found when they have the same start time"
+        );
+        assert!(results.contains(&v1), "Version 1 should be in results");
+        assert!(results.contains(&v2), "Version 2 should be in results");
+
+        // Verify timeline is sorted and both entries exist
+        let entity_id = EntityId::Node(node_id);
+        let timelines = indexes.index.get(&entity_id).unwrap();
+        assert_eq!(
+            timelines.valid.versions.len(),
+            2,
+            "Timeline should contain both versions"
+        );
+        // Both should have start time 1000
+        assert_eq!(timelines.valid.versions[0].start, 1000);
+        assert_eq!(timelines.valid.versions[1].start, 1000);
     }
 
     #[test]
