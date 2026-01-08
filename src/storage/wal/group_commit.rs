@@ -203,6 +203,22 @@ impl GroupCommitCoordinator {
         // Store any error for propagation
         state.last_flush_error = result.err().map(|e| e.to_string());
 
+        #[cfg(feature = "observability")]
+        {
+            let batch_size = state.batch_count;
+            let epoch = state.current_epoch;
+            let success = state.last_flush_error.is_none();
+
+            tracing::info!(
+                batch_size,
+                epoch,
+                success,
+                max_batch_size = self.config.max_batch_size,
+                max_delay_ms = self.config.max_delay_ms,
+                "GroupCommit batch flushed"
+            );
+        }
+
         // Advance the flushed epoch (even on error, so waiters wake up)
         state.flushed_epoch = state.current_epoch + 1;
         state.current_epoch += 1;

@@ -83,7 +83,23 @@ fn test_synchronous_mode_explicit() {
 
 #[test]
 fn test_async_mode_returns_immediately() {
-    let db = create_db_with_mode(DurabilityMode::Async {
+    // First, measure synchronous mode as baseline (10 writes to avoid excessive CI time)
+    let sync_db = create_db_with_mode(DurabilityMode::Synchronous);
+    let sync_start = Instant::now();
+    for i in 0..10 {
+        sync_db
+            .write(|tx| {
+                tx.create_node(
+                    "Record",
+                    PropertyMapBuilder::new().insert("index", i as i64).build(),
+                )
+            })
+            .expect("sync write failed");
+    }
+    let sync_elapsed = sync_start.elapsed();
+
+    // Now measure async mode
+    let async_db = create_db_with_mode(DurabilityMode::Async {
         flush_interval_ms: 100, // Long interval so we can measure
     });
 
@@ -93,35 +109,38 @@ fn test_async_mode_returns_immediately() {
         }),
     };
 
-    let start = Instant::now();
+    let async_start = Instant::now();
     let mut node_ids = Vec::new();
 
-    // Write many nodes - should return very quickly without waiting for fsync
-    for i in 0..100 {
-        let node_id = db
+    // Write same number of nodes - should return much faster than sync
+    for i in 0..10 {
+        let node_id = async_db
             .write_with_options(options.clone(), |tx| {
                 tx.create_node(
                     "Record",
                     PropertyMapBuilder::new().insert("index", i as i64).build(),
                 )
             })
-            .expect("write failed");
+            .expect("async write failed");
         node_ids.push(node_id);
     }
 
-    let elapsed = start.elapsed();
+    let async_elapsed = async_start.elapsed();
 
-    // 100 async writes should complete very quickly (no fsync per write)
-    // Being conservative with 500ms threshold - real value should be much faster
+    // Async should be at least 2x faster than sync (ratio-based, CI-resilient)
+    // Even on heavily loaded systems, async (no fsync) should outperform sync (10 fsyncs)
+    let max_async_time = sync_elapsed / 2;
     assert!(
-        elapsed < Duration::from_millis(500),
-        "Async writes took too long: {:?}",
-        elapsed
+        async_elapsed < max_async_time,
+        "Async writes not significantly faster than sync: async={:?}, sync={:?}, threshold={:?}",
+        async_elapsed,
+        sync_elapsed,
+        max_async_time
     );
 
     // All nodes should be visible (data is in memory/WAL buffer)
     for node_id in node_ids {
-        let node = db.get_node(node_id).expect("lookup failed");
+        let node = async_db.get_node(node_id).expect("lookup failed");
         assert_eq!(get_label(&node), "Record");
     }
 }
