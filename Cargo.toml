@@ -48,7 +48,6 @@ num_cpus = { version = "1.16", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
-criterion-table = "0.3"
 proptest = "1.4"
 rand = "0.8"
 tempfile = "3.8"
@@ -56,6 +55,7 @@ tempfile = "3.8"
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util"] }
 # Mutex for serializing env var tests
 lazy_static = "1.4"
+rayon = "1.8"
 
 [features]
 # Enable Tracy profiling (use with: cargo build --release --features tracy)

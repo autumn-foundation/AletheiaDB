@@ -439,9 +439,18 @@ fn bench_dot_product_batch(c: &mut Criterion) {
     group.finish();
 }
 
+fn configure_criterion() -> Criterion {
+    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
+        .map(|s| s.parse().unwrap_or(50))
+        .unwrap_or(50);
+
+    Criterion::default().sample_size(sample_size)
+}
+
 criterion_group!(
-    benches,
-    bench_cosine_similarity_dimensions,
+    name = benches;
+    config = configure_criterion();
+    targets = bench_cosine_similarity_dimensions,
     bench_cosine_similarity_openai,
     bench_cosine_similarity_normalized,
     bench_cosine_similarity_batch,
