@@ -379,49 +379,63 @@ impl VectorSnapshot {
     ///
     /// Uses iterative traversal through delta chain to avoid stack overflow.
     /// Enforces MAX_DELTA_CHAIN_DEPTH to prevent unbounded traversal.
+    ///
+    /// Returns:
+    /// - Ok(Some(vector)) - Vector found
+    /// - Ok(None) - Vector not found or was removed
+    /// - Err - Delta chain depth exceeded or corrupted snapshot state
     fn get_vector(
         &self,
         node_id: &NodeId,
         all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
-    ) -> Option<Arc<[f32]>> {
+    ) -> Result<Option<Arc<[f32]>>> {
         let mut current = self;
         let mut depth = 0;
 
         // Iteratively traverse the delta chain with depth limit
         loop {
             // SAFETY: Check depth limit to prevent unbounded traversal
-            // If chain exceeds MAX_DELTA_CHAIN_DEPTH, it indicates either:
-            // 1. Corrupted snapshot state (delta-of-delta chains)
-            // 2. Misconfiguration (full_snapshot_interval too large)
+            // If chain exceeds MAX_DELTA_CHAIN_DEPTH, return error instead of silently failing
             if depth >= MAX_DELTA_CHAIN_DEPTH {
-                // NOTE: Using eprintln! until logging framework is added to project.
-                // This should be replaced with log::warn! or tracing::warn! when available.
-                eprintln!(
-                    "WARNING: Delta chain depth exceeded {} for node {:?}. \
-                     This may indicate corrupted snapshot state or misconfiguration.",
-                    MAX_DELTA_CHAIN_DEPTH, node_id
-                );
-                return None;
+                return Err(VectorError::IndexError(
+                    format!(
+                        "Delta chain depth exceeded {} for node {:?}. \
+                         This indicates corrupted snapshot state or misconfiguration. \
+                         Reduce full_snapshot_interval or check snapshot integrity.",
+                        MAX_DELTA_CHAIN_DEPTH, node_id
+                    )
+                ).into());
             }
 
             match current {
                 VectorSnapshot::Full(vectors) => {
-                    return vectors.get(node_id).cloned();
+                    return Ok(vectors.get(node_id).cloned());
                 }
                 VectorSnapshot::Delta { base_time, added, removed } => {
                     // First check if removed
                     if removed.contains(node_id) {
-                        return None;
+                        return Ok(None);
                     }
 
                     // Then check if in added/updated
                     if let Some(vec) = added.get(node_id) {
-                        return Some(Arc::clone(vec));
+                        return Ok(Some(Arc::clone(vec)));
                     }
 
                     // Continue to base snapshot
-                    current = all_snapshots.get(base_time)?;
-                    depth += 1;
+                    if let Some(base) = all_snapshots.get(base_time) {
+                        current = base;
+                        depth += 1;
+                    } else {
+                        // Base snapshot was pruned - this is corrupted state
+                        return Err(VectorError::IndexError(
+                            format!(
+                                "Base snapshot at timestamp {} not found for node {:?}. \
+                                 Snapshot state is corrupted or base was incorrectly pruned.",
+                                base_time, node_id
+                            )
+                        ).into());
+                    }
                 }
             }
         }
@@ -432,13 +446,15 @@ impl VectorSnapshot {
     /// For delta snapshots, this combines the base with added/removed changes.
     /// Uses iterative traversal with depth limiting to prevent stack overflow.
     ///
-    /// # Safety
-    /// Enforces MAX_DELTA_CHAIN_DEPTH to prevent unbounded traversal.
-    /// If depth is exceeded, returns a partial result (stops at depth limit).
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Delta chain depth exceeds MAX_DELTA_CHAIN_DEPTH (corrupted state)
+    /// - Base snapshot is missing (corrupted state or incorrect pruning)
     fn to_hashmap(
         &self,
         all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
-    ) -> HashMap<NodeId, Arc<[f32]>> {
+    ) -> Result<HashMap<NodeId, Arc<[f32]>>> {
         // Use iterative approach to prevent stack overflow (similar to get_vector)
         let mut current = self;
         let mut depth = 0;
@@ -453,15 +469,15 @@ impl VectorSnapshot {
         // Walk backwards through delta chain to find the Full snapshot base
         let base_vectors: HashMap<NodeId, Arc<[f32]>> = loop {
             if depth >= MAX_DELTA_CHAIN_DEPTH {
-                // SAFETY: Depth limit exceeded, log warning and return partial result
-                eprintln!(
-                    "WARNING: Delta chain depth exceeded {} in to_hashmap(). \
-                     Returning partial snapshot reconstruction. \
-                     This may indicate corrupted snapshot state or misconfiguration.",
-                    MAX_DELTA_CHAIN_DEPTH
-                );
-                // Start with empty base if we hit depth limit
-                break HashMap::new();
+                // Return error instead of partial results to prevent silent data loss
+                return Err(VectorError::IndexError(
+                    format!(
+                        "Delta chain depth exceeded {} in to_hashmap(). \
+                         This indicates corrupted snapshot state or misconfiguration. \
+                         Reduce full_snapshot_interval or check snapshot integrity.",
+                        MAX_DELTA_CHAIN_DEPTH
+                    )
+                ).into());
             }
 
             match current {
@@ -478,13 +494,14 @@ impl VectorSnapshot {
                         current = base_snapshot;
                         depth += 1;
                     } else {
-                        // Base was pruned, start with empty
-                        eprintln!(
-                            "WARNING: Base snapshot at {} not found in to_hashmap(). \
-                             Returning partial reconstruction.",
-                            base_time
-                        );
-                        break HashMap::new();
+                        // Base was pruned - return error to prevent silent data loss
+                        return Err(VectorError::IndexError(
+                            format!(
+                                "Base snapshot at timestamp {} not found in to_hashmap(). \
+                                 Snapshot state is corrupted or base was incorrectly pruned.",
+                                base_time
+                            )
+                        ).into());
                     }
                 }
             }
@@ -503,7 +520,7 @@ impl VectorSnapshot {
             }
         }
 
-        result
+        Ok(result)
     }
 
     /// Returns an approximate count of vectors in this snapshot.
@@ -539,12 +556,16 @@ impl VectorSnapshot {
     ///
     /// For delta snapshots, this reconstructs the full set.
     /// Returns a vector of (NodeId, Arc<[f32]>) pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot state is corrupted (see `to_hashmap` for details).
     fn collect_all(
         &self,
         all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
-    ) -> Vec<(NodeId, Arc<[f32]>)> {
-        let hashmap = self.to_hashmap(all_snapshots);
-        hashmap.into_iter().collect()
+    ) -> Result<Vec<(NodeId, Arc<[f32]>)>> {
+        let hashmap = self.to_hashmap(all_snapshots)?;
+        Ok(hashmap.into_iter().collect())
     }
 }
 
@@ -1468,7 +1489,7 @@ impl TemporalVectorIndex {
             .vector_history
             .range(time_range.start()..=time_range.end())
         {
-            if let Some(vector) = snapshot_vectors.get_vector(&node_id, &snapshot_data.vector_history) {
+            if let Some(vector) = snapshot_vectors.get_vector(&node_id, &snapshot_data.vector_history)? {
                 evolution.push((timestamp, vector));
             }
         }
@@ -1562,7 +1583,7 @@ impl TemporalVectorIndex {
             .vector_history
             .range(time_range.start()..=time_range.end())
         {
-            let all_vectors = snapshot_vectors.collect_all(&snapshot_data.vector_history);
+            let all_vectors = snapshot_vectors.collect_all(&snapshot_data.vector_history)?;
             for (node_id, curr_vector) in all_vectors {
                 if let Some(prev_vector) = last_vectors.get(&node_id) {
                     let drift = Self::compute_drift_distance(prev_vector, &curr_vector, metric)?;
@@ -3480,18 +3501,25 @@ mod tests {
             index.on_transaction_at(timestamp)?;
         }
 
-        // Call collect_all() which uses to_hashmap() - should NOT stack overflow
+        // Call collect_all() which uses to_hashmap() - should succeed without panicking
+        // With full_snapshot_interval=10, we get full snapshots periodically,
+        // so max delta chain is ~5 (well under MAX_DELTA_CHAIN_DEPTH=10)
         let snapshot_data = index.snapshot_data.read();
         let latest_timestamp = 1000 + (15 * 100);
         if let Some(latest_snapshot) = snapshot_data.vector_history.get(&latest_timestamp) {
-            let all_vectors = latest_snapshot.collect_all(&snapshot_data.vector_history);
+            let result = latest_snapshot.collect_all(&snapshot_data.vector_history);
 
-            // Should return SOME results (may be partial due to depth limit)
-            // The key is that it doesn't panic/overflow
+            // Should succeed (not panic) and return all vectors
+            // If depth were exceeded, it would return an error instead of partial results
             assert!(
-                !all_vectors.is_empty() || all_vectors.is_empty(),
-                "collect_all() should complete without stack overflow (result may be partial)"
+                result.is_ok(),
+                "collect_all() should succeed without overflow when full snapshots are properly spaced"
             );
+
+            // Verify we got results
+            if let Ok(all_vectors) = result {
+                assert!(!all_vectors.is_empty(), "Should have collected vectors");
+            }
         }
 
         Ok(())
@@ -3520,7 +3548,9 @@ mod tests {
         }
 
         // Call find_semantic_drift which internally uses collect_all/to_hashmap
-        // Should NOT stack overflow even with deep delta chain
+        // Should NOT stack overflow even with many snapshots
+        // With full_snapshot_interval=10, we get full snapshots at 0 and 10,
+        // so max delta chain is 5 (snapshots 11-15), well under MAX_DELTA_CHAIN_DEPTH
         use crate::core::temporal::TimeRange;
         let time_range = TimeRange::new(1000, 2500);
         let result = index.find_semantic_drift(
@@ -3529,11 +3559,54 @@ mod tests {
             DriftMetric::Cosine,
         );
 
-        // Test passes if it doesn't panic/overflow
-        // Result may be partial due to depth limit, but that's acceptable
-        assert!(result.is_ok(), "find_semantic_drift should handle deep chains without overflow");
+        // Test passes if it doesn't panic/overflow and returns valid results
+        // (no depth limit exceeded since we have proper full snapshots)
+        assert!(result.is_ok(), "find_semantic_drift should handle chains within depth limit");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_depth_limit_error_behavior() {
+        // Test that missing base snapshot returns a proper error
+        // Directly test the VectorSnapshot methods with corrupted state
+
+        use std::collections::BTreeMap;
+
+        // Create a delta snapshot that references a missing base
+        let delta_snapshot = VectorSnapshot::Delta {
+            base_time: 1000, // This base won't exist
+            added: Arc::new(HashMap::from([
+                (NodeId::new(1).unwrap(), Arc::from(vec![1.0f32, 0.0f32, 0.0f32, 0.0f32]) as Arc<[f32]>),
+            ])),
+            removed: Arc::new(HashSet::new()),
+        };
+
+        let snapshots: BTreeMap<Timestamp, VectorSnapshot> = BTreeMap::new(); // Empty - no base
+
+        // Test get_vector with missing base - query a node NOT in added, so it must traverse to base
+        let result = delta_snapshot.get_vector(&NodeId::new(2).unwrap(), &snapshots);
+        assert!(result.is_err(), "Should return error when base snapshot is missing");
+
+        if let Err(err) = result {
+            let err_msg = err.to_string();
+            assert!(
+                err_msg.contains("not found") || err_msg.contains("corrupted"),
+                "Error should mention missing base or corrupted state, got: {}", err_msg
+            );
+        }
+
+        // Test to_hashmap with missing base
+        let result = delta_snapshot.to_hashmap(&snapshots);
+        assert!(result.is_err(), "to_hashmap should return error when base snapshot is missing");
+
+        if let Err(err) = result {
+            let err_msg = err.to_string();
+            assert!(
+                err_msg.contains("not found") || err_msg.contains("corrupted"),
+                "Error should mention missing base or corrupted state, got: {}", err_msg
+            );
+        }
     }
 
     // ==================== Config Validation Tests ====================
