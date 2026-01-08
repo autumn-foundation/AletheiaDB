@@ -1231,4 +1231,250 @@ mod tests {
             );
         }
     }
+
+    // Property-based tests using proptest
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Strategy for generating valid timestamps (avoid overflow)
+        fn timestamp_strategy() -> impl Strategy<Value = i64> {
+            0i64..1_000_000_000i64
+        }
+
+        // Strategy for generating time ranges
+        fn time_range_strategy() -> impl Strategy<Value = (i64, i64)> {
+            timestamp_strategy()
+                .prop_flat_map(|start| (Just(start), (start + 1)..=(start + 10_000)))
+        }
+
+        // Strategy for generating version entries
+        fn version_entry_strategy() -> impl Strategy<Value = (VersionId, BiTemporalInterval)> {
+            (0u64..10_000u64, time_range_strategy()).prop_map(|(vid, (start, end))| {
+                (
+                    VersionId::new(vid).unwrap(),
+                    BiTemporalInterval::new(
+                        TimeRange::new(start, end),
+                        TimeRange::new(0, Timestamp::MAX),
+                    ),
+                )
+            })
+        }
+
+        proptest! {
+            /// Property: Inserting versions in any order should produce the same sorted timeline
+            #[test]
+            fn prop_insert_order_irrelevant(
+                versions in prop::collection::vec(version_entry_strategy(), 1..100)
+            ) {
+                let indexes = TemporalIndexes::new();
+                let node_id = NodeId::new(1).unwrap();
+
+                // Insert in original order
+                for (version_id, temporal) in &versions {
+                    indexes.insert_node_version(node_id, *version_id, *temporal).unwrap();
+                }
+
+                // Get the timeline
+                let entity_id = EntityId::Node(node_id);
+                let timeline1 = indexes.index.get(&entity_id).unwrap().valid.versions.clone();
+
+                // Clear and insert in shuffled order
+                indexes.clear();
+                let mut shuffled = versions.clone();
+                shuffled.sort_by_key(|(vid, _)| *vid); // Sort by version ID (different order)
+                for (version_id, temporal) in shuffled {
+                    indexes.insert_node_version(node_id, version_id, temporal).unwrap();
+                }
+
+                let timeline2 = indexes.index.get(&entity_id).unwrap().valid.versions.clone();
+
+                // Both timelines should be sorted by start time
+                for i in 1..timeline1.len() {
+                    prop_assert!(timeline1[i-1].start <= timeline1[i].start);
+                }
+                for i in 1..timeline2.len() {
+                    prop_assert!(timeline2[i-1].start <= timeline2[i].start);
+                }
+
+                // Both timelines should have the same versions at the same sorted positions
+                prop_assert_eq!(timeline1.len(), timeline2.len());
+                for i in 0..timeline1.len() {
+                    prop_assert_eq!(timeline1[i].start, timeline2[i].start);
+                    prop_assert_eq!(timeline1[i].end, timeline2[i].end);
+                    prop_assert_eq!(timeline1[i].version_id, timeline2[i].version_id);
+                }
+            }
+
+            /// Property: Time range queries should return exactly the versions that overlap
+            #[test]
+            fn prop_range_query_correctness(
+                versions in prop::collection::vec(version_entry_strategy(), 1..50),
+                query_range in time_range_strategy()
+            ) {
+                let indexes = TemporalIndexes::new();
+                let node_id = NodeId::new(1).unwrap();
+
+                // Insert all versions
+                for (version_id, temporal) in &versions {
+                    indexes.insert_node_version(node_id, *version_id, *temporal).unwrap();
+                }
+
+                // Query the range
+                let query_time_range = TimeRange::new(query_range.0, query_range.1);
+                let results = indexes.find_node_versions_in_valid_time_range(node_id, query_time_range);
+
+                // Manually compute expected results
+                let mut expected: Vec<VersionId> = versions
+                    .iter()
+                    .filter(|(_, temporal)| {
+                        let valid = temporal.valid_time();
+                        // Check overlap: version.end > query.start && version.start < query.end
+                        valid.end() > query_range.0 && valid.start() < query_range.1
+                    })
+                    .map(|(vid, _)| *vid)
+                    .collect();
+
+                // Sort both for comparison (query results may not be in insertion order)
+                let mut results_sorted = results.clone();
+                results_sorted.sort();
+                expected.sort();
+
+                prop_assert_eq!(results_sorted, expected, "Query returned incorrect versions");
+            }
+
+            /// Property: Batch insert should be equivalent to individual inserts (when no duplicates)
+            #[test]
+            fn prop_batch_insert_equivalence(
+                versions in prop::collection::vec(version_entry_strategy(), 1..50)
+            ) {
+                let node_id = NodeId::new(1).unwrap();
+
+                // Remove duplicates from input to ensure fair comparison
+                let mut unique_versions = versions.clone();
+                unique_versions.sort_by_key(|(vid, _)| *vid);
+                unique_versions.dedup_by_key(|(vid, _)| *vid);
+
+                // Individual inserts
+                let indexes1 = TemporalIndexes::new();
+                for (version_id, temporal) in &unique_versions {
+                    indexes1.insert_node_version(node_id, *version_id, *temporal).unwrap();
+                }
+
+                // Batch insert
+                let indexes2 = TemporalIndexes::new();
+                indexes2.insert_node_versions_batch(node_id, unique_versions.clone()).unwrap();
+
+                // Both should produce identical timelines
+                let entity_id = EntityId::Node(node_id);
+                let timeline1 = indexes1.index.get(&entity_id).unwrap().valid.versions.clone();
+                let timeline2 = indexes2.index.get(&entity_id).unwrap().valid.versions.clone();
+
+                prop_assert_eq!(timeline1.len(), timeline2.len());
+                for i in 0..timeline1.len() {
+                    prop_assert_eq!(timeline1[i].start, timeline2[i].start);
+                    prop_assert_eq!(timeline1[i].end, timeline2[i].end);
+                    prop_assert_eq!(timeline1[i].version_id, timeline2[i].version_id);
+                }
+            }
+
+            /// Property: Timeline should remain sorted after random retroactive inserts
+            #[test]
+            fn prop_retroactive_inserts_maintain_order(
+                versions in prop::collection::vec(version_entry_strategy(), 1..100)
+            ) {
+                let indexes = TemporalIndexes::new();
+                let node_id = NodeId::new(1).unwrap();
+
+                // Insert versions in random order (simulates retroactive inserts)
+                for (version_id, temporal) in &versions {
+                    indexes.insert_node_version(node_id, *version_id, *temporal).unwrap();
+                }
+
+                // Verify timeline is sorted
+                let entity_id = EntityId::Node(node_id);
+                let timeline = indexes.index.get(&entity_id).unwrap().valid.versions.clone();
+
+                for i in 1..timeline.len() {
+                    prop_assert!(
+                        timeline[i-1].start <= timeline[i].start,
+                        "Timeline not sorted: timeline[{}].start={} > timeline[{}].start={}",
+                        i-1, timeline[i-1].start, i, timeline[i].start
+                    );
+                }
+            }
+
+            /// Property: Point queries should return subset of range queries
+            #[test]
+            fn prop_point_query_subset_of_range(
+                versions in prop::collection::vec(version_entry_strategy(), 1..50),
+                point in timestamp_strategy()
+            ) {
+                let indexes = TemporalIndexes::new();
+                let node_id = NodeId::new(1).unwrap();
+
+                // Insert all versions
+                for (version_id, temporal) in &versions {
+                    indexes.insert_node_version(node_id, *version_id, *temporal).unwrap();
+                }
+
+                // Point query
+                let point_results = indexes.find_node_versions_in_valid_time_range(
+                    node_id,
+                    TimeRange::new(point, point + 1)
+                );
+
+                // Range query covering the point
+                let range_results = indexes.find_node_versions_in_valid_time_range(
+                    node_id,
+                    TimeRange::new(point - 1000, point + 1000)
+                );
+
+                // Every version from point query should be in range query
+                for version_id in point_results {
+                    prop_assert!(
+                        range_results.contains(&version_id),
+                        "Point query returned version not in range query: {:?}",
+                        version_id
+                    );
+                }
+            }
+
+            /// Property: Timeline remains sorted after batch insert
+            #[test]
+            fn prop_batch_maintains_sort_order(
+                versions in prop::collection::vec(version_entry_strategy(), 1..50)
+            ) {
+                let indexes = TemporalIndexes::new();
+                let node_id = NodeId::new(1).unwrap();
+
+                // Batch insert
+                indexes.insert_node_versions_batch(node_id, versions).unwrap();
+
+                // Get timeline
+                let entity_id = EntityId::Node(node_id);
+                if let Some(timelines) = indexes.index.get(&entity_id) {
+                    let timeline = &timelines.valid.versions;
+
+                    // Verify timeline is sorted by start time
+                    for i in 1..timeline.len() {
+                        prop_assert!(
+                            timeline[i-1].start <= timeline[i].start,
+                            "Timeline must be sorted by start time"
+                        );
+                    }
+
+                    // Verify no consecutive duplicates (same version ID + start time)
+                    for i in 1..timeline.len() {
+                        if timeline[i-1].start == timeline[i].start {
+                            prop_assert!(
+                                timeline[i-1].version_id != timeline[i].version_id,
+                                "No consecutive entries with same start time and version ID"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
