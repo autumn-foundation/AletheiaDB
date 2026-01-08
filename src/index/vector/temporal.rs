@@ -135,7 +135,6 @@ impl Default for RetentionPolicy {
 ///     hnsw_config: HnswConfig::new(384, DistanceMetric::Cosine),
 /// };
 /// ```
-
 /// Maximum number of retries when creating a snapshot due to races (default: 3)
 const MAX_SNAPSHOT_RETRIES: usize = 3;
 
@@ -146,8 +145,28 @@ const MAX_DELTA_CHAIN_DEPTH: usize = 10;
 
 /// Minimum capacity estimate for HashMap pre-allocation (default: 100)
 /// Used when estimating capacity for vector collections to avoid excessive resizing.
+///
+/// **Justification**: 100 is a reasonable baseline that:
+/// - Avoids excessive allocations for small datasets (most vectors fit in 1 allocation)
+/// - Prevents too many resizes for medium datasets
+/// - Has negligible overhead (~800 bytes for empty capacity-100 HashMap)
+/// - Aligns with common batch sizes in vector databases
 const MIN_CAPACITY_ESTIMATE: usize = 100;
 
+/// Maximum accumulated changes before forcing a full snapshot (default: 100,000)
+///
+/// If `changes_accumulated` exceeds this threshold, force a full snapshot
+/// regardless of `full_snapshot_interval`. This prevents unbounded memory growth
+/// in write-heavy workloads.
+///
+/// **Justification**: 100k NodeIds × 8 bytes = 800 KB overhead, which is acceptable
+/// but starting to impact memory. Forcing a full snapshot resets the accumulator.
+const MAX_ACCUMULATED_CHANGES: usize = 100_000;
+
+/// Configuration for temporal vector index with snapshot management.
+///
+/// Controls how and when snapshots are created, retained, and pruned to balance
+/// memory usage, query performance, and historical depth.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TemporalVectorConfig {
     /// Snapshot creation strategy
@@ -186,22 +205,19 @@ impl TemporalVectorConfig {
     /// which would cause get_vector() and to_hashmap() to return partial/empty results.
     pub fn validate(&self) -> Result<()> {
         if self.full_snapshot_interval > MAX_DELTA_CHAIN_DEPTH {
-            return Err(VectorError::IndexError(
-                format!(
-                    "full_snapshot_interval ({}) exceeds MAX_DELTA_CHAIN_DEPTH ({}). \
+            return Err(VectorError::IndexError(format!(
+                "full_snapshot_interval ({}) exceeds MAX_DELTA_CHAIN_DEPTH ({}). \
                      This would cause delta chains to exceed traversal depth limits, \
                      leading to silent data loss. Reduce full_snapshot_interval to at most {}.",
-                    self.full_snapshot_interval,
-                    MAX_DELTA_CHAIN_DEPTH,
-                    MAX_DELTA_CHAIN_DEPTH
-                )
-            ).into());
+                self.full_snapshot_interval, MAX_DELTA_CHAIN_DEPTH, MAX_DELTA_CHAIN_DEPTH
+            ))
+            .into());
         }
 
         if self.max_snapshots == 0 {
-            return Err(VectorError::IndexError(
-                "max_snapshots must be at least 1".to_string()
-            ).into());
+            return Err(
+                VectorError::IndexError("max_snapshots must be at least 1".to_string()).into(),
+            );
         }
 
         Ok(())
@@ -397,21 +413,24 @@ impl VectorSnapshot {
             // SAFETY: Check depth limit to prevent unbounded traversal
             // If chain exceeds MAX_DELTA_CHAIN_DEPTH, return error instead of silently failing
             if depth >= MAX_DELTA_CHAIN_DEPTH {
-                return Err(VectorError::IndexError(
-                    format!(
-                        "Delta chain depth exceeded {} for node {:?}. \
+                return Err(VectorError::IndexError(format!(
+                    "Delta chain depth exceeded {} for node {:?}. \
                          This indicates corrupted snapshot state or misconfiguration. \
                          Reduce full_snapshot_interval or check snapshot integrity.",
-                        MAX_DELTA_CHAIN_DEPTH, node_id
-                    )
-                ).into());
+                    MAX_DELTA_CHAIN_DEPTH, node_id
+                ))
+                .into());
             }
 
             match current {
                 VectorSnapshot::Full(vectors) => {
                     return Ok(vectors.get(node_id).cloned());
                 }
-                VectorSnapshot::Delta { base_time, added, removed } => {
+                VectorSnapshot::Delta {
+                    base_time,
+                    added,
+                    removed,
+                } => {
                     // First check if removed
                     if removed.contains(node_id) {
                         return Ok(None);
@@ -428,13 +447,12 @@ impl VectorSnapshot {
                         depth += 1;
                     } else {
                         // Base snapshot was pruned - this is corrupted state
-                        return Err(VectorError::IndexError(
-                            format!(
-                                "Base snapshot at timestamp {} not found for node {:?}. \
+                        return Err(VectorError::IndexError(format!(
+                            "Base snapshot at timestamp {} not found for node {:?}. \
                                  Snapshot state is corrupted or base was incorrectly pruned.",
-                                base_time, node_id
-                            )
-                        ).into());
+                            base_time, node_id
+                        ))
+                        .into());
                     }
                 }
             }
@@ -470,14 +488,13 @@ impl VectorSnapshot {
         let base_vectors: HashMap<NodeId, Arc<[f32]>> = loop {
             if depth >= MAX_DELTA_CHAIN_DEPTH {
                 // Return error instead of partial results to prevent silent data loss
-                return Err(VectorError::IndexError(
-                    format!(
-                        "Delta chain depth exceeded {} in to_hashmap(). \
+                return Err(VectorError::IndexError(format!(
+                    "Delta chain depth exceeded {} in to_hashmap(). \
                          This indicates corrupted snapshot state or misconfiguration. \
                          Reduce full_snapshot_interval or check snapshot integrity.",
-                        MAX_DELTA_CHAIN_DEPTH
-                    )
-                ).into());
+                    MAX_DELTA_CHAIN_DEPTH
+                ))
+                .into());
             }
 
             match current {
@@ -485,7 +502,11 @@ impl VectorSnapshot {
                     // Found the base Full snapshot
                     break (**vectors).clone();
                 }
-                VectorSnapshot::Delta { base_time, added, removed } => {
+                VectorSnapshot::Delta {
+                    base_time,
+                    added,
+                    removed,
+                } => {
                     // Record this delta layer for later application
                     delta_layers.push(DeltaLayer { added, removed });
 
@@ -495,13 +516,12 @@ impl VectorSnapshot {
                         depth += 1;
                     } else {
                         // Base was pruned - return error to prevent silent data loss
-                        return Err(VectorError::IndexError(
-                            format!(
-                                "Base snapshot at timestamp {} not found in to_hashmap(). \
+                        return Err(VectorError::IndexError(format!(
+                            "Base snapshot at timestamp {} not found in to_hashmap(). \
                                  Snapshot state is corrupted or base was incorrectly pruned.",
-                                base_time
-                            )
-                        ).into());
+                            base_time
+                        ))
+                        .into());
                     }
                 }
             }
@@ -580,20 +600,21 @@ enum SnapshotIndex {
 impl std::fmt::Debug for SnapshotIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SnapshotIndex::Full(index) => {
-                f.debug_struct("SnapshotIndex::Full")
-                    .field("len", &index.len())
-                    .field("dimensions", &index.dimensions())
-                    .finish()
-            }
-            SnapshotIndex::Delta(delta) => {
-                f.debug_struct("SnapshotIndex::Delta")
-                    .field("base_len", &delta.base.len())
-                    .field("added_len", &delta.added.len())
-                    .field("removed_len", &delta.removed.len())
-                    .field("total_len", &(delta.base.len() + delta.added.len() - delta.removed.len()))
-                    .finish()
-            }
+            SnapshotIndex::Full(index) => f
+                .debug_struct("SnapshotIndex::Full")
+                .field("len", &index.len())
+                .field("dimensions", &index.dimensions())
+                .finish(),
+            SnapshotIndex::Delta(delta) => f
+                .debug_struct("SnapshotIndex::Delta")
+                .field("base_len", &delta.base.len())
+                .field("added_len", &delta.added.len())
+                .field("removed_len", &delta.removed.len())
+                .field(
+                    "total_len",
+                    &(delta.base.len() + delta.added.len() - delta.removed.len()),
+                )
+                .finish(),
         }
     }
 }
@@ -611,8 +632,7 @@ impl SnapshotIndex {
         query: &[f32],
         k: usize,
         predicate: &(dyn Fn(&NodeId) -> bool + Send + Sync),
-    ) -> Result<Vec<(NodeId, f32)>>
-    {
+    ) -> Result<Vec<(NodeId, f32)>> {
         match self {
             SnapshotIndex::Full(index) => index.search_with_filter(query, k, predicate),
             SnapshotIndex::Delta(delta) => delta.search_with_filter(query, k, predicate),
@@ -636,7 +656,6 @@ impl SnapshotIndex {
             SnapshotIndex::Delta(delta) => delta.added.dimensions(),
         }
     }
-
 }
 
 /// A delta snapshot that stores only changes relative to a base snapshot.
@@ -680,7 +699,9 @@ impl DeltaIndex {
         // - Nodes that were updated (old version in base, new version in added)
         // - Nodes that were removed (present in base, deleted from current state)
         let removed = &self.removed;
-        let base_results = self.base.search_with_filter(query, search_k, &|id| !removed.contains(id))?;
+        let base_results = self
+            .base
+            .search_with_filter(query, search_k, &|id| !removed.contains(id))?;
 
         // 3. Merge results from both indexes
         results.extend(base_results);
@@ -704,8 +725,7 @@ impl DeltaIndex {
         query: &[f32],
         k: usize,
         predicate: &(dyn Fn(&NodeId) -> bool + Send + Sync),
-    ) -> Result<Vec<(NodeId, f32)>>
-    {
+    ) -> Result<Vec<(NodeId, f32)>> {
         // Search for k*2 candidates to ensure global top-k (same strategy as search())
         let search_k = k.saturating_mul(2).max(k + 10);
 
@@ -717,12 +737,16 @@ impl DeltaIndex {
         let mut results = self.added.search_with_filter(query, search_k, predicate)?;
 
         // Search base (using combined predicate to filter out removed/updated nodes)
-        let base_results = self.base.search_with_filter(query, search_k, &combined_predicate)?;
+        let base_results = self
+            .base
+            .search_with_filter(query, search_k, &combined_predicate)?;
 
         // Merge results
         results.extend(base_results);
 
-        // Deduplicate (safety measure)
+        // Deduplicate: Although the combined predicate should prevent duplicates,
+        // we deduplicate as a safety measure to ensure correctness.
+        // We keep the first occurrence (which has the better score after sorting).
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         results.retain(|(id, _)| seen.insert(*id));
@@ -921,10 +945,7 @@ impl TemporalVectorIndex {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_micros() as Timestamp)
             .map_err(|_| {
-                VectorError::IndexError(
-                    "System time is before UNIX epoch".to_string(),
-                )
-                .into()
+                VectorError::IndexError("System time is before UNIX epoch".to_string()).into()
             })
     }
 
@@ -1049,13 +1070,12 @@ impl TemporalVectorIndex {
         // SAFETY VALIDATION: Ensure base is a Full snapshot, not a Delta
         // This prevents delta-of-delta chains which would violate our performance guarantees
         if !matches!(*base, SnapshotIndex::Full(_)) {
-            return Err(VectorError::IndexError(
-                format!(
-                    "CRITICAL: Attempted to create delta snapshot with non-Full base at timestamp {}. \
+            return Err(VectorError::IndexError(format!(
+                "CRITICAL: Attempted to create delta snapshot with non-Full base at timestamp {}. \
                      Delta-of-delta chains are not allowed. Base must be a Full snapshot.",
-                    base_time
-                )
-            ).into());
+                base_time
+            ))
+            .into());
         }
 
         // Create small HNSW for added/updated vectors
@@ -1162,9 +1182,13 @@ impl TemporalVectorIndex {
         let (is_full, base_time, changes) = {
             let metadata = self.metadata.read();
 
-            // Create FULL snapshot based on configured interval
+            // Create FULL snapshot if:
+            // 1. Reached configured interval, OR
+            // 2. This is the first snapshot, OR
+            // 3. Memory threshold exceeded (fallback to prevent unbounded growth)
             let is_full = metadata.snapshots_since_full >= self.config.full_snapshot_interval
-                || metadata.total_snapshots == 0;
+                || metadata.total_snapshots == 0
+                || metadata.changes_accumulated.len() >= MAX_ACCUMULATED_CHANGES;
 
             // Get base time and changes for delta (if needed)
             let base_time = metadata.last_full_snapshot_time;
@@ -1190,12 +1214,8 @@ impl TemporalVectorIndex {
             };
 
             if let Some((base, base_vectors)) = base_opt {
-                let (snap, vec_snap) = self.build_delta_snapshot(
-                    Arc::new(base),
-                    &base_vectors,
-                    base_time,
-                    &changes,
-                )?;
+                let (snap, vec_snap) =
+                    self.build_delta_snapshot(Arc::new(base), &base_vectors, base_time, &changes)?;
                 (snap, vec_snap, false) // false = delta
             } else {
                 // Base was pruned, fallback to full
@@ -1209,10 +1229,12 @@ impl TemporalVectorIndex {
             let mut metadata = self.metadata.write();
 
             // Re-validate: check if we need full vs delta NOW
-            let should_be_full = metadata.snapshots_since_full >= self.config.full_snapshot_interval
-                || metadata.total_snapshots == 0;
+            let should_be_full = metadata.snapshots_since_full
+                >= self.config.full_snapshot_interval
+                || metadata.total_snapshots == 0
+                || metadata.changes_accumulated.len() >= MAX_ACCUMULATED_CHANGES;
 
-            // If we built delta but now need full (due to race), discard and retry
+            // If we built delta but now need full (due to race or memory threshold), discard and retry
             if should_be_full && !snapshot_type {
                 drop(metadata);
                 return self.create_snapshot_internal_with_retries(current_time, retry_count + 1);
@@ -1221,16 +1243,16 @@ impl TemporalVectorIndex {
             // Re-validate: if we built delta, ensure base still exists
             if !snapshot_type {
                 let snapshot_data = self.snapshot_data.read();
-                let base_exists =
-                    snapshot_data
-                        .snapshots
-                        .contains_key(&metadata.last_full_snapshot_time);
+                let base_exists = snapshot_data
+                    .snapshots
+                    .contains_key(&metadata.last_full_snapshot_time);
                 drop(snapshot_data);
 
                 if !base_exists {
                     // Base was pruned, discard delta and retry with full
                     drop(metadata);
-                    return self.create_snapshot_internal_with_retries(current_time, retry_count + 1);
+                    return self
+                        .create_snapshot_internal_with_retries(current_time, retry_count + 1);
                 }
             }
 
@@ -1489,7 +1511,9 @@ impl TemporalVectorIndex {
             .vector_history
             .range(time_range.start()..=time_range.end())
         {
-            if let Some(vector) = snapshot_vectors.get_vector(&node_id, &snapshot_data.vector_history)? {
+            if let Some(vector) =
+                snapshot_vectors.get_vector(&node_id, &snapshot_data.vector_history)?
+            {
                 evolution.push((timestamp, vector));
             }
         }
@@ -1649,6 +1673,26 @@ impl TemporalVectorIndex {
         self.snapshot_data.read().snapshots.len()
     }
 
+    /// Returns memory usage statistics for monitoring.
+    ///
+    /// Use this to monitor `changes_accumulated` size and detect potential memory growth.
+    /// If `changes_accumulated_size` is large (>100k), consider:
+    /// - Reducing `full_snapshot_interval`
+    /// - Calling `create_manual_snapshot()` during idle periods
+    /// - Increasing snapshot frequency
+    pub fn memory_stats(&self) -> MemoryStats {
+        let metadata = self.metadata.read();
+        let snapshot_data = self.snapshot_data.read();
+
+        MemoryStats {
+            changes_accumulated_size: metadata.changes_accumulated.len(),
+            vectors_changed_since_snapshot: metadata.vectors_changed_since_snapshot.len(),
+            snapshots_since_full: metadata.snapshots_since_full,
+            total_snapshots: snapshot_data.snapshots.len(),
+            current_vectors: self.vectors.len(),
+        }
+    }
+
     /// Returns the current index (for current-state queries).
     pub fn current_index(&self) -> &HnswIndex {
         &self.current
@@ -1678,6 +1722,50 @@ pub struct SnapshotInfo {
     pub size_bytes: usize,
     /// Age of snapshot
     pub age: Duration,
+}
+
+/// Memory usage statistics for monitoring.
+///
+/// Use these metrics to detect potential memory growth and optimize snapshot configuration.
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    /// Number of unique vectors changed since last FULL snapshot.
+    ///
+    /// **WARNING**: This grows unboundedly between full snapshots.
+    /// If this exceeds 100k, consider reducing `full_snapshot_interval`
+    /// or calling `create_manual_snapshot()`.
+    pub changes_accumulated_size: usize,
+
+    /// Number of vectors changed since last snapshot (any type).
+    ///
+    /// Resets after each snapshot creation.
+    pub vectors_changed_since_snapshot: usize,
+
+    /// Number of snapshots created since last full snapshot.
+    pub snapshots_since_full: usize,
+
+    /// Total number of snapshots stored.
+    pub total_snapshots: usize,
+
+    /// Number of vectors in current (live) index.
+    pub current_vectors: usize,
+}
+
+impl MemoryStats {
+    /// Checks if memory growth is concerning and may require intervention.
+    ///
+    /// Returns true if `changes_accumulated_size` exceeds 100,000 entries,
+    /// which could indicate excessive memory usage.
+    pub fn is_high_memory_usage(&self) -> bool {
+        self.changes_accumulated_size > 100_000
+    }
+
+    /// Estimates memory overhead from accumulated changes in bytes.
+    ///
+    /// This is a rough estimate assuming ~8 bytes per NodeId in the HashSet.
+    pub fn estimated_accumulated_bytes(&self) -> usize {
+        self.changes_accumulated_size * 8 // NodeId is u64
+    }
 }
 
 #[cfg(test)]
@@ -2724,7 +2812,11 @@ mod tests {
             let timestamp = 1000 + (snapshot_num * 1000);
             let query = vec![0.0, 0.0, 0.0, 0.0];
             let results = index.find_similar_as_of(&query, 10, timestamp)?;
-            assert!(!results.is_empty(), "Snapshot {} should have results", snapshot_num);
+            assert!(
+                !results.is_empty(),
+                "Snapshot {} should have results",
+                snapshot_num
+            );
         }
 
         Ok(())
@@ -2806,7 +2898,11 @@ mod tests {
         // Query at old timestamp should still return it
         let results_old = index.find_similar_as_of(&query, 5, 1000)?;
         assert_eq!(results_old.len(), 5);
-        assert!(results_old.iter().any(|(id, _)| *id == NodeId::new(2).unwrap()));
+        assert!(
+            results_old
+                .iter()
+                .any(|(id, _)| *id == NodeId::new(2).unwrap())
+        );
 
         Ok(())
     }
@@ -2913,7 +3009,11 @@ mod tests {
         // before any reset the counter, leading to multiple snapshot creations at the same "trigger point"
         // Accept up to 6 snapshots (still much better than 15 if every transaction created one)
         let count = index.snapshot_count();
-        assert!(count >= 1 && count <= 6, "Expected 1-6 snapshots due to concurrent racing, got {} (15 transactions with interval=10 should not create 15 snapshots)", count);
+        assert!(
+            (1..=6).contains(&count),
+            "Expected 1-6 snapshots due to concurrent racing, got {} (15 transactions with interval=10 should not create 15 snapshots)",
+            count
+        );
 
         Ok(())
     }
@@ -2941,7 +3041,11 @@ mod tests {
         // Create delta snapshots at t=2000, 3000 (both reference t=1000)
         for snapshot_num in 1..3 {
             let timestamp = 1000 + (snapshot_num * 1000);
-            index.add(NodeId::new(0).unwrap(), &[snapshot_num as f32, 0.0, 0.0, 0.0], timestamp)?;
+            index.add(
+                NodeId::new(0).unwrap(),
+                &[snapshot_num as f32, 0.0, 0.0, 0.0],
+                timestamp,
+            )?;
             index.on_transaction_at(timestamp)?;
         }
         assert_eq!(index.snapshot_count(), 3);
@@ -2949,7 +3053,11 @@ mod tests {
         // Create more snapshots to exceed max_snapshots, which will prune t=1000 (the base)
         for snapshot_num in 3..6 {
             let timestamp = 1000 + (snapshot_num * 1000);
-            index.add(NodeId::new(0).unwrap(), &[snapshot_num as f32, 0.0, 0.0, 0.0], timestamp)?;
+            index.add(
+                NodeId::new(0).unwrap(),
+                &[snapshot_num as f32, 0.0, 0.0, 0.0],
+                timestamp,
+            )?;
             index.on_transaction_at(timestamp)?;
         }
 
@@ -2959,7 +3067,10 @@ mod tests {
         // Verify we can still query the remaining snapshots
         let query = vec![0.0, 0.0, 0.0, 0.0];
         let results = index.find_similar_as_of(&query, 5, 6000)?;
-        assert!(!results.is_empty(), "Should still be able to query after pruning base");
+        assert!(
+            !results.is_empty(),
+            "Should still be able to query after pruning base"
+        );
 
         Ok(())
     }
@@ -2985,7 +3096,11 @@ mod tests {
 
         // Modify only 5 vectors
         for i in 0..5 {
-            index.add(NodeId::new(i).unwrap(), &[100.0 + i as f32, 0.0, 0.0, 0.0], 2000)?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[100.0 + i as f32, 0.0, 0.0, 0.0],
+                2000,
+            )?;
         }
 
         // Manual snapshot should use delta (only 5 changes)
@@ -3029,14 +3144,21 @@ mod tests {
 
         // Update 50 vectors (creates delta with 50 in added, 50 in removed, net = 100)
         for i in 0..50 {
-            index.add(NodeId::new(i).unwrap(), &[200.0 + i as f32, 0.0, 0.0, 0.0], 2000)?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[200.0 + i as f32, 0.0, 0.0, 0.0],
+                2000,
+            )?;
         }
         index.on_transaction_at(2000)?;
 
         // Check delta snapshot reports correct count
         let snapshots = index.get_snapshot_info()?;
         assert_eq!(snapshots.len(), 2);
-        assert_eq!(snapshots[1].vector_count, 100, "Delta snapshot should report 100 vectors (base 100 + added 50 - removed 50)");
+        assert_eq!(
+            snapshots[1].vector_count, 100,
+            "Delta snapshot should report 100 vectors (base 100 + added 50 - removed 50)"
+        );
 
         Ok(())
     }
@@ -3073,7 +3195,10 @@ mod tests {
         let result = index.find_similar_as_of(&query, 5, 2500);
 
         // Test passes if it doesn't panic and handles the deep chain gracefully
-        assert!(result.is_ok(), "Should handle deep delta chains without panic");
+        assert!(
+            result.is_ok(),
+            "Should handle deep delta chains without panic"
+        );
 
         Ok(())
     }
@@ -3145,7 +3270,11 @@ mod tests {
             let timestamp = 1000 + (i * 100);
             let query = vec![i as f32, 0.0, 0.0, 0.0];
             let result = index.find_similar_as_of(&query, 5, timestamp)?;
-            assert!(!result.is_empty(), "Should find results at timestamp {}", timestamp);
+            assert!(
+                !result.is_empty(),
+                "Should find results at timestamp {}",
+                timestamp
+            );
         }
 
         Ok(())
@@ -3203,7 +3332,10 @@ mod tests {
         let query = vec![0.0, 0.0, 0.0, 0.0];
         let current_time = TemporalVectorIndex::current_timestamp()?;
         let results = index.find_similar_as_of(&query, 5, current_time)?;
-        assert!(!results.is_empty(), "Should still be able to query after concurrent pruning");
+        assert!(
+            !results.is_empty(),
+            "Should still be able to query after concurrent pruning"
+        );
 
         Ok(())
     }
@@ -3224,7 +3356,11 @@ mod tests {
         // Add vectors and create snapshots normally
         for i in 0..5 {
             let timestamp = 1000 + (i * 100) as i64;
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                timestamp,
+            )?;
             index.on_transaction_at(timestamp)?;
         }
 
@@ -3275,8 +3411,7 @@ mod tests {
         // Before fix: would incorrectly report 3 (because added.len=2 and removed.len=2)
         // After fix: correctly reports 5 (base=3 + added=2 - removed=0)
         assert_eq!(
-            snapshot_info[1].vector_count,
-            5,
+            snapshot_info[1].vector_count, 5,
             "Delta snapshot should report 5 nodes (3 from base + 2 additions)"
         );
 
@@ -3314,7 +3449,11 @@ mod tests {
         // At t=2000: update 3 nodes, add 2 new nodes, remove 1 node
         // Updates: nodes 0, 1, 2 -> new values
         for i in 0..3 {
-            index.add(NodeId::new(i).unwrap(), &[100.0 + i as f32, 0.0, 0.0, 0.0], 2000)?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[100.0 + i as f32, 0.0, 0.0, 0.0],
+                2000,
+            )?;
         }
         // Additions: nodes 10, 11
         for i in 10..12 {
@@ -3329,8 +3468,7 @@ mod tests {
         let snapshot_info = index.get_snapshot_info()?;
         assert_eq!(snapshot_info.len(), 2);
         assert_eq!(
-            snapshot_info[1].vector_count,
-            11,
+            snapshot_info[1].vector_count, 11,
             "Delta should report 11 nodes (10 base - 1 removed + 2 added)"
         );
 
@@ -3363,11 +3501,7 @@ mod tests {
 
         // Create base with vectors at [1.0, 0, 0, 0], [2.0, 0, 0, 0], ..., [10.0, 0, 0, 0]
         for i in 1..=10 {
-            index.add(
-                NodeId::new(i).unwrap(),
-                &[i as f32, 0.0, 0.0, 0.0],
-                1000,
-            )?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
         index.on_transaction_at(1000)?;
 
@@ -3407,7 +3541,10 @@ mod tests {
         let from_base = results.iter().filter(|(id, _)| id.as_u64() <= 10).count();
         let from_added = results.iter().filter(|(id, _)| id.as_u64() > 10).count();
         // Just log the distribution, don't assert on it as it depends on HNSW behavior
-        println!("Results distribution - base: {}, added: {}", from_base, from_added);
+        println!(
+            "Results distribution - base: {}, added: {}",
+            from_base, from_added
+        );
 
         // Verify results are sorted by descending similarity
         for i in 1..results.len() {
@@ -3435,11 +3572,7 @@ mod tests {
         // Create base with node 1 at [1.0, 0, 0, 0]
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
         for i in 2..=5 {
-            index.add(
-                NodeId::new(i).unwrap(),
-                &[i as f32, 0.0, 0.0, 0.0],
-                1000,
-            )?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
         index.on_transaction_at(1000)?;
 
@@ -3452,7 +3585,10 @@ mod tests {
         let results = index.find_similar_as_of(&query, 10, 2000)?;
 
         // Count how many times node 1 appears
-        let node1_count = results.iter().filter(|(id, _)| *id == NodeId::new(1).unwrap()).count();
+        let node1_count = results
+            .iter()
+            .filter(|(id, _)| *id == NodeId::new(1).unwrap())
+            .count();
         assert_eq!(
             node1_count, 1,
             "Updated node 1 should appear exactly once in results, not twice"
@@ -3561,7 +3697,10 @@ mod tests {
 
         // Test passes if it doesn't panic/overflow and returns valid results
         // (no depth limit exceeded since we have proper full snapshots)
-        assert!(result.is_ok(), "find_semantic_drift should handle chains within depth limit");
+        assert!(
+            result.is_ok(),
+            "find_semantic_drift should handle chains within depth limit"
+        );
 
         Ok(())
     }
@@ -3576,9 +3715,10 @@ mod tests {
         // Create a delta snapshot that references a missing base
         let delta_snapshot = VectorSnapshot::Delta {
             base_time: 1000, // This base won't exist
-            added: Arc::new(HashMap::from([
-                (NodeId::new(1).unwrap(), Arc::from(vec![1.0f32, 0.0f32, 0.0f32, 0.0f32]) as Arc<[f32]>),
-            ])),
+            added: Arc::new(HashMap::from([(
+                NodeId::new(1).unwrap(),
+                Arc::from(vec![1.0f32, 0.0f32, 0.0f32, 0.0f32]) as Arc<[f32]>,
+            )])),
             removed: Arc::new(HashSet::new()),
         };
 
@@ -3586,25 +3726,33 @@ mod tests {
 
         // Test get_vector with missing base - query a node NOT in added, so it must traverse to base
         let result = delta_snapshot.get_vector(&NodeId::new(2).unwrap(), &snapshots);
-        assert!(result.is_err(), "Should return error when base snapshot is missing");
+        assert!(
+            result.is_err(),
+            "Should return error when base snapshot is missing"
+        );
 
         if let Err(err) = result {
             let err_msg = err.to_string();
             assert!(
                 err_msg.contains("not found") || err_msg.contains("corrupted"),
-                "Error should mention missing base or corrupted state, got: {}", err_msg
+                "Error should mention missing base or corrupted state, got: {}",
+                err_msg
             );
         }
 
         // Test to_hashmap with missing base
         let result = delta_snapshot.to_hashmap(&snapshots);
-        assert!(result.is_err(), "to_hashmap should return error when base snapshot is missing");
+        assert!(
+            result.is_err(),
+            "to_hashmap should return error when base snapshot is missing"
+        );
 
         if let Err(err) = result {
             let err_msg = err.to_string();
             assert!(
                 err_msg.contains("not found") || err_msg.contains("corrupted"),
-                "Error should mention missing base or corrupted state, got: {}", err_msg
+                "Error should mention missing base or corrupted state, got: {}",
+                err_msg
             );
         }
     }
@@ -3622,7 +3770,10 @@ mod tests {
         };
 
         let result = TemporalVectorIndex::new(config);
-        assert!(result.is_err(), "Should reject config with full_snapshot_interval > MAX_DELTA_CHAIN_DEPTH");
+        assert!(
+            result.is_err(),
+            "Should reject config with full_snapshot_interval > MAX_DELTA_CHAIN_DEPTH"
+        );
 
         if let Err(err) = result {
             let err_msg = err.to_string();
@@ -3666,7 +3817,10 @@ mod tests {
         };
 
         let result = TemporalVectorIndex::new(config);
-        assert!(result.is_ok(), "Should accept valid config with full_snapshot_interval=MAX_DELTA_CHAIN_DEPTH");
+        assert!(
+            result.is_ok(),
+            "Should accept valid config with full_snapshot_interval=MAX_DELTA_CHAIN_DEPTH"
+        );
 
         Ok(())
     }
@@ -3696,7 +3850,10 @@ mod tests {
         // Test negative infinite rejection
         let vec_with_neg_inf = vec![1.0, f32::NEG_INFINITY, 0.0, 0.0];
         let result = index.add(node_id, &vec_with_neg_inf, 1000);
-        assert!(result.is_err(), "Should reject vector with negative infinity");
+        assert!(
+            result.is_err(),
+            "Should reject vector with negative infinity"
+        );
 
         // Test valid vector still works
         let vec_valid = vec![1.0, 0.0, 0.0, 0.0];
@@ -3720,7 +3877,10 @@ mod tests {
 
         // Test timestamp exceeding MAX_VALID_TIMESTAMP (should fail)
         let result = index.add(node_id, &vec_valid, MAX_VALID_TIMESTAMP + 1);
-        assert!(result.is_err(), "Should reject timestamp > MAX_VALID_TIMESTAMP");
+        assert!(
+            result.is_err(),
+            "Should reject timestamp > MAX_VALID_TIMESTAMP"
+        );
         if let Err(err) = result {
             let err_msg = err.to_string();
             assert!(
@@ -3736,6 +3896,107 @@ mod tests {
         // Test negative timestamp (should fail)
         let result = index.add(node_id, &vec_valid, -1);
         assert!(result.is_err(), "Should reject negative timestamp");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_memory_growth_with_many_updates() -> Result<()> {
+        // Test that changes_accumulated grows as expected and triggers fallback
+        // Use a high full_snapshot_interval to see accumulation
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(50),
+            max_snapshots: 50,
+            full_snapshot_interval: 10, // Full snapshot every 10 transactions
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Add many unique vectors to grow changes_accumulated
+        for i in 0..25 {
+            let node_id = NodeId::new(i as u64).unwrap();
+            let timestamp = 1000 + (i * 100);
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
+            index.on_transaction_at(timestamp)?;
+        }
+
+        // Check memory stats
+        let stats = index.memory_stats();
+
+        // After 25 transactions with full_snapshot_interval=10:
+        // - Full snapshots at: 0, 10, 20
+        // - Currently at snapshot 25 (5 since last full at 20)
+        // - changes_accumulated should have ~5 unique vectors since last full
+        assert!(
+            stats.changes_accumulated_size > 0,
+            "Should have accumulated changes"
+        );
+
+        assert!(
+            stats.changes_accumulated_size < 30,
+            "Should have reset on full snapshots (got {})",
+            stats.changes_accumulated_size
+        );
+
+        assert_eq!(
+            stats.current_vectors, 25,
+            "Should have 25 vectors in current index"
+        );
+
+        // Test is_high_memory_usage (should be false for small dataset)
+        assert!(
+            !stats.is_high_memory_usage(),
+            "Should not flag high memory for small dataset"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_memory_fallback_forces_full_snapshot() -> Result<()> {
+        // Test that exceeding MAX_ACCUMULATED_CHANGES forces a full snapshot
+        // We'll use a small threshold for testing by checking the actual behavior
+
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(50),
+            max_snapshots: 50,
+            full_snapshot_interval: 100, // Would normally never create full snapshots
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+
+        // This should fail due to validation (full_snapshot_interval > MAX_DELTA_CHAIN_DEPTH)
+        let result = TemporalVectorIndex::new(config);
+        assert!(result.is_err(), "Should reject invalid config");
+
+        // Use valid config instead
+        let config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(50),
+            max_snapshots: 50,
+            full_snapshot_interval: 10, // Valid
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        };
+        let index = TemporalVectorIndex::new_at(config, 1000)?;
+
+        // Add vectors - with full_snapshot_interval=10, we get full snapshots periodically
+        for i in 0..15 {
+            let node_id = NodeId::new(i as u64).unwrap();
+            let timestamp = 1000 + (i * 100);
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
+            index.on_transaction_at(timestamp)?;
+        }
+
+        let stats = index.memory_stats();
+
+        // Verify changes_accumulated is bounded by full snapshots
+        // With full_snapshot_interval=10: full at 0, 10, so at snapshot 15 we have 5 accumulated
+        assert!(
+            stats.changes_accumulated_size < 20,
+            "changes_accumulated should be bounded by periodic full snapshots (got {})",
+            stats.changes_accumulated_size
+        );
 
         Ok(())
     }

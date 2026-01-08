@@ -53,7 +53,7 @@ fn bench_snapshot_creation(c: &mut Criterion) {
                     snapshot_strategy: snapshot_strategy.clone(),
                     retention_policy: RetentionPolicy::KeepN(10),
                     max_snapshots: 100,
-        full_snapshot_interval: 10,
+                    full_snapshot_interval: 10,
                     hnsw_config,
                 };
                 let index = TemporalVectorIndex::new(config).unwrap();
@@ -178,6 +178,7 @@ fn bench_snapshot_pruning(c: &mut Criterion) {
                             snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
                             retention_policy: RetentionPolicy::KeepN(snapshot_count / 2),
                             max_snapshots: snapshot_count * 2,
+                            full_snapshot_interval: 10,
                             hnsw_config,
                         };
                         let index = TemporalVectorIndex::new(config).unwrap();
