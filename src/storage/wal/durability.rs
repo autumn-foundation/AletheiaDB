@@ -480,6 +480,12 @@ pub struct WriteOptions {
 }
 
 impl WriteOptions {
+    /// Flush interval for bulk import operations (in milliseconds).
+    ///
+    /// This value provides a good balance between throughput and data-at-risk
+    /// window for typical bulk loading scenarios.
+    const BULK_IMPORT_FLUSH_INTERVAL_MS: u64 = 100;
+
     /// Create new WriteOptions with default settings.
     pub fn new() -> Self {
         Self::default()
@@ -527,7 +533,7 @@ impl WriteOptions {
     pub fn bulk_import() -> Self {
         Self {
             durability_mode: Some(DurabilityMode::Async {
-                flush_interval_ms: 100,
+                flush_interval_ms: Self::BULK_IMPORT_FLUSH_INTERVAL_MS,
             }),
         }
     }
@@ -699,16 +705,13 @@ mod tests {
         assert!(opts.durability_mode.is_some());
         let mode = opts.durability_mode.unwrap();
 
-        // bulk_import should use Async mode for maximum throughput
+        // bulk_import should use Async mode with exact 100ms flush interval
         match mode {
             DurabilityMode::Async { flush_interval_ms } => {
-                assert!(
-                    flush_interval_ms > 0,
-                    "flush_interval_ms should be positive"
-                );
-                assert!(
-                    flush_interval_ms <= 60_000,
-                    "flush_interval_ms should be reasonable"
+                assert_eq!(
+                    flush_interval_ms,
+                    WriteOptions::BULK_IMPORT_FLUSH_INTERVAL_MS,
+                    "bulk_import preset should use the defined flush interval constant"
                 );
             }
             _ => panic!("bulk_import should return Async mode, got {:?}", mode),

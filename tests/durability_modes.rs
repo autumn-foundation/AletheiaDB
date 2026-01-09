@@ -559,22 +559,23 @@ fn test_write_with_options_closure_semantics() {
 fn test_write_options_bulk_import_preset_integration() {
     let db = GallifreyDB::new();
 
-    // Use bulk_import preset for fast loading
-    let mut node_ids = Vec::new();
-    for i in 0..100 {
-        let node_id = db
-            .write_with_options(WriteOptions::bulk_import(), |tx| {
-                tx.create_node(
+    // Use bulk_import preset for fast loading - all writes in ONE transaction
+    let node_ids = db
+        .write_with_options(WriteOptions::bulk_import(), |tx| {
+            let mut ids = Vec::with_capacity(100);
+            for i in 0..100 {
+                let node_id = tx.create_node(
                     "BulkData",
                     PropertyMapBuilder::new()
                         .insert("index", i as i64)
                         .insert("data", format!("bulk_item_{}", i))
                         .build(),
-                )
-            })
-            .expect("bulk import write failed");
-        node_ids.push(node_id);
-    }
+                )?;
+                ids.push(node_id);
+            }
+            Ok(ids)
+        })
+        .expect("bulk import write failed");
 
     // All nodes should be visible
     for (i, node_id) in node_ids.iter().enumerate() {
