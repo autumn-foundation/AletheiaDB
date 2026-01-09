@@ -185,6 +185,12 @@ name = "async_wal_writer"
 harness = false
 path = "benches/async_wal_writer.rs"
 required-features = []
+
+[[bench]]
+name = "wal_serialization"
+harness = false
+path = "benches/wal_serialization.rs"
+required-features = []
 # Patch libhoney-rust to use git version with updated dependencies
 # This overrides the crates.io version for ALL dependencies (including tracing-honeycomb)
 # Reason: crates.io v0.1.6 uses reqwest 0.10 with known CVEs

@@ -299,6 +299,11 @@ impl WalConfig {
     }
 }
 
+/// Initial capacity for the WAL serialization buffer (Issue #20)
+/// 2KB is sufficient for most entries without reallocation,
+/// while the buffer automatically grows for larger entries.
+const SERIALIZE_BUFFER_INITIAL_CAPACITY: usize = 2048;
+
 /// Write-Ahead Log manager
 ///
 /// # Lock-Free Sync Architecture
@@ -332,6 +337,9 @@ pub struct WriteAheadLog {
     async_writer: Option<AsyncWalWriter>,
     /// Tracks whether there's unflushed data (for piggybacking optimization)
     has_pending_data: bool,
+    /// Reusable serialization buffer to avoid allocating Vec per entry (Issue #20)
+    /// No Mutex needed - append() has &mut self, guaranteeing exclusive access
+    serialize_buffer: Vec<u8>,
 }
 
 /// Helper to deserialize and validate a NodeId from WAL buffer
@@ -397,6 +405,115 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
     })
 }
 
+/// Helper to serialize a string into the buffer (length prefix + bytes)
+#[inline(always)]
+fn serialize_str(s: &str, buffer: &mut Vec<u8>) {
+    buffer.extend_from_slice(&(s.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(s.as_bytes());
+}
+
+/// Serialize a WAL entry with CRC32 checksum into the provided buffer
+///
+/// This function reuses the provided buffer to avoid per-entry allocation (Issue #20).
+/// The caller should clear the buffer before calling this function to maintain its capacity.
+fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Result<()> {
+    // Write LSN (8 bytes)
+    buffer.extend_from_slice(&entry.lsn.0.to_le_bytes());
+
+    // Write timestamp (8 bytes)
+    buffer.extend_from_slice(&entry.timestamp.to_le_bytes());
+
+    // Reserve space for checksum (4 bytes) - will fill in later
+    let checksum_offset = buffer.len();
+    buffer.extend_from_slice(&[0u8; 4]);
+
+    // Write operation type and data with full serialization
+    match &entry.operation {
+        WalOperation::CreateNode {
+            node_id,
+            label,
+            properties,
+            temporal,
+        } => {
+            buffer.push(1); // operation type
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            serialize_str(label, buffer);
+            properties.serialize_into(buffer)?;
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::CreateEdge {
+            edge_id,
+            source,
+            target,
+            label,
+            properties,
+            temporal,
+        } => {
+            buffer.push(2); // operation type
+            buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+            buffer.extend_from_slice(&source.as_u64().to_le_bytes());
+            buffer.extend_from_slice(&target.as_u64().to_le_bytes());
+            serialize_str(label, buffer);
+            properties.serialize_into(buffer)?;
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::UpdateNode {
+            node_id,
+            version_id,
+            label,
+            properties,
+            temporal,
+        } => {
+            buffer.push(3); // operation type
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
+            serialize_str(label, buffer);
+            properties.serialize_into(buffer)?;
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::UpdateEdge {
+            edge_id,
+            version_id,
+            label,
+            properties,
+            temporal,
+        } => {
+            buffer.push(4); // operation type
+            buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+            buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
+            serialize_str(label, buffer);
+            properties.serialize_into(buffer)?;
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::DeleteNode { node_id, temporal } => {
+            buffer.push(6); // operation type
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::DeleteEdge { edge_id, temporal } => {
+            buffer.push(7); // operation type
+            buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::Checkpoint { lsn, timestamp } => {
+            buffer.push(5); // operation type
+            buffer.extend_from_slice(&lsn.0.to_le_bytes());
+            buffer.extend_from_slice(&timestamp.to_le_bytes());
+        }
+    }
+
+    // Compute CRC32 over everything except the checksum field
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&buffer[0..checksum_offset]); // LSN + timestamp
+    hasher.update(&buffer[checksum_offset + 4..]); // Operation data
+    let checksum = hasher.finalize();
+
+    // Write the checksum into the reserved space
+    buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+    Ok(())
+}
+
 impl WriteAheadLog {
     /// Create a new WAL with the given configuration
     pub fn new(config: WalConfig) -> Result<Self> {
@@ -418,6 +535,7 @@ impl WriteAheadLog {
             group_commit: None,
             async_writer: None,
             has_pending_data: false,
+            serialize_buffer: Vec::with_capacity(SERIALIZE_BUFFER_INITIAL_CAPACITY),
         };
 
         // Initialize background infrastructure based on durability mode
@@ -700,20 +818,22 @@ impl WriteAheadLog {
 
         let entry = WalEntry::new(self.current_lsn, operation);
 
-        // Serialize the entry (simplified - in production would use proper serialization)
-        let serialized = self.serialize_entry(&entry)?;
+        // Serialize using the reusable buffer (zero-allocation after warmup)
+        self.serialize_buffer.clear();
+        serialize_entry_into(&entry, &mut self.serialize_buffer)?;
 
-        // Write to current segment
+        let serialized_len = self.serialize_buffer.len();
+
+        // Write directly from the reused buffer
         if let Some(writer) = &mut self.writer {
             writer
-                .write_all(&serialized)
+                .write_all(&self.serialize_buffer)
                 .map_err(|e| StorageError::IoError(format!("Failed to write WAL entry: {}", e)))?;
-
-            // Mark that we have pending unflushed data
-            self.has_pending_data = true;
-
-            self.current_size += serialized.len();
         }
+
+        // Mark that we have pending unflushed data
+        self.has_pending_data = true;
+        self.current_size += serialized_len;
 
         let lsn = self.current_lsn;
         self.current_lsn = self.current_lsn.next();
@@ -792,112 +912,6 @@ impl WriteAheadLog {
         }
 
         Ok(())
-    }
-
-    /// Serialize a WAL entry with CRC32 checksum
-    fn serialize_entry(&self, entry: &WalEntry) -> Result<Vec<u8>> {
-        // Serialize entry with proper CRC32 checksum
-        let mut buffer = Vec::new();
-
-        // Write LSN (8 bytes)
-        buffer.extend_from_slice(&entry.lsn.0.to_le_bytes());
-
-        // Write timestamp (8 bytes)
-        buffer.extend_from_slice(&entry.timestamp.to_le_bytes());
-
-        // Reserve space for checksum (4 bytes) - will fill in later
-        let checksum_offset = buffer.len();
-        buffer.extend_from_slice(&[0u8; 4]);
-
-        // Write operation type and data with full serialization
-        match &entry.operation {
-            WalOperation::CreateNode {
-                node_id,
-                label,
-                properties,
-                temporal,
-            } => {
-                buffer.push(1); // operation type
-                buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
-                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
-                buffer.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer)?;
-                temporal.serialize_into(&mut buffer);
-            }
-            WalOperation::CreateEdge {
-                edge_id,
-                source,
-                target,
-                label,
-                properties,
-                temporal,
-            } => {
-                buffer.push(2); // operation type
-                buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
-                buffer.extend_from_slice(&source.as_u64().to_le_bytes());
-                buffer.extend_from_slice(&target.as_u64().to_le_bytes());
-                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
-                buffer.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer)?;
-                temporal.serialize_into(&mut buffer);
-            }
-            WalOperation::UpdateNode {
-                node_id,
-                version_id,
-                label,
-                properties,
-                temporal,
-            } => {
-                buffer.push(3); // operation type
-                buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
-                buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
-                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
-                buffer.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer)?;
-                temporal.serialize_into(&mut buffer);
-            }
-            WalOperation::UpdateEdge {
-                edge_id,
-                version_id,
-                label,
-                properties,
-                temporal,
-            } => {
-                buffer.push(4); // operation type
-                buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
-                buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
-                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
-                buffer.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer)?;
-                temporal.serialize_into(&mut buffer);
-            }
-            WalOperation::DeleteNode { node_id, temporal } => {
-                buffer.push(6); // operation type
-                buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
-                temporal.serialize_into(&mut buffer);
-            }
-            WalOperation::DeleteEdge { edge_id, temporal } => {
-                buffer.push(7); // operation type
-                buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
-                temporal.serialize_into(&mut buffer);
-            }
-            WalOperation::Checkpoint { lsn, timestamp } => {
-                buffer.push(5); // operation type
-                buffer.extend_from_slice(&lsn.0.to_le_bytes());
-                buffer.extend_from_slice(&timestamp.to_le_bytes());
-            }
-        }
-
-        // Compute CRC32 over everything except the checksum field
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&buffer[0..checksum_offset]); // LSN + timestamp
-        hasher.update(&buffer[checksum_offset + 4..]); // Operation data
-        let checksum = hasher.finalize();
-
-        // Write the checksum into the reserved space
-        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
-
-        Ok(buffer)
     }
 
     /// Read all WAL entries from a specific LSN onwards
@@ -1668,13 +1682,15 @@ pub fn migrate_wal_segment(path: &Path) -> Result<usize> {
         wal_dir: temp_dir,
         ..Default::default()
     };
-    let temp_wal = WriteAheadLog::new(temp_config)?;
+    let _temp_wal = WriteAheadLog::new(temp_config)?;
 
     // Write each entry
+    let mut buffer = Vec::new();
     for entry in &entries {
-        let serialized = temp_wal.serialize_entry(entry)?;
+        buffer.clear();
+        serialize_entry_into(entry, &mut buffer)?;
         new_file
-            .write_all(&serialized)
+            .write_all(&buffer)
             .map_err(|e| StorageError::IoError(format!("Failed to write WAL entry: {}", e)))?;
     }
 
@@ -2086,7 +2102,7 @@ mod tests {
             ..Default::default()
         };
 
-        let wal = WriteAheadLog::new(config)?;
+        let _wal = WriteAheadLog::new(config)?;
 
         let operation = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
@@ -2098,7 +2114,8 @@ mod tests {
         let entry = WalEntry::new(LSN::initial(), operation);
 
         // Serialize the entry to get the actual bytes with checksum
-        let serialized = wal.serialize_entry(&entry)?;
+        let mut serialized = Vec::new();
+        serialize_entry_into(&entry, &mut serialized)?;
 
         // Verify checksum is valid
         assert!(entry.verify_checksum(&serialized));
@@ -3287,6 +3304,140 @@ mod tests {
             5,
             "All entries should be synced before shutdown"
         );
+
+        Ok(())
+    }
+
+    /// Test buffer reuse correctness for Issue #20
+    ///
+    /// Verifies that reusing the serialization buffer doesn't cause data corruption
+    /// or cross-contamination between sequential WAL entries.
+    #[test]
+    fn test_serialize_buffer_reuse_correctness() -> Result<()> {
+        use crate::core::property::PropertyMapBuilder;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            wal_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let mut wal = WriteAheadLog::new(config)?;
+
+        // Create a series of operations with different data sizes
+        // to ensure buffer resizing works correctly
+        let operations = vec![
+            // Small entry
+            WalOperation::CreateNode {
+                node_id: NodeId::new(1).unwrap(),
+                label: "A".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            },
+            // Larger entry with properties
+            WalOperation::CreateNode {
+                node_id: NodeId::new(2).unwrap(),
+                label: "LongerLabel".to_string(),
+                properties: PropertyMapBuilder::new()
+                    .insert("key1", "value1")
+                    .insert("key2", 42i64)
+                    .insert("key3", true)
+                    .build(),
+                temporal: BiTemporalInterval::current(time::now()),
+            },
+            // Small entry again (tests buffer shrinking/reuse)
+            WalOperation::CreateNode {
+                node_id: NodeId::new(3).unwrap(),
+                label: "B".to_string(),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            },
+            // Different operation type
+            WalOperation::CreateEdge {
+                edge_id: EdgeId::new(1).unwrap(),
+                source: NodeId::new(1).unwrap(),
+                target: NodeId::new(2).unwrap(),
+                label: "KNOWS".to_string(),
+                properties: PropertyMapBuilder::new().insert("weight", 0.95f64).build(),
+                temporal: BiTemporalInterval::current(time::now()),
+            },
+        ];
+
+        // Append all operations (buffer reuse happens here)
+        for op in operations {
+            wal.append(op)?;
+        }
+
+        wal.flush()?;
+
+        // Read back and verify all data is correct
+        let entries = wal.read_from(LSN::initial())?;
+        assert_eq!(entries.len(), 4, "Should read back all 4 entries");
+
+        // Verify first entry (small)
+        match &entries[0].operation {
+            WalOperation::CreateNode { node_id, label, .. } => {
+                assert_eq!(node_id.as_u64(), 1);
+                assert_eq!(label, "A");
+            }
+            _ => panic!("Expected CreateNode"),
+        }
+
+        // Verify second entry (large with properties)
+        match &entries[1].operation {
+            WalOperation::CreateNode {
+                node_id,
+                label,
+                properties,
+                ..
+            } => {
+                assert_eq!(node_id.as_u64(), 2);
+                assert_eq!(label, "LongerLabel");
+                assert_eq!(
+                    properties.get("key1").and_then(|v| v.as_str()),
+                    Some("value1")
+                );
+                assert_eq!(properties.get("key2").and_then(|v| v.as_int()), Some(42));
+                assert_eq!(properties.get("key3").and_then(|v| v.as_bool()), Some(true));
+            }
+            _ => panic!("Expected CreateNode"),
+        }
+
+        // Verify third entry (small again - tests buffer didn't retain old data)
+        match &entries[2].operation {
+            WalOperation::CreateNode {
+                node_id,
+                label,
+                properties,
+                ..
+            } => {
+                assert_eq!(node_id.as_u64(), 3);
+                assert_eq!(label, "B");
+                // Should be empty, not contaminated from previous large entry
+                assert_eq!(properties.len(), 0);
+            }
+            _ => panic!("Expected CreateNode"),
+        }
+
+        // Verify fourth entry (different operation type)
+        match &entries[3].operation {
+            WalOperation::CreateEdge {
+                edge_id,
+                source,
+                target,
+                properties,
+                ..
+            } => {
+                assert_eq!(edge_id.as_u64(), 1);
+                assert_eq!(source.as_u64(), 1);
+                assert_eq!(target.as_u64(), 2);
+                assert_eq!(
+                    properties.get("weight").and_then(|v| v.as_float()),
+                    Some(0.95)
+                );
+            }
+            _ => panic!("Expected CreateEdge"),
+        }
 
         Ok(())
     }
