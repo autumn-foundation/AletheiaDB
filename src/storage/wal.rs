@@ -338,7 +338,7 @@ pub struct WriteAheadLog {
     /// Tracks whether there's unflushed data (for piggybacking optimization)
     has_pending_data: bool,
     /// Reusable serialization buffer to avoid allocating Vec per entry (Issue #20)
-    serialize_buffer: std::cell::RefCell<Vec<u8>>,
+    serialize_buffer: std::sync::Mutex<Vec<u8>>,
 }
 
 /// Helper to deserialize and validate a NodeId from WAL buffer
@@ -425,7 +425,9 @@ impl WriteAheadLog {
             group_commit: None,
             async_writer: None,
             has_pending_data: false,
-            serialize_buffer: std::cell::RefCell::new(Vec::with_capacity(SERIALIZE_BUFFER_INITIAL_CAPACITY)),
+            serialize_buffer: std::sync::Mutex::new(Vec::with_capacity(
+                SERIALIZE_BUFFER_INITIAL_CAPACITY,
+            )),
         };
 
         // Initialize background infrastructure based on durability mode
@@ -708,20 +710,24 @@ impl WriteAheadLog {
 
         let entry = WalEntry::new(self.current_lsn, operation);
 
-        // Serialize the entry (simplified - in production would use proper serialization)
-        let serialized = self.serialize_entry(&entry)?;
+        // Serialize entry using the shared buffer (zero-allocation after warmup)
+        let serialized_len = {
+            let mut buffer = self.serialize_buffer.lock().unwrap();
+            self.serialize_entry_into(&entry, &mut buffer)?;
 
-        // Write to current segment
-        if let Some(writer) = &mut self.writer {
-            writer
-                .write_all(&serialized)
-                .map_err(|e| StorageError::IoError(format!("Failed to write WAL entry: {}", e)))?;
+            // Write directly from the shared buffer - no clone!
+            if let Some(writer) = &mut self.writer {
+                writer.write_all(&buffer).map_err(|e| {
+                    StorageError::IoError(format!("Failed to write WAL entry: {}", e))
+                })?;
+            }
 
-            // Mark that we have pending unflushed data
-            self.has_pending_data = true;
+            buffer.len()
+        };
 
-            self.current_size += serialized.len();
-        }
+        // Mark that we have pending unflushed data
+        self.has_pending_data = true;
+        self.current_size += serialized_len;
 
         let lsn = self.current_lsn;
         self.current_lsn = self.current_lsn.next();
@@ -802,21 +808,22 @@ impl WriteAheadLog {
         Ok(())
     }
 
-    /// Serialize a WAL entry with CRC32 checksum
-    fn serialize_entry(&self, entry: &WalEntry) -> Result<Vec<u8>> {
-        // Reuse serialization buffer to avoid per-entry allocation (Issue #20)
-        let mut buffer_ref = self.serialize_buffer.borrow_mut();
-        buffer_ref.clear(); // Keeps allocated capacity, just resets length
+    /// Serialize a WAL entry with CRC32 checksum into the provided buffer
+    ///
+    /// This method reuses the provided buffer to avoid per-entry allocation (Issue #20).
+    /// The buffer is cleared before use, keeping its allocated capacity.
+    fn serialize_entry_into(&self, entry: &WalEntry, buffer: &mut Vec<u8>) -> Result<()> {
+        buffer.clear(); // Keeps allocated capacity, just resets length
 
         // Write LSN (8 bytes)
-        buffer_ref.extend_from_slice(&entry.lsn.0.to_le_bytes());
+        buffer.extend_from_slice(&entry.lsn.0.to_le_bytes());
 
         // Write timestamp (8 bytes)
-        buffer_ref.extend_from_slice(&entry.timestamp.to_le_bytes());
+        buffer.extend_from_slice(&entry.timestamp.to_le_bytes());
 
         // Reserve space for checksum (4 bytes) - will fill in later
-        let checksum_offset = buffer_ref.len();
-        buffer_ref.extend_from_slice(&[0u8; 4]);
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&[0u8; 4]);
 
         // Write operation type and data with full serialization
         match &entry.operation {
@@ -826,12 +833,12 @@ impl WriteAheadLog {
                 properties,
                 temporal,
             } => {
-                buffer_ref.push(1); // operation type
-                buffer_ref.extend_from_slice(&node_id.as_u64().to_le_bytes());
-                buffer_ref.extend_from_slice(&(label.len() as u32).to_le_bytes());
-                buffer_ref.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer_ref)?;
-                temporal.serialize_into(&mut buffer_ref);
+                buffer.push(1); // operation type
+                buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(label.as_bytes());
+                properties.serialize_into(buffer)?;
+                temporal.serialize_into(buffer);
             }
             WalOperation::CreateEdge {
                 edge_id,
@@ -841,14 +848,14 @@ impl WriteAheadLog {
                 properties,
                 temporal,
             } => {
-                buffer_ref.push(2); // operation type
-                buffer_ref.extend_from_slice(&edge_id.as_u64().to_le_bytes());
-                buffer_ref.extend_from_slice(&source.as_u64().to_le_bytes());
-                buffer_ref.extend_from_slice(&target.as_u64().to_le_bytes());
-                buffer_ref.extend_from_slice(&(label.len() as u32).to_le_bytes());
-                buffer_ref.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer_ref)?;
-                temporal.serialize_into(&mut buffer_ref);
+                buffer.push(2); // operation type
+                buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&source.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&target.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(label.as_bytes());
+                properties.serialize_into(buffer)?;
+                temporal.serialize_into(buffer);
             }
             WalOperation::UpdateNode {
                 node_id,
@@ -857,13 +864,13 @@ impl WriteAheadLog {
                 properties,
                 temporal,
             } => {
-                buffer_ref.push(3); // operation type
-                buffer_ref.extend_from_slice(&node_id.as_u64().to_le_bytes());
-                buffer_ref.extend_from_slice(&version_id.as_u64().to_le_bytes());
-                buffer_ref.extend_from_slice(&(label.len() as u32).to_le_bytes());
-                buffer_ref.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer_ref)?;
-                temporal.serialize_into(&mut buffer_ref);
+                buffer.push(3); // operation type
+                buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(label.as_bytes());
+                properties.serialize_into(buffer)?;
+                temporal.serialize_into(buffer);
             }
             WalOperation::UpdateEdge {
                 edge_id,
@@ -872,43 +879,41 @@ impl WriteAheadLog {
                 properties,
                 temporal,
             } => {
-                buffer_ref.push(4); // operation type
-                buffer_ref.extend_from_slice(&edge_id.as_u64().to_le_bytes());
-                buffer_ref.extend_from_slice(&version_id.as_u64().to_le_bytes());
-                buffer_ref.extend_from_slice(&(label.len() as u32).to_le_bytes());
-                buffer_ref.extend_from_slice(label.as_bytes());
-                properties.serialize_into(&mut buffer_ref)?;
-                temporal.serialize_into(&mut buffer_ref);
+                buffer.push(4); // operation type
+                buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
+                buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(label.as_bytes());
+                properties.serialize_into(buffer)?;
+                temporal.serialize_into(buffer);
             }
             WalOperation::DeleteNode { node_id, temporal } => {
-                buffer_ref.push(6); // operation type
-                buffer_ref.extend_from_slice(&node_id.as_u64().to_le_bytes());
-                temporal.serialize_into(&mut buffer_ref);
+                buffer.push(6); // operation type
+                buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+                temporal.serialize_into(buffer);
             }
             WalOperation::DeleteEdge { edge_id, temporal } => {
-                buffer_ref.push(7); // operation type
-                buffer_ref.extend_from_slice(&edge_id.as_u64().to_le_bytes());
-                temporal.serialize_into(&mut buffer_ref);
+                buffer.push(7); // operation type
+                buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+                temporal.serialize_into(buffer);
             }
             WalOperation::Checkpoint { lsn, timestamp } => {
-                buffer_ref.push(5); // operation type
-                buffer_ref.extend_from_slice(&lsn.0.to_le_bytes());
-                buffer_ref.extend_from_slice(&timestamp.to_le_bytes());
+                buffer.push(5); // operation type
+                buffer.extend_from_slice(&lsn.0.to_le_bytes());
+                buffer.extend_from_slice(&timestamp.to_le_bytes());
             }
         }
 
         // Compute CRC32 over everything except the checksum field
         let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&buffer_ref[0..checksum_offset]); // LSN + timestamp
-        hasher.update(&buffer_ref[checksum_offset + 4..]); // Operation data
+        hasher.update(&buffer[0..checksum_offset]); // LSN + timestamp
+        hasher.update(&buffer[checksum_offset + 4..]); // Operation data
         let checksum = hasher.finalize();
 
         // Write the checksum into the reserved space
-        buffer_ref[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
 
-        // Clone the filled portion to return
-        // The buffer's capacity is reused on next call via clear()
-        Ok(buffer_ref.clone())
+        Ok(())
     }
 
     /// Read all WAL entries from a specific LSN onwards
@@ -1682,10 +1687,12 @@ pub fn migrate_wal_segment(path: &Path) -> Result<usize> {
     let temp_wal = WriteAheadLog::new(temp_config)?;
 
     // Write each entry
+    // Write each entry
+    let mut buffer = Vec::new();
     for entry in &entries {
-        let serialized = temp_wal.serialize_entry(entry)?;
+        temp_wal.serialize_entry_into(entry, &mut buffer)?;
         new_file
-            .write_all(&serialized)
+            .write_all(&buffer)
             .map_err(|e| StorageError::IoError(format!("Failed to write WAL entry: {}", e)))?;
     }
 
@@ -2109,7 +2116,8 @@ mod tests {
         let entry = WalEntry::new(LSN::initial(), operation);
 
         // Serialize the entry to get the actual bytes with checksum
-        let serialized = wal.serialize_entry(&entry)?;
+        let mut serialized = Vec::new();
+        wal.serialize_entry_into(&entry, &mut serialized)?;
 
         // Verify checksum is valid
         assert!(entry.verify_checksum(&serialized));
