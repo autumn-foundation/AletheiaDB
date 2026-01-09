@@ -687,9 +687,9 @@ impl WriteAheadLog {
         if let Some(ref async_writer) = self.async_writer
             && let Err(_e) = async_writer.append(entry.clone())
         {
-            // Background thread terminated - this is an error condition
+            // WAL background sync thread has terminated unexpectedly - this is an error condition
             // but we've already written to the BufWriter, so continue
-            // Log error in production
+            // Log error in production (should use proper logging framework)
         }
 
         // Check if we need to rotate to a new segment

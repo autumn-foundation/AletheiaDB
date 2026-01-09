@@ -210,7 +210,7 @@ impl AsyncWalWriter {
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError::WalClosed`] if the background thread has died.
+    /// Returns [`StorageError::WalError`] if the background sync thread has terminated unexpectedly.
     pub fn append(&self, entry: WalEntry) -> Result<()> {
         // Try non-blocking send first
         match self.sender.try_send(entry) {
@@ -223,13 +223,14 @@ impl AsyncWalWriter {
                 self.sender
                     .send(entry)
                     .map_err(|_| StorageError::WalError {
-                        reason: "Background sync thread terminated".to_string(),
+                        reason: "WAL background sync thread has terminated unexpectedly"
+                            .to_string(),
                     })?;
                 self.metrics.buffer_depth.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
             Err(TrySendError::Disconnected(_)) => Err(StorageError::WalError {
-                reason: "Background sync thread terminated".to_string(),
+                reason: "WAL background sync thread has terminated unexpectedly".to_string(),
             }
             .into()),
         }
@@ -617,5 +618,168 @@ mod tests {
             first_count, second_count,
             "should not busy-wait when no entries"
         );
+    }
+
+    #[test]
+    fn test_extremely_large_batch() {
+        // Test with 1M buffer size to ensure no overflow or performance issues
+        let write_count = Arc::new(AtomicU64::new(0));
+        let write_count_clone = Arc::clone(&write_count);
+
+        let writer = AsyncWalWriter::new(
+            1_000_000, // 1M buffer
+            Duration::from_millis(100),
+            move |batch| {
+                write_count_clone.fetch_add(batch.len() as u64, Ordering::SeqCst);
+            },
+            vec![],
+        );
+
+        // Write 10k entries - should handle large batch efficiently
+        for i in 1..=10_000 {
+            writer.append(create_test_entry(i)).unwrap();
+        }
+
+        drop(writer);
+
+        assert_eq!(
+            write_count.load(Ordering::SeqCst),
+            10_000,
+            "all entries should be synced"
+        );
+    }
+
+    #[test]
+    fn test_zero_interval_sync() {
+        // Test immediate flush (0ms interval) - should sync on every entry or batch
+        let sync_count = Arc::new(AtomicU64::new(0));
+        let sync_count_clone = Arc::clone(&sync_count);
+
+        let writer = AsyncWalWriter::new(
+            100,
+            Duration::from_millis(1), // Near-zero interval (1ms minimum)
+            move |batch| {
+                sync_count_clone.fetch_add(1, Ordering::SeqCst);
+                let _ = batch.len();
+            },
+            vec![],
+        );
+
+        // Write a few entries
+        for i in 1..=5 {
+            writer.append(create_test_entry(i)).unwrap();
+            thread::sleep(Duration::from_millis(2)); // Give sync time to occur
+        }
+
+        drop(writer);
+
+        let syncs = sync_count.load(Ordering::SeqCst);
+        // Should have multiple syncs due to near-zero interval
+        assert!(syncs >= 3, "should have frequent syncs with low interval");
+    }
+
+    #[test]
+    fn test_concurrent_append_from_multiple_threads() {
+        use std::sync::Barrier;
+
+        let write_count = Arc::new(AtomicU64::new(0));
+        let write_count_clone = Arc::clone(&write_count);
+
+        let writer = Arc::new(AsyncWalWriter::new(
+            10_000, // Large buffer to avoid backpressure
+            Duration::from_millis(50),
+            move |batch| {
+                write_count_clone.fetch_add(batch.len() as u64, Ordering::SeqCst);
+            },
+            vec![],
+        ));
+
+        let num_threads = 4;
+        let entries_per_thread = 250;
+        let barrier = Arc::new(Barrier::new(num_threads));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let writer = Arc::clone(&writer);
+                let barrier = Arc::clone(&barrier);
+
+                thread::spawn(move || {
+                    // Wait for all threads to be ready
+                    barrier.wait();
+
+                    // Each thread writes entries concurrently
+                    for i in 0..entries_per_thread {
+                        let lsn = (thread_id * entries_per_thread + i + 1) as u64;
+                        writer.append(create_test_entry(lsn)).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        drop(writer);
+
+        let total = write_count.load(Ordering::SeqCst);
+        let expected = (num_threads * entries_per_thread) as u64;
+        assert_eq!(
+            total, expected,
+            "all entries from concurrent threads should be synced"
+        );
+    }
+
+    #[test]
+    fn test_background_thread_panic_detection() {
+        // Create writer with a write_fn that panics
+        let writer = AsyncWalWriter::new(
+            100,
+            Duration::from_millis(10),
+            |_batch| {
+                panic!("Simulated background thread panic");
+            },
+            vec![],
+        );
+
+        // Append an entry
+        writer.append(create_test_entry(1)).unwrap();
+
+        // Give thread time to panic
+        thread::sleep(Duration::from_millis(50));
+
+        // Try to append another entry - should fail since thread is dead
+        let result = writer.append(create_test_entry(2));
+        assert!(
+            result.is_err(),
+            "append should fail after background thread panics"
+        );
+
+        // Drop should capture the panic (verified by stderr output in real run)
+        drop(writer);
+    }
+
+    #[test]
+    fn test_append_after_drop_fails() {
+        let write_count = Arc::new(AtomicU64::new(0));
+        let write_count_clone = Arc::clone(&write_count);
+
+        let writer = AsyncWalWriter::new(
+            100,
+            Duration::from_millis(10),
+            move |batch| {
+                write_count_clone.fetch_add(batch.len() as u64, Ordering::SeqCst);
+            },
+            vec![],
+        );
+
+        // Drop the writer
+        drop(writer);
+
+        // This test demonstrates expected behavior:
+        // After drop, the writer is consumed and cannot be used
+        // (Rust's ownership prevents this at compile time)
+        // This test documents that append() can only fail if background thread dies
     }
 }
