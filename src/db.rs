@@ -102,8 +102,12 @@ impl GallifreyDB {
         let wal = WriteAheadLog::new(wal_config).expect("Failed to create WAL");
         let wal = Arc::new(Mutex::new(wal));
 
-        // Start the background flush thread for Async and GroupCommit modes
-        WriteAheadLog::start_flush_thread(Arc::clone(&wal));
+        // Start the background flush thread only for modes that need it
+        // (Async, GroupCommit, AsyncBatched). Skip for Synchronous mode
+        // to avoid unnecessary lock contention and overhead.
+        if durability_mode.needs_background_thread() {
+            WriteAheadLog::start_flush_thread(Arc::clone(&wal));
+        }
 
         GallifreyDB {
             current: Arc::new(CurrentStorage::new()),

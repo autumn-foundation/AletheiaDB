@@ -570,7 +570,10 @@ impl WriteAheadLog {
         })?;
 
         let file_size = metadata.len() as usize;
-        let mut writer = BufWriter::new(file);
+        // Use 64KB buffer (vs default 8KB) to reduce write syscall overhead and improve
+        // performance for all durability modes, especially Async which spends 1.8ms in
+        // BufWriter::flush(). This should reduce that to ~1ms.
+        let mut writer = BufWriter::with_capacity(64 * 1024, file);
 
         // Write header for new segments
         if file_size == 0 {
@@ -1265,6 +1268,9 @@ impl WriteAheadLog {
     ///
     /// Call `sync_to_disk()` afterward (without holding the lock) for durability.
     pub fn flush_to_os(&mut self) -> Result<()> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("wal_flush_to_os").entered();
+
         if let Some(writer) = &mut self.writer {
             writer
                 .flush()
@@ -1303,11 +1309,19 @@ impl WriteAheadLog {
     /// For high-throughput scenarios, use `flush_to_os()` then release the lock,
     /// then call `sync_to_disk()`.
     pub fn flush(&mut self) -> Result<()> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("wal_flush_full").entered();
+
         if let Some(writer) = &mut self.writer {
             // Step 1: Flush BufWriter buffer to OS (fast)
-            writer
-                .flush()
-                .map_err(|e| StorageError::IoError(format!("Failed to flush WAL buffer: {}", e)))?;
+            {
+                #[cfg(feature = "observability")]
+                let _buffer_span = tracing::info_span!("wal_flush_buffer").entered();
+
+                writer.flush().map_err(|e| {
+                    StorageError::IoError(format!("Failed to flush WAL buffer: {}", e))
+                })?;
+            }
 
             // Step 2: Force OS to sync data to disk (slow)
             // SAFETY: sync_data() ensures durability by forcing the OS to write buffered data to disk.
@@ -1317,6 +1331,9 @@ impl WriteAheadLog {
             //
             // NOTE: For high-throughput, call get_sync_handle() and sync outside the lock instead.
             if let Some(sync_handle) = &self.sync_handle {
+                #[cfg(feature = "observability")]
+                let _fsync_span = tracing::info_span!("wal_fsync").entered();
+
                 sync_handle
                     .sync_data()
                     .map_err(|e| StorageError::IoError(format!("Failed to fsync WAL: {}", e)))?;
