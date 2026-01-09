@@ -33,7 +33,7 @@ class BenchmarkResult:
     throughput: Optional[str] = None
 
 
-def parse_criterion_estimates(estimates_path: Path) -> Optional[BenchmarkResult]:
+def parse_criterion_estimates(estimates_path: Path, criterion_dir: Path) -> Optional[BenchmarkResult]:
     """Parse a Criterion estimates.json file."""
     try:
         with open(estimates_path, 'r') as f:
@@ -49,8 +49,29 @@ def parse_criterion_estimates(estimates_path: Path) -> Optional[BenchmarkResult]
         std_dev, _ = format_time(std_dev_ns)
         median, _ = format_time(median_ns)
 
-        # Get benchmark name from parent directory
-        bench_name = estimates_path.parent.name
+        # Get full benchmark name from path structure
+        # Criterion structure: target/criterion/<group>/<benchmark_param>/<baseline|new>/estimates.json
+        # or: target/criterion/<group>/<baseline|new>/estimates.json
+        parts = estimates_path.relative_to(criterion_dir).parts
+
+        # Build descriptive name
+        if len(parts) >= 3:
+            group_name = parts[0]
+            # Check if this is a parameterized benchmark
+            if parts[-1] == 'estimates.json':
+                # parts[-2] is 'base' or 'new'
+                # parts[-3] might be a parameter like '100_nodes', or might be the group
+                if len(parts) >= 4 and parts[-3] not in ['base', 'new']:
+                    # Parameterized: group/parameter/baseline
+                    param = parts[-3]
+                    bench_name = f"{group_name}/{param}"
+                else:
+                    # Simple: group/baseline
+                    bench_name = group_name
+            else:
+                bench_name = group_name
+        else:
+            bench_name = estimates_path.parent.name
 
         return BenchmarkResult(
             name=bench_name,
@@ -85,7 +106,7 @@ def collect_benchmark_results(criterion_dir: Path) -> dict[str, list[BenchmarkRe
     for root, dirs, files in os.walk(criterion_dir):
         if 'estimates.json' in files:
             estimates_path = Path(root) / 'estimates.json'
-            result = parse_criterion_estimates(estimates_path)
+            result = parse_criterion_estimates(estimates_path, criterion_dir)
 
             if result:
                 # Determine which benchmark suite this belongs to
@@ -136,6 +157,52 @@ def generate_html_table(suite_name: str, results: list[BenchmarkResult]) -> str:
     return html
 
 
+def parse_target_value(target_str: str) -> tuple[Optional[float], str]:
+    """
+    Parse a target string like '<1µs' or '>100k edges/sec' into (value_ns, operator).
+
+    Returns:
+        (target_value_in_ns, operator) where operator is '<' or '>'
+        Returns (None, '') if parsing fails
+    """
+    target_str = target_str.strip()
+
+    # Extract operator
+    if target_str.startswith('<'):
+        operator = '<'
+        value_str = target_str[1:].strip()
+    elif target_str.startswith('>'):
+        operator = '>'
+        value_str = target_str[1:].strip()
+    else:
+        return (None, '')
+
+    # Parse time values
+    if 'ns' in value_str:
+        try:
+            return (float(value_str.replace('ns', '').strip()), operator)
+        except ValueError:
+            return (None, '')
+    elif 'µs' in value_str or 'us' in value_str:
+        try:
+            val = value_str.replace('µs', '').replace('us', '').strip()
+            return (float(val) * 1000, operator)  # Convert to ns
+        except ValueError:
+            return (None, '')
+    elif 'ms' in value_str:
+        try:
+            return (float(value_str.replace('ms', '').strip()) * 1_000_000, operator)
+        except ValueError:
+            return (None, '')
+    elif 's' in value_str and 'sec' not in value_str:
+        try:
+            return (float(value_str.replace('s', '').strip()) * 1_000_000_000, operator)
+        except ValueError:
+            return (None, '')
+
+    return (None, '')
+
+
 def load_performance_targets() -> list[dict]:
     """Load performance targets from JSON file."""
     targets_path = Path(__file__).parent.parent / "benchmarks" / "performance-targets.json"
@@ -148,13 +215,90 @@ def load_performance_targets() -> list[dict]:
         return []
 
 
+def match_benchmark_to_target(bench_name: str, targets: list[dict]) -> Optional[tuple[dict, float, str]]:
+    """
+    Match a benchmark name to a performance target and calculate the percentage.
+
+    Returns:
+        (target_dict, target_value_ns, operator) if matched, None otherwise
+    """
+    # Map benchmark names to target metrics
+    bench_to_metric = {
+        'target_single_hop/traverse_one_hop': 'Current-state single-hop traversal',
+        'target_3_hop/traverse_three_hops': 'Current-state 3-hop traversal',
+        'target_time_travel_anchor/query_at_anchor': 'Time-travel at anchor',
+        'target_time_travel_deltas/query_with_5_deltas': 'Time-travel with deltas (avg 5)',
+        'target_time_travel_worst_case/query_with_9_deltas': 'Time-travel worst case (9 deltas)',
+        'target_batch_insertion/insert_1000_edges': 'Batch insertion throughput',
+    }
+
+    metric_name = bench_to_metric.get(bench_name)
+    if not metric_name:
+        return None
+
+    # Find matching target
+    for target in targets:
+        if target.get('metric') == metric_name:
+            target_val, operator = parse_target_value(target.get('target', ''))
+            if target_val is not None:
+                return (target, target_val, operator)
+
+    return None
+
+
 def generate_index_page(all_results: dict[str, list[BenchmarkResult]], output_dir: Path) -> None:
     """Generate the main index page with all benchmark results."""
 
     # Load performance targets
     targets = load_performance_targets()
+
+    # Collect all benchmark results and check against targets
+    target_results = []
+    for suite_name, results in all_results.items():
+        for bench in results:
+            match = match_benchmark_to_target(bench.name, targets)
+            if match:
+                target_dict, target_val_ns, operator = match
+                # Calculate percentage difference
+                actual_val_ns = bench.mean_ns
+                if operator == '<':
+                    # Lower is better
+                    pct = ((actual_val_ns - target_val_ns) / target_val_ns) * 100
+                    status = '✅ PASS' if actual_val_ns < target_val_ns else '❌ FAIL'
+                    if actual_val_ns < target_val_ns:
+                        pct_text = f"{abs(pct):.1f}% faster than target"
+                    else:
+                        pct_text = f"{pct:.1f}% slower than target"
+                else:
+                    # Higher is better (throughput)
+                    pct = ((actual_val_ns - target_val_ns) / target_val_ns) * 100
+                    status = '✅ PASS' if actual_val_ns > target_val_ns else '❌ FAIL'
+                    pct_text = f"{pct:+.1f}% vs target"
+
+                target_results.append({
+                    'metric': target_dict['metric'],
+                    'target': target_dict['target'],
+                    'actual': f"{bench.mean:.2f} {bench.unit}",
+                    'status': status,
+                    'pct_text': pct_text,
+                })
+
+    # Generate targets HTML with validation
     targets_html = ""
-    if targets:
+    if target_results:
+        targets_html = "<table class='benchmark-table'>\n"
+        targets_html += "<thead><tr><th>Metric</th><th>Target</th><th>Actual</th><th>Status</th></tr></thead>\n"
+        targets_html += "<tbody>\n"
+        for result in target_results:
+            targets_html += f"""<tr>
+                <td>{result['metric']}</td>
+                <td>{result['target']}</td>
+                <td>{result['actual']} <em>({result['pct_text']})</em></td>
+                <td>{result['status']}</td>
+            </tr>\n"""
+        targets_html += "</tbody></table>"
+    elif targets:
+        # Show targets without validation if we have targets but no results yet
         targets_html = "<ul>\n"
         for target in targets:
             metric = target.get('metric', '')
@@ -421,8 +565,12 @@ Benchmarks have been run for this PR.
 *Full benchmark results available in workflow artifacts*
 
 📊 [View detailed results](https://madmax983.github.io/GallifreyDB/benchmarks/)
-📈 [Historical trends](https://madmax983.github.io/GallifreyDB/dev/bench/)
 """
+    # Note: Historical trends chart is generated by github-action-benchmark
+    # at https://madmax983.github.io/GallifreyDB/dev/bench/index.html
+    # Only include if we have historical data
+    if history:
+        md += "📈 [Historical trends](https://madmax983.github.io/GallifreyDB/dev/bench/index.html)\n"
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(md)

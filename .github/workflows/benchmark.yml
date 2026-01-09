@@ -68,15 +68,15 @@ jobs:
           set -o pipefail  # Ensure piped commands propagate failures
 
           # Determine which benchmarks to run based on trigger type
-          # Weekly (scheduled) and manual runs: all benchmarks
-          # CI runs (push/PR): core benchmarks only for faster feedback
+          # Weekly (scheduled) and manual runs: all benchmarks for comprehensive testing
+          # CI runs (push/PR): performance_targets only for fast feedback on key metrics
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Running ALL benchmarks (weekly/manual run)..."
-            BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench gallifreydb --bench hnsw_index --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity"
+            BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench gallifreydb --bench hnsw_index --bench performance_targets --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity"
           else
-            echo "Running CORE benchmarks only (CI run)..."
-            # Core benchmarks: storage layer, high-level API
-            BENCH_TARGETS="--bench current_state --bench gallifreydb"
+            echo "Running PERFORMANCE TARGETS benchmark only (CI run)..."
+            # Performance targets: lightweight benchmark verifying key performance metrics
+            BENCH_TARGETS="--bench performance_targets"
           fi
 
           # Run benchmarks with configured timing parameters
