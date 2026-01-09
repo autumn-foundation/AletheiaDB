@@ -1424,32 +1424,17 @@ impl TemporalVectorIndex {
             return Ok(None);
         }
 
-        // Build snapshot outside locks (expensive O(n log n) operation)
-        let (snapshot, vector_snapshot) = self.build_snapshot_data()?;
-
-        // Store snapshot and return stable ID
-        let stable_id = {
-            let mut metadata = self.metadata.write();
-            let mut snapshot_data = self.snapshot_data.write();
-
-            // Get stable ID before inserting
-            let id = metadata.total_snapshots;
-
-            // Insert snapshot
-            snapshot_data.insert(timestamp, id, Arc::new(snapshot), vector_snapshot);
-
-            // Update metadata
-            metadata.reset(timestamp);
-
-            // Enforce snapshot limit
-            while snapshot_data.len() > self.config.max_snapshots {
-                snapshot_data.remove_oldest();
-            }
-
-            id
+        // Get snapshot ID before creating (will be the next total_snapshots value)
+        let snapshot_id = {
+            let metadata = self.metadata.read();
+            metadata.total_snapshots
         };
 
-        Ok(Some(stable_id))
+        // Delegate to internal snapshot creation logic
+        // This handles full vs delta snapshots, metadata updates, and pruning
+        self.create_snapshot_internal(timestamp)?;
+
+        Ok(Some(snapshot_id))
     }
 
     /// Prunes snapshots according to the configured retention policy.

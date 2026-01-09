@@ -812,8 +812,9 @@ impl GallifreyDB {
     /// Access the internal HistoricalStorage for testing purposes.
     ///
     /// This method provides access to the internal HistoricalStorage for
-    /// integration test verification purposes. It is public to allow access
-    /// from integration tests.
+    /// integration test verification purposes. It is public to allow access from
+    /// integration tests but is hidden from documentation and marked with
+    /// `__test_` prefix to discourage production use.
     ///
     /// **Warning**: This method exposes internal implementation details and
     /// should only be used in tests.

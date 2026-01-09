@@ -423,8 +423,10 @@ impl HistoricalStorage {
                         // Hook failed - log but don't block anchor creation (graceful degradation)
                         #[cfg(feature = "observability")]
                         tracing::warn!(
-                            "Pre-anchor hook failed for node {}: {:?} (anchor will still be created)",
+                            "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
+                            "node",
                             node_id,
+                            timestamp,
                             e
                         );
                     }
@@ -562,8 +564,10 @@ impl HistoricalStorage {
                         // Hook failed - log but don't block anchor creation (graceful degradation)
                         #[cfg(feature = "observability")]
                         tracing::warn!(
-                            "Pre-anchor hook failed for edge {}: {:?} (anchor will still be created)",
+                            "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
+                            "edge",
                             edge_id,
+                            timestamp,
                             e
                         );
                     }
@@ -947,7 +951,9 @@ impl HistoricalStorage {
     /// Get an iterator over all node versions (test-only helper).
     ///
     /// This method provides access to the node versions for integration test
-    /// verification purposes. It is public to allow access from integration tests.
+    /// verification purposes. It is public to allow access from integration tests
+    /// but is hidden from documentation and marked with `__test_` prefix to
+    /// discourage production use.
     ///
     /// **Warning**: This method exposes internal implementation details and
     /// should only be used in tests.
