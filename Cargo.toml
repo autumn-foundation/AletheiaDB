@@ -187,6 +187,12 @@ harness = false
 path = "benches/temporal_query.rs"
 required-features = []
 
+[[bench]]
+name = "profiling_commit"
+harness = false
+path = "benches/profiling_commit.rs"
+required-features = []
+
 # Patch libhoney-rust to use git version with updated dependencies
 # This overrides the crates.io version for ALL dependencies (including tracing-honeycomb)
 # Reason: crates.io v0.1.6 uses reqwest 0.10 with known CVEs
