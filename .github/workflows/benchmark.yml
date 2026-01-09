@@ -64,7 +64,9 @@ jobs:
           set -o pipefail  # Ensure piped commands propagate failures
           echo "Running all benchmarks..."
           # Run benchmarks and capture output for github-action-benchmark 'cargo' tool support
-          cargo bench --all-features --bench concurrent_reads --bench current_state --bench gallifreydb --bench hnsw_index --bench id_generation --bench persistence --bench string_interning --bench temporal_vector --bench transactions --bench vector_similarity -- --quick | tee output.txt
+          # Use --quick for fast measurements but set BENCH_SAMPLE_SIZE=2 to ensure >=2 samples
+          # (prevents panic in Criterion's stats when only 1 sample is collected)
+          BENCH_SAMPLE_SIZE=2 cargo bench --all-features --bench concurrent_reads --bench current_state --bench gallifreydb --bench hnsw_index --bench id_generation --bench persistence --bench string_interning --bench temporal_vector --bench transactions --bench vector_similarity -- --quick | tee output.txt
 
           # Verify that Criterion generated output
           if [ ! -d "target/criterion" ]; then
