@@ -61,9 +61,11 @@ impl Deref for AdjacencyGuard {
 
 impl std::fmt::Debug for AdjacencyGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Get slice once and reuse to avoid multiple deref calls during formatting
+        let entries = self.deref();
         f.debug_struct("AdjacencyGuard")
             .field("node", &self.node)
-            .field("entries", &self.deref())
+            .field("entry_count", &entries.len())
             .finish()
     }
 }
@@ -827,7 +829,6 @@ mod tests {
 
     /// Test AdjacencyGuard Debug implementation for coverage.
     #[test]
-    #[ignore] // Temporarily disabled - investigating segfault during cleanup
     fn test_adjacency_guard_debug() {
         let indexes = CurrentIndexes::new();
 
@@ -841,12 +842,11 @@ mod tests {
         // Should contain node ID and show it's an AdjacencyGuard
         assert!(debug_str.contains("AdjacencyGuard"));
         assert!(debug_str.contains("node"));
-        assert!(debug_str.contains("entries"));
+        assert!(debug_str.contains("entry_count"));
     }
 
     /// Test AdjacencyGuard with empty list for Debug coverage.
     #[test]
-    #[ignore] // Temporarily disabled - investigating segfault during cleanup
     fn test_adjacency_guard_debug_empty() {
         let indexes = CurrentIndexes::new();
         indexes.rebuild_adjacency();
@@ -857,7 +857,7 @@ mod tests {
 
         // Should format successfully even with empty entries
         assert!(debug_str.contains("AdjacencyGuard"));
-        assert!(debug_str.contains("entries"));
+        assert!(debug_str.contains("entry_count"));
     }
 }
 
