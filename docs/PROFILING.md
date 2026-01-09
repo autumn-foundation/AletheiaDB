@@ -51,7 +51,7 @@ cargo build --release --features observability-tracy
 ./tracy-profiler
 
 # Terminal 2: Run profiling benchmark
-cargo bench --bench profiling_commit --features observability-tracy -- --profile-time 10
+cargo bench --bench profiling_commit --features observability-tracy
 ```
 
 Tracy will automatically connect and start collecting data from the tracing spans.

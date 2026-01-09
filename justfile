@@ -103,7 +103,7 @@ profile-bin BIN:
 profile-commit:
     @echo "Ensure Tracy profiler is running, then press Enter..."
     @pause
-    cargo bench --bench profiling_commit --features observability-tracy -- --profile-time 10
+    cargo bench --bench profiling_commit --features observability-tracy
 
 # Quick profiling check (single scenario)
 profile-quick:

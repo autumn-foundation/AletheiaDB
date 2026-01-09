@@ -472,7 +472,7 @@ GallifreyDB uses the observability framework with Tracy integration for CPU prof
 ./tracy-profiler
 
 # Terminal 2: Run profiling benchmark with observability-tracy
-cargo bench --bench profiling_commit --features observability-tracy -- --profile-time 10
+cargo bench --bench profiling_commit --features observability-tracy
 ```
 
 **Architecture**:
