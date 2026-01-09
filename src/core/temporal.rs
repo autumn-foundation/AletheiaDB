@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use crate::utils::error::StorageError;
+use crate::utils::error::{StorageError, TemporalError};
 
 /// Timestamp represented as microseconds since Unix epoch (1970-01-01 00:00:00 UTC).
 ///
@@ -47,17 +47,14 @@ pub struct TimeRange {
 impl TimeRange {
     /// Create a new time range.
     ///
-    /// # Panics
-    /// Panics in debug mode if start > end.
+    /// # Errors
+    /// Returns `TemporalError::InvalidTimeRange` if start > end.
     #[inline]
-    pub fn new(start: Timestamp, end: Timestamp) -> Self {
-        debug_assert!(
-            start <= end,
-            "TimeRange start ({}) must be <= end ({})",
-            start,
-            end
-        );
-        TimeRange { start, end }
+    pub fn new(start: Timestamp, end: Timestamp) -> Result<Self, TemporalError> {
+        if start > end {
+            return Err(TemporalError::InvalidTimeRange { start, end });
+        }
+        Ok(TimeRange { start, end })
     }
 
     /// Create a time range that starts at the given timestamp and is still current.
@@ -71,7 +68,7 @@ impl TimeRange {
 
     /// Create a time range that is bounded on both ends.
     #[inline]
-    pub fn between(start: Timestamp, end: Timestamp) -> Self {
+    pub fn between(start: Timestamp, end: Timestamp) -> Result<Self, TemporalError> {
         Self::new(start, end)
     }
 
@@ -452,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_time_range_creation() {
-        let range = TimeRange::new(100, 200);
+        let range = TimeRange::new(100, 200).unwrap();
         assert_eq!(range.start(), 100);
         assert_eq!(range.end(), 200);
         assert!(!range.is_current());
@@ -470,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_time_range_contains() {
-        let range = TimeRange::new(100, 200);
+        let range = TimeRange::new(100, 200).unwrap();
         assert!(!range.contains(99));
         assert!(range.contains(100));
         assert!(range.contains(150));
@@ -480,10 +477,10 @@ mod tests {
 
     #[test]
     fn test_time_range_overlaps() {
-        let r1 = TimeRange::new(100, 200);
-        let r2 = TimeRange::new(150, 250);
-        let r3 = TimeRange::new(200, 300);
-        let r4 = TimeRange::new(50, 75);
+        let r1 = TimeRange::new(100, 200).unwrap();
+        let r2 = TimeRange::new(150, 250).unwrap();
+        let r3 = TimeRange::new(200, 300).unwrap();
+        let r4 = TimeRange::new(50, 75).unwrap();
 
         assert!(r1.overlaps(&r2));
         assert!(r2.overlaps(&r1));
@@ -493,9 +490,9 @@ mod tests {
 
     #[test]
     fn test_time_range_contains_range() {
-        let outer = TimeRange::new(100, 300);
-        let inner = TimeRange::new(150, 250);
-        let overlapping = TimeRange::new(150, 350);
+        let outer = TimeRange::new(100, 300).unwrap();
+        let inner = TimeRange::new(150, 250).unwrap();
+        let overlapping = TimeRange::new(150, 350).unwrap();
 
         assert!(outer.contains_range(&inner));
         assert!(!inner.contains_range(&outer));
@@ -515,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_time_range_duration() {
-        let range = TimeRange::new(100, 500);
+        let range = TimeRange::new(100, 500).unwrap();
         assert_eq!(range.duration_micros(), Some(400));
 
         let open = TimeRange::from(100);
@@ -542,8 +539,8 @@ mod tests {
     #[test]
     fn test_bitemporal_visibility() {
         let interval = BiTemporalInterval::new(
-            TimeRange::new(1000, 2000), // Valid from 1000 to 2000
-            TimeRange::new(3000, 4000), // Recorded from 3000 to 4000
+            TimeRange::new(1000, 2000).unwrap(), // Valid from 1000 to 2000
+            TimeRange::new(3000, 4000).unwrap(), // Recorded from 3000 to 4000
         );
 
         // Visible if both dimensions are in range
@@ -593,10 +590,38 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_time_range_invalid_in_debug() {
-        // This should panic in debug mode when start > end
-        TimeRange::new(200, 100);
+    fn test_time_range_invalid_returns_error() {
+        // TimeRange::new should return an error for invalid ranges (start > end)
+        let result = TimeRange::new(200, 100);
+        assert!(result.is_err());
+
+        match result {
+            Err(crate::utils::error::TemporalError::InvalidTimeRange { start, end }) => {
+                assert_eq!(start, 200);
+                assert_eq!(end, 100);
+            }
+            _ => panic!("Expected InvalidTimeRange error"),
+        }
+    }
+
+    #[test]
+    fn test_time_range_valid_returns_ok() {
+        // TimeRange::new should return Ok for valid ranges
+        let result = TimeRange::new(100, 200);
+        assert!(result.is_ok());
+        let range = result.unwrap();
+        assert_eq!(range.start(), 100);
+        assert_eq!(range.end(), 200);
+    }
+
+    #[test]
+    fn test_time_range_equal_start_end_returns_ok() {
+        // TimeRange::new should return Ok when start == end (point-in-time)
+        let result = TimeRange::new(100, 100);
+        assert!(result.is_ok());
+        let range = result.unwrap();
+        assert_eq!(range.start(), 100);
+        assert_eq!(range.end(), 100);
     }
 
     // Serialization tests
@@ -604,11 +629,11 @@ mod tests {
     #[test]
     fn test_timerange_serialize_roundtrip() {
         let ranges = [
-            TimeRange::new(100, 200),
+            TimeRange::new(100, 200).unwrap(),
             TimeRange::from(1000),
             TimeRange::at(500),
-            TimeRange::new(i64::MIN, i64::MAX),
-            TimeRange::new(0, 0),
+            TimeRange::new(i64::MIN, i64::MAX).unwrap(),
+            TimeRange::new(0, 0).unwrap(),
         ];
         for range in ranges {
             let bytes = range.serialize();
@@ -621,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_timerange_serialize_into() {
-        let range = TimeRange::new(100, 200);
+        let range = TimeRange::new(100, 200).unwrap();
         let mut buffer = Vec::new();
         range.serialize_into(&mut buffer);
         assert_eq!(buffer.len(), 16);
@@ -640,7 +665,10 @@ mod tests {
         let intervals = [
             BiTemporalInterval::current(1000),
             BiTemporalInterval::now(500, 600),
-            BiTemporalInterval::new(TimeRange::new(100, 200), TimeRange::new(300, 400)),
+            BiTemporalInterval::new(
+                TimeRange::new(100, 200).unwrap(),
+                TimeRange::new(300, 400).unwrap(),
+            ),
             BiTemporalInterval::new(TimeRange::from(0), TimeRange::from(0)),
         ];
         for interval in intervals {
@@ -654,7 +682,10 @@ mod tests {
 
     #[test]
     fn test_bitemporal_serialize_into() {
-        let interval = BiTemporalInterval::new(TimeRange::new(100, 200), TimeRange::new(300, 400));
+        let interval = BiTemporalInterval::new(
+            TimeRange::new(100, 200).unwrap(),
+            TimeRange::new(300, 400).unwrap(),
+        );
         let mut buffer = Vec::new();
         interval.serialize_into(&mut buffer);
         assert_eq!(buffer.len(), 32);
@@ -671,7 +702,7 @@ mod tests {
     #[test]
     fn test_serialization_endianness() {
         // Verify little-endian format
-        let range = TimeRange::new(0x0102030405060708i64, 0x1112131415161718i64);
+        let range = TimeRange::new(0x0102030405060708i64, 0x1112131415161718i64).unwrap();
         let bytes = range.serialize();
         // Little-endian: least significant byte first
         assert_eq!(bytes[0], 0x08);

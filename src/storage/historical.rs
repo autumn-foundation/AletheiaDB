@@ -1224,7 +1224,10 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
+                BiTemporalInterval::new(
+                    TimeRange::new(0, 1000).unwrap(),
+                    TimeRange::new(0, Timestamp::MAX).unwrap(),
+                ),
                 label,
                 PropertyMapBuilder::new().insert("age", 30i64).build(),
             )
@@ -1235,8 +1238,8 @@ mod tests {
                 node_id,
                 v2,
                 BiTemporalInterval::new(
-                    TimeRange::new(1000, 2000),
-                    TimeRange::new(0, Timestamp::MAX),
+                    TimeRange::new(1000, 2000).unwrap(),
+                    TimeRange::new(0, Timestamp::MAX).unwrap(),
                 ),
                 label,
                 PropertyMapBuilder::new().insert("age", 31i64).build(),
@@ -1248,8 +1251,8 @@ mod tests {
                 node_id,
                 v3,
                 BiTemporalInterval::new(
-                    TimeRange::new(2000, Timestamp::MAX),
-                    TimeRange::new(0, Timestamp::MAX),
+                    TimeRange::new(2000, Timestamp::MAX).unwrap(),
+                    TimeRange::new(0, Timestamp::MAX).unwrap(),
                 ),
                 label,
                 PropertyMapBuilder::new().insert("age", 32i64).build(),
@@ -1842,8 +1845,8 @@ mod tests {
                     node_id,
                     VersionId::new(i as u64).unwrap(),
                     BiTemporalInterval::new(
-                        TimeRange::new(*start, *end),
-                        TimeRange::new(0, Timestamp::MAX),
+                        TimeRange::new(*start, *end).unwrap(),
+                        TimeRange::new(0, Timestamp::MAX).unwrap(),
                     ),
                     label,
                     PropertyMapBuilder::new()

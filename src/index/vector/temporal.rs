@@ -60,7 +60,7 @@
 //! // Track semantic drift over time
 //! let node_id = NodeId::new(42).unwrap();
 //! let reference_embedding = vec![0.5f32; 384];
-//! let time_range = TimeRange::new(1000000, 2000000);
+//! let time_range = TimeRange::new(1000000, 2000000).unwrap();
 //! let drift = index.track_semantic_drift(node_id, &reference_embedding, time_range)?;
 //! # Ok(())
 //! # }
@@ -1613,7 +1613,7 @@ impl TemporalVectorIndex {
     ///
     /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
     /// let query = vec![0.1f32; 384];
-    /// let time_range = TimeRange::new(1672531200000000, 1704067200000000); // 2023-2024
+    /// let time_range = TimeRange::new(1672531200000000, 1704067200000000).unwrap(); // 2023-2024
     ///
     /// let results = index.find_similar_in_range(&query, 10, time_range)?;
     ///
@@ -1714,7 +1714,7 @@ impl TemporalVectorIndex {
     /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
     /// let node_id = NodeId::new(42).unwrap();
     /// let reference = vec![0.5f32; 384];
-    /// let time_range = TimeRange::new(1000000, 2000000);
+    /// let time_range = TimeRange::new(1000000, 2000000).unwrap();
     ///
     /// let drift_timeline = index.track_semantic_drift(node_id, &reference, time_range)?;
     ///
@@ -1808,7 +1808,7 @@ impl TemporalVectorIndex {
     /// use gallifreydb::core::temporal::TimeRange;
     ///
     /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
-    /// let time_range = TimeRange::new(1000000, 2000000);
+    /// let time_range = TimeRange::new(1000000, 2000000).unwrap();
     ///
     /// // Find documents that changed significantly (cosine distance > 0.3)
     /// let drifted = index.find_semantic_drift(0.3, time_range, DriftMetric::Cosine)?;
@@ -2346,7 +2346,7 @@ mod tests {
         index.on_transaction_at(3000)?;
 
         let query = vec![1.0, 0.0, 0.0, 0.0];
-        let time_range = TimeRange::new(1000, 3000);
+        let time_range = TimeRange::new(1000, 3000).unwrap();
         let results = index.find_similar_in_range(&query, 5, time_range)?;
 
         assert!(!results.is_empty());
@@ -2589,7 +2589,7 @@ mod tests {
         index.on_transaction_at(3000)?;
         assert_eq!(index.snapshot_count(), 3);
 
-        let time_range = TimeRange::new(1000, 3000);
+        let time_range = TimeRange::new(1000, 3000).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 3);
@@ -2620,7 +2620,7 @@ mod tests {
             index.on_transaction_at(timestamp)?;
         }
 
-        let time_range = TimeRange::new(2000, 4000);
+        let time_range = TimeRange::new(2000, 4000).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 3);
@@ -2647,7 +2647,7 @@ mod tests {
         index.on_transaction_at(1000)?;
 
         let node_id = NodeId::new(42).unwrap();
-        let time_range = TimeRange::new(1000, 2000);
+        let time_range = TimeRange::new(1000, 2000).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 0);
@@ -2678,7 +2678,7 @@ mod tests {
         index.on_transaction_at(3000)?;
 
         let reference = vec![1.0, 0.0, 0.0, 0.0];
-        let time_range = TimeRange::new(1000, 3000);
+        let time_range = TimeRange::new(1000, 3000).unwrap();
         let drift = index.track_semantic_drift(node_id, &reference, time_range)?;
 
         assert_eq!(drift.len(), 3);
@@ -2714,7 +2714,7 @@ mod tests {
         index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 4000)?;
         index.on_transaction_at(4000)?;
 
-        let time_range = TimeRange::new(1000, 4000);
+        let time_range = TimeRange::new(1000, 4000).unwrap();
         let drift = index.calculate_consecutive_drift(node_id, time_range)?;
 
         assert_eq!(drift.len(), 3);
@@ -2741,7 +2741,7 @@ mod tests {
         index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
         index.on_transaction_at(1000)?;
 
-        let time_range = TimeRange::new(1000, 2000);
+        let time_range = TimeRange::new(1000, 2000).unwrap();
         let drift = index.calculate_consecutive_drift(node_id, time_range)?;
 
         assert_eq!(drift.len(), 0);
@@ -2768,7 +2768,7 @@ mod tests {
         index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 2000)?;
         index.on_transaction_at(2000)?;
 
-        let time_range = TimeRange::new(1000, 2000);
+        let time_range = TimeRange::new(1000, 2000).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 2);
@@ -2799,7 +2799,7 @@ mod tests {
 
         assert_eq!(index.snapshot_count(), 3);
 
-        let time_range = TimeRange::new(1000, 5000);
+        let time_range = TimeRange::new(1000, 5000).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 3);
@@ -2827,7 +2827,7 @@ mod tests {
         index.on_transaction_at(1000)?;
 
         let wrong_dimension_ref = vec![1.0, 0.0, 0.0];
-        let time_range = TimeRange::new(1000, 2000);
+        let time_range = TimeRange::new(1000, 2000).unwrap();
 
         let result = index.track_semantic_drift(node_id, &wrong_dimension_ref, time_range);
 
@@ -2894,7 +2894,7 @@ mod tests {
         )?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX);
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
 
         let results = index.find_semantic_drift(0.2, time_range, DriftMetric::Cosine)?;
 
@@ -2956,7 +2956,7 @@ mod tests {
         )?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX);
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
 
         assert_eq!(results.len(), 3);
@@ -2995,7 +2995,7 @@ mod tests {
         index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX);
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
 
         assert_eq!(results.len(), 1);
@@ -3021,7 +3021,7 @@ mod tests {
         index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, 100);
+        let time_range = TimeRange::new(0, 100).unwrap();
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
 
         assert_eq!(results.len(), 0);
@@ -3050,7 +3050,7 @@ mod tests {
         index.add(node1, &[0.9, 0.1, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX);
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
 
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
         assert_eq!(results.len(), 1);
@@ -3082,7 +3082,7 @@ mod tests {
         index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX);
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
 
         let cosine_results = index.find_semantic_drift(0.5, time_range, DriftMetric::Cosine)?;
         assert_eq!(cosine_results.len(), 1);
@@ -3118,7 +3118,7 @@ mod tests {
         index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX);
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
 
         let cosine_results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
         assert_eq!(cosine_results[0].1, 1.0);
@@ -4061,7 +4061,7 @@ mod tests {
         // With full_snapshot_interval=10, we get full snapshots at 0 and 10,
         // so max delta chain is 5 (snapshots 11-15), well under MAX_DELTA_CHAIN_DEPTH
         use crate::core::temporal::TimeRange;
-        let time_range = TimeRange::new(1000, 2500);
+        let time_range = TimeRange::new(1000, 2500).unwrap();
         let result = index.find_semantic_drift(
             0.1, // threshold
             time_range,

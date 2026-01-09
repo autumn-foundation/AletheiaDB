@@ -2228,8 +2228,8 @@ mod tests {
 
         // Create specific temporal interval
         let temporal = BiTemporalInterval::new(
-            TimeRange::new(1000, 2000),
-            TimeRange::new(3000, crate::core::temporal::TIMESTAMP_MAX),
+            TimeRange::new(1000, 2000).unwrap(),
+            TimeRange::new(3000, crate::core::temporal::TIMESTAMP_MAX).unwrap(),
         );
 
         let operation = WalOperation::CreateNode {
@@ -2291,8 +2291,10 @@ mod tests {
             .insert("weight", 0.85f64)
             .build();
 
-        let temporal =
-            BiTemporalInterval::new(TimeRange::new(5000, 6000), TimeRange::new(7000, 8000));
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(5000, 6000).unwrap(),
+            TimeRange::new(7000, 8000).unwrap(),
+        );
 
         let operation = WalOperation::CreateEdge {
             edge_id: EdgeId::new(99).unwrap(),
@@ -2353,8 +2355,10 @@ mod tests {
             .insert("age", 31i64) // Updated age
             .build();
 
-        let temporal =
-            BiTemporalInterval::new(TimeRange::new(10000, 20000), TimeRange::from(15000));
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(10000, 20000).unwrap(),
+            TimeRange::from(15000),
+        );
 
         let operation = WalOperation::UpdateNode {
             node_id: NodeId::new(42).unwrap(),
@@ -2402,7 +2406,10 @@ mod tests {
 
         let mut wal = WriteAheadLog::new(config)?;
 
-        let temporal = BiTemporalInterval::new(TimeRange::new(100, 200), TimeRange::new(300, 400));
+        let temporal = BiTemporalInterval::new(
+            TimeRange::new(100, 200).unwrap(),
+            TimeRange::new(300, 400).unwrap(),
+        );
 
         wal.append(WalOperation::DeleteNode {
             node_id: NodeId::new(5).unwrap(),
@@ -2507,8 +2514,10 @@ mod tests {
                 .insert("key", "value")
                 .insert("count", 42i64)
                 .build();
-            original_temporal =
-                BiTemporalInterval::new(TimeRange::new(1000, 2000), TimeRange::new(3000, 4000));
+            original_temporal = BiTemporalInterval::new(
+                TimeRange::new(1000, 2000).unwrap(),
+                TimeRange::new(3000, 4000).unwrap(),
+            );
 
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(100).unwrap(),

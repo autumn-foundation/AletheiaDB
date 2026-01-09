@@ -44,7 +44,7 @@ fn bench_valid_at_query(c: &mut Criterion) {
                                     node_id,
                                     v_id,
                                     BiTemporalInterval::new(
-                                        TimeRange::new(start, end),
+                                        TimeRange::new(start, end).unwrap(),
                                         TimeRange::from(0), // Tx time is irrelevant for this test
                                     ),
                                 )
@@ -59,7 +59,7 @@ fn bench_valid_at_query(c: &mut Criterion) {
                         // Benchmark: Query operation only
                         // New efficient query: "valid at time T"
                         // Since the index now supports overlaps, we can just query the point interval.
-                        let range = TimeRange::new(time, time + 1);
+                        let range = TimeRange::new(time, time + 1).unwrap();
                         black_box(indexes.find_node_versions_in_valid_time_range(node_id, range))
                     },
                     criterion::BatchSize::SmallInput,
@@ -95,7 +95,7 @@ fn bench_insert_performance(c: &mut Criterion) {
                                     node_id,
                                     v_id,
                                     BiTemporalInterval::new(
-                                        TimeRange::new(start, end),
+                                        TimeRange::new(start, end).unwrap(),
                                         TimeRange::from(0),
                                     ),
                                 )
@@ -135,7 +135,7 @@ fn bench_insert_performance(c: &mut Criterion) {
                                     node_id,
                                     v_id,
                                     BiTemporalInterval::new(
-                                        TimeRange::new(start, end),
+                                        TimeRange::new(start, end).unwrap(),
                                         TimeRange::from(0),
                                     ),
                                 )
@@ -179,7 +179,8 @@ fn bench_concurrent_write_throughput(c: &mut Criterion) {
                                                 TimeRange::new(
                                                     (v * 1000) as i64,
                                                     ((v + 1) * 1000) as i64,
-                                                ),
+                                                )
+                                                .unwrap(),
                                                 TimeRange::from(0),
                                             ),
                                         )
@@ -224,7 +225,8 @@ fn bench_concurrent_write_throughput(c: &mut Criterion) {
                                                 TimeRange::new(
                                                     ((thread_id * 100 + v) * 1000) as i64,
                                                     (((thread_id * 100 + v) + 1) * 1000) as i64,
-                                                ),
+                                                )
+                                                .unwrap(),
                                                 TimeRange::from(0),
                                             ),
                                         )
@@ -267,7 +269,7 @@ fn bench_read_latency_under_write_contention(c: &mut Criterion) {
                             node_id,
                             version_id,
                             BiTemporalInterval::new(
-                                TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64),
+                                TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64).unwrap(),
                                 TimeRange::from(0),
                             ),
                         )
@@ -275,7 +277,7 @@ fn bench_read_latency_under_write_contention(c: &mut Criterion) {
                 }
 
                 // Query range in the middle
-                let query_range = TimeRange::new(5_000_000, 5_001_000);
+                let query_range = TimeRange::new(5_000_000, 5_001_000).unwrap();
 
                 b.iter_batched(
                     || {
@@ -295,7 +297,8 @@ fn bench_read_latency_under_write_contention(c: &mut Criterion) {
                                                 TimeRange::new(
                                                     ((thread_id * 100 + v) * 1000) as i64,
                                                     (((thread_id * 100 + v) + 1) * 1000) as i64,
-                                                ),
+                                                )
+                                                .unwrap(),
                                                 TimeRange::from(0),
                                             ),
                                         )
@@ -349,7 +352,7 @@ fn bench_concurrent_read_same_entity(c: &mut Criterion) {
                     node_id,
                     version_id,
                     BiTemporalInterval::new(
-                        TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64),
+                        TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64).unwrap(),
                         TimeRange::from(0),
                     ),
                 )
@@ -376,7 +379,7 @@ fn bench_concurrent_read_same_entity(c: &mut Criterion) {
                                     for q in 0..50 {
                                         // Query different time points across the history
                                         let time = ((reader_id * 50 + q) * 1000) as i64;
-                                        let range = TimeRange::new(time, time + 1);
+                                        let range = TimeRange::new(time, time + 1).unwrap();
                                         let r = idx_clone
                                             .find_node_versions_in_valid_time_range(node_id, range);
                                         results.push(r);
@@ -421,7 +424,7 @@ fn bench_mixed_read_write_same_entity(c: &mut Criterion) {
                         node_id,
                         version_id,
                         BiTemporalInterval::new(
-                            TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64),
+                            TimeRange::new((i * 1000) as i64, ((i + 1) * 1000) as i64).unwrap(),
                             TimeRange::from(0),
                         ),
                     )
@@ -446,7 +449,7 @@ fn bench_mixed_read_write_same_entity(c: &mut Criterion) {
                                 let mut results = Vec::new();
                                 for q in 0..25 {
                                     let time = ((reader_id * 25 + q) * 1000) as i64;
-                                    let range = TimeRange::new(time, time + 1);
+                                    let range = TimeRange::new(time, time + 1).unwrap();
                                     let r = idx_clone
                                         .find_node_versions_in_valid_time_range(node_id, range);
                                     results.push(r);
@@ -470,7 +473,8 @@ fn bench_mixed_read_write_same_entity(c: &mut Criterion) {
                                                 TimeRange::new(
                                                     ((1000 + writer_id * 10 + w) * 1000) as i64,
                                                     ((1001 + writer_id * 10 + w) * 1000) as i64,
-                                                ),
+                                                )
+                                                .unwrap(),
                                                 TimeRange::from(0),
                                             ),
                                         )
