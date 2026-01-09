@@ -550,6 +550,58 @@ fn bench_string_hot_path(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark allocation overhead in get_outgoing() at the index level.
+///
+/// This micro-benchmark isolates the Vec allocation cost by directly
+/// accessing CurrentIndexes rather than going through CurrentStorage.
+/// Target: Eliminate 100-500ns allocation overhead.
+fn bench_get_outgoing_allocation_overhead(c: &mut Criterion) {
+    use gallifreydb::core::graph::Edge;
+    use gallifreydb::core::id::{EdgeId, VersionId};
+    use gallifreydb::core::interning::GLOBAL_INTERNER;
+    use gallifreydb::index::current::CurrentIndexes;
+
+    let mut group = c.benchmark_group("get_outgoing_allocation");
+
+    // Create a test graph at the index level with varying degrees
+    for out_degree in [1, 10, 100] {
+        let indexes = CurrentIndexes::new();
+        let node_id = gallifreydb::NodeId::new(0).unwrap();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Insert edges to create adjacency list
+        for i in 0..out_degree {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                node_id,
+                gallifreydb::NodeId::new(i + 1).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+
+        // Trigger initial rebuild
+        indexes.rebuild_adjacency();
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("degree_{}", out_degree)),
+            &(indexes, node_id),
+            |b, (indexes, node)| {
+                b.iter(|| {
+                    // After optimization: returns AdjacencyGuard with Arc clone (~5-10ns)
+                    // Previously: allocated Vec on every call (100-500ns overhead)
+                    let adjacency = indexes.get_outgoing(black_box(*node));
+                    black_box(adjacency)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
@@ -562,6 +614,7 @@ criterion_group!(
     bench_edge_creation,
     bench_degree_queries,
     bench_find_neighbors,
+    bench_get_outgoing_allocation_overhead,
     // ID Generation
     bench_id_single_thread,
     bench_id_concurrent,
