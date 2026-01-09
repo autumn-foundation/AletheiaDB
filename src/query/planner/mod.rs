@@ -1067,4 +1067,235 @@ mod tests {
         let plan = planner.plan(query).unwrap();
         assert!(!plan.parallel);
     }
+
+    // ==================== Additional Operation Tests ====================
+
+    #[test]
+    fn test_traverse_in_direction() {
+        let planner = test_planner();
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .traverse_in("KNOWS")
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        // Should be IndexedTraversal with Incoming direction
+        if let PhysicalOp::IndexedTraversal { direction, .. } = plan.root {
+            assert_eq!(direction, crate::query::ir::Direction::Incoming);
+        } else {
+            panic!("Expected IndexedTraversal");
+        }
+    }
+
+    #[test]
+    fn test_traverse_both_directions() {
+        let planner = test_planner();
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .traverse_both("KNOWS")
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        // Should be IndexedTraversal with Both direction
+        if let PhysicalOp::IndexedTraversal { direction, .. } = plan.root {
+            assert_eq!(direction, crate::query::ir::Direction::Both);
+        } else {
+            panic!("Expected IndexedTraversal");
+        }
+    }
+
+    #[test]
+    fn test_filter_label_operation() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes {
+                    label: Some("Person".to_string()),
+                },
+                QueryOp::FilterLabel("Admin".to_string()),
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        // Should be Filter(NodeScan)
+        assert!(matches!(plan.root, PhysicalOp::Filter { .. }));
+    }
+
+    #[test]
+    fn test_skip_operation() {
+        let planner = test_planner();
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .skip(10)
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        // Skip is converted to Limit with offset
+        if let PhysicalOp::Limit { offset, .. } = plan.root {
+            assert_eq!(offset, 10);
+        } else {
+            panic!("Expected Limit with offset");
+        }
+    }
+
+    #[test]
+    fn test_count_operation() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![
+                QueryOp::ScanNodes {
+                    label: Some("Person".to_string()),
+                },
+                QueryOp::Count,
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        // Should be Count(NodeScan)
+        assert!(matches!(plan.root, PhysicalOp::Count { .. }));
+    }
+
+    #[test]
+    fn test_get_edges_requires_source() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::GetEdges {
+                direction: crate::query::ir::Direction::Outgoing,
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let result = planner.plan(query);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("requires a source"));
+    }
+
+    #[test]
+    fn test_temporal_as_of_without_source() {
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let query = Query {
+            ops: vec![QueryOp::AsOf {
+                valid_time: now,
+                transaction_time: now,
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let result = planner.plan(query);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_temporal_between_without_source() {
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let query = Query {
+            ops: vec![QueryOp::Between {
+                time_range: crate::core::temporal::TimeRange::new(now, now),
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let result = planner.plan(query);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_track_changes_without_source() {
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let query = Query {
+            ops: vec![QueryOp::TrackChanges {
+                time_range: crate::core::temporal::TimeRange::new(now, now),
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let result = planner.plan(query);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_temporal_node_lookup_with_context() {
+        let planner = test_planner();
+        let now = crate::core::temporal::time::now();
+        let mut query = QueryBuilder::new().start(NodeId::new(1).unwrap()).build();
+
+        // Add temporal context
+        query.temporal_context = Some(TemporalContext {
+            as_of: Some((now, now)),
+            between: None,
+        });
+
+        let plan = planner.plan(query).unwrap();
+        // Should be TemporalNodeLookup instead of NodeLookup
+        assert!(matches!(plan.root, PhysicalOp::TemporalNodeLookup { .. }));
+    }
+
+    #[test]
+    fn test_temporal_vector_search_with_context() {
+        let planner = test_planner();
+        let embedding = [0.1f32; 4];
+        let now = crate::core::temporal::time::now();
+
+        let mut query = Query {
+            ops: vec![QueryOp::VectorSearch {
+                embedding: Arc::from(embedding.as_slice()),
+                k: 10,
+                metric: crate::index::vector::DistanceMetric::Cosine,
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        // Add temporal context
+        query.temporal_context = Some(TemporalContext {
+            as_of: Some((now, now)),
+            between: None,
+        });
+
+        let plan = planner.plan(query).unwrap();
+        // Should be TemporalVectorSearch instead of HnswSearch
+        assert!(matches!(plan.root, PhysicalOp::TemporalVectorSearch { .. }));
+    }
+
+    #[test]
+    fn test_filter_label_without_source_error() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::FilterLabel("Person".to_string())],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let result = planner.plan(query);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("requires a source"));
+    }
+
+    #[test]
+    fn test_skip_without_source_error() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Skip(10)],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let result = planner.plan(query);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("requires a source"));
+    }
 }
