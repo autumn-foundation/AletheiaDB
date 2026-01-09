@@ -419,7 +419,7 @@ impl HistoricalStorage {
                             node_id
                         );
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         // Hook failed - log but don't block anchor creation (graceful degradation)
                         #[cfg(feature = "observability")]
                         tracing::warn!(
@@ -427,7 +427,7 @@ impl HistoricalStorage {
                             "node",
                             node_id,
                             timestamp,
-                            e
+                            _e
                         );
                     }
                 }
@@ -560,7 +560,7 @@ impl HistoricalStorage {
                             edge_id
                         );
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         // Hook failed - log but don't block anchor creation (graceful degradation)
                         #[cfg(feature = "observability")]
                         tracing::warn!(
@@ -568,7 +568,7 @@ impl HistoricalStorage {
                             "edge",
                             edge_id,
                             timestamp,
-                            e
+                            _e
                         );
                     }
                 }
