@@ -209,8 +209,6 @@ pub struct TemporalNodeIterator {
     node_ids: std::vec::IntoIter<NodeId>,
     valid_time: Timestamp,
     transaction_time: Timestamp,
-    #[allow(dead_code)]
-    current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
 }
 
@@ -219,14 +217,12 @@ impl TemporalNodeIterator {
         node_ids: Vec<NodeId>,
         valid_time: Timestamp,
         transaction_time: Timestamp,
-        current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
     ) -> Self {
         TemporalNodeIterator {
             node_ids: node_ids.into_iter(),
             valid_time,
             transaction_time,
-            current,
             historical,
         }
     }
@@ -235,52 +231,44 @@ impl TemporalNodeIterator {
 impl ResultIterator for TemporalNodeIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         self.node_ids.next().map(|id| {
-            // Look up the version valid at the requested time
             // Acquire read lock on historical storage
-            let historical = match self.historical.read() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    return Err(crate::utils::error::StorageError::LockPoisoned {
-                        lock_type: "historical_storage_read",
-                    }
-                    .into());
+            let historical = self.historical.read().map_err(|_| {
+                crate::utils::error::StorageError::LockPoisoned {
+                    lock_type: "historical_storage_read",
                 }
-            };
+            })?;
 
-            match historical.find_node_version_at_time(id, self.valid_time, self.transaction_time) {
-                Some(version_id) => {
-                    // Get the version metadata
-                    let version = match historical.get_node_version(version_id) {
-                        Some(v) => v,
-                        None => {
-                            return Err(crate::utils::error::TemporalError::VersionNotFound(
-                                version_id,
-                            )
-                            .into());
-                        }
-                    };
-
-                    // Reconstruct the properties from the version
-                    let properties = match historical.reconstruct_node_properties(version_id) {
-                        Ok(props) => props,
-                        Err(e) => return Err(e),
-                    };
-
-                    // Construct a node with the historical data
-                    let node = Node::new(id, version.label, properties, version_id);
-
-                    Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(self.valid_time))
-                }
-                None => {
-                    // Node did not exist at the requested time - return not found
-                    Err(crate::utils::error::TemporalError::NodeNotFoundAtTime {
+            // Find the version valid at the requested time
+            let version_id =
+                historical
+                    .find_node_version_at_time(id, self.valid_time, self.transaction_time)
+                    .ok_or(crate::utils::error::TemporalError::NodeNotFoundAtTime {
                         node_id: id,
                         valid_time: self.valid_time,
                         transaction_time: self.transaction_time,
-                    }
-                    .into())
-                }
-            }
+                    })?;
+
+            // INVARIANT: If find_node_version_at_time returns a version_id,
+            // that version MUST exist in storage. If this fails, it indicates
+            // a critical data inconsistency (broken version chain or dangling version_id).
+            debug_assert!(
+                historical.get_node_version(version_id).is_some(),
+                "INVARIANT VIOLATION: find_node_version_at_time returned non-existent version_id {}",
+                version_id
+            );
+
+            // Get the version metadata
+            let version = historical
+                .get_node_version(version_id)
+                .ok_or(crate::utils::error::TemporalError::VersionNotFound(version_id))?;
+
+            // Reconstruct the properties from the version
+            let properties = historical.reconstruct_node_properties(version_id)?;
+
+            // Construct a node with the historical data
+            let node = Node::new(id, version.label, properties, version_id);
+
+            Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(self.valid_time))
         })
     }
 
@@ -1925,7 +1913,7 @@ mod tests {
 
         let node_ids = vec![node];
 
-        let mut iter = TemporalNodeIterator::new(node_ids, now, now, current, historical);
+        let mut iter = TemporalNodeIterator::new(node_ids, now, now, historical);
 
         let row = iter.next().unwrap().unwrap();
         assert_eq!(row.entity.node_id(), Some(node));
@@ -1937,7 +1925,6 @@ mod tests {
         use crate::storage::historical::HistoricalStorage;
         use crate::storage::version::AnchorConfig;
 
-        let current = Arc::new(CurrentStorage::new());
         let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
             AnchorConfig::default(),
         )));
@@ -1945,7 +1932,7 @@ mod tests {
         let node_ids = vec![];
         let now = crate::core::temporal::time::now();
 
-        let mut iter = TemporalNodeIterator::new(node_ids, now, now, current, historical);
+        let mut iter = TemporalNodeIterator::new(node_ids, now, now, historical);
 
         assert!(iter.next().is_none());
     }

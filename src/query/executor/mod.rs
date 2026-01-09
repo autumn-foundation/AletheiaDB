@@ -121,7 +121,6 @@ impl QueryExecutor {
                 node_ids.clone(),
                 *valid_time,
                 *transaction_time,
-                Arc::clone(&self.current),
                 Arc::clone(&self.historical),
             ))),
 
