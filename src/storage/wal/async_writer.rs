@@ -29,12 +29,53 @@
 //! - **Metrics**: Tracks buffer depth and sync lag
 
 use super::WalEntry;
+use crate::core::temporal::{Timestamp, time};
 use crate::utils::error::{Result, StorageError};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+/// Events emitted by the WAL async writer.
+#[derive(Debug, Clone)]
+pub enum WalEvent {
+    /// Sync completed for a batch of entries.
+    SyncCompleted {
+        /// Number of entries synced
+        entry_count: usize,
+        /// Timestamp when sync completed
+        timestamp: Timestamp,
+    },
+}
+
+/// Observer trait for WAL events.
+///
+/// Implement this trait to receive notifications about WAL operations,
+/// such as sync completion. This enables observability, metrics collection,
+/// and coordination with other components.
+///
+/// # Example
+///
+/// ```
+/// use gallifreydb::storage::wal::{WalObserver, WalEvent};
+///
+/// struct MetricsCollector;
+///
+/// impl WalObserver for MetricsCollector {
+///     fn on_event(&self, event: &WalEvent) {
+///         match event {
+///             WalEvent::SyncCompleted { entry_count, timestamp } => {
+///                 println!("Synced {} entries at {}", entry_count, timestamp);
+///             }
+///         }
+///     }
+/// }
+/// ```
+pub trait WalObserver: Send + Sync {
+    /// Called when a WAL event occurs.
+    fn on_event(&self, event: &WalEvent);
+}
 
 /// Async WAL writer that uses a background thread for fsync operations.
 ///
@@ -57,6 +98,9 @@ pub struct AsyncWalWriter {
     metrics: Arc<AsyncWalMetrics>,
     /// Background thread handle
     sync_thread: Option<JoinHandle<()>>,
+    /// Observers to notify on WAL events
+    #[allow(dead_code)] // Used in sync_loop closure, clippy doesn't detect it
+    observers: Vec<Arc<dyn WalObserver>>,
 }
 
 /// Metrics for async WAL operations.
@@ -103,22 +147,35 @@ impl AsyncWalWriter {
     /// * `buffer_size` - Maximum number of entries to buffer (backpressure threshold)
     /// * `sync_interval` - How often to fsync when idle (recv_timeout duration)
     /// * `write_fn` - Function to write and sync entries (receives batch)
+    /// * `observers` - List of observers to notify on WAL events
     ///
     /// # Panics
     ///
     /// Panics if the background thread cannot be spawned (rare, resource exhaustion).
-    pub fn new<F>(buffer_size: usize, sync_interval: Duration, write_fn: F) -> Self
+    pub fn new<F>(
+        buffer_size: usize,
+        sync_interval: Duration,
+        write_fn: F,
+        observers: Vec<Arc<dyn WalObserver>>,
+    ) -> Self
     where
         F: Fn(Vec<WalEntry>) + Send + 'static,
     {
         let (sender, receiver) = bounded(buffer_size);
         let metrics = Arc::new(AsyncWalMetrics::new());
         let metrics_clone = Arc::clone(&metrics);
+        let observers_clone = observers.clone();
 
         let sync_thread = thread::Builder::new()
             .name("gallifreydb-async-wal".to_string())
             .spawn(move || {
-                Self::sync_loop(receiver, write_fn, sync_interval, metrics_clone);
+                Self::sync_loop(
+                    receiver,
+                    write_fn,
+                    sync_interval,
+                    metrics_clone,
+                    observers_clone,
+                );
             })
             .expect("failed to spawn async WAL sync thread");
 
@@ -126,6 +183,7 @@ impl AsyncWalWriter {
             sender,
             metrics,
             sync_thread: Some(sync_thread),
+            observers,
         }
     }
 
@@ -173,7 +231,8 @@ impl AsyncWalWriter {
     /// 2. Drains all pending entries into a batch
     /// 3. Calls write_fn with the batch
     /// 4. Updates metrics
-    /// 5. Repeats until sender is disconnected
+    /// 5. Notifies observers
+    /// 6. Repeats until sender is disconnected
     ///
     /// # Shutdown
     ///
@@ -186,6 +245,7 @@ impl AsyncWalWriter {
         write_fn: F,
         sync_interval: Duration,
         metrics: Arc<AsyncWalMetrics>,
+        observers: Vec<Arc<dyn WalObserver>>,
     ) where
         F: Fn(Vec<WalEntry>),
     {
@@ -213,6 +273,15 @@ impl AsyncWalWriter {
                         .total_entries
                         .fetch_add(batch_size as u64, Ordering::Relaxed);
                     metrics.total_syncs.fetch_add(1, Ordering::Relaxed);
+
+                    // Notify observers
+                    let event = WalEvent::SyncCompleted {
+                        entry_count: batch_size,
+                        timestamp: time::now(),
+                    };
+                    for observer in &observers {
+                        observer.on_event(&event);
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     // Timeout - no entries to flush, just continue
@@ -237,6 +306,15 @@ impl AsyncWalWriter {
                             .total_entries
                             .fetch_add(batch_size as u64, Ordering::Relaxed);
                         metrics.total_syncs.fetch_add(1, Ordering::Relaxed);
+
+                        // Notify observers about final sync
+                        let event = WalEvent::SyncCompleted {
+                            entry_count: batch_size,
+                            timestamp: time::now(),
+                        };
+                        for observer in &observers {
+                            observer.on_event(&event);
+                        }
                     }
 
                     break;
@@ -290,9 +368,14 @@ mod tests {
         let write_count = Arc::new(AtomicU64::new(0));
         let write_count_clone = Arc::clone(&write_count);
 
-        let writer = AsyncWalWriter::new(100, Duration::from_millis(10), move |batch| {
-            write_count_clone.fetch_add(batch.len() as u64, Ordering::SeqCst);
-        });
+        let writer = AsyncWalWriter::new(
+            100,
+            Duration::from_millis(10),
+            move |batch| {
+                write_count_clone.fetch_add(batch.len() as u64, Ordering::SeqCst);
+            },
+            vec![],
+        );
 
         assert_eq!(writer.metrics().buffer_depth(), 0);
         assert_eq!(writer.metrics().total_entries(), 0);
@@ -304,10 +387,15 @@ mod tests {
         let written_entries = Arc::new(Mutex::new(Vec::new()));
         let written_entries_clone = Arc::clone(&written_entries);
 
-        let writer = AsyncWalWriter::new(100, Duration::from_millis(10), move |batch| {
-            let mut entries = written_entries_clone.lock().unwrap();
-            entries.extend(batch);
-        });
+        let writer = AsyncWalWriter::new(
+            100,
+            Duration::from_millis(10),
+            move |batch| {
+                let mut entries = written_entries_clone.lock().unwrap();
+                entries.extend(batch);
+            },
+            vec![],
+        );
 
         let entry = create_test_entry(1);
         writer.append(entry).expect("append should succeed");
@@ -325,10 +413,15 @@ mod tests {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches);
 
-        let writer = AsyncWalWriter::new(100, Duration::from_millis(50), move |batch| {
-            let mut b = batches_clone.lock().unwrap();
-            b.push(batch.len());
-        });
+        let writer = AsyncWalWriter::new(
+            100,
+            Duration::from_millis(50),
+            move |batch| {
+                let mut b = batches_clone.lock().unwrap();
+                b.push(batch.len());
+            },
+            vec![],
+        );
 
         // Write multiple entries rapidly
         for i in 1..=10 {
@@ -354,10 +447,15 @@ mod tests {
         let written_entries = Arc::new(Mutex::new(Vec::new()));
         let written_entries_clone = Arc::clone(&written_entries);
 
-        let writer = AsyncWalWriter::new(100, Duration::from_secs(60), move |batch| {
-            let mut entries = written_entries_clone.lock().unwrap();
-            entries.extend(batch);
-        });
+        let writer = AsyncWalWriter::new(
+            100,
+            Duration::from_secs(60),
+            move |batch| {
+                let mut entries = written_entries_clone.lock().unwrap();
+                entries.extend(batch);
+            },
+            vec![],
+        );
 
         // Write entries
         for i in 1..=5 {
@@ -380,11 +478,16 @@ mod tests {
         let write_started = Arc::new(Mutex::new(false));
         let write_started_clone = Arc::clone(&write_started);
 
-        let writer = AsyncWalWriter::new(1, Duration::from_secs(60), move |_batch| {
-            // Mark that write started, then sleep
-            *write_started_clone.lock().unwrap() = true;
-            thread::sleep(Duration::from_millis(300));
-        });
+        let writer = AsyncWalWriter::new(
+            1,
+            Duration::from_secs(60),
+            move |_batch| {
+                // Mark that write started, then sleep
+                *write_started_clone.lock().unwrap() = true;
+                thread::sleep(Duration::from_millis(300));
+            },
+            vec![],
+        );
 
         // Fill the single-slot buffer
         writer.append(create_test_entry(1)).unwrap();
@@ -419,9 +522,14 @@ mod tests {
         let write_count = Arc::new(AtomicU64::new(0));
         let write_count_clone = Arc::clone(&write_count);
 
-        let writer = AsyncWalWriter::new(100, Duration::from_millis(10), move |batch| {
-            write_count_clone.fetch_add(batch.len() as u64, Ordering::SeqCst);
-        });
+        let writer = AsyncWalWriter::new(
+            100,
+            Duration::from_millis(10),
+            move |batch| {
+                write_count_clone.fetch_add(batch.len() as u64, Ordering::SeqCst);
+            },
+            vec![],
+        );
 
         // Write entries
         for i in 1..=20 {
@@ -442,9 +550,14 @@ mod tests {
         let sync_count = Arc::new(AtomicU64::new(0));
         let sync_count_clone = Arc::clone(&sync_count);
 
-        let writer = AsyncWalWriter::new(100, Duration::from_millis(50), move |_batch| {
-            sync_count_clone.fetch_add(1, Ordering::SeqCst);
-        });
+        let writer = AsyncWalWriter::new(
+            100,
+            Duration::from_millis(50),
+            move |_batch| {
+                sync_count_clone.fetch_add(1, Ordering::SeqCst);
+            },
+            vec![],
+        );
 
         // Write one entry
         writer.append(create_test_entry(1)).unwrap();

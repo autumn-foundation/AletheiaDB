@@ -36,9 +36,14 @@ fn bench_async_write_latency(c: &mut Criterion) {
         let write_count_clone = Arc::clone(&write_count);
 
         // Use a large buffer to avoid backpressure
-        let writer = AsyncWalWriter::new(10000, Duration::from_millis(100), move |batch| {
-            write_count_clone.fetch_add(batch.len() as u64, Ordering::Relaxed);
-        });
+        let writer = AsyncWalWriter::new(
+            10000,
+            Duration::from_millis(100),
+            move |batch| {
+                write_count_clone.fetch_add(batch.len() as u64, Ordering::Relaxed);
+            },
+            vec![],
+        );
 
         let mut lsn = 1;
         b.iter(|| {
@@ -62,9 +67,14 @@ fn bench_async_write_throughput(c: &mut Criterion) {
             let write_count_clone = Arc::clone(&write_count);
 
             // Large buffer to avoid backpressure
-            let writer = AsyncWalWriter::new(20000, Duration::from_millis(100), move |batch| {
-                write_count_clone.fetch_add(batch.len() as u64, Ordering::Relaxed);
-            });
+            let writer = AsyncWalWriter::new(
+                20000,
+                Duration::from_millis(100),
+                move |batch| {
+                    write_count_clone.fetch_add(batch.len() as u64, Ordering::Relaxed);
+                },
+                vec![],
+            );
 
             // Write 10,000 entries
             for lsn in 1..=10_000 {
@@ -88,10 +98,15 @@ fn bench_async_write_batching(c: &mut Criterion) {
             let batch_sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
             let batch_sizes_clone = Arc::clone(&batch_sizes);
 
-            let writer = AsyncWalWriter::new(1000, Duration::from_millis(10), move |batch| {
-                let mut sizes = batch_sizes_clone.lock().unwrap();
-                sizes.push(batch.len());
-            });
+            let writer = AsyncWalWriter::new(
+                1000,
+                Duration::from_millis(10),
+                move |batch| {
+                    let mut sizes = batch_sizes_clone.lock().unwrap();
+                    sizes.push(batch.len());
+                },
+                vec![],
+            );
 
             // Write entries rapidly to encourage batching
             for lsn in 1..=1000 {
