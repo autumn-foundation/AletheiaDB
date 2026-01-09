@@ -153,29 +153,20 @@ just check-all         # Full quality check (tests, coverage, lint)
 4. Batch insertion throughput (>100k edges/sec)
 5. Storage overhead (<2X vs non-temporal)
 
-## WAL Format and Migration
+## WAL Format
 
 **See [docs/WAL.md](docs/WAL.md) for comprehensive WAL documentation.**
 
 ### Quick Reference
 
-**Current Version**: 2 (binary format with "GWAL" magic bytes)
+**Current Version**: 1 (binary format with "GWAL" magic bytes)
 
 **Key Features**:
-- Version-aware format with automatic detection
 - Full property and temporal interval serialization
 - Checksum verification for data integrity
-- Backward compatible with V1 (with data loss warnings)
+- Version-aware format for future evolution
 
-**Migration**:
-```rust
-use gallifreydb::storage::wal::migrate_wal_directory;
-
-// Migrate all segments (creates .bak backups)
-let results = migrate_wal_directory(Path::new("data/wal/"))?;
-```
-
-**Adding New Versions**: See [docs/WAL.md](docs/WAL.md#adding-new-wal-versions) for the 5-step process.
+**Adding New Versions**: See [docs/WAL.md](docs/WAL.md#adding-new-wal-versions) for guidance.
 
 ## Vector Storage & Indexing
 

@@ -1,6 +1,6 @@
-# Write-Ahead Log (WAL) Format and Migration
+# Write-Ahead Log (WAL) Format
 
-This document describes the WAL format, versioning strategy, and migration procedures for GallifreyDB.
+This document describes the WAL format for GallifreyDB.
 
 ## WAL Versioning
 
@@ -18,190 +18,13 @@ The Write-Ahead Log (WAL) uses a versioned binary format to enable future evolut
 [LSN: 8 bytes][timestamp: 8 bytes][checksum: 4 bytes][op_type: 1 byte][operation data...]
 ```
 
-### Current Version: 2
+### Current Version: 1
 
 **Features:**
 - Full serialization of properties (PropertyMap)
 - Full serialization of bi-temporal intervals (32 bytes each)
 - Labels serialized for all operation types
 - Checksum verification for data integrity
-
-### Legacy Version: 1
-
-**Limitations (no header):**
-- Properties were not serialized (data loss on recovery)
-- Temporal intervals were not serialized (reconstructed from timestamp)
-- Update operations did not serialize labels
-- No format version identifier
-
-## Backward Compatibility
-
-The WAL reader automatically detects the format version:
-
-| Version | Identification | Handling |
-|---------|----------------|----------|
-| V2+ | "GWAL" magic bytes at start | Full deserialization |
-| V1 | No header (absence of magic bytes) | Default values |
-
-### V1 Default Values
-
-When reading V1 segments:
-- **Properties**: Default to `PropertyMap::new()` (empty)
-- **Temporal intervals**: Default to `BiTemporalInterval::current(timestamp)`
-- **Update labels**: Default to empty string
-
-**Note**: This represents data loss - information that was never serialized cannot be recovered.
-
-## Migration Tool
-
-### Checking WAL Version
-
-```rust
-use gallifreydb::storage::wal::detect_wal_version;
-use std::path::Path;
-
-// Check a single segment
-let info = detect_wal_version(Path::new("data/wal/000001.log"))?;
-println!("Version: {}, needs migration: {}", info.version, info.needs_migration);
-
-if info.needs_migration {
-    println!("This segment should be migrated to V{}", info.current_version);
-}
-```
-
-### Migrating Single Segment
-
-```rust
-use gallifreydb::storage::wal::migrate_wal_segment;
-
-// Migrate a single segment (creates .bak backup)
-let entries_migrated = migrate_wal_segment(Path::new("data/wal/000001.log"))?;
-println!("Migrated {} entries", entries_migrated);
-```
-
-### Migrating Directory
-
-```rust
-use gallifreydb::storage::wal::migrate_wal_directory;
-
-// Migrate all segments in a directory
-let results = migrate_wal_directory(Path::new("data/wal/"))?;
-for (path, count) in results {
-    println!("Migrated {}: {} entries", path.display(), count);
-}
-```
-
-## Migration Process
-
-The migration follows these steps:
-
-1. **Backup**: Original segment is renamed to `.log.bak`
-2. **Parse**: Entries are read using version-aware parsing
-3. **Rewrite**: Entries are written in V2 format with proper header
-4. **Verify**: New segment can be read back successfully
-
-### Safety Guarantees
-
-- Original file is preserved as `.log.bak`
-- Migration is atomic - either succeeds completely or rolls back
-- Checksums verify data integrity after migration
-- Failed migrations can be retried
-
-### Data Loss Warning
-
-**Important**: Migration of V1 segments results in data loss for properties and temporal intervals that were never serialized. The migrated entries will have placeholder values.
-
-If you need to preserve this data, you must regenerate it from the application layer before migration.
-
-## Adding New WAL Versions
-
-When adding new serialization features:
-
-### Step 1: Update Version Constant
-
-```rust
-// In src/storage/wal/mod.rs
-pub const WAL_VERSION: u8 = 3;  // Increment version
-```
-
-### Step 2: Update Serialization
-
-```rust
-fn serialize_entry(entry: &WalEntry, version: u8) -> Vec<u8> {
-    let mut buf = Vec::new();
-
-    // Write header
-    buf.extend_from_slice(b"GWAL");
-    buf.push(version);
-
-    // Write LSN, timestamp, etc.
-    buf.extend_from_slice(&entry.lsn.to_le_bytes());
-    buf.extend_from_slice(&entry.timestamp.to_le_bytes());
-
-    // V3+ specific fields
-    if version >= 3 {
-        // Serialize new fields
-    }
-
-    buf
-}
-```
-
-### Step 3: Update Deserialization
-
-```rust
-fn read_segment(path: &Path) -> Result<Vec<WalEntry>> {
-    let version = detect_version(path)?;
-
-    // Version-aware parsing
-    let (data, len) = if version >= 3 {
-        // Deserialize new format
-        deserialize_v3(reader)?
-    } else if version >= 2 {
-        // Use V2 format
-        deserialize_v2(reader)?
-    } else {
-        // Use placeholder for V1
-        deserialize_v1_with_defaults(reader)?
-    };
-
-    Ok(data)
-}
-```
-
-### Step 4: Update Migration Support
-
-```rust
-fn parse_wal_entries_versioned(entries: &[u8], version: u8) -> Result<Vec<WalEntry>> {
-    match version {
-        3 => parse_v3_entries(entries),
-        2 => parse_v2_entries(entries),
-        1 => parse_v1_entries_with_defaults(entries),
-        _ => Err(Error::UnsupportedWalVersion(version)),
-    }
-}
-```
-
-### Step 5: Add Tests
-
-```rust
-#[test]
-fn test_v3_serialization_roundtrip() {
-    let entry = create_v3_entry();
-    let serialized = serialize_entry(&entry, 3);
-    let deserialized = deserialize_entry(&serialized, 3)?;
-    assert_eq!(entry, deserialized);
-}
-
-#[test]
-fn test_v2_to_v3_migration() {
-    let v2_segment = create_v2_test_segment();
-    let migrated = migrate_wal_segment(v2_segment)?;
-    let entries = read_segment(migrated)?;
-    // Verify entries are now in V3 format
-    assert_eq!(detect_version(migrated)?, 3);
-}
-```
 
 ## WAL Recovery
 
@@ -297,6 +120,23 @@ pub struct WalConfig {
 | `write_buffer_size` | 8-16 KB | Match filesystem block size |
 | `sync_on_commit` | `true` | Durability guarantee |
 | `retention_count` | 10-20 | Enough for recovery + debugging |
+
+## Adding New WAL Versions
+
+When adding new serialization features, bump the version constant and add version-aware serialization/deserialization logic:
+
+```rust
+// In src/storage/wal.rs
+const WAL_VERSION: u8 = 2;  // Increment version
+
+fn serialize_entry(entry: &WalEntry, version: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"GWAL");
+    buf.push(version);
+    // ... serialize fields, with version-specific logic
+    buf
+}
+```
 
 ## Debugging Tools
 

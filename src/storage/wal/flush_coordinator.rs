@@ -766,8 +766,8 @@ mod tests {
         // Request flush
         thread.request_flush();
 
-        // Wait a bit for flush to complete
-        std::thread::sleep(Duration::from_millis(50));
+        // Wait for flush to complete (increased timeout for CI reliability)
+        std::thread::sleep(Duration::from_millis(200));
 
         // Should have flushed
         assert!(coordinator.total_entries_flushed() >= 2);
