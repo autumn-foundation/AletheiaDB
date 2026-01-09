@@ -99,6 +99,20 @@ bench-profile:
 profile-bin BIN:
     cargo run --release --features tracy --bin {{BIN}}
 
+# Run profiling benchmark with Tracy (open Tracy GUI first)
+profile-commit:
+    @echo "Ensure Tracy profiler is running, then press Enter..."
+    @pause
+    cargo bench --bench profiling_commit --features tracy -- --profile-time 10
+
+# Run profiling with observability-tracy bridge
+profile-commit-tracing:
+    cargo bench --bench profiling_commit --features observability-tracy
+
+# Quick profiling check (single scenario)
+profile-quick:
+    cargo bench --bench profiling_commit --features tracy -- sequential/ops/10
+
 # === Development Workflow ===
 
 # Full check: format, lint, test, coverage

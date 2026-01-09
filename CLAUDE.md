@@ -464,23 +464,35 @@ git commit -m "feat: your change"
 
 ### Tracy Profiler
 
-Use Tracy for detailed CPU profiling:
+GallifreyDB is instrumented with Tracy spans for CPU profiling to identify transaction commit bottlenecks. See **[docs/PROFILING.md](docs/PROFILING.md)** for comprehensive profiling guide.
 
-1. Download Tracy from [releases](https://github.com/wolfpld/tracy/releases)
-2. Build with profiling: `cargo build --release --features tracy`
-3. Run profiled build: `just profile-tracy`
+**Quick start:**
+```bash
+# Terminal 1: Start Tracy GUI
+./tracy-profiler
 
-**Instrumenting code:**
-```rust
-#[cfg(feature = "tracy")]
-use tracy_client::span;
-
-pub fn hot_path_function() {
-    #[cfg(feature = "tracy")]
-    let _span = span!("hot_path_function");
-    // Function body
-}
+# Terminal 2: Run profiling benchmark
+cargo bench --bench profiling_commit --features tracy -- --profile-time 10
 ```
+
+**Known bottlenecks** (as of performance investigation):
+- Lock contention: ~10-15% of transaction time (timestamp + WAL locks)
+- Graph operations (apply_changes): ~85-90% of time
+- Target: Use Tracy to break down apply_changes into specific operations
+
+**Key instrumentation points:**
+- Transaction commit critical path (timestamp lock, WAL lock, apply_changes)
+- Historical storage version chain operations
+- Current storage graph mutations
+- Adjacency index rebuilds
+
+**Profiling scenarios:**
+- `sequential` - Baseline single-threaded performance
+- `concurrent` - Exposes lock contention under load
+- `heavy` - Stresses apply_changes with large transactions
+- `mixed` - Realistic mixed workload
+
+See **[docs/PROFILING.md](docs/PROFILING.md)** for detailed workflow, Tracy span hierarchy, analysis guide, and troubleshooting.
 
 ### Development Tools
 
@@ -491,6 +503,7 @@ All common tasks via `just`:
 - `just fmt` - Format code
 - `just pre-commit` - Quick pre-commit checks
 - `just check-all` - Full quality check
+- `just profile-commit` - Run Tracy profiling benchmark
 
 See `justfile` for complete list of commands.
 

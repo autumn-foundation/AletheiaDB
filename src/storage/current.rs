@@ -17,6 +17,9 @@ use crate::utils::error::{Result, StorageError};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+#[cfg(feature = "tracy")]
+use tracy_client::span;
+
 /// Statistics about current storage
 #[derive(Debug, Clone)]
 pub struct CurrentStats {
@@ -324,6 +327,9 @@ impl CurrentStorage {
     /// Insert a node directly (used by WriteTransaction).
     /// Does not generate IDs - caller must provide them.
     pub fn insert_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
+        #[cfg(feature = "tracy")]
+        let _span = span!("CurrentStorage::insert_node");
+
         // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
         // we have not modified any graph state, so we can safely return error without rollback.
         // This prevents the VS-030 bug where transaction-created nodes bypassed indexing,
@@ -342,6 +348,9 @@ impl CurrentStorage {
     /// Insert an edge directly (used by WriteTransaction).
     /// Does not generate IDs or rebuild adjacency - caller must handle.
     pub fn insert_edge_direct(&self, edge: Edge) -> Result<()> {
+        #[cfg(feature = "tracy")]
+        let _span = span!("CurrentStorage::insert_edge");
+
         self.indexes.insert_edge(edge);
         Ok(())
     }

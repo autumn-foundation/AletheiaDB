@@ -27,6 +27,9 @@ use crate::utils::error::{Result, StorageError, TransactionError};
 use crate::utils::lock::{MutexExt, RwLockExt};
 use std::sync::{Arc, Mutex, RwLock};
 
+#[cfg(feature = "tracy")]
+use tracy_client::span;
+
 /// Write transaction with full ACID guarantees.
 ///
 /// Write transactions buffer all operations in memory and apply them
@@ -170,6 +173,10 @@ impl WriteTransaction {
         )
         .entered();
 
+        // Tracy profiling span for flame graph analysis
+        #[cfg(feature = "tracy")]
+        let _tracy_commit = span!("WriteTransaction::commit");
+
         #[cfg(feature = "observability")]
         let commit_start = std::time::Instant::now();
 
@@ -214,13 +221,25 @@ impl WriteTransaction {
         // - Async: Release locks after flush to OS cache (fast, background syncs)
         // - GroupCommit: Release locks after flush, wait for epoch (ACID + fast)
         let (commit_timestamp, wait_epoch, coordinator) = {
+            // Tracy: Track entire critical section (timestamp + WAL lock hold time)
+            #[cfg(feature = "tracy")]
+            let _tracy_critical = span!("commit_critical_section");
+
             #[cfg(feature = "observability")]
             let ts_lock_start = std::time::Instant::now();
+
+            // Tracy: Track timestamp lock acquisition time
+            #[cfg(feature = "tracy")]
+            let _tracy_ts_lock = span!("acquire_timestamp_lock");
 
             let mut ts = self
                 .current_timestamp
                 .lock()
                 .expect("timestamp lock poisoned - unrecoverable state");
+
+            // Drop the timestamp lock span after acquisition to measure only wait time
+            #[cfg(feature = "tracy")]
+            drop(_tracy_ts_lock);
 
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
@@ -232,6 +251,10 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let wal_lock_start = std::time::Instant::now();
 
+            // Tracy: Track WAL lock acquisition time
+            #[cfg(feature = "tracy")]
+            let _tracy_wal_lock = span!("acquire_wal_lock");
+
             // Acquire WAL lock once and hold through logging.
             // CRITICAL: We release this lock BEFORE waiting for GroupCommit epoch flush
             // to prevent deadlock (flush thread needs WAL lock to mark epochs complete).
@@ -240,18 +263,30 @@ impl WriteTransaction {
                 .lock()
                 .expect("WAL lock poisoned - unrecoverable state");
 
+            // Drop the WAL lock span after acquisition to measure only wait time
+            #[cfg(feature = "tracy")]
+            drop(_tracy_wal_lock);
+
             #[cfg(feature = "observability")]
             let wal_lock_acquired = std::time::Instant::now();
 
             // Log operations to WAL while holding both locks.
             // This must happen BEFORE applying changes for durability.
-            self.log_operations_to_wal(&mut wal, commit)?;
+            {
+                #[cfg(feature = "tracy")]
+                let _tracy_wal_log = span!("wal_log_operations");
+                self.log_operations_to_wal(&mut wal, commit)?;
+            }
 
             #[cfg(feature = "observability")]
             let wal_logged = std::time::Instant::now();
 
             // Mode-aware commit: returns epoch to wait for (GroupCommit) or None
-            let epoch = wal.commit_with_mode(self.durability_mode)?;
+            let epoch = {
+                #[cfg(feature = "tracy")]
+                let _tracy_wal_commit = span!("wal_commit");
+                wal.commit_with_mode(self.durability_mode)?
+            };
 
             #[cfg(feature = "observability")]
             let wal_commit_completed = std::time::Instant::now();
@@ -324,11 +359,17 @@ impl WriteTransaction {
             && let Some(gc) = coordinator
             && self.durability_mode.waits_for_durability()
         {
+            #[cfg(feature = "tracy")]
+            let _tracy_gc_wait = span!("group_commit_wait");
             gc.wait_for_flush(epoch)?;
         }
 
-        // Apply all changes atomically
-        self.apply_changes(commit_timestamp)?;
+        // Apply all changes atomically - THE KEY UNKNOWN (suspected 85-90% of time)
+        {
+            #[cfg(feature = "tracy")]
+            let _tracy_apply = span!("apply_changes");
+            self.apply_changes(commit_timestamp)?;
+        }
 
         // Notify temporal vector index of transaction completion (for snapshot creation)
         // Only call this if the transaction modified vector properties to avoid unnecessary overhead
@@ -671,38 +712,49 @@ impl WriteTransaction {
     /// 2. `temporal_indexes` - temporal indexes (acquired second)
     /// 3. `version_id_gen` - version ID generator (acquired later for tombstones)
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
+        // Tracy: Track entire apply_changes method (suspected 85-90% of transaction time)
+        #[cfg(feature = "tracy")]
+        let _span = span!("WriteTransaction::apply_changes");
+
         let temporal = BiTemporalInterval::current(commit_timestamp);
 
         // Acquire lock on historical storage once before processing all operations.
         // TemporalIndexes uses DashMap internally, so no outer lock needed.
-        let mut historical = self.historical.write_or_err()?;
-        let temporal_indexes = &self.temporal_indexes;
+        let (mut historical, temporal_indexes, num_deletes, mut tombstone_ids) = {
+            #[cfg(feature = "tracy")]
+            let _setup_span = span!("apply_changes_setup");
 
-        // Pre-generate all tombstone version IDs at once to reduce lock contention
-        // on the ID generator. Count delete operations and generate IDs in batch.
-        let num_deletes = self
-            .buffer
-            .operations()
-            .iter()
-            .filter(|op| {
-                matches!(
-                    op,
-                    super::BufferedWrite::DeleteNode { .. }
-                        | super::BufferedWrite::DeleteEdge { .. }
-                )
-            })
-            .count();
+            let historical = self.historical.write_or_err()?;
+            let temporal_indexes = &self.temporal_indexes;
 
-        let mut tombstone_ids = if num_deletes > 0 {
-            let ids: Result<Vec<u64>> = {
-                let id_gen = self.version_id_gen.lock_or_err()?;
-                (0..num_deletes)
-                    .map(|_| id_gen.next().map_err(Into::into))
-                    .collect()
+            // Pre-generate all tombstone version IDs at once to reduce lock contention
+            // on the ID generator. Count delete operations and generate IDs in batch.
+            let num_deletes = self
+                .buffer
+                .operations()
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        op,
+                        super::BufferedWrite::DeleteNode { .. }
+                            | super::BufferedWrite::DeleteEdge { .. }
+                    )
+                })
+                .count();
+
+            let tombstone_ids = if num_deletes > 0 {
+                let ids: Result<Vec<u64>> = {
+                    let id_gen = self.version_id_gen.lock_or_err()?;
+                    (0..num_deletes)
+                        .map(|_| id_gen.next().map_err(Into::into))
+                        .collect()
+                };
+                ids?.into_iter()
+            } else {
+                Vec::new().into_iter()
             };
-            ids?.into_iter()
-        } else {
-            Vec::new().into_iter()
+
+            (historical, temporal_indexes, num_deletes, tombstone_ids)
         };
 
         for write in self.buffer.operations() {
@@ -714,6 +766,9 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
+                    #[cfg(feature = "tracy")]
+                    let _op_span = span!("apply_create_node");
+
                     // Create in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
                     let node = Node::with_metadata(
@@ -746,6 +801,9 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
+                    #[cfg(feature = "tracy")]
+                    let _op_span = span!("apply_create_edge");
+
                     // Create in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
                     let edge = Edge::with_metadata(
@@ -780,6 +838,9 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
+                    #[cfg(feature = "tracy")]
+                    let _op_span = span!("apply_update_node");
+
                     // Update in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
                     let node = Node::with_metadata(
@@ -812,6 +873,9 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
+                    #[cfg(feature = "tracy")]
+                    let _op_span = span!("apply_update_edge");
+
                     // Update in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
                     let edge = Edge::with_metadata(
@@ -840,6 +904,9 @@ impl WriteTransaction {
                     temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::DeleteNode { node_id } => {
+                    #[cfg(feature = "tracy")]
+                    let _op_span = span!("apply_delete_node");
+
                     // Get the node before deleting
                     let node = self.current.get_node(*node_id)?;
 
@@ -895,6 +962,9 @@ impl WriteTransaction {
                         .delete_node_direct(*node_id, commit_timestamp)?;
                 }
                 super::BufferedWrite::DeleteEdge { edge_id } => {
+                    #[cfg(feature = "tracy")]
+                    let _op_span = span!("apply_delete_edge");
+
                     // Get the edge before deleting
                     let edge = self.current.get_edge(*edge_id)?;
 
@@ -968,7 +1038,11 @@ impl WriteTransaction {
 
         // Rebuild adjacency indexes once after all edge operations
         // This is much more efficient than rebuilding after each operation
-        self.current.rebuild_adjacency();
+        {
+            #[cfg(feature = "tracy")]
+            let _rebuild_span = span!("rebuild_adjacency_index");
+            self.current.rebuild_adjacency();
+        }
 
         Ok(())
     }
