@@ -1128,4 +1128,178 @@ mod tests {
         // Binary operators don't have a single input
         assert!(union.get_input().is_none());
     }
+
+    // ==================== Additional Explain Tests ====================
+
+    #[test]
+    fn test_explain_temporal_vector_search() {
+        let plan = PhysicalOp::TemporalVectorSearch {
+            embedding: Arc::from([0.1f32; 4].as_slice()),
+            k: 10,
+            timestamp: 42000,
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("TemporalVectorSearch"));
+    }
+
+    #[test]
+    fn test_explain_intersect() {
+        let plan = PhysicalOp::Intersect {
+            left: Box::new(PhysicalOp::Empty),
+            right: Box::new(PhysicalOp::NodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap()],
+            }),
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("Intersect"));
+        assert!(explain.contains("Empty"));
+        assert!(explain.contains("NodeLookup"));
+    }
+
+    #[test]
+    fn test_explain_except() {
+        let plan = PhysicalOp::Except {
+            left: Box::new(PhysicalOp::NodeScan {
+                label: Some("Person".to_string()),
+                estimated_rows: 100,
+            }),
+            right: Box::new(PhysicalOp::Empty),
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("Except"));
+        assert!(explain.contains("NodeScan"));
+        assert!(explain.contains("Empty"));
+    }
+
+    #[test]
+    fn test_explain_temporal_track() {
+        let plan = PhysicalOp::TemporalTrack {
+            input: Box::new(PhysicalOp::Empty),
+            time_range: TimeRange::new(1000, 2000),
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("TemporalTrack"));
+        assert!(explain.contains("Empty"));
+    }
+
+    // ==================== Additional Name Tests ====================
+
+    #[test]
+    fn test_all_operator_names() {
+        // Test all operator variants have correct names
+        assert_eq!(
+            PhysicalOp::TemporalVectorSearch {
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10,
+                timestamp: 1000,
+            }
+            .name(),
+            "TemporalVectorSearch"
+        );
+
+        assert_eq!(
+            PhysicalOp::Intersect {
+                left: Box::new(PhysicalOp::Empty),
+                right: Box::new(PhysicalOp::Empty),
+            }
+            .name(),
+            "Intersect"
+        );
+
+        assert_eq!(
+            PhysicalOp::Except {
+                left: Box::new(PhysicalOp::Empty),
+                right: Box::new(PhysicalOp::Empty),
+            }
+            .name(),
+            "Except"
+        );
+
+        assert_eq!(
+            PhysicalOp::TemporalTrack {
+                input: Box::new(PhysicalOp::Empty),
+                time_range: TimeRange::new(1000, 2000),
+            }
+            .name(),
+            "TemporalTrack"
+        );
+
+        assert_eq!(
+            PhysicalOp::Materialize {
+                input: Box::new(PhysicalOp::Empty),
+            }
+            .name(),
+            "Materialize"
+        );
+    }
+
+    // ==================== Additional Depth Tests ====================
+
+    #[test]
+    fn test_depth_additional_binary_operators() {
+        let intersect = PhysicalOp::Intersect {
+            left: Box::new(PhysicalOp::Filter {
+                input: Box::new(PhysicalOp::Empty),
+                predicate: Predicate::True,
+            }),
+            right: Box::new(PhysicalOp::Empty),
+        };
+        assert_eq!(intersect.depth(), 3); // 1 + max(2, 1)
+
+        let except = PhysicalOp::Except {
+            left: Box::new(PhysicalOp::Empty),
+            right: Box::new(PhysicalOp::Limit {
+                input: Box::new(PhysicalOp::Empty),
+                count: 10,
+                offset: 0,
+            }),
+        };
+        assert_eq!(except.depth(), 3); // 1 + max(1, 2)
+    }
+
+    #[test]
+    fn test_depth_temporal_operators() {
+        let temporal_track = PhysicalOp::TemporalTrack {
+            input: Box::new(PhysicalOp::NodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap()],
+            }),
+            time_range: TimeRange::new(1000, 2000),
+        };
+        assert_eq!(temporal_track.depth(), 2); // 1 + 1
+    }
+
+    // ==================== Additional is_leaf Tests ====================
+
+    #[test]
+    fn test_is_leaf_additional_non_leaf_operators() {
+        // Temporal track
+        assert!(
+            !PhysicalOp::TemporalTrack {
+                input: Box::new(PhysicalOp::Empty),
+                time_range: TimeRange::new(1000, 2000),
+            }
+            .is_leaf()
+        );
+
+        // Binary operators
+        assert!(
+            !PhysicalOp::Intersect {
+                left: Box::new(PhysicalOp::Empty),
+                right: Box::new(PhysicalOp::Empty),
+            }
+            .is_leaf()
+        );
+
+        assert!(
+            !PhysicalOp::Except {
+                left: Box::new(PhysicalOp::Empty),
+                right: Box::new(PhysicalOp::Empty),
+            }
+            .is_leaf()
+        );
+    }
 }
