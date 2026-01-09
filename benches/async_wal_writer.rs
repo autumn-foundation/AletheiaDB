@@ -137,7 +137,11 @@ fn bench_async_write_batching(c: &mut Criterion) {
             drop(writer);
 
             let sizes = batch_sizes.lock().unwrap();
-            let avg_batch_size: f64 = sizes.iter().sum::<usize>() as f64 / sizes.len() as f64;
+            let avg_batch_size: f64 = if !sizes.is_empty() {
+                sizes.iter().sum::<usize>() as f64 / sizes.len() as f64
+            } else {
+                0.0
+            };
 
             // Print batch statistics for verification
             println!(

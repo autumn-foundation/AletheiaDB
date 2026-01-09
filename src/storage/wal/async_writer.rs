@@ -259,27 +259,25 @@ impl AsyncWalWriter {
             .into());
         }
 
-        // Try non-blocking send first
-        match self.sender.try_send(entry) {
-            Ok(()) => {
-                self.metrics.buffer_depth.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
+        // Try non-blocking send first, then blocking if needed
+        let send_ok = match self.sender.try_send(entry) {
+            Ok(()) => true,
             Err(TrySendError::Full(entry)) => {
                 // Buffer full - apply backpressure by blocking
-                self.sender
-                    .send(entry)
-                    .map_err(|_| StorageError::WalError {
-                        reason: "WAL background sync thread has terminated unexpectedly"
-                            .to_string(),
-                    })?;
-                self.metrics.buffer_depth.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+                self.sender.send(entry).is_ok()
             }
-            Err(TrySendError::Disconnected(_)) => Err(StorageError::WalError {
+            Err(TrySendError::Disconnected(_)) => false,
+        };
+
+        if send_ok {
+            // Increment metric after successful send to avoid race condition
+            self.metrics.buffer_depth.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        } else {
+            Err(StorageError::WalError {
                 reason: "WAL background sync thread has terminated unexpectedly".to_string(),
             }
-            .into()),
+            .into())
         }
     }
 
@@ -456,109 +454,103 @@ impl AsyncWalWriter {
                 }
             }
 
-            match receiver.recv_timeout(sync_interval) {
-                Ok(first_entry) => {
-                    // Got at least one entry - build batch
-                    let mut batch = vec![first_entry];
-
-                    // Drain any other pending entries non-blockingly
-                    while let Ok(entry) = receiver.try_recv() {
-                        batch.push(entry);
-                    }
-
-                    let batch_size = batch.len();
-
-                    // Check for drain command before syncing (optimization)
-                    // If a drain arrives just before we sync, we can skip the sync
-                    // since the caller will fsync these entries anyway
-                    match control_receiver.try_recv() {
-                        Ok(ControlMessage::DrainWithoutSync) => {
-                            // Entries already drained (they're in the batch), just update metrics
-                            metrics
-                                .buffer_depth
-                                .fetch_sub(batch_size, Ordering::Relaxed);
-                            metrics
-                                .total_entries
-                                .fetch_add(batch_size as u64, Ordering::Relaxed);
-                            // Note: total_syncs NOT incremented since we didn't fsync
-                            continue; // Skip write_fn and observers
-                        }
-                        Ok(ControlMessage::DrainWithAck(ack_sender)) => {
-                            // Entries already drained, update metrics and send ack
-                            metrics
-                                .buffer_depth
-                                .fetch_sub(batch_size, Ordering::Relaxed);
-                            metrics
-                                .total_entries
-                                .fetch_add(batch_size as u64, Ordering::Relaxed);
-                            // Note: total_syncs NOT incremented since we didn't fsync
-
-                            // Send acknowledgment with batch size (these were "drained")
-                            let _ = ack_sender.try_send(batch_size);
-                            continue; // Skip write_fn and observers
-                        }
-                        Err(_) => {
-                            // No drain command, proceed with normal sync
-                        }
-                    }
-
-                    // Write and sync the batch
-                    write_fn(batch);
-
-                    // Update metrics
-                    metrics
-                        .buffer_depth
-                        .fetch_sub(batch_size, Ordering::Relaxed);
-                    metrics
-                        .total_entries
-                        .fetch_add(batch_size as u64, Ordering::Relaxed);
-                    metrics.total_syncs.fetch_add(1, Ordering::Relaxed);
-
-                    // Notify observers
-                    let event = WalEvent::SyncCompleted {
-                        entry_count: batch_size,
-                        timestamp: time::now(),
-                    };
-                    for observer in &observers {
-                        observer.on_event(&event);
-                    }
-                }
+            // Wait for the first entry, or a timeout, or disconnect.
+            let (first_entry, is_disconnected) = match receiver.recv_timeout(sync_interval) {
+                Ok(entry) => (Some(entry), false),
                 Err(RecvTimeoutError::Timeout) => {
-                    // Timeout - no entries to flush, just continue
+                    // No entries received, loop again.
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    // Sender dropped - drain remaining entries and exit
-                    let mut final_batch = Vec::new();
-                    while let Ok(entry) = receiver.try_recv() {
-                        final_batch.push(entry);
-                    }
+                    // Channel is disconnected. We'll do one final drain.
+                    (None, true)
+                }
+            };
 
-                    if !final_batch.is_empty() {
-                        let batch_size = final_batch.len();
-                        write_fn(final_batch);
+            // Build batch from first entry (if any) plus any pending entries
+            let mut batch = Vec::new();
+            if let Some(entry) = first_entry {
+                batch.push(entry);
+            }
 
-                        // Update metrics
+            // Drain any other pending entries non-blockingly.
+            // In the disconnected case, this will drain the remainder of the channel.
+            while let Ok(entry) = receiver.try_recv() {
+                batch.push(entry);
+            }
+
+            if !batch.is_empty() {
+                let batch_size = batch.len();
+
+                // Check for drain command before syncing (optimization)
+                // If a drain arrives just before we sync, we can skip the sync
+                // since the caller will fsync these entries anyway
+                match control_receiver.try_recv() {
+                    Ok(ControlMessage::DrainWithoutSync) => {
+                        // Entries already drained (they're in the batch), just update metrics
                         metrics
                             .buffer_depth
                             .fetch_sub(batch_size, Ordering::Relaxed);
                         metrics
                             .total_entries
                             .fetch_add(batch_size as u64, Ordering::Relaxed);
-                        metrics.total_syncs.fetch_add(1, Ordering::Relaxed);
+                        // Note: total_syncs NOT incremented since we didn't fsync
 
-                        // Notify observers about final sync
-                        let event = WalEvent::SyncCompleted {
-                            entry_count: batch_size,
-                            timestamp: time::now(),
-                        };
-                        for observer in &observers {
-                            observer.on_event(&event);
+                        // If disconnected after drain, exit; otherwise continue
+                        if is_disconnected {
+                            break;
                         }
+                        continue;
                     }
+                    Ok(ControlMessage::DrainWithAck(ack_sender)) => {
+                        // Entries already drained, update metrics and send ack
+                        metrics
+                            .buffer_depth
+                            .fetch_sub(batch_size, Ordering::Relaxed);
+                        metrics
+                            .total_entries
+                            .fetch_add(batch_size as u64, Ordering::Relaxed);
+                        // Note: total_syncs NOT incremented since we didn't fsync
 
-                    break;
+                        // Send acknowledgment with batch size (these were "drained")
+                        let _ = ack_sender.try_send(batch_size);
+
+                        // If disconnected after drain, exit; otherwise continue
+                        if is_disconnected {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        // No drain command, proceed with normal sync
+                    }
                 }
+
+                // Write and sync the batch
+                write_fn(batch);
+
+                // Update metrics
+                metrics
+                    .buffer_depth
+                    .fetch_sub(batch_size, Ordering::Relaxed);
+                metrics
+                    .total_entries
+                    .fetch_add(batch_size as u64, Ordering::Relaxed);
+                metrics.total_syncs.fetch_add(1, Ordering::Relaxed);
+
+                // Notify observers
+                let event = WalEvent::SyncCompleted {
+                    entry_count: batch_size,
+                    timestamp: time::now(),
+                };
+                for observer in &observers {
+                    observer.on_event(&event);
+                }
+            }
+
+            // If the channel was disconnected, we've just performed the final drain. Exit.
+            if is_disconnected {
+                break;
             }
         }
     }
