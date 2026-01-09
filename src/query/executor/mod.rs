@@ -221,30 +221,49 @@ mod tests {
             .unwrap();
 
         // Create test nodes
-        let alice = current
-            .create_node(
-                "Person",
-                PropertyMapBuilder::new()
-                    .insert("name", "Alice")
-                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
-                    .build(),
-            )
-            .unwrap();
+        let alice_props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .build();
+        let alice = current.create_node("Person", alice_props.clone()).unwrap();
 
-        let bob = current
-            .create_node(
-                "Person",
-                PropertyMapBuilder::new()
-                    .insert("name", "Bob")
-                    .insert_vector("embedding", &[0.9f32, 0.1, 0.0, 0.0])
-                    .build(),
-            )
-            .unwrap();
+        let bob_props = PropertyMapBuilder::new()
+            .insert("name", "Bob")
+            .insert_vector("embedding", &[0.9f32, 0.1, 0.0, 0.0])
+            .build();
+        let bob = current.create_node("Person", bob_props.clone()).unwrap();
 
         // Create edge
         current
             .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
             .unwrap();
+
+        // Add versions to historical storage (needed for temporal queries)
+        use crate::core::temporal::{BiTemporalInterval, time};
+        let now = time::now();
+        let alice_label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
+        let bob_label = alice_label;
+        {
+            let mut hist = historical.write().unwrap();
+            hist.add_node_version(
+                alice,
+                crate::core::id::VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(now),
+                alice_label,
+                alice_props,
+            )
+            .unwrap();
+            hist.add_node_version(
+                bob,
+                crate::core::id::VersionId::new(2).unwrap(),
+                BiTemporalInterval::current(now),
+                bob_label,
+                bob_props,
+            )
+            .unwrap();
+        }
 
         (current, historical, alice, bob)
     }

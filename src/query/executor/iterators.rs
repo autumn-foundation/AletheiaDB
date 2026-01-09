@@ -1902,15 +1902,28 @@ mod tests {
             AnchorConfig::default(),
         )));
 
-        let node = current
-            .create_node(
-                "Person",
-                PropertyMapBuilder::new().insert("name", "Alice").build(),
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let node = current.create_node("Person", props.clone()).unwrap();
+
+        // Add version to historical storage
+        use crate::core::temporal::{BiTemporalInterval, time};
+        let now = time::now();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
+        {
+            let mut hist = historical.write().unwrap();
+            hist.add_node_version(
+                node,
+                crate::core::id::VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(now),
+                label,
+                props,
             )
             .unwrap();
+        }
 
         let node_ids = vec![node];
-        let now = crate::core::temporal::time::now();
 
         let mut iter = TemporalNodeIterator::new(node_ids, now, now, current, historical);
 
