@@ -593,15 +593,13 @@ mod tests {
     fn test_time_range_invalid_returns_error() {
         // TimeRange::new should return an error for invalid ranges (start > end)
         let result = TimeRange::new(200, 100);
-        assert!(result.is_err());
-
-        match result {
-            Err(crate::utils::error::TemporalError::InvalidTimeRange { start, end }) => {
-                assert_eq!(start, 200);
-                assert_eq!(end, 100);
-            }
-            _ => panic!("Expected InvalidTimeRange error"),
-        }
+        assert!(matches!(
+            result,
+            Err(crate::utils::error::TemporalError::InvalidTimeRange {
+                start: 200,
+                end: 100
+            })
+        ));
     }
 
     #[test]
