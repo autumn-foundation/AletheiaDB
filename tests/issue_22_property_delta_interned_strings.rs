@@ -98,8 +98,8 @@ fn test_property_delta_memory_efficiency() {
         assert!(last_delta.changed.contains_key(&key));
 
         // Verify the keys are the same interned instance
-        let first_key = first_delta.changed.keys().find(|k| **k == key).unwrap();
-        let last_key = last_delta.changed.keys().find(|k| **k == key).unwrap();
+        let (first_key, _) = first_delta.changed.get_key_value(&key).unwrap();
+        let (last_key, _) = last_delta.changed.get_key_value(&key).unwrap();
         assert_eq!(first_key.as_u32(), last_key.as_u32());
     }
 
@@ -211,7 +211,7 @@ fn test_property_delta_large_scale_memory_efficiency() {
         if delta.changed.contains_key(&name_key) {
             deltas_with_name += 1;
             // Verify the key ID matches
-            let key_in_delta = delta.changed.keys().find(|k| **k == name_key).unwrap();
+            let (key_in_delta, _) = delta.changed.get_key_value(&name_key).unwrap();
             assert_eq!(key_in_delta.as_u32(), name_key.as_u32());
         }
     }
