@@ -117,12 +117,26 @@ impl QueryExecutor {
                 node_ids,
                 valid_time,
                 transaction_time,
-            } => Ok(Box::new(iterators::TemporalNodeIterator::new(
-                node_ids.clone(),
-                *valid_time,
-                *transaction_time,
-                Arc::clone(&self.historical),
-            ))),
+                use_batch,
+            } => {
+                if *use_batch {
+                    // Use batch iterator for large queries (holds lock across all iterations)
+                    Ok(Box::new(iterators::BatchTemporalNodeIterator::new(
+                        node_ids.clone(),
+                        *valid_time,
+                        *transaction_time,
+                        Arc::clone(&self.historical),
+                    )?))
+                } else {
+                    // Use per-node iterator for small queries (lock per node)
+                    Ok(Box::new(iterators::TemporalNodeIterator::new(
+                        node_ids.clone(),
+                        *valid_time,
+                        *transaction_time,
+                        Arc::clone(&self.historical),
+                    )))
+                }
+            }
 
             PhysicalOp::IndexedTraversal {
                 input,
@@ -556,6 +570,7 @@ mod tests {
                 node_ids: vec![alice],
                 valid_time: now,
                 transaction_time: now,
+                use_batch: false,
             },
             estimated_cost: Default::default(),
             temporal_context: None,

@@ -123,6 +123,10 @@ pub struct OperationCosts {
     pub hash_build: f64,
     /// Hash join probe per element
     pub hash_probe: f64,
+    /// Lock acquisition overhead (~2µs for RwLock)
+    pub lock_acquisition: f64,
+    /// Threshold for using batch iterator (nodes)
+    pub batch_threshold: usize,
 }
 
 impl Default for OperationCosts {
@@ -138,6 +142,8 @@ impl Default for OperationCosts {
             sort_per_element: 0.01,
             hash_build: 0.1,
             hash_probe: 0.05,
+            lock_acquisition: 2.0,
+            batch_threshold: 100,
         }
     }
 }
@@ -186,6 +192,17 @@ impl CostModel {
         }
     }
 
+    /// Determine whether to use batch iterator for temporal lookup.
+    ///
+    /// Batch iterator is more efficient when the lock acquisition overhead
+    /// of per-node iteration exceeds the cost of holding the lock longer.
+    ///
+    /// Returns true if batch mode should be used.
+    #[must_use]
+    pub fn should_use_batch_temporal_lookup(&self, node_count: usize) -> bool {
+        node_count >= self.operation_costs.batch_threshold
+    }
+
     /// Estimate the cost of executing a physical operator
     #[must_use]
     pub fn estimate(&self, op: &PhysicalOp, stats: &Statistics) -> Cost {
@@ -198,9 +215,11 @@ impl CostModel {
                 k, label_filter, ..
             } => self.estimate_hnsw_search(*k, label_filter.is_some(), stats),
 
-            PhysicalOp::TemporalNodeLookup { node_ids, .. } => {
-                self.estimate_temporal_lookup(node_ids.len(), stats)
-            }
+            PhysicalOp::TemporalNodeLookup {
+                node_ids,
+                use_batch,
+                ..
+            } => self.estimate_temporal_lookup(node_ids.len(), *use_batch, stats),
 
             PhysicalOp::TemporalVectorSearch { k, .. } => {
                 self.estimate_temporal_vector_search(*k, stats)
@@ -348,11 +367,23 @@ impl CostModel {
         }
     }
 
-    fn estimate_temporal_lookup(&self, count: usize, stats: &Statistics) -> Cost {
+    fn estimate_temporal_lookup(&self, count: usize, use_batch: bool, stats: &Statistics) -> Cost {
         let avg_delta_chain = stats.average_delta_chain_length().max(1.0);
 
+        // Calculate lock overhead based on iterator strategy:
+        // - Per-node iterator: acquires lock for each node lookup
+        // - Batch iterator: acquires lock once but holds it longer
+        let lock_overhead = if use_batch {
+            // Batch: single lock acquisition
+            self.operation_costs.lock_acquisition
+        } else {
+            // Per-node: lock acquisition per node
+            self.operation_costs.lock_acquisition * count as f64
+        };
+
         Cost {
-            cpu: self.operation_costs.temporal_delta * avg_delta_chain * count as f64,
+            cpu: lock_overhead
+                + self.operation_costs.temporal_delta * avg_delta_chain * count as f64,
             io: avg_delta_chain * count as f64,
             memory: count * std::mem::size_of::<u64>() * 20, // Larger due to versioning
             network: 0.0,

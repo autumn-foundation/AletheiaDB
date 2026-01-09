@@ -387,10 +387,12 @@ impl QueryPlanner {
         match scan {
             ScanOp::NodeLookup(ids) => {
                 if let Some((valid_time, tx_time)) = temporal.as_ref().and_then(|ctx| ctx.as_of) {
+                    let use_batch = self.cost_model.should_use_batch_temporal_lookup(ids.len());
                     return Ok(PhysicalOp::TemporalNodeLookup {
                         node_ids: ids.clone(),
                         valid_time,
                         transaction_time: tx_time,
+                        use_batch,
                     });
                 }
                 Ok(PhysicalOp::NodeLookup {
@@ -430,11 +432,17 @@ impl QueryPlanner {
                 node_ids,
                 valid_time,
                 transaction_time,
-            } => Ok(PhysicalOp::TemporalNodeLookup {
-                node_ids: node_ids.clone(),
-                valid_time: *valid_time,
-                transaction_time: *transaction_time,
-            }),
+            } => {
+                let use_batch = self
+                    .cost_model
+                    .should_use_batch_temporal_lookup(node_ids.len());
+                Ok(PhysicalOp::TemporalNodeLookup {
+                    node_ids: node_ids.clone(),
+                    valid_time: *valid_time,
+                    transaction_time: *transaction_time,
+                    use_batch,
+                })
+            }
 
             ScanOp::TemporalVectorSearch {
                 embedding,

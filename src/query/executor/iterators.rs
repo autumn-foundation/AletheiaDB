@@ -231,7 +231,8 @@ impl TemporalNodeIterator {
 impl ResultIterator for TemporalNodeIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         self.node_ids.next().map(|id| {
-            // Acquire read lock on historical storage
+            // Acquire read lock on historical storage (per-node)
+            // For bulk queries, use BatchTemporalNodeIterator instead
             let historical = self.historical.read().map_err(|_| {
                 crate::utils::error::StorageError::LockPoisoned {
                     lock_type: "historical_storage_read",
@@ -274,6 +275,98 @@ impl ResultIterator for TemporalNodeIterator {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.node_ids.size_hint()
+    }
+}
+
+/// Batch temporal node iterator for bulk queries.
+///
+/// This iterator is optimized for querying many nodes at once by acquiring
+/// a single read lock, reconstructing all nodes at once, then releasing the lock.
+///
+/// **Performance**: Use this for bulk queries (>100 nodes) where lock acquisition
+/// overhead is significant. For small queries, use `TemporalNodeIterator` instead.
+///
+/// **Trade-off**: Collects all results eagerly during construction, which requires
+/// more memory upfront but avoids per-node lock overhead and allows the lock to be
+/// released immediately after construction.
+pub struct BatchTemporalNodeIterator {
+    results: std::vec::IntoIter<Result<QueryRow>>,
+}
+
+impl BatchTemporalNodeIterator {
+    /// Create a new batch temporal node iterator.
+    ///
+    /// Acquires the historical storage lock once, reconstructs all nodes,
+    /// then releases the lock and returns the iterator over results.
+    ///
+    /// # Errors
+    /// Returns an error if the historical storage lock is poisoned.
+    pub fn new(
+        node_ids: Vec<NodeId>,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Result<Self> {
+        // Acquire lock once for all nodes
+        let guard =
+            historical
+                .read()
+                .map_err(|_| crate::utils::error::StorageError::LockPoisoned {
+                    lock_type: "historical_storage_read",
+                })?;
+
+        // Reconstruct all nodes while holding the lock
+        let results: Vec<Result<QueryRow>> = node_ids
+            .into_iter()
+            .map(|id| {
+                // Find the version valid at the requested time
+                let version_id = guard
+                    .find_node_version_at_time(id, valid_time, transaction_time)
+                    .ok_or(crate::utils::error::TemporalError::NodeNotFoundAtTime {
+                        node_id: id,
+                        valid_time,
+                        transaction_time,
+                    })?;
+
+                // INVARIANT: If find_node_version_at_time returns a version_id,
+                // that version MUST exist in storage. If this fails, it indicates
+                // a critical data inconsistency (broken version chain or dangling version_id).
+                debug_assert!(
+                    guard.get_node_version(version_id).is_some(),
+                    "INVARIANT VIOLATION: find_node_version_at_time returned non-existent version_id {}",
+                    version_id
+                );
+
+                // Get the version metadata
+                let version = guard
+                    .get_node_version(version_id)
+                    .ok_or(crate::utils::error::TemporalError::VersionNotFound(version_id))?;
+
+                // Reconstruct the properties from the version
+                let properties = guard.reconstruct_node_properties(version_id)?;
+
+                // Construct a node with the historical data
+                let node = Node::new(id, version.label, properties, version_id);
+
+                Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(valid_time))
+            })
+            .collect();
+
+        // Lock is automatically released here when `guard` goes out of scope
+
+        Ok(BatchTemporalNodeIterator {
+            results: results.into_iter(),
+        })
+    }
+}
+
+impl ResultIterator for BatchTemporalNodeIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.results.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.results.size_hint()
     }
 }
 
