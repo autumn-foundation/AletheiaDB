@@ -117,25 +117,45 @@ pub struct WriteOptions {
     pub durability_mode: Option<DurabilityMode>,
 }
 
-// Critical financial transaction - override to Synchronous
-let critical_options = WriteOptions {
-    durability_mode: Some(DurabilityMode::Synchronous),
-};
+impl WriteOptions {
+    /// Create new options with default settings
+    pub fn new() -> Self;
 
-let payment_id = db.write_with_options(critical_options, |tx| {
+    /// Set custom durability mode
+    pub fn with_durability(self, mode: DurabilityMode) -> Self;
+
+    /// Preset for bulk imports (Async mode, 100ms flush)
+    pub fn bulk_import() -> Self;
+
+    /// Preset for critical operations (Synchronous mode)
+    pub fn critical() -> Self;
+}
+
+// Method 1: Use preset for critical transactions
+let payment_id = db.write_with_options(WriteOptions::critical(), |tx| {
     tx.create_node("Payment", payment_data)
 })?;
 
-// Bulk import - override to Async for maximum throughput
-let bulk_options = WriteOptions {
-    durability_mode: Some(DurabilityMode::Async { flush_interval_ms: 50 }),
-};
+// Method 2: Use preset for bulk imports
+db.write_with_options(WriteOptions::bulk_import(), |tx| {
+    for record in bulk_data {
+        tx.create_node("Record", record)?;
+    }
+    Ok(())
+})?;
 
-for record in bulk_data {
-    db.write_with_options(bulk_options.clone(), |tx| {
-        tx.create_node("Record", record)
-    })?;
-}
+// Method 3: Custom configuration
+let custom_options = WriteOptions::new()
+    .with_durability(DurabilityMode::Async { flush_interval_ms: 50 });
+
+db.write_with_options(custom_options, |tx| {
+    tx.create_node("CustomData", data)
+})?;
+
+// Method 4: Manual struct construction (also supported)
+let manual_options = WriteOptions {
+    durability_mode: Some(DurabilityMode::Synchronous),
+};
 
 // Regular transaction - uses global default (GroupCommit)
 db.write(|tx| {

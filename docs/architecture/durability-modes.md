@@ -203,6 +203,30 @@ graph LR
     Note2[Example: Financial txn uses Sync<br/>while rest of DB uses GroupCommit]
 ```
 
+**Convenience Presets:**
+
+```rust
+// Preset for critical operations (Synchronous mode)
+db.write_with_options(WriteOptions::critical(), |tx| {
+    tx.create_node("Payment", payment_data)
+})?;
+
+// Preset for bulk imports (Async mode, 100ms flush)
+db.write_with_options(WriteOptions::bulk_import(), |tx| {
+    for record in bulk_data {
+        tx.create_node("Record", record)?;
+    }
+    Ok(())
+})?;
+
+// Custom configuration (builder pattern)
+let options = WriteOptions::new()
+    .with_durability(DurabilityMode::GroupCommit {
+        max_delay_ms: 5,
+        max_batch_size: 500,
+    });
+```
+
 ## GroupCommit Mode Internals
 
 ### Epoch-Based Coordination
