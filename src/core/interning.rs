@@ -10,6 +10,7 @@
 //! - Thread-safe without locking (uses DashMap)
 
 use dashmap::DashMap;
+use quick_cache::sync::Cache;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -76,12 +77,13 @@ impl Default for InternerConfig {
 /// The interner is designed to be used as a singleton (via lazy_static or similar).
 pub struct StringInterner {
     /// Maps strings to their IDs.
-    string_to_id: DashMap<Arc<str>, InternedString>,
+    active_cache: Arc<Cache<Arc<str>, InternedString>>,
     /// Maps IDs back to strings.
     id_to_string: DashMap<InternedString, Arc<str>>,
     /// Next ID to assign.
     next_id: AtomicU32,
     /// Maximum number of strings to intern (DoS protection)
+    #[allow(dead_code)] // Will be used in Phase 5 (ID exhaustion warning)
     max_capacity: usize,
 }
 
@@ -94,7 +96,7 @@ impl StringInterner {
     /// Create a new string interner with a custom maximum capacity.
     pub fn with_max_capacity(max_capacity: usize) -> Self {
         StringInterner {
-            string_to_id: DashMap::new(),
+            active_cache: Arc::new(Cache::new(max_capacity)),
             id_to_string: DashMap::new(),
             next_id: AtomicU32::new(0),
             max_capacity,
@@ -104,7 +106,7 @@ impl StringInterner {
     /// Create a new string interner with custom configuration.
     pub fn with_config(config: InternerConfig) -> Self {
         StringInterner {
-            string_to_id: DashMap::new(),
+            active_cache: Arc::new(Cache::new(config.max_cache_size)),
             id_to_string: DashMap::new(),
             next_id: AtomicU32::new(0),
             max_capacity: config.max_cache_size,
@@ -126,46 +128,22 @@ impl StringInterner {
         string: S,
     ) -> std::result::Result<InternedString, crate::utils::error::Error> {
         let string = string.as_ref();
-
-        // Fast path: check if already interned (avoids Arc allocation)
-        if let Some(id) = self.get_id(string) {
+        if let Some(id) = self.active_cache.get(string) {
             return Ok(id);
         }
-
-        // Slow path: need to intern the string
-        // Use entry API for atomic check-and-insert
-        // This prevents race conditions where two threads could assign different IDs
-        // to the same string
         let arc_str: Arc<str> = Arc::from(string);
-
-        self.string_to_id
-            .entry(arc_str.clone())
-            .or_try_insert_with(|| {
-                // Atomically reserve an ID first to prevent capacity check race
-                let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
-
-                // Check if we exceeded capacity AFTER reserving ID
-                if id_value >= self.max_capacity as u32 {
-                    // Best effort: undo the reservation
-                    self.next_id.fetch_sub(1, Ordering::Relaxed);
-
-                    return Err(crate::utils::error::Error::Storage(
-                        crate::utils::error::StorageError::CapacityExceeded {
-                            resource: "string interner".to_string(),
-                            current: id_value as usize,
-                            limit: self.max_capacity,
-                        },
-                    ));
-                }
-
-                let id = InternedString(id_value);
-
-                // Store the reverse mapping
-                self.id_to_string.insert(id, arc_str.clone());
-
-                Ok(id)
-            })
-            .map(|r| *r)
+        for entry in self.id_to_string.iter() {
+            if entry.value().as_ref() == string {
+                let existing_id = *entry.key();
+                self.active_cache.insert(arc_str, existing_id);
+                return Ok(existing_id);
+            }
+        }
+        let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = InternedString(id_value);
+        self.id_to_string.insert(id, arc_str.clone());
+        self.active_cache.insert(arc_str, id);
+        Ok(id)
     }
 
     /// Intern a string without capacity checks.
@@ -177,24 +155,25 @@ impl StringInterner {
     ///
     /// Using this method with untrusted input could lead to unbounded memory growth.
     #[inline]
-    #[allow(dead_code)] // Available for internal use (WAL recovery, etc.)
+    #[allow(dead_code)]
     pub(crate) fn intern_unchecked<S: AsRef<str>>(&self, string: S) -> InternedString {
         let string = string.as_ref();
-
-        // Fast path: check if already interned
-        if let Some(id) = self.get_id(string) {
+        if let Some(id) = self.active_cache.get(string) {
             return id;
         }
-
-        // Slow path: intern without capacity check
         let arc_str: Arc<str> = Arc::from(string);
-
-        *self.string_to_id.entry(arc_str.clone()).or_insert_with(|| {
-            let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let id = InternedString(id_value);
-            self.id_to_string.insert(id, arc_str.clone());
-            id
-        })
+        for entry in self.id_to_string.iter() {
+            if entry.value().as_ref() == string {
+                let existing_id = *entry.key();
+                self.active_cache.insert(arc_str, existing_id);
+                return existing_id;
+            }
+        }
+        let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = InternedString(id_value);
+        self.id_to_string.insert(id, arc_str.clone());
+        self.active_cache.insert(arc_str, id);
+        id
     }
 
     /// Resolve an interned string ID back to the original string.
@@ -270,31 +249,29 @@ impl StringInterner {
 
     /// Check if a string has been interned.
     pub fn contains<S: AsRef<str>>(&self, string: S) -> bool {
-        self.string_to_id.contains_key(string.as_ref())
+        self.active_cache.get(string.as_ref()).is_some()
     }
 
     /// Get the ID of a string if it has been interned.
     pub fn get_id<S: AsRef<str>>(&self, string: S) -> Option<InternedString> {
-        self.string_to_id
-            .get(string.as_ref())
-            .map(|entry| *entry.value())
+        self.active_cache.get(string.as_ref())
     }
 
     /// Get the number of interned strings.
     pub fn len(&self) -> usize {
-        self.string_to_id.len()
+        self.active_cache.len()
     }
 
     /// Check if the interner is empty.
     pub fn is_empty(&self) -> bool {
-        self.string_to_id.is_empty()
+        self.active_cache.len() == 0
     }
 
     /// Clear all interned strings.
     ///
     /// This invalidates all existing InternedString IDs!
     pub fn clear(&self) {
-        self.string_to_id.clear();
+        self.active_cache.clear();
         self.id_to_string.clear();
         self.next_id.store(0, Ordering::Relaxed);
     }
@@ -653,24 +630,8 @@ mod tests {
 
         assert_eq!(interner.len(), 10);
 
-        // 11th string should fail with CapacityExceeded error
-        let result = interner.intern("overflow");
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert!(
-            matches!(
-                err,
-                crate::utils::error::Error::Storage(
-                    crate::utils::error::StorageError::CapacityExceeded { .. }
-                )
-            ),
-            "Expected CapacityExceeded error, got: {:?}",
-            err
-        );
-
-        // Should still have exactly 10 strings
-        assert_eq!(interner.len(), 10);
+        // With cache eviction, 11th string succeeds
+        let _result = interner.intern("overflow").unwrap();
 
         Ok(())
     }
@@ -710,12 +671,8 @@ mod tests {
             .map(|h: std::thread::JoinHandle<usize>| h.join().unwrap())
             .sum();
 
-        // Exactly 100 successful interns is guaranteed by atomic operations:
-        // - fetch_add(1, Ordering::Relaxed) atomically reserves an ID
-        // - If ID >= max_capacity, intern() returns error and undoes reservation
-        // - This ensures exactly `max_capacity` successful interns, no more, no less
-        assert_eq!(total_successes, 100);
-        assert_eq!(interner.len(), 100);
+        // With cache eviction, all 200 succeed
+        assert_eq!(total_successes, 200);
     }
 
     #[test]
@@ -780,5 +737,25 @@ mod tests {
         // Can intern strings
         let id = interner.intern("test").unwrap();
         assert_eq!(interner.resolve(id).unwrap().as_ref(), "test");
+    }
+
+    #[test]
+    fn test_cache_eviction_over_capacity() {
+        let config = InternerConfig {
+            max_cache_size: 100,
+            ..Default::default()
+        };
+        let interner = StringInterner::with_config(config);
+        let mut ids = Vec::new();
+        for i in 0..200 {
+            ids.push(interner.intern(&format!("key_{}", i)).unwrap());
+        }
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(
+                interner.resolve(*id).unwrap().as_ref(),
+                format!("key_{}", i)
+            );
+        }
+        assert_eq!(ids[0], interner.intern("key_0").unwrap());
     }
 }
