@@ -75,8 +75,8 @@ jobs:
             BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench gallifreydb --bench hnsw_index --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity"
           else
             echo "Running CORE benchmarks only (CI run)..."
-            # Core benchmarks: storage layer, high-level API, transactions
-            BENCH_TARGETS="--bench current_state --bench gallifreydb --bench transactions"
+            # Core benchmarks: storage layer, high-level API
+            BENCH_TARGETS="--bench current_state --bench gallifreydb"
           fi
 
           # Run benchmarks with configured timing parameters
