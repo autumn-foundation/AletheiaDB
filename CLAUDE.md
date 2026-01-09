@@ -396,6 +396,48 @@ This enables multiple Claude instances to work in parallel without conflicts. Ea
 
 See `WORKTREE_WORKFLOW.md` for complete documentation.
 
+### ⚠️ MANDATORY: Pre-Commit Quality Checks
+
+**BEFORE EVERY COMMIT, you MUST run these commands in order:**
+
+```bash
+# 1. Run clippy with ALL warnings as errors
+cargo clippy --all-targets --all-features -- -D warnings
+
+# 2. Format all code
+cargo fmt --all
+
+# 3. Verify tests pass
+cargo test
+```
+
+**These checks are NON-NEGOTIABLE:**
+- `cargo clippy` ensures code quality and catches potential bugs
+- `cargo fmt` maintains consistent code style
+- Both MUST pass before committing
+
+**Recommended workflow:**
+```bash
+# Make code changes
+# ...
+
+# Run quality checks
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --all
+
+# If clippy or fmt made changes, review them
+git diff
+
+# Run tests
+cargo test
+
+# Only then commit
+git add .
+git commit -m "feat: your change"
+```
+
+**Note:** The `just pre-commit` command includes these checks, but you should run them explicitly to see any issues immediately.
+
 ### Feature Development Process
 
 1. **Design First**: Document design in issue/PR description
@@ -406,6 +448,9 @@ See `WORKTREE_WORKFLOW.md` for complete documentation.
 
 ### Code Review Checklist
 
+- [ ] **Clippy passes**: `cargo clippy --all-targets --all-features -- -D warnings` with no errors
+- [ ] **Code formatted**: `cargo fmt --all` applied
+- [ ] **Tests pass**: All tests passing
 - [ ] Temporal invariants preserved
 - [ ] No performance regression on benchmarks
 - [ ] Error handling is comprehensive (no unwrap/expect)

@@ -47,15 +47,15 @@ check:
 
 # Run clippy lints
 lint:
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets --all-features -- -D warnings
 
 # Format code
 fmt:
-    cargo fmt
+    cargo fmt --all
 
 # Check formatting without modifying
 fmt-check:
-    cargo fmt -- --check
+    cargo fmt --all -- --check
 
 # Clean build artifacts
 clean:

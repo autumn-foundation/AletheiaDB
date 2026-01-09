@@ -20,6 +20,7 @@ fn main() {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1000),
         retention_policy: RetentionPolicy::KeepN(100),
         max_snapshots: 100,
+        full_snapshot_interval: 10,
         hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
     };
     let index3 = TemporalVectorIndex::new(config).unwrap();

@@ -23,6 +23,7 @@ fn create_test_index() -> Result<TemporalVectorIndex> {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(2),
         retention_policy: RetentionPolicy::KeepN(10),
         max_snapshots: 100,
+        full_snapshot_interval: 10,
         hnsw_config,
     };
     TemporalVectorIndex::new(config)
@@ -137,6 +138,7 @@ fn test_snapshot_pruning_with_keep_n() -> Result<()> {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
         retention_policy: RetentionPolicy::KeepN(3),
         max_snapshots: 100,
+        full_snapshot_interval: 10,
         hnsw_config,
     };
     let index = TemporalVectorIndex::new(config)?;
@@ -165,6 +167,7 @@ fn test_snapshot_pruning_with_keep_duration() -> Result<()> {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
         retention_policy: RetentionPolicy::KeepDuration(Duration::from_secs(10)),
         max_snapshots: 100,
+        full_snapshot_interval: 10,
         hnsw_config,
     };
     let index = TemporalVectorIndex::new(config)?;
@@ -195,7 +198,7 @@ fn test_snapshot_info_retrieval() -> Result<()> {
     index.on_transaction()?;
     index.on_transaction()?;
 
-    let info = index.get_snapshot_info();
+    let info = index.get_snapshot_info()?;
     assert_eq!(info.len(), 1);
 
     let snapshot_info = &info[0];
@@ -215,6 +218,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
         snapshot_strategy: SnapshotStrategy::TimeInterval(1), // 1 second
         retention_policy: RetentionPolicy::KeepN(10),
         max_snapshots: 100,
+        full_snapshot_interval: 10,
         hnsw_config: hnsw_config.clone(),
     };
 
@@ -235,6 +239,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
         snapshot_strategy: SnapshotStrategy::ChangeThreshold(0.5), // 50% changed
         retention_policy: RetentionPolicy::KeepN(10),
         max_snapshots: 100,
+        full_snapshot_interval: 10,
         hnsw_config,
     };
     let change_threshold_index = TemporalVectorIndex::new_at(config, 1000)?;
