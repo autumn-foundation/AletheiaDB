@@ -122,6 +122,13 @@ exclude = [
     "tests/*",
 ]
 
+# Performance targets - lightweight validation of key performance metrics
+[[bench]]
+name = "performance_targets"
+harness = false
+path = "benches/performance_targets.rs"
+required-features = []
+
 # Storage layer - raw storage primitives and fast path
 [[bench]]
 name = "current_state"
