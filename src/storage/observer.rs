@@ -144,8 +144,12 @@
 //! ```rust
 //! # use gallifreydb::storage::historical::{HistoricalStorage, PreAnchorHook};
 //! # use gallifreydb::storage::observer::{StorageObserver, StorageEvent};
-//! # use gallifreydb::index::vector::temporal::TemporalVectorIndex;
+//! # use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig};
+//! # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
 //! # use std::sync::Arc;
+//! #
+//! # let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
+//! # let config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
 //!
 //! // Pre-Anchor Hook: Create snapshot BEFORE anchor storage, return ID
 //! let index = Arc::new(TemporalVectorIndex::new(config)?);
