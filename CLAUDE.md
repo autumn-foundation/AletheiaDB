@@ -199,13 +199,12 @@ GallifreyDB uses a **Striped Lock-Free Ring Buffers** architecture for high-thro
 
 ### Quick Reference
 
-**Current Version**: 1 (binary format with "GWAL" magic bytes)
+**Format**: Binary with "GWAL" magic bytes, version 1
 
 **Key Features**:
 - Lock-free concurrent append path
 - Full property and temporal interval serialization
-- Checksum verification for data integrity
-- Version-aware format for future evolution
+- CRC32 checksum verification
 
 **Documentation:**
 - [ADR-0020: Concurrent WAL Architecture](docs/adr/0020-concurrent-wal-architecture.md)

@@ -93,7 +93,6 @@ use std::sync::{Arc, Mutex};
 const WAL_MAGIC: [u8; 4] = *b"GWAL";
 
 /// Current WAL format version.
-/// Version 1: Full serialization of properties and temporal intervals.
 const WAL_VERSION: u8 = 1;
 
 /// Size of the WAL segment header (magic + version).

@@ -103,13 +103,12 @@ The WAL uses a versioned binary format to enable future evolution.
 [LSN: 8 bytes][timestamp: 8 bytes][checksum: 4 bytes][op_type: 1 byte][operation data...]
 ```
 
-### Current Version: 1
+### Format (Version 1)
 
-**Features:**
 - Full serialization of properties (PropertyMap)
 - Full serialization of bi-temporal intervals (32 bytes each)
 - Labels serialized for all operation types
-- CRC32 checksum verification for data integrity
+- CRC32 checksum verification
 
 ## WAL Recovery
 
