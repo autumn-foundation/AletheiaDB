@@ -790,12 +790,85 @@ mod tests {
         )
     }
 
+    fn test_node_with_age(id: u64, name: &str, age: i64) -> Node {
+        let props = PropertyMapBuilder::new()
+            .insert("name", name)
+            .insert("age", age)
+            .build();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        Node::new(
+            NodeId::new(id).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        )
+    }
+
+    fn test_node_with_vector(id: u64, name: &str, embedding: Vec<f32>) -> Node {
+        let props = PropertyMapBuilder::new()
+            .insert("name", name)
+            .insert_vector("embedding", &embedding)
+            .build();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        Node::new(
+            NodeId::new(id).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        )
+    }
+
+    /// Mock iterator for testing
+    struct MockIterator {
+        items: std::vec::IntoIter<Result<QueryRow>>,
+    }
+
+    impl MockIterator {
+        fn from_nodes(nodes: Vec<Node>) -> Self {
+            let items: Vec<Result<QueryRow>> = nodes
+                .into_iter()
+                .map(|n| Ok(QueryRow::from_entity(EntityResult::Node(n))))
+                .collect();
+            MockIterator {
+                items: items.into_iter(),
+            }
+        }
+
+        fn from_results(results: Vec<Result<QueryRow>>) -> Self {
+            MockIterator {
+                items: results.into_iter(),
+            }
+        }
+    }
+
+    impl ResultIterator for MockIterator {
+        fn next(&mut self) -> Option<Result<QueryRow>> {
+            self.items.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.items.size_hint()
+        }
+    }
+
+    // ==================== EmptyIterator Tests ====================
+
     #[test]
     fn test_empty_iterator() {
         let mut iter = EmptyIterator;
         assert!(iter.next().is_none());
         assert_eq!(iter.size_hint(), (0, Some(0)));
     }
+
+    #[test]
+    fn test_empty_iterator_multiple_calls() {
+        let mut iter = EmptyIterator;
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none());
+    }
+
+    // ==================== FilterIterator Predicate Tests ====================
 
     #[test]
     fn test_filter_predicate_eq() {
@@ -807,12 +880,299 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_predicate_eq_false() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::eq("name", "Bob");
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_eq_missing_property() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::eq("missing", "value");
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
     fn test_filter_predicate_ne() {
         let node = test_node(1, "Alice");
         let predicate = Predicate::ne("name", "Bob");
 
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
         assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_ne_same_value() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::ne("name", "Alice");
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_ne_missing_property() {
+        let node = test_node(1, "Alice");
+        // Missing property != anything is true
+        let predicate = Predicate::ne("missing", "value");
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_gt() {
+        let node = test_node_with_age(1, "Alice", 30);
+        let predicate = Predicate::gt("age", 18i64);
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_gt_equal_value() {
+        let node = test_node_with_age(1, "Alice", 18);
+        let predicate = Predicate::gt("age", 18i64);
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_gt_less_value() {
+        let node = test_node_with_age(1, "Alice", 15);
+        let predicate = Predicate::gt("age", 18i64);
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_lt() {
+        let node = test_node_with_age(1, "Alice", 15);
+        let predicate = Predicate::lt("age", 18i64);
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_lt_equal_value() {
+        let node = test_node_with_age(1, "Alice", 18);
+        let predicate = Predicate::lt("age", 18i64);
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_gte() {
+        let node = test_node_with_age(1, "Alice", 18);
+        let predicate = Predicate::Gte {
+            key: "age".to_string(),
+            value: PredicateValue::Int(18),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_gte_greater() {
+        let node = test_node_with_age(1, "Alice", 20);
+        let predicate = Predicate::Gte {
+            key: "age".to_string(),
+            value: PredicateValue::Int(18),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_gte_less() {
+        let node = test_node_with_age(1, "Alice", 15);
+        let predicate = Predicate::Gte {
+            key: "age".to_string(),
+            value: PredicateValue::Int(18),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_lte() {
+        let node = test_node_with_age(1, "Alice", 18);
+        let predicate = Predicate::Lte {
+            key: "age".to_string(),
+            value: PredicateValue::Int(18),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_lte_less() {
+        let node = test_node_with_age(1, "Alice", 15);
+        let predicate = Predicate::Lte {
+            key: "age".to_string(),
+            value: PredicateValue::Int(18),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_lte_greater() {
+        let node = test_node_with_age(1, "Alice", 20);
+        let predicate = Predicate::Lte {
+            key: "age".to_string(),
+            value: PredicateValue::Int(18),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_exists() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::exists("name");
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_exists_missing() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::exists("missing");
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_not_exists() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::NotExists("missing".to_string());
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_not_exists_present() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::NotExists("name".to_string());
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_contains() {
+        let node = test_node(1, "Alice Johnson");
+        let predicate = Predicate::contains("name", "John");
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_contains_not_found() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::contains("name", "Bob");
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_starts_with() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::StartsWith {
+            key: "name".to_string(),
+            prefix: "Ali".to_string(),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_starts_with_not_match() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::StartsWith {
+            key: "name".to_string(),
+            prefix: "Bob".to_string(),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_ends_with() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::EndsWith {
+            key: "name".to_string(),
+            suffix: "ice".to_string(),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_ends_with_not_match() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::EndsWith {
+            key: "name".to_string(),
+            suffix: "Bob".to_string(),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_in() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::In {
+            key: "name".to_string(),
+            values: vec![
+                PredicateValue::String("Alice".to_string()),
+                PredicateValue::String("Bob".to_string()),
+                PredicateValue::String("Charlie".to_string()),
+            ],
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_in_not_found() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::In {
+            key: "name".to_string(),
+            values: vec![
+                PredicateValue::String("Bob".to_string()),
+                PredicateValue::String("Charlie".to_string()),
+            ],
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
     }
 
     #[test]
@@ -835,6 +1195,177 @@ mod tests {
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
         assert!(filter.evaluate(&node));
     }
+
+    #[test]
+    fn test_filter_predicate_and_one_false() {
+        let node = test_node_with_age(1, "Alice", 15);
+        let predicate = Predicate::eq("name", "Alice").and(Predicate::gt("age", 18i64));
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_or() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::eq("name", "Alice").or(Predicate::eq("name", "Bob"));
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_or_second_true() {
+        let node = test_node(1, "Bob");
+        let predicate = Predicate::eq("name", "Alice").or(Predicate::eq("name", "Bob"));
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_or_both_false() {
+        let node = test_node(1, "Charlie");
+        let predicate = Predicate::eq("name", "Alice").or(Predicate::eq("name", "Bob"));
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_not() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::Not(Box::new(Predicate::eq("name", "Bob")));
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_not_negates_true() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::Not(Box::new(Predicate::eq("name", "Alice")));
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_true() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::True;
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_false() {
+        let node = test_node(1, "Alice");
+        let predicate = Predicate::False;
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_float_comparison() {
+        let props = PropertyMapBuilder::new().insert("score", 3.5f64).build();
+        let label = GLOBAL_INTERNER.intern("Score").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        let predicate = Predicate::gt("score", 3.0f64);
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+
+        let predicate = Predicate::lt("score", 4.0f64);
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_predicate_bool_comparison() {
+        let props = PropertyMapBuilder::new().insert("active", true).build();
+        let label = GLOBAL_INTERNER.intern("Status").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        let predicate = Predicate::eq("active", true);
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+
+        let predicate = Predicate::eq("active", false);
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    // ==================== FilterIterator Integration Tests ====================
+
+    #[test]
+    fn test_filter_iterator_passes_matching_nodes() {
+        let nodes = vec![
+            test_node_with_age(1, "Alice", 30),
+            test_node_with_age(2, "Bob", 25),
+            test_node_with_age(3, "Charlie", 35),
+        ];
+
+        let input = MockIterator::from_nodes(nodes);
+        let predicate = Predicate::gt("age", 28i64);
+        let mut filter = FilterIterator::new(Box::new(input), predicate);
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = filter.next() {
+            results.push(row);
+        }
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].entity.node_id(), Some(NodeId::new(1).unwrap())); // Alice (30)
+        assert_eq!(results[1].entity.node_id(), Some(NodeId::new(3).unwrap())); // Charlie (35)
+    }
+
+    #[test]
+    fn test_filter_iterator_no_matches() {
+        let nodes = vec![
+            test_node_with_age(1, "Alice", 20),
+            test_node_with_age(2, "Bob", 25),
+        ];
+
+        let input = MockIterator::from_nodes(nodes);
+        let predicate = Predicate::gt("age", 100i64);
+        let mut filter = FilterIterator::new(Box::new(input), predicate);
+
+        assert!(filter.next().is_none());
+    }
+
+    #[test]
+    fn test_filter_iterator_propagates_errors() {
+        let results = vec![
+            Ok(QueryRow::from_entity(EntityResult::Node(test_node(
+                1, "Alice",
+            )))),
+            Err(crate::utils::error::Error::other("test error")),
+        ];
+
+        let input = MockIterator::from_results(results);
+        let predicate = Predicate::True;
+        let mut filter = FilterIterator::new(Box::new(input), predicate);
+
+        // First result succeeds
+        assert!(filter.next().unwrap().is_ok());
+        // Second result is error
+        assert!(filter.next().unwrap().is_err());
+    }
+
+    // ==================== LimitIterator Tests ====================
 
     #[test]
     fn test_limit_iterator() {
@@ -879,5 +1410,274 @@ mod tests {
         assert_eq!(results.len(), 3);
         // First result should be node 3 (after skipping 2)
         assert_eq!(results[0].entity.node_id(), Some(NodeId::new(3).unwrap()));
+    }
+
+    #[test]
+    fn test_limit_iterator_no_offset() {
+        let nodes = vec![
+            test_node(1, "Alice"),
+            test_node(2, "Bob"),
+            test_node(3, "Charlie"),
+            test_node(4, "Dave"),
+        ];
+
+        let input = MockIterator::from_nodes(nodes);
+        let mut limit = LimitIterator::new(Box::new(input), 0, 2);
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = limit.next() {
+            results.push(row);
+        }
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].entity.node_id(), Some(NodeId::new(1).unwrap()));
+        assert_eq!(results[1].entity.node_id(), Some(NodeId::new(2).unwrap()));
+    }
+
+    #[test]
+    fn test_limit_iterator_offset_exceeds_input() {
+        let nodes = vec![test_node(1, "Alice"), test_node(2, "Bob")];
+
+        let input = MockIterator::from_nodes(nodes);
+        let mut limit = LimitIterator::new(Box::new(input), 5, 10);
+
+        // Offset exceeds input, should return nothing
+        assert!(limit.next().is_none());
+    }
+
+    #[test]
+    fn test_limit_iterator_count_zero() {
+        let nodes = vec![test_node(1, "Alice"), test_node(2, "Bob")];
+
+        let input = MockIterator::from_nodes(nodes);
+        let mut limit = LimitIterator::new(Box::new(input), 0, 0);
+
+        // Count is 0, should return nothing
+        assert!(limit.next().is_none());
+    }
+
+    #[test]
+    fn test_limit_iterator_count_exceeds_remaining() {
+        let nodes = vec![test_node(1, "Alice"), test_node(2, "Bob")];
+
+        let input = MockIterator::from_nodes(nodes);
+        let mut limit = LimitIterator::new(Box::new(input), 1, 10);
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = limit.next() {
+            results.push(row);
+        }
+
+        // Skipped 1, only 1 remaining
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entity.node_id(), Some(NodeId::new(2).unwrap()));
+    }
+
+    #[test]
+    fn test_limit_iterator_propagates_errors_during_skip() {
+        let results = vec![
+            Err(crate::utils::error::Error::other("test error")),
+            Ok(QueryRow::from_entity(EntityResult::Node(test_node(
+                1, "Alice",
+            )))),
+        ];
+
+        let input = MockIterator::from_results(results);
+        let mut limit = LimitIterator::new(Box::new(input), 1, 5);
+
+        // Should get error during skip phase
+        let result = limit.next();
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_limit_iterator_size_hint() {
+        let nodes = vec![
+            test_node(1, "Alice"),
+            test_node(2, "Bob"),
+            test_node(3, "Charlie"),
+        ];
+
+        let input = MockIterator::from_nodes(nodes);
+        let limit = LimitIterator::new(Box::new(input), 0, 2);
+
+        // Size hint should respect the limit
+        let (lower, upper) = limit.size_hint();
+        assert!(lower <= 2);
+        assert!(upper.map(|u| u <= 2).unwrap_or(true));
+    }
+
+    // ==================== VectorRerankIterator Tests ====================
+
+    #[test]
+    fn test_vector_rerank_no_vector_index_error() {
+        let nodes = vec![test_node_with_vector(1, "Alice", vec![1.0, 0.0, 0.0, 0.0])];
+
+        // Create CurrentStorage without vector index
+        let current = Arc::new(CurrentStorage::new());
+
+        let input = MockIterator::from_nodes(nodes);
+        let query = Arc::from(vec![1.0f32, 0.0, 0.0, 0.0]);
+
+        let mut rerank = VectorRerankIterator::new(Box::new(input), query, 10, current);
+
+        // Should return error because no vector index is configured
+        let result = rerank.next();
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_vector_rerank_size_hint_before_init() {
+        let nodes = vec![test_node_with_vector(1, "Alice", vec![1.0, 0.0, 0.0, 0.0])];
+
+        let current = Arc::new(CurrentStorage::new());
+        let input = MockIterator::from_nodes(nodes);
+        let query = Arc::from(vec![1.0f32, 0.0, 0.0, 0.0]);
+
+        let rerank = VectorRerankIterator::new(Box::new(input), query, 5, current);
+
+        // Before initialization, size_hint upper bound is k
+        let (lower, upper) = rerank.size_hint();
+        assert_eq!(lower, 0);
+        assert_eq!(upper, Some(5));
+    }
+
+    // ==================== MockIterator Tests ====================
+
+    #[test]
+    fn test_mock_iterator_from_nodes() {
+        let nodes = vec![test_node(1, "Alice"), test_node(2, "Bob")];
+
+        let mut iter = MockIterator::from_nodes(nodes);
+
+        let row1 = iter.next().unwrap().unwrap();
+        assert_eq!(row1.entity.node_id(), Some(NodeId::new(1).unwrap()));
+
+        let row2 = iter.next().unwrap().unwrap();
+        assert_eq!(row2.entity.node_id(), Some(NodeId::new(2).unwrap()));
+
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_mock_iterator_size_hint() {
+        let nodes = vec![test_node(1, "Alice"), test_node(2, "Bob")];
+
+        let iter = MockIterator::from_nodes(nodes);
+
+        let (lower, upper) = iter.size_hint();
+        assert_eq!(lower, 2);
+        assert_eq!(upper, Some(2));
+    }
+
+    // ==================== Type comparison edge cases ====================
+
+    #[test]
+    fn test_filter_type_mismatch_returns_false() {
+        // String property compared to Int predicate
+        let node = test_node(1, "Alice"); // name is String
+        let predicate = Predicate::gt("name", 10i64); // Comparing String to Int
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node)); // Type mismatch returns false
+    }
+
+    #[test]
+    fn test_filter_contains_on_non_string_returns_false() {
+        let node = test_node_with_age(1, "Alice", 30);
+        let predicate = Predicate::contains("age", "30"); // age is Int, not String
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_starts_with_on_non_string_returns_false() {
+        let node = test_node_with_age(1, "Alice", 30);
+        let predicate = Predicate::StartsWith {
+            key: "age".to_string(),
+            prefix: "3".to_string(),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_ends_with_on_non_string_returns_false() {
+        let node = test_node_with_age(1, "Alice", 30);
+        let predicate = Predicate::EndsWith {
+            key: "age".to_string(),
+            suffix: "0".to_string(),
+        };
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
+    }
+
+    // ==================== Null handling ====================
+
+    #[test]
+    fn test_filter_null_equality() {
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("optional", PropertyValue::Null)
+            .build();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        // Null == Null should be true
+        let predicate = Predicate::Eq {
+            key: "optional".to_string(),
+            value: PredicateValue::Null,
+        };
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    // ==================== Complex nested predicates ====================
+
+    #[test]
+    fn test_filter_deeply_nested_predicate() {
+        let node = test_node_with_age(1, "Alice", 30);
+
+        // (name == "Alice" AND age > 20) OR (name == "Bob")
+        let predicate = Predicate::Or(vec![
+            Predicate::And(vec![
+                Predicate::eq("name", "Alice"),
+                Predicate::gt("age", 20i64),
+            ]),
+            Predicate::eq("name", "Bob"),
+        ]);
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_empty_and_is_true() {
+        let node = test_node(1, "Alice");
+        // Empty AND is vacuously true
+        let predicate = Predicate::And(vec![]);
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(filter.evaluate(&node));
+    }
+
+    #[test]
+    fn test_filter_empty_or_is_false() {
+        let node = test_node(1, "Alice");
+        // Empty OR is vacuously false
+        let predicate = Predicate::Or(vec![]);
+
+        let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
+        assert!(!filter.evaluate(&node));
     }
 }

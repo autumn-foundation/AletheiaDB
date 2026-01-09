@@ -557,10 +557,37 @@ mod tests {
     use super::*;
     use crate::core::NodeId;
     use crate::query::builder::QueryBuilder;
+    use crate::query::ir::{Direction, Predicate, TraversalDepth};
     use crate::query::plan::QueryHints;
 
     fn test_planner() -> QueryPlanner {
         QueryPlanner::new(Arc::new(Statistics::default()))
+    }
+
+    // ==================== Basic Planner Tests ====================
+
+    #[test]
+    fn test_planner_new() {
+        let stats = Arc::new(Statistics::default());
+        let planner = QueryPlanner::new(Arc::clone(&stats));
+        // Verify the planner was created (no public fields to check)
+        let _ = planner;
+    }
+
+    #[test]
+    fn test_planner_with_cost_model() {
+        let stats = Arc::new(Statistics::default());
+        let custom_cost = CostModel::default();
+        let planner = QueryPlanner::new(stats).with_cost_model(custom_cost);
+        let _ = planner;
+    }
+
+    #[test]
+    fn test_planner_with_rules() {
+        let stats = Arc::new(Statistics::default());
+        let custom_rules: Vec<Box<dyn OptimizationRule>> = vec![];
+        let planner = QueryPlanner::new(stats).with_rules(custom_rules);
+        let _ = planner;
     }
 
     #[test]
@@ -571,6 +598,57 @@ mod tests {
         let plan = planner.plan(query).unwrap();
         assert!(matches!(plan.root, PhysicalOp::NodeLookup { .. }));
     }
+
+    #[test]
+    fn test_multiple_node_lookup() {
+        let planner = test_planner();
+        let ids = vec![
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            NodeId::new(3).unwrap(),
+        ];
+        let query = QueryBuilder::new().start_from(ids.clone()).build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::NodeLookup { node_ids } => {
+                assert_eq!(node_ids.len(), 3);
+            }
+            _ => panic!("Expected NodeLookup"),
+        }
+    }
+
+    // ==================== Node Scan Tests ====================
+
+    #[test]
+    fn test_node_scan_all() {
+        let planner = test_planner();
+        let query = QueryBuilder::new().scan(None).build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::NodeScan { label, .. } => {
+                assert!(label.is_none());
+            }
+            _ => panic!("Expected NodeScan"),
+        }
+    }
+
+    #[test]
+    fn test_node_scan_with_label() {
+        let planner = test_planner();
+        let query = QueryBuilder::new().scan_label("Person").build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::NodeScan { label, .. } => {
+                assert_eq!(label.as_ref().unwrap(), "Person");
+            }
+            _ => panic!("Expected NodeScan"),
+        }
+    }
+
+    // ==================== Traverse Tests ====================
 
     #[test]
     fn test_traverse_planning() {
@@ -585,6 +663,157 @@ mod tests {
     }
 
     #[test]
+    fn test_traverse_outgoing() {
+        let planner = test_planner();
+        // Use traverse() which defaults to outgoing
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .traverse("KNOWS")
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::IndexedTraversal { direction, .. } => {
+                assert_eq!(*direction, Direction::Outgoing);
+            }
+            _ => panic!("Expected IndexedTraversal"),
+        }
+    }
+
+    #[test]
+    fn test_traverse_incoming() {
+        let planner = test_planner();
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .traverse_in("KNOWS")
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::IndexedTraversal { direction, .. } => {
+                assert_eq!(*direction, Direction::Incoming);
+            }
+            _ => panic!("Expected IndexedTraversal"),
+        }
+    }
+
+    #[test]
+    fn test_traverse_both() {
+        let planner = test_planner();
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .traverse_both("KNOWS")
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::IndexedTraversal { direction, .. } => {
+                assert_eq!(*direction, Direction::Both);
+            }
+            _ => panic!("Expected IndexedTraversal"),
+        }
+    }
+
+    #[test]
+    fn test_traverse_without_source_error() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::TraverseOut {
+                label: Some("KNOWS".to_string()),
+                depth: TraversalDepth::Exact(1),
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        assert!(planner.plan(query).is_err());
+    }
+
+    // ==================== Filter Tests ====================
+
+    #[test]
+    fn test_filter_planning() {
+        let planner = test_planner();
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .filter(Predicate::eq("name", "Alice"))
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::Filter { .. }));
+    }
+
+    #[test]
+    fn test_filter_without_source_error() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Filter(Predicate::True)],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        assert!(planner.plan(query).is_err());
+    }
+
+    #[test]
+    fn test_filter_label_planning() {
+        let planner = test_planner();
+        let query = QueryBuilder::new().scan(None).with_label("Person").build();
+
+        let plan = planner.plan(query).unwrap();
+        // with_label gets converted to Filter with _label predicate
+        assert!(matches!(plan.root, PhysicalOp::Filter { .. }));
+    }
+
+    // ==================== Limit/Skip Tests ====================
+
+    #[test]
+    fn test_limit_planning() {
+        let planner = test_planner();
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .limit(10)
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::Limit { count, offset, .. } => {
+                assert_eq!(*count, 10);
+                assert_eq!(*offset, 0);
+            }
+            _ => panic!("Expected Limit"),
+        }
+    }
+
+    #[test]
+    fn test_skip_planning() {
+        let planner = test_planner();
+        let query = QueryBuilder::new().scan(None).skip(5).build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::Limit { offset, .. } => {
+                assert_eq!(*offset, 5);
+            }
+            _ => panic!("Expected Limit with offset (Skip)"),
+        }
+    }
+
+    #[test]
+    fn test_limit_without_source_error() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Limit(10)],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        assert!(planner.plan(query).is_err());
+    }
+
+    // ==================== Vector Search Tests ====================
+
+    #[test]
     fn test_vector_search_planning() {
         let planner = test_planner();
         let embedding = [0.1f32; 4];
@@ -593,6 +822,37 @@ mod tests {
         let plan = planner.plan(query).unwrap();
         assert!(matches!(plan.root, PhysicalOp::HnswSearch { .. }));
     }
+
+    #[test]
+    fn test_vector_rerank_planning() {
+        let planner = test_planner();
+        let embedding = [0.1f32; 4];
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .rank_by_similarity(&embedding, 10)
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::VectorRerank { .. }));
+    }
+
+    #[test]
+    fn test_similar_to_not_implemented() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::SimilarTo {
+                source_node: NodeId::new(1).unwrap(),
+                k: 10,
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        // SimilarTo is not yet implemented
+        assert!(planner.plan(query).is_err());
+    }
+
+    // ==================== Temporal Tests ====================
 
     #[test]
     fn test_temporal_planning() {
@@ -604,7 +864,89 @@ mod tests {
 
         let plan = planner.plan(query).unwrap();
         assert!(matches!(plan.root, PhysicalOp::TemporalNodeLookup { .. }));
+        assert!(plan.temporal_context.is_some());
     }
+
+    #[test]
+    fn test_temporal_vector_search() {
+        let planner = test_planner();
+        let embedding = [0.1f32; 4];
+        let query = QueryBuilder::new()
+            .as_of(1000, 2000)
+            .find_similar(&embedding, 10)
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::TemporalVectorSearch { .. }));
+    }
+
+    // ==================== Aggregation Tests ====================
+
+    #[test]
+    fn test_count_planning() {
+        let planner = test_planner();
+        // Use raw Query since count() is not on QueryBuilder
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes { label: None }, QueryOp::Count],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::Count { .. }));
+    }
+
+    #[test]
+    fn test_count_without_source_error() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Count],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        assert!(planner.plan(query).is_err());
+    }
+
+    #[test]
+    fn test_distinct_planning() {
+        let planner = test_planner();
+        // Use raw Query since distinct() is not on QueryBuilder
+        let query = Query {
+            ops: vec![QueryOp::ScanNodes { label: None }, QueryOp::Distinct],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::Distinct { .. }));
+    }
+
+    #[test]
+    fn test_project_planning() {
+        let planner = test_planner();
+        // Use raw Query since project() is not on QueryBuilder
+        let query = Query {
+            ops: vec![
+                QueryOp::StartNode(NodeId::new(1).unwrap()),
+                QueryOp::Project(vec!["name".to_string(), "age".to_string()]),
+            ],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::Project { properties, .. } => {
+                assert_eq!(properties.len(), 2);
+                assert!(properties.contains(&"name".to_string()));
+                assert!(properties.contains(&"age".to_string()));
+            }
+            _ => panic!("Expected Project"),
+        }
+    }
+
+    // ==================== Hybrid Query Tests ====================
 
     #[test]
     fn test_hybrid_planning() {
@@ -622,6 +964,22 @@ mod tests {
     }
 
     #[test]
+    fn test_complex_query_chain() {
+        let planner = test_planner();
+        let query = QueryBuilder::new()
+            .scan_label("Person")
+            .filter(Predicate::gt("age", 21i64))
+            .limit(100)
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        // Should be Limit(Filter(NodeScan))
+        assert!(matches!(plan.root, PhysicalOp::Limit { .. }));
+    }
+
+    // ==================== Error Cases ====================
+
+    #[test]
     fn test_empty_query_error() {
         let planner = test_planner();
         let query = Query {
@@ -631,5 +989,82 @@ mod tests {
         };
 
         assert!(planner.plan(query).is_err());
+    }
+
+    #[test]
+    fn test_rank_without_source_error() {
+        let planner = test_planner();
+        let embedding = [0.1f32; 4];
+        let query = Query {
+            ops: vec![QueryOp::RankBySimilarity {
+                embedding: Arc::from(embedding.as_slice()),
+                top_k: Some(10),
+            }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        assert!(planner.plan(query).is_err());
+    }
+
+    #[test]
+    fn test_distinct_without_source_error() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Distinct],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        assert!(planner.plan(query).is_err());
+    }
+
+    #[test]
+    fn test_project_without_source_error() {
+        let planner = test_planner();
+        let query = Query {
+            ops: vec![QueryOp::Project(vec!["name".to_string()])],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        assert!(planner.plan(query).is_err());
+    }
+
+    // ==================== Plan Properties Tests ====================
+
+    #[test]
+    fn test_plan_has_estimated_cost() {
+        let planner = test_planner();
+        let query = QueryBuilder::new().start(NodeId::new(1).unwrap()).build();
+
+        let plan = planner.plan(query).unwrap();
+        // Cost should be non-zero
+        assert!(
+            plan.estimated_cost.cpu > 0.0
+                || plan.estimated_cost.io > 0.0
+                || plan.estimated_cost.memory > 0
+        );
+    }
+
+    #[test]
+    fn test_plan_parallel_hint() {
+        let planner = test_planner();
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .parallel()
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        assert!(plan.parallel);
+    }
+
+    #[test]
+    fn test_plan_default_not_parallel() {
+        let planner = test_planner();
+        let query = QueryBuilder::new().start(NodeId::new(1).unwrap()).build();
+
+        let plan = planner.plan(query).unwrap();
+        assert!(!plan.parallel);
     }
 }

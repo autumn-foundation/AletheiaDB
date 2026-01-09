@@ -426,6 +426,64 @@ mod tests {
     use super::*;
     use crate::core::NodeId;
 
+    // ==================== PhysicalPlan Tests ====================
+
+    #[test]
+    fn test_physical_plan_is_temporal() {
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Empty,
+            estimated_cost: Cost::default(),
+            temporal_context: None,
+            parallel: false,
+        };
+        assert!(!plan.is_temporal());
+
+        let temporal_plan = PhysicalPlan {
+            root: PhysicalOp::Empty,
+            estimated_cost: Cost::default(),
+            temporal_context: Some(TemporalContext {
+                as_of: Some((1000, 2000)),
+                between: None,
+            }),
+            parallel: false,
+        };
+        assert!(temporal_plan.is_temporal());
+    }
+
+    #[test]
+    fn test_physical_plan_cpu_cost() {
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Empty,
+            estimated_cost: Cost {
+                cpu: 42.0,
+                io: 0.0,
+                memory: 0,
+                network: 0.0,
+            },
+            temporal_context: None,
+            parallel: false,
+        };
+        assert_eq!(plan.cpu_cost(), 42.0);
+    }
+
+    #[test]
+    fn test_physical_plan_memory_cost() {
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Empty,
+            estimated_cost: Cost {
+                cpu: 0.0,
+                io: 0.0,
+                memory: 1024,
+                network: 0.0,
+            },
+            temporal_context: None,
+            parallel: false,
+        };
+        assert_eq!(plan.memory_cost(), 1024);
+    }
+
+    // ==================== PhysicalOp Name Tests ====================
+
     #[test]
     fn test_physical_op_names() {
         let lookup = PhysicalOp::NodeLookup {
@@ -436,6 +494,178 @@ mod tests {
         let empty = PhysicalOp::Empty;
         assert_eq!(empty.name(), "Empty");
     }
+
+    #[test]
+    fn test_physical_op_names_all_variants() {
+        // Scan operators
+        assert_eq!(
+            PhysicalOp::NodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap()]
+            }
+            .name(),
+            "NodeLookup"
+        );
+        assert_eq!(
+            PhysicalOp::NodeScan {
+                label: None,
+                estimated_rows: 100
+            }
+            .name(),
+            "NodeScan"
+        );
+        assert_eq!(
+            PhysicalOp::HnswSearch {
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10,
+                label_filter: None
+            }
+            .name(),
+            "HnswSearch"
+        );
+        assert_eq!(
+            PhysicalOp::TemporalNodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap()],
+                valid_time: 1000,
+                transaction_time: 2000
+            }
+            .name(),
+            "TemporalNodeLookup"
+        );
+        assert_eq!(
+            PhysicalOp::TemporalVectorSearch {
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10,
+                timestamp: 1000
+            }
+            .name(),
+            "TemporalVectorSearch"
+        );
+
+        // Traversal operators
+        assert_eq!(
+            PhysicalOp::IndexedTraversal {
+                input: Box::new(PhysicalOp::Empty),
+                direction: Direction::Outgoing,
+                label: None,
+                depth: 1
+            }
+            .name(),
+            "IndexedTraversal"
+        );
+
+        // Join operators
+        assert_eq!(
+            PhysicalOp::HashJoin {
+                left: Box::new(PhysicalOp::Empty),
+                right: Box::new(PhysicalOp::Empty),
+                left_key: "id".to_string(),
+                right_key: "id".to_string()
+            }
+            .name(),
+            "HashJoin"
+        );
+        assert_eq!(
+            PhysicalOp::Union {
+                left: Box::new(PhysicalOp::Empty),
+                right: Box::new(PhysicalOp::Empty)
+            }
+            .name(),
+            "Union"
+        );
+        assert_eq!(
+            PhysicalOp::Intersect {
+                left: Box::new(PhysicalOp::Empty),
+                right: Box::new(PhysicalOp::Empty)
+            }
+            .name(),
+            "Intersect"
+        );
+        assert_eq!(
+            PhysicalOp::Except {
+                left: Box::new(PhysicalOp::Empty),
+                right: Box::new(PhysicalOp::Empty)
+            }
+            .name(),
+            "Except"
+        );
+
+        // Transform operators
+        assert_eq!(
+            PhysicalOp::Filter {
+                input: Box::new(PhysicalOp::Empty),
+                predicate: Predicate::True
+            }
+            .name(),
+            "Filter"
+        );
+        assert_eq!(
+            PhysicalOp::VectorRerank {
+                input: Box::new(PhysicalOp::Empty),
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10
+            }
+            .name(),
+            "VectorRerank"
+        );
+        assert_eq!(
+            PhysicalOp::Sort {
+                input: Box::new(PhysicalOp::Empty),
+                key: SortKey::Property("name".to_string()),
+                descending: false
+            }
+            .name(),
+            "Sort"
+        );
+        assert_eq!(
+            PhysicalOp::Limit {
+                input: Box::new(PhysicalOp::Empty),
+                count: 10,
+                offset: 0
+            }
+            .name(),
+            "Limit"
+        );
+        assert_eq!(
+            PhysicalOp::Project {
+                input: Box::new(PhysicalOp::Empty),
+                properties: vec!["name".to_string()]
+            }
+            .name(),
+            "Project"
+        );
+        assert_eq!(
+            PhysicalOp::Distinct {
+                input: Box::new(PhysicalOp::Empty)
+            }
+            .name(),
+            "Distinct"
+        );
+        assert_eq!(
+            PhysicalOp::Count {
+                input: Box::new(PhysicalOp::Empty)
+            }
+            .name(),
+            "Count"
+        );
+        assert_eq!(
+            PhysicalOp::TemporalTrack {
+                input: Box::new(PhysicalOp::Empty),
+                time_range: TimeRange::new(1000, 2000)
+            }
+            .name(),
+            "TemporalTrack"
+        );
+        assert_eq!(
+            PhysicalOp::Materialize {
+                input: Box::new(PhysicalOp::Empty)
+            }
+            .name(),
+            "Materialize"
+        );
+        assert_eq!(PhysicalOp::Empty.name(), "Empty");
+    }
+
+    // ==================== is_leaf Tests ====================
 
     #[test]
     fn test_is_leaf() {
@@ -450,6 +680,93 @@ mod tests {
         };
         assert!(!filter.is_leaf());
     }
+
+    #[test]
+    fn test_is_leaf_all_leaf_operators() {
+        assert!(
+            PhysicalOp::NodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap()]
+            }
+            .is_leaf()
+        );
+        assert!(
+            PhysicalOp::NodeScan {
+                label: None,
+                estimated_rows: 100
+            }
+            .is_leaf()
+        );
+        assert!(
+            PhysicalOp::HnswSearch {
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10,
+                label_filter: None
+            }
+            .is_leaf()
+        );
+        assert!(
+            PhysicalOp::TemporalNodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap()],
+                valid_time: 1000,
+                transaction_time: 2000
+            }
+            .is_leaf()
+        );
+        assert!(
+            PhysicalOp::TemporalVectorSearch {
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10,
+                timestamp: 1000
+            }
+            .is_leaf()
+        );
+        assert!(PhysicalOp::Empty.is_leaf());
+    }
+
+    #[test]
+    fn test_is_leaf_non_leaf_operators() {
+        assert!(
+            !PhysicalOp::IndexedTraversal {
+                input: Box::new(PhysicalOp::Empty),
+                direction: Direction::Outgoing,
+                label: None,
+                depth: 1
+            }
+            .is_leaf()
+        );
+        assert!(
+            !PhysicalOp::Filter {
+                input: Box::new(PhysicalOp::Empty),
+                predicate: Predicate::True
+            }
+            .is_leaf()
+        );
+        assert!(
+            !PhysicalOp::VectorRerank {
+                input: Box::new(PhysicalOp::Empty),
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10
+            }
+            .is_leaf()
+        );
+        assert!(
+            !PhysicalOp::Limit {
+                input: Box::new(PhysicalOp::Empty),
+                count: 10,
+                offset: 0
+            }
+            .is_leaf()
+        );
+        assert!(
+            !PhysicalOp::Union {
+                left: Box::new(PhysicalOp::Empty),
+                right: Box::new(PhysicalOp::Empty)
+            }
+            .is_leaf()
+        );
+    }
+
+    // ==================== depth Tests ====================
 
     #[test]
     fn test_depth() {
@@ -473,6 +790,157 @@ mod tests {
     }
 
     #[test]
+    fn test_depth_all_leaf_operators() {
+        assert_eq!(PhysicalOp::Empty.depth(), 1);
+        assert_eq!(
+            PhysicalOp::NodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap()]
+            }
+            .depth(),
+            1
+        );
+        assert_eq!(
+            PhysicalOp::NodeScan {
+                label: None,
+                estimated_rows: 100
+            }
+            .depth(),
+            1
+        );
+        assert_eq!(
+            PhysicalOp::HnswSearch {
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10,
+                label_filter: None
+            }
+            .depth(),
+            1
+        );
+        assert_eq!(
+            PhysicalOp::TemporalNodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap()],
+                valid_time: 1000,
+                transaction_time: 2000
+            }
+            .depth(),
+            1
+        );
+        assert_eq!(
+            PhysicalOp::TemporalVectorSearch {
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10,
+                timestamp: 1000
+            }
+            .depth(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_depth_binary_operators() {
+        // Symmetric depths
+        let union = PhysicalOp::Union {
+            left: Box::new(PhysicalOp::Empty),
+            right: Box::new(PhysicalOp::Empty),
+        };
+        assert_eq!(union.depth(), 2);
+
+        // Asymmetric depths - should take max
+        let union_asymmetric = PhysicalOp::Union {
+            left: Box::new(PhysicalOp::Filter {
+                input: Box::new(PhysicalOp::Empty),
+                predicate: Predicate::True,
+            }),
+            right: Box::new(PhysicalOp::Empty),
+        };
+        assert_eq!(union_asymmetric.depth(), 3);
+
+        // HashJoin
+        let hash_join = PhysicalOp::HashJoin {
+            left: Box::new(PhysicalOp::Empty),
+            right: Box::new(PhysicalOp::Filter {
+                input: Box::new(PhysicalOp::Filter {
+                    input: Box::new(PhysicalOp::Empty),
+                    predicate: Predicate::True,
+                }),
+                predicate: Predicate::True,
+            }),
+            left_key: "id".to_string(),
+            right_key: "id".to_string(),
+        };
+        assert_eq!(hash_join.depth(), 4); // 1 + max(1, 3)
+
+        // Intersect
+        let intersect = PhysicalOp::Intersect {
+            left: Box::new(PhysicalOp::Empty),
+            right: Box::new(PhysicalOp::Empty),
+        };
+        assert_eq!(intersect.depth(), 2);
+
+        // Except
+        let except = PhysicalOp::Except {
+            left: Box::new(PhysicalOp::Empty),
+            right: Box::new(PhysicalOp::Empty),
+        };
+        assert_eq!(except.depth(), 2);
+    }
+
+    #[test]
+    fn test_depth_unary_operators() {
+        let base = PhysicalOp::Empty;
+
+        // All unary operators add 1 to depth
+        assert_eq!(
+            PhysicalOp::Sort {
+                input: Box::new(base.clone()),
+                key: SortKey::Property("name".to_string()),
+                descending: false
+            }
+            .depth(),
+            2
+        );
+        assert_eq!(
+            PhysicalOp::Project {
+                input: Box::new(base.clone()),
+                properties: vec![]
+            }
+            .depth(),
+            2
+        );
+        assert_eq!(
+            PhysicalOp::Distinct {
+                input: Box::new(base.clone())
+            }
+            .depth(),
+            2
+        );
+        assert_eq!(
+            PhysicalOp::Count {
+                input: Box::new(base.clone())
+            }
+            .depth(),
+            2
+        );
+        assert_eq!(
+            PhysicalOp::TemporalTrack {
+                input: Box::new(base.clone()),
+                time_range: TimeRange::new(1000, 2000)
+            }
+            .depth(),
+            2
+        );
+        assert_eq!(
+            PhysicalOp::Materialize {
+                input: Box::new(base)
+            }
+            .depth(),
+            2
+        );
+    }
+
+    // ==================== explain Tests ====================
+
+    #[test]
     fn test_explain() {
         let plan = PhysicalOp::Limit {
             input: Box::new(PhysicalOp::Filter {
@@ -489,5 +957,175 @@ mod tests {
         assert!(explain.contains("Limit"));
         assert!(explain.contains("Filter"));
         assert!(explain.contains("NodeLookup"));
+    }
+
+    #[test]
+    fn test_explain_node_scan() {
+        let plan = PhysicalOp::NodeScan {
+            label: Some("Person".to_string()),
+            estimated_rows: 1000,
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("NodeScan"));
+        assert!(explain.contains("Person"));
+        assert!(explain.contains("1000"));
+    }
+
+    #[test]
+    fn test_explain_hnsw_search() {
+        let plan = PhysicalOp::HnswSearch {
+            embedding: Arc::from([0.1f32; 4].as_slice()),
+            k: 10,
+            label_filter: Some("Document".to_string()),
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("HnswSearch"));
+        assert!(explain.contains("k: 10"));
+        assert!(explain.contains("Document"));
+    }
+
+    #[test]
+    fn test_explain_temporal_node_lookup() {
+        let plan = PhysicalOp::TemporalNodeLookup {
+            node_ids: vec![NodeId::new(42).unwrap()],
+            valid_time: 1000,
+            transaction_time: 2000,
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("TemporalNodeLookup"));
+        assert!(explain.contains("vt: 1000"));
+        assert!(explain.contains("tt: 2000"));
+    }
+
+    #[test]
+    fn test_explain_indexed_traversal() {
+        let plan = PhysicalOp::IndexedTraversal {
+            input: Box::new(PhysicalOp::Empty),
+            direction: Direction::Outgoing,
+            label: Some("KNOWS".to_string()),
+            depth: 2,
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("IndexedTraversal"));
+        assert!(explain.contains("Outgoing"));
+        assert!(explain.contains("KNOWS"));
+        assert!(explain.contains("depth: 2"));
+    }
+
+    #[test]
+    fn test_explain_vector_rerank() {
+        let plan = PhysicalOp::VectorRerank {
+            input: Box::new(PhysicalOp::Empty),
+            embedding: Arc::from([0.1f32; 4].as_slice()),
+            k: 5,
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("VectorRerank"));
+        assert!(explain.contains("k: 5"));
+    }
+
+    #[test]
+    fn test_explain_hash_join() {
+        let plan = PhysicalOp::HashJoin {
+            left: Box::new(PhysicalOp::Empty),
+            right: Box::new(PhysicalOp::Empty),
+            left_key: "user_id".to_string(),
+            right_key: "id".to_string(),
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("HashJoin"));
+        assert!(explain.contains("user_id"));
+        assert!(explain.contains("id"));
+    }
+
+    #[test]
+    fn test_explain_union() {
+        let plan = PhysicalOp::Union {
+            left: Box::new(PhysicalOp::Empty),
+            right: Box::new(PhysicalOp::Empty),
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("Union"));
+        assert!(explain.contains("Empty"));
+    }
+
+    #[test]
+    fn test_explain_simple_operators() {
+        // Sort
+        let sort = PhysicalOp::Sort {
+            input: Box::new(PhysicalOp::Empty),
+            key: SortKey::Property("name".to_string()),
+            descending: false,
+        };
+        let explain = sort.explain();
+        assert!(explain.contains("Sort"));
+        assert!(explain.contains("Empty"));
+
+        // Project
+        let project = PhysicalOp::Project {
+            input: Box::new(PhysicalOp::Empty),
+            properties: vec!["name".to_string()],
+        };
+        let explain = project.explain();
+        assert!(explain.contains("Project"));
+
+        // Distinct
+        let distinct = PhysicalOp::Distinct {
+            input: Box::new(PhysicalOp::Empty),
+        };
+        let explain = distinct.explain();
+        assert!(explain.contains("Distinct"));
+
+        // Count
+        let count = PhysicalOp::Count {
+            input: Box::new(PhysicalOp::Empty),
+        };
+        let explain = count.explain();
+        assert!(explain.contains("Count"));
+
+        // Materialize
+        let materialize = PhysicalOp::Materialize {
+            input: Box::new(PhysicalOp::Empty),
+        };
+        let explain = materialize.explain();
+        assert!(explain.contains("Materialize"));
+    }
+
+    // ==================== get_input Tests ====================
+
+    #[test]
+    fn test_get_input_returns_none_for_leaf() {
+        let lookup = PhysicalOp::NodeLookup {
+            node_ids: vec![NodeId::new(1).unwrap()],
+        };
+        assert!(lookup.get_input().is_none());
+        assert!(PhysicalOp::Empty.get_input().is_none());
+    }
+
+    #[test]
+    fn test_get_input_returns_some_for_unary() {
+        let filter = PhysicalOp::Filter {
+            input: Box::new(PhysicalOp::Empty),
+            predicate: Predicate::True,
+        };
+        assert!(filter.get_input().is_some());
+        assert!(matches!(filter.get_input(), Some(PhysicalOp::Empty)));
+    }
+
+    #[test]
+    fn test_get_input_returns_none_for_binary() {
+        let union = PhysicalOp::Union {
+            left: Box::new(PhysicalOp::Empty),
+            right: Box::new(PhysicalOp::Empty),
+        };
+        // Binary operators don't have a single input
+        assert!(union.get_input().is_none());
     }
 }
