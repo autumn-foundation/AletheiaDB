@@ -299,14 +299,14 @@ impl CurrentStorage {
     ///
     /// Note: This does not delete edges connected to the node.
     /// TODO: Add cascade delete option.
-    pub fn delete_node(&mut self, id: NodeId) -> Result<Node> {
+    pub fn delete_node(&self, id: NodeId) -> Result<Node> {
         self.indexes
             .remove_node(id)
             .ok_or_else(|| StorageError::NodeNotFound(id).into())
     }
 
     /// Delete an edge.
-    pub fn delete_edge(&mut self, id: EdgeId) -> Result<Edge> {
+    pub fn delete_edge(&self, id: EdgeId) -> Result<Edge> {
         let edge = self
             .indexes
             .remove_edge(id)
@@ -1163,7 +1163,7 @@ mod tests {
 
     #[test]
     fn test_delete_node() {
-        let mut storage = CurrentStorage::new();
+        let storage = CurrentStorage::new();
 
         let node_id = storage
             .create_node("Person", PropertyMapBuilder::new().build())
@@ -1181,7 +1181,7 @@ mod tests {
 
     #[test]
     fn test_delete_edge() {
-        let mut storage = CurrentStorage::new();
+        let storage = CurrentStorage::new();
 
         let n0 = storage
             .create_node("Person", PropertyMapBuilder::new().build())
@@ -1726,5 +1726,95 @@ mod tests {
             node.get_property("name").and_then(|v| v.as_str()),
             Some("test")
         );
+    }
+
+    // ========================================================================
+    // Tests for Issue #24: delete_node/delete_edge with &self (P3-2)
+    // ========================================================================
+
+    /// Test that delete_node can be called with an immutable reference.
+    ///
+    /// This test verifies that delete_node(&self) works correctly since
+    /// the underlying DashMap doesn't require &mut self.
+    #[test]
+    fn test_delete_node_with_immutable_reference() {
+        let storage = CurrentStorage::new();
+
+        // Create a node
+        let node_id = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        assert_eq!(storage.node_count(), 1);
+
+        // Delete using immutable reference - this should compile and work
+        // Thanks to DashMap's interior mutability
+        let deleted = storage.delete_node(node_id).unwrap();
+        assert_eq!(deleted.id, node_id);
+        assert_eq!(storage.node_count(), 0);
+    }
+
+    /// Test that delete_edge can be called with an immutable reference.
+    ///
+    /// This test verifies that delete_edge(&self) works correctly since
+    /// the underlying DashMap doesn't require &mut self.
+    #[test]
+    fn test_delete_edge_with_immutable_reference() {
+        let storage = CurrentStorage::new();
+
+        // Create two nodes and an edge
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n1 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let edge_id = storage
+            .create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        assert_eq!(storage.edge_count(), 1);
+
+        // Delete using immutable reference - this should compile and work
+        // Thanks to DashMap's interior mutability
+        let deleted = storage.delete_edge(edge_id).unwrap();
+        assert_eq!(deleted.id, edge_id);
+        assert_eq!(storage.edge_count(), 0);
+    }
+
+    /// Test that delete operations can be called from a shared reference context.
+    ///
+    /// This test demonstrates a real-world scenario where we have a shared
+    /// reference to storage and need to perform deletes.
+    #[test]
+    fn test_delete_operations_in_shared_context() {
+        let storage = CurrentStorage::new();
+
+        // Create test data
+        let node1 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let node2 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_id = storage
+            .create_edge(node1, node2, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        assert_eq!(storage.node_count(), 2);
+        assert_eq!(storage.edge_count(), 1);
+
+        // Helper function that takes &CurrentStorage (shared reference)
+        fn delete_data(storage: &CurrentStorage, node_id: NodeId, edge_id: EdgeId) {
+            storage.delete_edge(edge_id).unwrap();
+            storage.delete_node(node_id).unwrap();
+        }
+
+        // This should compile because delete methods accept &self
+        delete_data(&storage, node1, edge_id);
+
+        assert_eq!(storage.node_count(), 1);
+        assert_eq!(storage.edge_count(), 0);
     }
 }
