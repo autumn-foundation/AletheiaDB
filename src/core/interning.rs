@@ -47,6 +47,26 @@ impl fmt::Display for InternedString {
     }
 }
 
+/// Configuration for the string interner.
+///
+/// Allows customization of cache size and ID exhaustion warning thresholds.
+#[derive(Debug, Clone)]
+pub struct InternerConfig {
+    /// Maximum number of active cached strings (default: 100,000)
+    pub max_cache_size: usize,
+    /// Warn when total IDs exceed this threshold (default: u32::MAX - 1,000,000)
+    pub id_exhaustion_warning_threshold: u32,
+}
+
+impl Default for InternerConfig {
+    fn default() -> Self {
+        Self {
+            max_cache_size: DEFAULT_MAX_INTERNED_STRINGS,
+            id_exhaustion_warning_threshold: u32::MAX - 1_000_000,
+        }
+    }
+}
+
 /// Thread-safe string interner.
 ///
 /// This interner maintains a bidirectional mapping between strings and IDs:
@@ -78,6 +98,16 @@ impl StringInterner {
             id_to_string: DashMap::new(),
             next_id: AtomicU32::new(0),
             max_capacity,
+        }
+    }
+
+    /// Create a new string interner with custom configuration.
+    pub fn with_config(config: InternerConfig) -> Self {
+        StringInterner {
+            string_to_id: DashMap::new(),
+            id_to_string: DashMap::new(),
+            next_id: AtomicU32::new(0),
+            max_capacity: config.max_cache_size,
         }
     }
 
@@ -717,5 +747,38 @@ mod tests {
 
         // Should only have 1 unique string
         assert_eq!(interner.len(), 1);
+    }
+
+    // ========================================
+    // Phase 1: Configuration & Setup Tests (TDD - RED phase)
+    // ========================================
+
+    #[test]
+    fn test_interner_config_defaults() {
+        let config = InternerConfig::default();
+        assert_eq!(config.max_cache_size, 100_000);
+        assert_eq!(config.id_exhaustion_warning_threshold, u32::MAX - 1_000_000);
+    }
+
+    #[test]
+    fn test_interner_config_custom() {
+        let config = InternerConfig {
+            max_cache_size: 50_000,
+            id_exhaustion_warning_threshold: 1_000_000,
+        };
+        assert_eq!(config.max_cache_size, 50_000);
+        assert_eq!(config.id_exhaustion_warning_threshold, 1_000_000);
+    }
+
+    #[test]
+    fn test_interner_with_config() {
+        let config = InternerConfig {
+            max_cache_size: 1000,
+            id_exhaustion_warning_threshold: 5000,
+        };
+        let interner = StringInterner::with_config(config);
+        // Can intern strings
+        let id = interner.intern("test").unwrap();
+        assert_eq!(interner.resolve(id).unwrap().as_ref(), "test");
     }
 }
