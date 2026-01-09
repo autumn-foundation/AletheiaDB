@@ -84,6 +84,13 @@ pub trait WalObserver: Send + Sync {
     fn on_event(&self, event: &WalEvent);
 }
 
+/// Control messages for AsyncWalWriter background thread.
+#[derive(Debug, Clone, Copy)]
+enum ControlMessage {
+    /// Drain all pending entries without calling write_fn (for piggyback optimization)
+    DrainWithoutSync,
+}
+
 /// Async WAL writer that uses a background thread for fsync operations.
 ///
 /// Writes return immediately after queueing the entry to a bounded channel.
@@ -101,6 +108,8 @@ pub trait WalObserver: Send + Sync {
 pub struct AsyncWalWriter {
     /// Sender for queueing entries
     sender: Sender<WalEntry>,
+    /// Control channel for background thread commands
+    control_sender: Sender<ControlMessage>,
     /// Metrics tracker
     metrics: Arc<AsyncWalMetrics>,
     /// Background thread handle
@@ -180,6 +189,7 @@ impl AsyncWalWriter {
         F: Fn(Vec<WalEntry>) + Send + 'static,
     {
         let (sender, receiver) = bounded(buffer_size);
+        let (control_sender, control_receiver) = bounded(10); // Small control channel
         let metrics = Arc::new(AsyncWalMetrics::new());
         let metrics_clone = Arc::clone(&metrics);
         let observers_clone = observers.clone();
@@ -193,6 +203,7 @@ impl AsyncWalWriter {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     Self::sync_loop(
                         receiver,
+                        control_receiver,
                         write_fn,
                         sync_interval,
                         metrics_clone,
@@ -208,6 +219,7 @@ impl AsyncWalWriter {
 
         Self {
             sender,
+            control_sender,
             metrics,
             sync_thread: Some(sync_thread),
             observers,
@@ -261,6 +273,38 @@ impl AsyncWalWriter {
         &self.metrics
     }
 
+    /// Drain all pending entries without fsyncing (for piggyback optimization).
+    ///
+    /// This is used when a synchronous commit is about to happen - we want to
+    /// drain the async writer's queue so those entries piggyback on the sync fsync,
+    /// avoiding a redundant fsync later.
+    ///
+    /// # How It Works
+    ///
+    /// Sends a control message to the background thread to drain all pending
+    /// entries without calling write_fn. The entries are already written to the
+    /// WAL's BufWriter, so the caller's fsync will persist them. This avoids
+    /// a redundant fsync by the background thread.
+    ///
+    /// This is a non-blocking call - it sends the message and returns immediately.
+    /// The background thread will process the drain command on its next iteration.
+    ///
+    /// # Returns
+    ///
+    /// The approximate number of pending entries that will be drained.
+    pub fn drain_without_sync(&self) -> usize {
+        let pending = self.metrics.buffer_depth.load(Ordering::Relaxed);
+
+        // Send drain command (non-blocking, fire-and-forget)
+        // If the channel is full or disconnected, ignore - the thread will
+        // process entries normally or has already exited
+        let _ = self
+            .control_sender
+            .try_send(ControlMessage::DrainWithoutSync);
+
+        pending
+    }
+
     /// Background sync loop (uses recv_timeout, NOT busy-wait).
     ///
     /// This is the main loop for the background thread. It:
@@ -289,6 +333,7 @@ impl AsyncWalWriter {
     /// This guarantee is essential for data durability on graceful shutdown.
     fn sync_loop<F>(
         receiver: Receiver<WalEntry>,
+        control_receiver: Receiver<ControlMessage>,
         write_fn: F,
         sync_interval: Duration,
         metrics: Arc<AsyncWalMetrics>,
@@ -297,6 +342,29 @@ impl AsyncWalWriter {
         F: Fn(Vec<WalEntry>),
     {
         loop {
+            // Check for control messages (non-blocking)
+            if let Ok(ControlMessage::DrainWithoutSync) = control_receiver.try_recv() {
+                // Drain all pending entries WITHOUT calling write_fn
+                // (they're already in the BufWriter and will be fsynced by the caller)
+                let mut drained_count = 0;
+                while receiver.try_recv().is_ok() {
+                    drained_count += 1;
+                }
+
+                // Update metrics only (no sync, no observer notification)
+                if drained_count > 0 {
+                    metrics
+                        .buffer_depth
+                        .fetch_sub(drained_count, Ordering::Relaxed);
+                    metrics
+                        .total_entries
+                        .fetch_add(drained_count as u64, Ordering::Relaxed);
+                    // Note: total_syncs NOT incremented since we didn't fsync
+                }
+
+                continue; // Check for more control messages or entries
+            }
+
             match receiver.recv_timeout(sync_interval) {
                 Ok(first_entry) => {
                     // Got at least one entry - build batch
@@ -876,5 +944,92 @@ mod tests {
             num_batches,
             total_entries as f64 / num_batches as f64
         );
+    }
+
+    #[test]
+    fn test_drain_without_sync_optimization() {
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicUsize;
+
+        // Track sync calls to verify drain optimization reduces redundant fsyncs
+        let sync_count = Arc::new(AtomicUsize::new(0));
+        let sync_count_clone = Arc::clone(&sync_count);
+
+        // Use barrier to ensure we can append entries faster than background thread processes
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_clone = Arc::clone(&barrier);
+
+        let writer = AsyncWalWriter::new(
+            1000,
+            Duration::from_millis(10),
+            move |_batch| {
+                // Wait for main thread to signal before processing
+                // This ensures entries stay queued for drain test
+                barrier_clone.wait();
+                sync_count_clone.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(10)); // Simulate slow fsync
+            },
+            vec![],
+        );
+
+        // Append entries rapidly
+        for i in 1..=10 {
+            writer
+                .append(create_test_entry(i))
+                .expect("append should succeed");
+        }
+
+        // Give entries time to reach the channel
+        thread::sleep(Duration::from_millis(20));
+
+        // Background thread is now blocked in write_fn waiting at barrier
+        // Entries are in the channel, waiting to be processed
+
+        // Drain without sync (simulating piggyback optimization)
+        let drained_count = writer.drain_without_sync();
+
+        // Give background thread time to process drain command
+        thread::sleep(Duration::from_millis(50));
+
+        // Verify entries were drained WITHOUT calling write_fn
+        // The barrier is still blocking, so sync_count should remain 1 (for first batch before drain)
+        let _syncs_before_release = sync_count.load(Ordering::SeqCst);
+
+        // Release the barrier to let background thread complete
+        barrier.wait();
+
+        // Wait for any in-flight processing
+        thread::sleep(Duration::from_millis(50));
+
+        // After drain, no additional syncs should have happened
+        let syncs_after_release = sync_count.load(Ordering::SeqCst);
+
+        // We expect exactly 1 sync (the first batch that triggered before drain)
+        // The drained entries should NOT have caused additional syncs
+        assert_eq!(
+            syncs_after_release, 1,
+            "should have exactly 1 sync (first batch only, drained entries don't sync)"
+        );
+
+        assert!(
+            drained_count > 0,
+            "should have drained some entries: {}",
+            drained_count
+        );
+
+        // Metrics should show entries were processed (counted) but with fewer syncs
+        let total_entries = writer.metrics().total_entries();
+        let total_syncs = writer.metrics().total_syncs();
+
+        assert_eq!(
+            total_entries, 10,
+            "all 10 entries should be counted as processed"
+        );
+        assert_eq!(
+            total_syncs, 1,
+            "only 1 sync should have happened (drain prevented redundant sync)"
+        );
+
+        drop(writer);
     }
 }

@@ -46,6 +46,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 /// Magic bytes identifying a GallifreyDB WAL segment file.
 const WAL_MAGIC: [u8; 4] = *b"GWAL";
@@ -1405,14 +1407,25 @@ impl WriteAheadLog {
     pub fn commit_with_mode(&mut self, mode: DurabilityMode) -> Result<Option<u64>> {
         match mode {
             DurabilityMode::Synchronous => {
-                // Piggyback optimization: Wake background thread to flush pending async data
-                // before we do our own fsync. This reduces the data-at-risk window for async
-                // writes without slowing down the synchronous commit.
+                // Piggyback optimization: Drain async writer entries before fsync
+                // This avoids redundant fsync by the background thread, since these
+                // entries are already in the BufWriter and will be synced by our flush()
+                if let Some(ref async_writer) = self.async_writer {
+                    let drained = async_writer.drain_without_sync();
+                    if drained > 0 {
+                        // Give background thread a moment to process the drain command
+                        // This is a best-effort optimization - if entries haven't been
+                        // drained yet, they'll still be synced by our flush() below
+                        thread::sleep(Duration::from_micros(100));
+                    }
+                }
+
+                // Piggyback optimization: Wake background thread for GroupCommit
                 if let Some(signal) = &self.flush_signal {
                     signal.request_flush();
                 }
 
-                // Immediate full flush (current behavior)
+                // Immediate full flush (syncs both sync and drained async entries)
                 self.flush()?;
                 Ok(None)
             }
