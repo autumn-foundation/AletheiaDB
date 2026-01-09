@@ -140,8 +140,12 @@ fn bench_current_state_queries(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark single-hop traversal (fast path).
-fn bench_single_hop_traversal(c: &mut Criterion) {
+/// Benchmark single-hop traversal through the high-level API.
+///
+/// Includes transaction overhead and API layer. Compare to
+/// `current_state::bench_single_hop_traversal` for raw storage performance
+/// without API layer overhead.
+fn bench_api_single_hop_traversal(c: &mut Criterion) {
     let mut group = c.benchmark_group("gallifreydb_single_hop");
 
     for graph_size in [100, 1000, 10000] {
@@ -163,8 +167,12 @@ fn bench_single_hop_traversal(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark 3-hop traversal (fast path).
-fn bench_multi_hop_traversal(c: &mut Criterion) {
+/// Benchmark 3-hop traversal through the high-level API.
+///
+/// Includes transaction overhead and API layer. Compare to
+/// `current_state::bench_multi_hop_traversal` for raw storage performance
+/// without API layer overhead.
+fn bench_api_multi_hop_traversal(c: &mut Criterion) {
     let (db, node_ids) = create_versioned_graph(1000, 1);
     let start_node = node_ids[0];
 
@@ -266,8 +274,12 @@ fn bench_degree_queries(c: &mut Criterion) {
     });
 }
 
-/// Benchmark labeled edge traversal.
-fn bench_labeled_traversal(c: &mut Criterion) {
+/// Benchmark labeled edge traversal through the high-level API.
+///
+/// Includes transaction overhead and API layer. Compare to
+/// `current_state::bench_labeled_traversal` for raw storage performance
+/// without API layer overhead.
+fn bench_api_labeled_traversal(c: &mut Criterion) {
     let (db, node_ids) = create_versioned_graph(1000, 1);
     let node_id = node_ids[0];
 
@@ -332,11 +344,11 @@ criterion_group!(
     targets = bench_node_creation_with_versioning,
     bench_edge_creation_with_versioning,
     bench_current_state_queries,
-    bench_single_hop_traversal,
-    bench_multi_hop_traversal,
+    bench_api_single_hop_traversal,
+    bench_api_multi_hop_traversal,
     bench_time_travel_queries,
     bench_degree_queries,
-    bench_labeled_traversal,
+    bench_api_labeled_traversal,
     bench_stats,
     bench_batch_operations,
 );

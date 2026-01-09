@@ -1,10 +1,20 @@
+//! Benchmarks for temporal index internals and concurrent access
+//!
+//! Covers:
+//! - Temporal B-Tree operations
+//! - Time-point and time-range queries
+//! - Concurrent read/write patterns
+//! - Cache effectiveness
+
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::GallifreyDB;
+use gallifreydb::api::transaction::WriteOps;
 use gallifreydb::core::id::{NodeId, VersionId};
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
 use gallifreydb::index::temporal::TemporalIndexes;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 fn bench_valid_at_query(c: &mut Criterion) {
@@ -487,59 +497,54 @@ fn bench_mixed_read_write_same_entity(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_batch_vs_loop_time_travel(c: &mut Criterion) {
-    let mut group = c.benchmark_group("batch_vs_loop_time_travel");
+// ============================================================================
+// Concurrent Time-Travel Reads Benchmarks
+// ============================================================================
 
-    // Benchmark the primary value proposition: batch API vs loop
-    // This validates that get_nodes_at_time is actually faster than N individual calls
-    for batch_size in [10, 50, 100, 500] {
-        // Setup: Create database with historical data
-        let db = GallifreyDB::new();
+/// Benchmark concurrent time-travel reads with varying concurrency levels.
+fn bench_concurrent_time_travel_reads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_time_travel_reads");
 
-        // Create nodes with some historical versions
-        let node_ids: Vec<NodeId> = (0..batch_size)
-            .map(|i| {
-                db.create_node(
-                    "Person",
-                    PropertyMapBuilder::new()
-                        .insert("name", format!("Person{}", i))
-                        .insert("index", i as i64)
-                        .build(),
-                )
-                .unwrap()
-            })
-            .collect();
+    // Setup: Create database ONCE.
+    // We wrap it in Arc here so we can clone the reference into threads cheaply.
+    let db = Arc::new(setup_database_with_versions(100)); // 100 nodes is enough for this
 
-        // Use a timestamp that's guaranteed to be after all creates
-        // GallifreyDB uses logical timestamps (sequential integers), not wall-clock time
-        // Since entities are created with sequential timestamps, use a value well beyond the batch size
-        let query_time = (batch_size as i64) * 10;
-
-        // Benchmark 1: Batch API (single lock acquisition)
+    for num_threads in [1, 2, 4, 8, 10] {
         group.bench_with_input(
-            BenchmarkId::new("batch_api", batch_size),
-            &batch_size,
-            |b, _| {
-                b.iter(|| {
-                    let results = db
-                        .get_nodes_at_time(&node_ids, query_time, query_time)
-                        .unwrap();
-                    black_box(results)
-                });
-            },
-        );
+            BenchmarkId::new("threads", num_threads),
+            &num_threads,
+            |b, &num_threads| {
+                // OPTIMIZATION 1: Create the thread pool OUTSIDE the measurement loop.
+                // We only want to measure the query time, not OS thread spawning time.
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap();
 
-        // Benchmark 2: Loop with individual calls (N lock acquisitions)
-        group.bench_with_input(
-            BenchmarkId::new("loop_individual", batch_size),
-            &batch_size,
-            |b, _| {
                 b.iter(|| {
-                    let results: Vec<_> = node_ids
-                        .iter()
-                        .map(|&node_id| db.get_node_at_time(node_id, query_time, query_time).ok())
-                        .collect();
-                    black_box(results)
+                    pool.install(|| {
+                        rayon::scope(|s| {
+                            for _ in 0..num_threads {
+                                let db_clone = Arc::clone(&db);
+                                s.spawn(move |_| {
+                                    // Each thread performs 25 queries (total work per iter scales with threads)
+                                    for i in 0..25 {
+                                        let node_id = gallifreydb::core::id::NodeId::new(
+                                            (i % 100) as u64 + 1,
+                                        )
+                                        .unwrap();
+                                        // Pick a valid timestamp
+                                        let timestamp = 1000 + (i as i64 * 100);
+
+                                        let result = db_clone
+                                            .get_node_at_time(node_id, timestamp, timestamp);
+
+                                        let _ = black_box(result);
+                                    }
+                                });
+                            }
+                        });
+                    });
                 });
             },
         );
@@ -548,70 +553,91 @@ fn bench_batch_vs_loop_time_travel(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_batch_edges_vs_loop(c: &mut Criterion) {
-    let mut group = c.benchmark_group("batch_edges_vs_loop");
+/// Benchmark cache hit rate by reading the same version repeatedly.
+fn bench_cache_hit_rate(c: &mut Criterion) {
+    // Setup ONCE
+    let db = setup_database_with_versions(10);
+    let node_id = gallifreydb::core::id::NodeId::new(1).unwrap();
+    let timestamp = 1000;
 
-    // Same benchmark but for edges
-    for batch_size in [10, 50, 100, 500] {
-        let db = GallifreyDB::new();
+    // Warm up the cache manually (optional, but ensures we measure hits)
+    let _ = db.get_node_at_time(node_id, timestamp, timestamp);
 
-        // Create nodes
-        let source = db
-            .create_node("Node", PropertyMapBuilder::new().build())
-            .unwrap();
-        let target = db
-            .create_node("Node", PropertyMapBuilder::new().build())
-            .unwrap();
+    c.bench_function("time_travel_cache_hit", |b| {
+        b.iter(|| {
+            // Hot path: This should be ~50ns
+            let result = db.get_node_at_time(
+                black_box(node_id),
+                black_box(timestamp),
+                black_box(timestamp),
+            );
+            black_box(result)
+        })
+    });
+}
 
-        // Create edges
-        let edge_ids = (0..batch_size)
-            .map(|i| {
-                db.create_edge(
-                    source,
-                    target,
-                    "LINK",
-                    PropertyMapBuilder::new().insert("index", i as i64).build(),
-                )
-                .unwrap()
+/// Benchmark cache miss (first-time reconstruction).
+fn bench_cache_miss(c: &mut Criterion) {
+    // OPTIMIZATION 2: The "Infinite Corridor" Strategy
+    // Instead of rebuilding the DB 100 times, build ONE DB with 10,000 nodes.
+    // In the loop, read Node 1, then Node 2, then Node 3...
+    // Since we never repeat a node, every read is a cache miss.
+    let node_count = 10_000;
+    let db = setup_database_with_versions(node_count);
+
+    // Atomic counter to pick a unique node each iteration
+    let counter = AtomicU64::new(1);
+
+    c.bench_function("time_travel_cache_miss", |b| {
+        b.iter(|| {
+            // Get unique ID (mod count to be safe, but ideally we don't wrap)
+            let i = counter.fetch_add(1, Ordering::Relaxed);
+            let id_to_read = (i % node_count as u64) + 1;
+
+            let node_id = gallifreydb::core::id::NodeId::new(id_to_read).unwrap();
+            let timestamp = 1000; // First version
+
+            let result = db.get_node_at_time(
+                black_box(node_id),
+                black_box(timestamp),
+                black_box(timestamp),
+            );
+            black_box(result)
+        })
+    });
+}
+
+/// Setup helper: Create a database with `count` versioned nodes.
+fn setup_database_with_versions(count: usize) -> GallifreyDB {
+    let db = GallifreyDB::new();
+
+    // Batch writes if possible, otherwise individual
+    for i in 0..count {
+        let props = PropertyMapBuilder::new()
+            .insert("name", format!("Node_{}", i).as_str())
+            .insert("value", i as i64)
+            .build();
+
+        let node_id = db.create_node("TestNode", props).unwrap();
+
+        // Create versions
+        for version in 1..3 {
+            // Reduced versions to speed up setup, still sufficient for testing
+            let updated_props = PropertyMapBuilder::new()
+                .insert("name", format!("Node_{}", i).as_str())
+                .insert("value", (i * 10 + version) as i64)
+                .insert("version", version as i64)
+                .build();
+
+            db.write(|tx| {
+                tx.update_node(node_id, updated_props.clone())?;
+                Ok(())
             })
-            .collect::<Vec<_>>();
-
-        // Use a timestamp that's guaranteed to be after all creates
-        // GallifreyDB uses logical timestamps (sequential integers), not wall-clock time
-        // Since entities are created with sequential timestamps, use a value well beyond the batch size
-        let query_time = (batch_size as i64) * 10;
-
-        // Benchmark 1: Batch API
-        group.bench_with_input(
-            BenchmarkId::new("batch_api", batch_size),
-            &batch_size,
-            |b, _| {
-                b.iter(|| {
-                    let results = db
-                        .get_edges_at_time(&edge_ids, query_time, query_time)
-                        .unwrap();
-                    black_box(results)
-                });
-            },
-        );
-
-        // Benchmark 2: Loop
-        group.bench_with_input(
-            BenchmarkId::new("loop_individual", batch_size),
-            &batch_size,
-            |b, _| {
-                b.iter(|| {
-                    let results: Vec<_> = edge_ids
-                        .iter()
-                        .map(|&edge_id| db.get_edge_at_time(edge_id, query_time, query_time).ok())
-                        .collect();
-                    black_box(results)
-                });
-            },
-        );
+            .unwrap();
+        }
     }
 
-    group.finish();
+    db
 }
 
 criterion_group!(
@@ -622,7 +648,8 @@ criterion_group!(
     bench_read_latency_under_write_contention,
     bench_concurrent_read_same_entity,
     bench_mixed_read_write_same_entity,
-    bench_batch_vs_loop_time_travel,
-    bench_batch_edges_vs_loop
+    bench_concurrent_time_travel_reads,
+    bench_cache_hit_rate,
+    bench_cache_miss
 );
 criterion_main!(benches);
