@@ -1,7 +1,7 @@
 //! Profiling benchmark for transaction commit bottleneck analysis.
 //!
-//! This benchmark is specifically designed to run with Tracy profiler enabled to
-//! identify bottlenecks in the transaction commit path.
+//! This benchmark is designed to run with Tracy profiler via the observability
+//! framework to identify bottlenecks in the transaction commit path.
 //!
 //! ## Usage
 //!
@@ -9,8 +9,8 @@
 //! # Terminal 1: Start Tracy GUI
 //! ./tracy-profiler
 //!
-//! # Terminal 2: Run benchmark with Tracy
-//! cargo bench --bench profiling_commit --features tracy -- --profile-time 10
+//! # Terminal 2: Run benchmark with observability-tracy
+//! cargo bench --bench profiling_commit --features observability-tracy -- --profile-time 10
 //! ```
 //!
 //! ## Benchmark Scenarios
@@ -20,9 +20,11 @@
 //! - **heavy**: Stresses apply_changes with large transactions
 //! - **mixed**: Realistic mixed workload simulation
 //!
-//! Each scenario is instrumented with Tracy spans to identify where time is spent:
+//! With observability-tracy enabled, tracing spans automatically map to Tracy:
+//! - `transaction_commit` - Full commit operation
 //! - `commit_critical_section` - Timestamp + WAL lock hold time
 //! - `apply_changes` - Graph operations (suspected 85-90% of time)
+//! - `apply_changes_detailed` - Breakdown of graph operations
 //! - `rebuild_adjacency_index` - Adjacency index rebuild overhead
 
 use criterion::{BenchmarkId, Criterion, SamplingMode, black_box, criterion_group, criterion_main};
@@ -60,9 +62,6 @@ fn profile_sequential_commits(c: &mut Criterion) {
                 let mut counter = 0u64;
 
                 b.iter(|| {
-                    #[cfg(feature = "tracy")]
-                    let _bench_iter = tracy_client::span!("benchmark_iteration_sequential");
-
                     db.write(|tx| {
                         for i in 0..ops_per_tx {
                             tx.create_node(
@@ -101,16 +100,10 @@ fn profile_concurrent_commits(c: &mut Criterion) {
                 let db = Arc::new(db);
 
                 b.iter(|| {
-                    #[cfg(feature = "tracy")]
-                    let _bench_iter = tracy_client::span!("benchmark_iteration_concurrent");
-
                     let handles: Vec<_> = (0..thread_count)
                         .map(|i| {
                             let db = Arc::clone(&db);
                             thread::spawn(move || {
-                                #[cfg(feature = "tracy")]
-                                let _worker = tracy_client::span!("worker_thread");
-
                                 db.write(|tx| {
                                     tx.create_node(
                                         "TestNode",
@@ -145,9 +138,6 @@ fn profile_heavy_transactions(c: &mut Criterion) {
         let (db, _guard) = create_db_for_profiling();
 
         b.iter(|| {
-            #[cfg(feature = "tracy")]
-            let _bench_iter = tracy_client::span!("benchmark_heavy_tx");
-
             db.write(|tx| {
                 // Create 100 nodes
                 let node_ids: Result<Vec<_>, _> = (0..100)
@@ -199,16 +189,10 @@ fn profile_mixed_workload(c: &mut Criterion) {
         let db = Arc::new(db);
 
         b.iter(|| {
-            #[cfg(feature = "tracy")]
-            let _bench_iter = tracy_client::span!("benchmark_mixed_workload");
-
             let handles: Vec<_> = (0..8)
                 .map(|i| {
                     let db = Arc::clone(&db);
                     thread::spawn(move || {
-                        #[cfg(feature = "tracy")]
-                        let _worker = tracy_client::span!("mixed_worker");
-
                         db.write(|tx| {
                             // Each thread: 5 nodes, 10 edges between them
                             let nodes: Result<Vec<_>, _> = (0..5)

@@ -27,9 +27,6 @@ use crate::utils::error::{Result, StorageError, TransactionError};
 use crate::utils::lock::{MutexExt, RwLockExt};
 use std::sync::{Arc, Mutex, RwLock};
 
-#[cfg(feature = "tracy")]
-use tracy_client::span;
-
 /// Write transaction with full ACID guarantees.
 ///
 /// Write transactions buffer all operations in memory and apply them
@@ -173,10 +170,6 @@ impl WriteTransaction {
         )
         .entered();
 
-        // Tracy profiling span for flame graph analysis
-        #[cfg(feature = "tracy")]
-        let _tracy_commit = span!("WriteTransaction::commit");
-
         #[cfg(feature = "observability")]
         let commit_start = std::time::Instant::now();
 
@@ -221,25 +214,16 @@ impl WriteTransaction {
         // - Async: Release locks after flush to OS cache (fast, background syncs)
         // - GroupCommit: Release locks after flush, wait for epoch (ACID + fast)
         let (commit_timestamp, wait_epoch, coordinator) = {
-            // Tracy: Track entire critical section (timestamp + WAL lock hold time)
-            #[cfg(feature = "tracy")]
-            let _tracy_critical = span!("commit_critical_section");
+            #[cfg(feature = "observability")]
+            let _critical_span = tracing::debug_span!("commit_critical_section").entered();
 
             #[cfg(feature = "observability")]
             let ts_lock_start = std::time::Instant::now();
-
-            // Tracy: Track timestamp lock acquisition time
-            #[cfg(feature = "tracy")]
-            let _tracy_ts_lock = span!("acquire_timestamp_lock");
 
             let mut ts = self
                 .current_timestamp
                 .lock()
                 .expect("timestamp lock poisoned - unrecoverable state");
-
-            // Drop the timestamp lock span after acquisition to measure only wait time
-            #[cfg(feature = "tracy")]
-            drop(_tracy_ts_lock);
 
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
@@ -251,10 +235,6 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let wal_lock_start = std::time::Instant::now();
 
-            // Tracy: Track WAL lock acquisition time
-            #[cfg(feature = "tracy")]
-            let _tracy_wal_lock = span!("acquire_wal_lock");
-
             // Acquire WAL lock once and hold through logging.
             // CRITICAL: We release this lock BEFORE waiting for GroupCommit epoch flush
             // to prevent deadlock (flush thread needs WAL lock to mark epochs complete).
@@ -263,18 +243,14 @@ impl WriteTransaction {
                 .lock()
                 .expect("WAL lock poisoned - unrecoverable state");
 
-            // Drop the WAL lock span after acquisition to measure only wait time
-            #[cfg(feature = "tracy")]
-            drop(_tracy_wal_lock);
-
             #[cfg(feature = "observability")]
             let wal_lock_acquired = std::time::Instant::now();
 
             // Log operations to WAL while holding both locks.
             // This must happen BEFORE applying changes for durability.
             {
-                #[cfg(feature = "tracy")]
-                let _tracy_wal_log = span!("wal_log_operations");
+                #[cfg(feature = "observability")]
+                let _log_span = tracing::debug_span!("wal_log_operations").entered();
                 self.log_operations_to_wal(&mut wal, commit)?;
             }
 
@@ -283,8 +259,8 @@ impl WriteTransaction {
 
             // Mode-aware commit: returns epoch to wait for (GroupCommit) or None
             let epoch = {
-                #[cfg(feature = "tracy")]
-                let _tracy_wal_commit = span!("wal_commit");
+                #[cfg(feature = "observability")]
+                let _commit_span = tracing::debug_span!("wal_commit").entered();
                 wal.commit_with_mode(self.durability_mode)?
             };
 
@@ -359,15 +335,15 @@ impl WriteTransaction {
             && let Some(gc) = coordinator
             && self.durability_mode.waits_for_durability()
         {
-            #[cfg(feature = "tracy")]
-            let _tracy_gc_wait = span!("group_commit_wait");
+            #[cfg(feature = "observability")]
+            let _wait_span = tracing::debug_span!("group_commit_wait").entered();
             gc.wait_for_flush(epoch)?;
         }
 
         // Apply all changes atomically - THE KEY UNKNOWN (suspected 85-90% of time)
         {
-            #[cfg(feature = "tracy")]
-            let _tracy_apply = span!("apply_changes");
+            #[cfg(feature = "observability")]
+            let _apply_span = tracing::debug_span!("apply_changes").entered();
             self.apply_changes(commit_timestamp)?;
         }
 
@@ -712,17 +688,16 @@ impl WriteTransaction {
     /// 2. `temporal_indexes` - temporal indexes (acquired second)
     /// 3. `version_id_gen` - version ID generator (acquired later for tombstones)
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
-        // Tracy: Track entire apply_changes method (suspected 85-90% of transaction time)
-        #[cfg(feature = "tracy")]
-        let _span = span!("WriteTransaction::apply_changes");
+        #[cfg(feature = "observability")]
+        let _span = tracing::debug_span!("apply_changes_detailed").entered();
 
         let temporal = BiTemporalInterval::current(commit_timestamp);
 
         // Acquire lock on historical storage once before processing all operations.
         // TemporalIndexes uses DashMap internally, so no outer lock needed.
         let (mut historical, temporal_indexes, num_deletes, mut tombstone_ids) = {
-            #[cfg(feature = "tracy")]
-            let _setup_span = span!("apply_changes_setup");
+            #[cfg(feature = "observability")]
+            let _setup_span = tracing::trace_span!("apply_changes_setup").entered();
 
             let historical = self.historical.write_or_err()?;
             let temporal_indexes = &self.temporal_indexes;
@@ -766,8 +741,8 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    #[cfg(feature = "tracy")]
-                    let _op_span = span!("apply_create_node");
+                    #[cfg(feature = "observability")]
+                    let _op_span = tracing::trace_span!("apply_create_node").entered();
 
                     // Create in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
@@ -801,8 +776,8 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    #[cfg(feature = "tracy")]
-                    let _op_span = span!("apply_create_edge");
+                    #[cfg(feature = "observability")]
+                    let _op_span = tracing::trace_span!("apply_create_edge").entered();
 
                     // Create in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
@@ -838,8 +813,8 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    #[cfg(feature = "tracy")]
-                    let _op_span = span!("apply_update_node");
+                    #[cfg(feature = "observability")]
+                    let _op_span = tracing::trace_span!("apply_update_node").entered();
 
                     // Update in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
@@ -873,8 +848,8 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    #[cfg(feature = "tracy")]
-                    let _op_span = span!("apply_update_edge");
+                    #[cfg(feature = "observability")]
+                    let _op_span = tracing::trace_span!("apply_update_edge").entered();
 
                     // Update in current storage with proper transaction metadata
                     let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
@@ -904,8 +879,8 @@ impl WriteTransaction {
                     temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::DeleteNode { node_id } => {
-                    #[cfg(feature = "tracy")]
-                    let _op_span = span!("apply_delete_node");
+                    #[cfg(feature = "observability")]
+                    let _op_span = tracing::trace_span!("apply_delete_node").entered();
 
                     // Get the node before deleting
                     let node = self.current.get_node(*node_id)?;
@@ -962,8 +937,8 @@ impl WriteTransaction {
                         .delete_node_direct(*node_id, commit_timestamp)?;
                 }
                 super::BufferedWrite::DeleteEdge { edge_id } => {
-                    #[cfg(feature = "tracy")]
-                    let _op_span = span!("apply_delete_edge");
+                    #[cfg(feature = "observability")]
+                    let _op_span = tracing::trace_span!("apply_delete_edge").entered();
 
                     // Get the edge before deleting
                     let edge = self.current.get_edge(*edge_id)?;
@@ -1039,8 +1014,8 @@ impl WriteTransaction {
         // Rebuild adjacency indexes once after all edge operations
         // This is much more efficient than rebuilding after each operation
         {
-            #[cfg(feature = "tracy")]
-            let _rebuild_span = span!("rebuild_adjacency_index");
+            #[cfg(feature = "observability")]
+            let _rebuild_span = tracing::debug_span!("rebuild_adjacency_index").entered();
             self.current.rebuild_adjacency();
         }
 

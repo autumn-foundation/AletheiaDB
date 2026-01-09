@@ -462,18 +462,23 @@ git commit -m "feat: your change"
 
 ## Profiling and Performance Tools
 
-### Tracy Profiler
+### Tracy Profiler via Observability Framework
 
-GallifreyDB is instrumented with Tracy spans for CPU profiling to identify transaction commit bottlenecks. See **[docs/PROFILING.md](docs/PROFILING.md)** for comprehensive profiling guide.
+GallifreyDB uses the observability framework with Tracy integration for CPU profiling. Tracing spans automatically map to Tracy zones for flame graph analysis. See **[docs/PROFILING.md](docs/PROFILING.md)** for comprehensive profiling guide.
 
 **Quick start:**
 ```bash
 # Terminal 1: Start Tracy GUI
 ./tracy-profiler
 
-# Terminal 2: Run profiling benchmark
-cargo bench --bench profiling_commit --features tracy -- --profile-time 10
+# Terminal 2: Run profiling benchmark with observability-tracy
+cargo bench --bench profiling_commit --features observability-tracy -- --profile-time 10
 ```
+
+**Architecture**:
+- Instrumentation: `tracing` spans (single layer)
+- Backend: `observability-tracy` bridges to Tracy profiler
+- Benefit: Single instrumentation serves multiple backends (logs, Tracy, Honeycomb)
 
 **Known bottlenecks** (as of performance investigation):
 - Lock contention: ~10-15% of transaction time (timestamp + WAL locks)
@@ -481,9 +486,9 @@ cargo bench --bench profiling_commit --features tracy -- --profile-time 10
 - Target: Use Tracy to break down apply_changes into specific operations
 
 **Key instrumentation points:**
-- Transaction commit critical path (timestamp lock, WAL lock, apply_changes)
-- Historical storage version chain operations
-- Current storage graph mutations
+- Transaction commit critical path (commit_critical_section, apply_changes)
+- Historical storage version chain operations (add_node_version, add_edge_version)
+- Current storage graph mutations (insert_node, insert_edge)
 - Adjacency index rebuilds
 
 **Profiling scenarios:**

@@ -26,9 +26,6 @@ use std::sync::Arc;
 #[cfg(feature = "observability")]
 use tracing;
 
-#[cfg(feature = "tracy")]
-use tracy_client::span;
-
 /// Default maximum number of versions per entity (DoS protection)
 pub const DEFAULT_MAX_VERSIONS_PER_ENTITY: usize = 1_000;
 
@@ -350,8 +347,8 @@ impl HistoricalStorage {
         label: InternedString,
         properties: PropertyMap,
     ) -> Result<()> {
-        #[cfg(feature = "tracy")]
-        let _span = span!("HistoricalStorage::add_node_version");
+        #[cfg(feature = "observability")]
+        let _span = tracing::trace_span!("add_node_version").entered();
 
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
@@ -495,8 +492,8 @@ impl HistoricalStorage {
         target: NodeId,
         properties: PropertyMap,
     ) -> Result<()> {
-        #[cfg(feature = "tracy")]
-        let _span = span!("HistoricalStorage::add_edge_version");
+        #[cfg(feature = "observability")]
+        let _span = tracing::trace_span!("add_edge_version").entered();
 
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
