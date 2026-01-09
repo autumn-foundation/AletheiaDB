@@ -8,12 +8,13 @@ use std::time::Duration;
 
 /// Durability mode controlling when data is synced to disk.
 ///
-/// GallifreyDB supports three durability modes, each offering different
+/// GallifreyDB supports four durability modes, each offering different
 /// tradeoffs between latency, throughput, and durability guarantees:
 ///
 /// - [`Synchronous`](DurabilityMode::Synchronous): Maximum durability, fsync per commit
 /// - [`Async`](DurabilityMode::Async): Maximum throughput, periodic background flush
 /// - [`GroupCommit`](DurabilityMode::GroupCommit): ACID durability with high throughput
+/// - [`AsyncBatched`](DurabilityMode::AsyncBatched): Low latency with batched fsync (not ACID)
 ///
 /// # Piggybacking Optimization
 ///
@@ -303,30 +304,40 @@ impl DurabilityMode {
     /// // 10ms max delay, 100 operations max batch size
     /// ```
     pub fn async_batched_validated(max_delay_ms: u64, max_batch_size: usize) -> Result<Self> {
-        if max_delay_ms == 0 {
-            return Err(StorageError::WalError {
-                reason: "max_delay_ms must be greater than 0".to_string(),
+        // Validate max_delay_ms range
+        match max_delay_ms {
+            0 => {
+                return Err(StorageError::WalError {
+                    reason: "max_delay_ms must be greater than 0".to_string(),
+                }
+                .into());
             }
-            .into());
-        }
-        if max_delay_ms > 1000 {
-            return Err(StorageError::WalError {
-                reason: "max_delay_ms must be <= 1000ms (1 second)".to_string(),
+            1..=1000 => {} // Valid range
+            _ => {
+                return Err(StorageError::WalError {
+                    reason: "max_delay_ms must be <= 1000ms (1 second)".to_string(),
+                }
+                .into());
             }
-            .into());
         }
-        if max_batch_size == 0 {
-            return Err(StorageError::WalError {
-                reason: "max_batch_size must be greater than 0".to_string(),
+
+        // Validate max_batch_size range
+        match max_batch_size {
+            0 => {
+                return Err(StorageError::WalError {
+                    reason: "max_batch_size must be greater than 0".to_string(),
+                }
+                .into());
             }
-            .into());
-        }
-        if max_batch_size > 10_000 {
-            return Err(StorageError::WalError {
-                reason: "max_batch_size must be <= 10000".to_string(),
+            1..=10_000 => {} // Valid range
+            _ => {
+                return Err(StorageError::WalError {
+                    reason: "max_batch_size must be <= 10000".to_string(),
+                }
+                .into());
             }
-            .into());
         }
+
         Ok(DurabilityMode::AsyncBatched {
             max_delay_ms,
             max_batch_size,

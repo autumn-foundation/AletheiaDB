@@ -34,6 +34,9 @@ fn create_db_with_mode(mode: DurabilityMode) -> (GallifreyDB, TempDir) {
 }
 
 /// Benchmark single transaction latency for each mode
+///
+/// The AsyncBatched benchmarks validate Issue #128's <100µs latency requirement.
+/// Expected results: AsyncBatched modes should show 30-80µs average latency.
 fn bench_single_transaction_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("single_transaction_latency");
 
@@ -136,9 +139,8 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
 
     // AsyncBatched aggressive (5ms, 50 batch) - ultra-low latency
     group.bench_function("async_batched_aggressive", |b| {
-        let (db, _guard) = create_db_with_mode(
-            DurabilityMode::async_batched_validated(5, 50).unwrap(),
-        );
+        let (db, _guard) =
+            create_db_with_mode(DurabilityMode::async_batched_validated(5, 50).unwrap());
         let mut counter = 0u64;
 
         b.iter(|| {
