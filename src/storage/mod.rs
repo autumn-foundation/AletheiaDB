@@ -9,6 +9,7 @@
 
 pub mod current;
 pub mod historical;
+pub mod observer;
 pub mod persistence;
 pub mod version;
 pub mod wal;
@@ -16,6 +17,7 @@ pub mod wal;
 // Re-export commonly used types
 pub use current::{CurrentStats, CurrentStorage};
 pub use historical::{HistoricalStats, HistoricalStorage};
+pub use observer::{Observer, StorageEvent, StorageObserver};
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
 pub use version::{
     AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData, VersionMetadata,

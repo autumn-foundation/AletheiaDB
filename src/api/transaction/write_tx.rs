@@ -161,6 +161,7 @@ impl WriteTransaction {
     /// - **Synchronous**: Waits for fsync (maximum durability, default)
     /// - **Async**: Returns after flush to OS cache (background thread syncs)
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
+    /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
     pub fn commit(mut self) -> Result<()> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!(
@@ -316,8 +317,12 @@ impl WriteTransaction {
         //
         // RACE CONDITION SAFETY: We cloned the coordinator reference above while holding
         // the WAL lock, guaranteeing we wait on the same coordinator we registered with.
+        //
+        // AsyncBatched mode returns an epoch for tracking but does NOT wait - that's the
+        // key difference from GroupCommit. It returns immediately for low latency.
         if let Some(epoch) = wait_epoch
             && let Some(gc) = coordinator
+            && self.durability_mode.waits_for_durability()
         {
             gc.wait_for_flush(epoch)?;
         }

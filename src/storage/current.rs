@@ -732,8 +732,11 @@ impl CurrentStorage {
             ));
         }
 
-        let index = TemporalVectorIndex::new(config.clone())?;
-        state.index = Some(Arc::new(index));
+        // Create temporal vector index wrapped in Arc for sharing
+        let index = Arc::new(TemporalVectorIndex::new(config.clone())?);
+
+        // Store state
+        state.index = Some(index);
         state.property_name = Some(property_name.to_string());
         state.config = Some(config);
 
@@ -743,6 +746,14 @@ impl CurrentStorage {
     /// Check if temporal vector indexing is enabled.
     pub fn is_temporal_vector_index_enabled(&self) -> bool {
         self.temporal_vector_index_state.read().is_enabled()
+    }
+
+    /// Get a reference to the temporal vector index if enabled.
+    ///
+    /// Returns `None` if temporal vector indexing is not enabled.
+    pub(crate) fn get_temporal_vector_index(&self) -> Option<Arc<TemporalVectorIndex>> {
+        let state = self.temporal_vector_index_state.read();
+        state.index.clone()
     }
 
     /// Find k most similar nodes at a specific point in time.
