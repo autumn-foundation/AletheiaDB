@@ -187,6 +187,12 @@ pub enum VersionData {
     Anchor {
         /// The complete property map
         properties: PropertyMap,
+        /// Stable ID of corresponding temporal vector snapshot (if any)
+        ///
+        /// Links this graph anchor to a TemporalVectorIndex snapshot for provenance tracking.
+        /// `None` means no vector snapshot exists for this anchor (normal if no vectors present
+        /// or temporal vector indexing is disabled).
+        vector_snapshot_id: Option<usize>,
     },
     /// Delta from previous version
     Delta {
@@ -198,7 +204,10 @@ pub enum VersionData {
 impl VersionData {
     /// Create an anchor version with the given properties.
     pub fn anchor(properties: PropertyMap) -> Self {
-        VersionData::Anchor { properties }
+        VersionData::Anchor {
+            properties,
+            vector_snapshot_id: None,
+        }
     }
 
     /// Create a delta version from two property maps.
@@ -216,6 +225,39 @@ impl VersionData {
     /// Returns true if this is a delta.
     pub fn is_delta(&self) -> bool {
         matches!(self, VersionData::Delta { .. })
+    }
+
+    /// Set the vector snapshot ID for an anchor.
+    ///
+    /// This links the anchor to a temporal vector index snapshot for provenance tracking.
+    /// Only works on Anchor variants; silently does nothing for Delta variants.
+    ///
+    /// # Arguments
+    /// - `id`: Stable snapshot ID returned by TemporalVectorIndex
+    pub fn set_vector_snapshot_id(&mut self, id: usize) {
+        if let VersionData::Anchor {
+            vector_snapshot_id, ..
+        } = self
+        {
+            *vector_snapshot_id = Some(id);
+        }
+    }
+
+    /// Get the vector snapshot ID from an anchor.
+    ///
+    /// Returns the linked snapshot ID if this is an Anchor with a snapshot, or `None` otherwise.
+    /// Delta variants always return `None`.
+    ///
+    /// # Returns
+    /// - `Some(id)`: Anchor has a linked vector snapshot
+    /// - `None`: No snapshot linked (Delta, or Anchor without vector snapshot)
+    pub fn get_vector_snapshot_id(&self) -> Option<usize> {
+        match self {
+            VersionData::Anchor {
+                vector_snapshot_id, ..
+            } => *vector_snapshot_id,
+            _ => None,
+        }
     }
 }
 

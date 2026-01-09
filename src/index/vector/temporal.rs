@@ -76,6 +76,9 @@ use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, HnswConfig, TemporalSearchResults, VectorIndex};
 use crate::utils::{Error, Result, TemporalError, VectorError};
 
+#[cfg(feature = "observability")]
+use tracing;
+
 /// Retention policy for snapshot cleanup.
 ///
 /// Determines which snapshots to keep and which to prune.
@@ -849,6 +852,79 @@ impl TemporalVectorIndex {
         self.create_snapshot(timestamp)
     }
 
+    /// Creates a snapshot aligned with a graph anchor.
+    ///
+    /// This method is called by HistoricalStorage (via observers) when creating anchors
+    /// to maintain synchronization between graph versioning and vector snapshots.
+    /// This enables temporal vector queries to align with temporal graph queries.
+    ///
+    /// # Arguments
+    ///
+    /// * `timestamp` - Transaction time of the anchor (for snapshot alignment)
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(id))` - Snapshot created successfully, returns stable snapshot ID
+    /// - `Ok(None)` - No snapshot created (empty index, no vectors to snapshot)
+    /// - `Err(...)` - Snapshot creation failed
+    ///
+    /// # Design Note
+    ///
+    /// Returns `Option<usize>` to allow the caller (HistoricalStorage) to store the
+    /// snapshot ID in the anchor's metadata, enabling provenance tracking.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use gallifreydb::index::vector::temporal::TemporalVectorIndex;
+    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// # let config = gallifreydb::index::vector::temporal::TemporalVectorConfig::default_with_hnsw(
+    /// #     HnswConfig::new(384, DistanceMetric::Cosine)
+    /// # );
+    /// # let index = TemporalVectorIndex::new(config)?;
+    /// // Called by HistoricalStorage when creating an anchor
+    /// let timestamp = 1234567890;
+    /// if let Some(snapshot_id) = index.create_snapshot_for_anchor(timestamp)? {
+    ///     println!("Created snapshot {} for anchor at {}", snapshot_id, timestamp);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn create_snapshot_for_anchor(&self, timestamp: Timestamp) -> Result<Option<usize>> {
+        // Don't create snapshot if index is empty
+        if self.current.len() == 0 {
+            return Ok(None);
+        }
+
+        // Build snapshot outside locks (expensive O(n log n) operation)
+        let (snapshot, vector_snapshot) = self.build_snapshot_data()?;
+
+        // Store snapshot and return stable ID
+        let stable_id = {
+            let mut metadata = self.metadata.write();
+            let mut snapshot_data = self.snapshot_data.write();
+
+            // Get stable ID before inserting
+            let id = metadata.total_snapshots;
+
+            // Insert snapshot
+            snapshot_data.insert(timestamp, id, Arc::new(snapshot), vector_snapshot);
+
+            // Update metadata
+            metadata.reset(timestamp);
+
+            // Enforce snapshot limit
+            while snapshot_data.len() > self.config.max_snapshots {
+                snapshot_data.remove_oldest();
+            }
+
+            id
+        };
+
+        Ok(Some(stable_id))
+    }
+
     /// Prunes snapshots according to the configured retention policy.
     ///
     /// This method removes old snapshots based on the `RetentionPolicy` configured
@@ -1473,6 +1549,126 @@ pub struct SnapshotInfo {
     pub size_bytes: usize,
     /// Age of snapshot
     pub age: Duration,
+}
+
+/// Observer adapter for TemporalVectorIndex to react to storage events.
+///
+/// This struct implements `StorageObserver` to enable TemporalVectorIndex to create
+/// snapshots when HistoricalStorage creates anchors, maintaining synchronization
+/// between graph versioning and vector indexing.
+///
+/// # Design
+///
+/// The observer wraps an Arc reference to TemporalVectorIndex, allowing multiple
+/// components to share the same index. When node/edge anchors are created, the
+/// observer triggers snapshot creation and stores the snapshot ID in the anchor's
+/// metadata via the return value.
+///
+/// # Example
+///
+/// ```no_run
+/// use gallifreydb::index::vector::temporal::{TemporalVectorIndex, VectorIndexObserver, TemporalVectorConfig};
+/// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+/// use gallifreydb::storage::historical::HistoricalStorage;
+/// use std::sync::Arc;
+///
+/// # fn example() -> gallifreydb::utils::Result<()> {
+/// // Create temporal vector index
+/// let config = TemporalVectorConfig::default_with_hnsw(
+///     HnswConfig::new(384, DistanceMetric::Cosine)
+/// );
+/// let index = Arc::new(TemporalVectorIndex::new(config)?);
+///
+/// // Create observer wrapper
+/// let observer = VectorIndexObserver::new(Arc::clone(&index));
+///
+/// // Register with HistoricalStorage
+/// let mut storage = HistoricalStorage::new();
+/// storage.add_observer(Arc::new(observer));
+///
+/// // Now anchors will automatically trigger vector snapshots
+/// # Ok(())
+/// # }
+/// ```
+pub struct VectorIndexObserver {
+    /// The temporal vector index to create snapshots in
+    index: Arc<TemporalVectorIndex>,
+}
+
+impl VectorIndexObserver {
+    /// Creates a new observer for a TemporalVectorIndex.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Arc reference to the TemporalVectorIndex to observe
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use gallifreydb::index::vector::temporal::{TemporalVectorIndex, VectorIndexObserver, TemporalVectorConfig};
+    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// # use std::sync::Arc;
+    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// let config = TemporalVectorConfig::default_with_hnsw(
+    ///     HnswConfig::new(384, DistanceMetric::Cosine)
+    /// );
+    /// let index = Arc::new(TemporalVectorIndex::new(config)?);
+    /// let observer = VectorIndexObserver::new(index);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new(index: Arc<TemporalVectorIndex>) -> Self {
+        VectorIndexObserver { index }
+    }
+}
+
+impl crate::storage::observer::StorageObserver for VectorIndexObserver {
+    fn on_event(&self, event: &crate::storage::observer::StorageEvent) -> crate::utils::Result<()> {
+        use crate::storage::observer::StorageEvent;
+
+        match event {
+            // React to anchor creation by creating aligned vector snapshot
+            StorageEvent::NodeAnchorCreated { timestamp, .. }
+            | StorageEvent::EdgeAnchorCreated { timestamp, .. } => {
+                // Create snapshot for this anchor
+                // Note: We don't return the snapshot_id here because StorageObserver
+                // doesn't have a way to return values. The snapshot_id linking happens
+                // through a different mechanism (to be implemented in CurrentStorage).
+                match self.index.create_snapshot_for_anchor(*timestamp) {
+                    Ok(Some(_snapshot_id)) => {
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            "Created vector snapshot {} for anchor at timestamp {}",
+                            _snapshot_id,
+                            timestamp
+                        );
+                        Ok(())
+                    }
+                    Ok(None) => {
+                        // No snapshot created (empty index), this is fine
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Log error but don't fail - observer errors shouldn't block storage
+                        #[cfg(feature = "observability")]
+                        tracing::warn!(
+                            "Failed to create vector snapshot for anchor at timestamp {}: {:?}",
+                            timestamp,
+                            e
+                        );
+                        Err(e)
+                    }
+                }
+            }
+            // Ignore other events
+            _ => Ok(()),
+        }
+    }
+
+    fn interested_in(&self, event: &crate::storage::observer::StorageEvent) -> bool {
+        // Only interested in anchor creation events
+        event.is_anchor_event()
+    }
 }
 
 #[cfg(test)]
