@@ -40,7 +40,7 @@ use crate::utils::error::{Result, StorageError};
 // 5. Well-tested in production systems (used by tokio, rayon, etc.)
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -108,6 +108,8 @@ pub struct AsyncWalWriter {
     /// Observers to notify on WAL events
     #[allow(dead_code)] // Used in sync_loop closure, clippy doesn't detect it
     observers: Vec<Arc<dyn WalObserver>>,
+    /// Thread health flag - set to false if background thread panics
+    thread_alive: Arc<AtomicBool>,
 }
 
 /// Metrics for async WAL operations.
@@ -181,17 +183,26 @@ impl AsyncWalWriter {
         let metrics = Arc::new(AsyncWalMetrics::new());
         let metrics_clone = Arc::clone(&metrics);
         let observers_clone = observers.clone();
+        let thread_alive = Arc::new(AtomicBool::new(true));
+        let thread_alive_clone = Arc::clone(&thread_alive);
 
         let sync_thread = thread::Builder::new()
             .name("gallifreydb-async-wal".to_string())
             .spawn(move || {
-                Self::sync_loop(
-                    receiver,
-                    write_fn,
-                    sync_interval,
-                    metrics_clone,
-                    observers_clone,
-                );
+                // Catch panics and mark thread as dead
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::sync_loop(
+                        receiver,
+                        write_fn,
+                        sync_interval,
+                        metrics_clone,
+                        observers_clone,
+                    );
+                }));
+
+                if result.is_err() {
+                    thread_alive_clone.store(false, Ordering::SeqCst);
+                }
             })
             .expect("failed to spawn async WAL sync thread");
 
@@ -200,6 +211,7 @@ impl AsyncWalWriter {
             metrics,
             sync_thread: Some(sync_thread),
             observers,
+            thread_alive,
         }
     }
 
@@ -212,6 +224,14 @@ impl AsyncWalWriter {
     ///
     /// Returns [`StorageError::WalError`] if the background sync thread has terminated unexpectedly.
     pub fn append(&self, entry: WalEntry) -> Result<()> {
+        // Check if background thread is still alive
+        if !self.thread_alive.load(Ordering::SeqCst) {
+            return Err(StorageError::WalError {
+                reason: "WAL background sync thread has terminated unexpectedly".to_string(),
+            }
+            .into());
+        }
+
         // Try non-blocking send first
         match self.sender.try_send(entry) {
             Ok(()) => {
