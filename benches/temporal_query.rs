@@ -511,8 +511,9 @@ fn bench_batch_vs_loop_time_travel(c: &mut Criterion) {
             .collect();
 
         // Use a timestamp that's guaranteed to be after all creates
-        // GallifreyDB uses logical timestamps, not wall-clock time
-        let query_time = i64::MAX / 2;
+        // GallifreyDB uses logical timestamps (sequential integers), not wall-clock time
+        // Since entities are created with sequential timestamps, use a value well beyond the batch size
+        let query_time = (batch_size as i64) * 10;
 
         // Benchmark 1: Batch API (single lock acquisition)
         group.bench_with_input(
@@ -576,8 +577,9 @@ fn bench_batch_edges_vs_loop(c: &mut Criterion) {
             .collect::<Vec<_>>();
 
         // Use a timestamp that's guaranteed to be after all creates
-        // GallifreyDB uses logical timestamps, not wall-clock time
-        let query_time = i64::MAX / 2;
+        // GallifreyDB uses logical timestamps (sequential integers), not wall-clock time
+        // Since entities are created with sequential timestamps, use a value well beyond the batch size
+        let query_time = (batch_size as i64) * 10;
 
         // Benchmark 1: Batch API
         group.bench_with_input(

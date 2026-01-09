@@ -584,20 +584,19 @@ impl GallifreyDB {
                             .get_node_version(version_id)
                             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-                        // Reconstruct properties - log errors for observability before converting to None
-                        let properties = match historical.reconstruct_node_properties(version_id) {
-                            Ok(props) => props,
-                            Err(_e) => {
+                        // Reconstruct properties - propagate errors as these are systemic failures
+                        let properties = historical
+                            .reconstruct_node_properties(version_id)
+                            .map_err(|e| {
                                 #[cfg(feature = "observability")]
-                                tracing::warn!(
+                                tracing::error!(
                                     version_id = %version_id,
                                     node_id = %node_id,
-                                    error = %_e,
-                                    "Failed to reconstruct node properties in batch query"
+                                    error = %e,
+                                    "Property reconstruction failed in batch query"
                                 );
-                                return Ok((node_id, None));
-                            }
-                        };
+                                e // Propagate the error
+                            })?;
 
                         // Build node from version
                         Some(Node::new(
@@ -703,20 +702,19 @@ impl GallifreyDB {
                             .get_edge_version(version_id)
                             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-                        // Reconstruct properties - log errors for observability before converting to None
-                        let properties = match historical.reconstruct_edge_properties(version_id) {
-                            Ok(props) => props,
-                            Err(_e) => {
+                        // Reconstruct properties - propagate errors as these are systemic failures
+                        let properties = historical
+                            .reconstruct_edge_properties(version_id)
+                            .map_err(|e| {
                                 #[cfg(feature = "observability")]
-                                tracing::warn!(
+                                tracing::error!(
                                     version_id = %version_id,
                                     edge_id = %edge_id,
-                                    error = %_e,
-                                    "Failed to reconstruct edge properties in batch query"
+                                    error = %e,
+                                    "Property reconstruction failed in batch query"
                                 );
-                                return Ok((edge_id, None));
-                            }
-                        };
+                                e // Propagate the error
+                            })?;
 
                         // Build edge from version
                         Some(Edge::new(
