@@ -820,4 +820,61 @@ mod tests {
         // (Rust's ownership prevents this at compile time)
         // This test documents that append() can only fail if background thread dies
     }
+
+    #[test]
+    fn test_piggyback_optimization() {
+        // Track batch sizes to verify multiple entries are batched together
+        let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+        let batch_sizes_clone = Arc::clone(&batch_sizes);
+
+        let writer = AsyncWalWriter::new(
+            1000,                      // Large buffer
+            Duration::from_millis(20), // 20ms sync interval
+            move |batch| {
+                batch_sizes_clone.lock().unwrap().push(batch.len());
+                // Simulate slow fsync to allow more entries to accumulate
+                thread::sleep(Duration::from_millis(5));
+            },
+            vec![],
+        );
+
+        // Rapidly append 100 entries - they should batch together
+        for i in 1..=100 {
+            writer
+                .append(create_test_entry(i))
+                .expect("append should succeed");
+        }
+
+        // Wait for all entries to be processed
+        thread::sleep(Duration::from_millis(200));
+        drop(writer); // Ensure final batch is flushed
+
+        // Verify piggyback optimization: fewer fsyncs than entries
+        let sizes = batch_sizes.lock().unwrap();
+        let total_entries: usize = sizes.iter().sum();
+        let num_batches = sizes.len();
+
+        assert_eq!(total_entries, 100, "all entries should be written");
+
+        // The piggyback optimization should result in significantly fewer
+        // fsyncs than entries. With 100 entries and 20ms interval + 5ms fsync,
+        // we expect around 4-10 batches depending on timing.
+        assert!(
+            num_batches < 50,
+            "piggyback optimization should batch multiple entries: {} batches for 100 entries (expected < 50)",
+            num_batches
+        );
+
+        // At least one batch should have multiple entries
+        assert!(
+            sizes.iter().any(|&size| size > 1),
+            "at least one batch should contain multiple entries"
+        );
+
+        println!(
+            "Piggyback optimization: 100 entries in {} batches (avg {:.1} entries/batch)",
+            num_batches,
+            total_entries as f64 / num_batches as f64
+        );
+    }
 }
