@@ -338,6 +338,16 @@ pub enum TemporalError {
         /// The entity ID
         entity_id: String,
     },
+    /// Maximum recursion depth exceeded during version reconstruction.
+    ///
+    /// This error indicates either a corrupted version chain (possible cycle)
+    /// or an unusually long delta chain that exceeds the safety limit.
+    MaxDepthExceeded {
+        /// The maximum depth that was exceeded
+        max_depth: usize,
+        /// The entity ID being reconstructed
+        entity_id: String,
+    },
 }
 
 impl fmt::Display for TemporalError {
@@ -380,6 +390,16 @@ impl fmt::Display for TemporalError {
             }
             TemporalError::MissingAnchor { entity_id } => {
                 write!(f, "Missing anchor in version chain for {}", entity_id)
+            }
+            TemporalError::MaxDepthExceeded {
+                max_depth,
+                entity_id,
+            } => {
+                write!(
+                    f,
+                    "Maximum recursion depth ({}) exceeded while reconstructing {}: possible corrupted version chain or cycle",
+                    max_depth, entity_id
+                )
             }
         }
     }
@@ -822,6 +842,16 @@ mod tests {
         };
         assert!(format!("{}", err).contains("Missing anchor"));
         assert!(format!("{}", err).contains("edge-456"));
+
+        // Test MaxDepthExceeded
+        let err = TemporalError::MaxDepthExceeded {
+            max_depth: 100,
+            entity_id: "node-789".to_string(),
+        };
+        assert!(format!("{}", err).contains("Maximum recursion depth"));
+        assert!(format!("{}", err).contains("100"));
+        assert!(format!("{}", err).contains("node-789"));
+        assert!(format!("{}", err).contains("corrupted version chain"));
     }
 
     #[test]
