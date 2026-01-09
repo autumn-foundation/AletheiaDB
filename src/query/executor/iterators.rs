@@ -197,25 +197,19 @@ impl ResultIterator for VectorResultIterator {
 
 /// Iterator for temporal node lookups.
 ///
-/// # Current Limitations (TODO)
+/// This iterator reconstructs nodes at a specific point in bi-temporal time
+/// by querying the historical storage for the appropriate version and
+/// reconstructing properties using the anchor+delta compression strategy.
 ///
-/// **WARNING**: This iterator currently returns CURRENT state, not historical state.
-/// The temporal lookup is not yet implemented - it just annotates results with the
-/// requested timestamp but returns current node data.
-///
-/// A complete implementation requires:
-/// 1. Looking up the node's version chain in HistoricalStorage
-/// 2. Finding the anchor version at or before the requested time
-/// 3. Applying delta reconstructions to get the state at that point
-/// 4. Returning the reconstructed historical node
-///
-/// For now, use `db.as_of().get_node()` directly for accurate temporal queries.
+/// The reconstruction process:
+/// 1. Find the version valid at the requested (valid_time, transaction_time)
+/// 2. Reconstruct properties from the version using anchor+delta
+/// 3. Return a Node with the historical label and properties
 pub struct TemporalNodeIterator {
     node_ids: std::vec::IntoIter<NodeId>,
     valid_time: Timestamp,
-    _transaction_time: Timestamp,
-    current: Arc<CurrentStorage>,
-    _historical: Arc<RwLock<HistoricalStorage>>,
+    transaction_time: Timestamp,
+    historical: Arc<RwLock<HistoricalStorage>>,
 }
 
 impl TemporalNodeIterator {
@@ -223,15 +217,13 @@ impl TemporalNodeIterator {
         node_ids: Vec<NodeId>,
         valid_time: Timestamp,
         transaction_time: Timestamp,
-        current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
     ) -> Self {
         TemporalNodeIterator {
             node_ids: node_ids.into_iter(),
             valid_time,
-            _transaction_time: transaction_time,
-            current,
-            _historical: historical,
+            transaction_time,
+            historical,
         }
     }
 }
@@ -239,18 +231,142 @@ impl TemporalNodeIterator {
 impl ResultIterator for TemporalNodeIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         self.node_ids.next().map(|id| {
-            // TODO: Implement proper temporal lookup using HistoricalStorage
-            // For now, just get the current node and annotate with timestamp
-            // A full implementation would reconstruct the node at the given time
-            // using anchor+delta from historical storage.
-            self.current.get_node(id).map(|node| {
-                QueryRow::from_entity(EntityResult::Node(node)).at_time(self.valid_time)
-            })
+            // Acquire read lock on historical storage (per-node)
+            // For bulk queries, use BatchTemporalNodeIterator instead
+            let historical = self.historical.read().map_err(|_| {
+                crate::utils::error::StorageError::LockPoisoned {
+                    lock_type: "historical_storage_read",
+                }
+            })?;
+
+            // Find the version valid at the requested time
+            let version_id =
+                historical
+                    .find_node_version_at_time(id, self.valid_time, self.transaction_time)
+                    .ok_or(crate::utils::error::TemporalError::NodeNotFoundAtTime {
+                        node_id: id,
+                        valid_time: self.valid_time,
+                        transaction_time: self.transaction_time,
+                    })?;
+
+            // INVARIANT: If find_node_version_at_time returns a version_id,
+            // that version MUST exist in storage. If this fails, it indicates
+            // a critical data inconsistency (broken version chain or dangling version_id).
+            debug_assert!(
+                historical.get_node_version(version_id).is_some(),
+                "INVARIANT VIOLATION: find_node_version_at_time returned non-existent version_id {}",
+                version_id
+            );
+
+            // Get the version metadata
+            let version = historical
+                .get_node_version(version_id)
+                .ok_or(crate::utils::error::TemporalError::VersionNotFound(version_id))?;
+
+            // Reconstruct the properties from the version
+            let properties = historical.reconstruct_node_properties(version_id)?;
+
+            // Construct a node with the historical data
+            let node = Node::new(id, version.label, properties, version_id);
+
+            Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(self.valid_time))
         })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.node_ids.size_hint()
+    }
+}
+
+/// Batch temporal node iterator for bulk queries.
+///
+/// This iterator is optimized for querying many nodes at once by acquiring
+/// a single read lock, reconstructing all nodes at once, then releasing the lock.
+///
+/// **Performance**: Use this for bulk queries (>100 nodes) where lock acquisition
+/// overhead is significant. For small queries, use `TemporalNodeIterator` instead.
+///
+/// **Trade-off**: Collects all results eagerly during construction, which requires
+/// more memory upfront but avoids per-node lock overhead and allows the lock to be
+/// released immediately after construction.
+pub struct BatchTemporalNodeIterator {
+    results: std::vec::IntoIter<Result<QueryRow>>,
+}
+
+impl BatchTemporalNodeIterator {
+    /// Create a new batch temporal node iterator.
+    ///
+    /// Acquires the historical storage lock once, reconstructs all nodes,
+    /// then releases the lock and returns the iterator over results.
+    ///
+    /// # Errors
+    /// Returns an error if the historical storage lock is poisoned.
+    pub fn new(
+        node_ids: Vec<NodeId>,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+        historical: Arc<RwLock<HistoricalStorage>>,
+    ) -> Result<Self> {
+        // Acquire lock once for all nodes
+        let guard =
+            historical
+                .read()
+                .map_err(|_| crate::utils::error::StorageError::LockPoisoned {
+                    lock_type: "historical_storage_read",
+                })?;
+
+        // Reconstruct all nodes while holding the lock
+        let results: Vec<Result<QueryRow>> = node_ids
+            .into_iter()
+            .map(|id| {
+                // Find the version valid at the requested time
+                let version_id = guard
+                    .find_node_version_at_time(id, valid_time, transaction_time)
+                    .ok_or(crate::utils::error::TemporalError::NodeNotFoundAtTime {
+                        node_id: id,
+                        valid_time,
+                        transaction_time,
+                    })?;
+
+                // INVARIANT: If find_node_version_at_time returns a version_id,
+                // that version MUST exist in storage. If this fails, it indicates
+                // a critical data inconsistency (broken version chain or dangling version_id).
+                debug_assert!(
+                    guard.get_node_version(version_id).is_some(),
+                    "INVARIANT VIOLATION: find_node_version_at_time returned non-existent version_id {}",
+                    version_id
+                );
+
+                // Get the version metadata
+                let version = guard
+                    .get_node_version(version_id)
+                    .ok_or(crate::utils::error::TemporalError::VersionNotFound(version_id))?;
+
+                // Reconstruct the properties from the version
+                let properties = guard.reconstruct_node_properties(version_id)?;
+
+                // Construct a node with the historical data
+                let node = Node::new(id, version.label, properties, version_id);
+
+                Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(valid_time))
+            })
+            .collect();
+
+        // Lock is automatically released here when `guard` goes out of scope
+
+        Ok(BatchTemporalNodeIterator {
+            results: results.into_iter(),
+        })
+    }
+}
+
+impl ResultIterator for BatchTemporalNodeIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.results.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.results.size_hint()
     }
 }
 
@@ -1867,17 +1983,30 @@ mod tests {
             AnchorConfig::default(),
         )));
 
-        let node = current
-            .create_node(
-                "Person",
-                PropertyMapBuilder::new().insert("name", "Alice").build(),
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let node = current.create_node("Person", props.clone()).unwrap();
+
+        // Add version to historical storage
+        use crate::core::temporal::{BiTemporalInterval, time};
+        let now = time::now();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
+        {
+            let mut hist = historical.write().unwrap();
+            hist.add_node_version(
+                node,
+                crate::core::id::VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(now),
+                label,
+                props,
             )
             .unwrap();
+        }
 
         let node_ids = vec![node];
-        let now = crate::core::temporal::time::now();
 
-        let mut iter = TemporalNodeIterator::new(node_ids, now, now, current, historical);
+        let mut iter = TemporalNodeIterator::new(node_ids, now, now, historical);
 
         let row = iter.next().unwrap().unwrap();
         assert_eq!(row.entity.node_id(), Some(node));
@@ -1889,7 +2018,6 @@ mod tests {
         use crate::storage::historical::HistoricalStorage;
         use crate::storage::version::AnchorConfig;
 
-        let current = Arc::new(CurrentStorage::new());
         let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
             AnchorConfig::default(),
         )));
@@ -1897,7 +2025,78 @@ mod tests {
         let node_ids = vec![];
         let now = crate::core::temporal::time::now();
 
-        let mut iter = TemporalNodeIterator::new(node_ids, now, now, current, historical);
+        let mut iter = TemporalNodeIterator::new(node_ids, now, now, historical);
+
+        assert!(iter.next().is_none());
+    }
+
+    // ==================== BatchTemporalNodeIterator Tests ====================
+
+    #[test]
+    fn test_batch_temporal_node_iterator_success() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let mut hist = historical.write().unwrap();
+
+        // Add 3 nodes
+        for i in 1..=3 {
+            let node_id = NodeId::new(i).unwrap();
+            let version_id = VersionId::new(i * 100).unwrap();
+            let label = GLOBAL_INTERNER.intern("Person").unwrap();
+            let timestamp = (i * 1000) as i64;
+
+            let props = PropertyMapBuilder::new()
+                .insert("name", format!("Person{}", i).as_str())
+                .build();
+
+            hist.add_node_version(
+                node_id,
+                version_id,
+                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                label,
+                props,
+            )
+            .unwrap();
+        }
+        drop(hist);
+
+        // Create batch iterator
+        let node_ids = vec![
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            NodeId::new(3).unwrap(),
+        ];
+        let mut iter = BatchTemporalNodeIterator::new(node_ids, 5000, 5000, historical).unwrap();
+
+        // Verify all nodes retrieved
+        let mut count = 0;
+        while let Some(Ok(_)) = iter.next() {
+            count += 1;
+        }
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_batch_temporal_node_iterator_node_not_found() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+
+        let node_ids = vec![NodeId::new(999).unwrap()];
+        let mut iter = BatchTemporalNodeIterator::new(node_ids, 1000, 1000, historical).unwrap();
+
+        let result = iter.next().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batch_temporal_node_iterator_empty() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let node_ids = vec![];
+        let mut iter = BatchTemporalNodeIterator::new(node_ids, 1000, 1000, historical).unwrap();
 
         assert!(iter.next().is_none());
     }

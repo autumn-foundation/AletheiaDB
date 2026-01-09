@@ -844,3 +844,178 @@ fn test_statistics_caching() {
 
     println!("✓ Statistics caching works correctly");
 }
+
+// =============================================================================
+// Temporal Query Execution Tests (Issue #306)
+// =============================================================================
+
+#[test]
+fn test_execute_temporal_node_lookup_returns_historical_state() {
+    // Create database with frequent anchoring for testing
+    let db = GallifreyDB::with_config(AnchorConfig {
+        anchor_interval: 2,
+        max_delta_chain: 10,
+    });
+    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+    db.enable_vector_index("embedding", config)
+        .expect("Failed to enable vector index");
+
+    // Create a node with initial properties
+    let node_id = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Original Title")
+                .insert("content", "Original Content")
+                .insert("version", 1)
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    // Wait a moment before updating (simulating passage of time)
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Update the node with different properties
+    db.write(|tx| {
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new()
+                .insert("title", "Updated Title")
+                .insert("content", "Updated Content")
+                .insert("version", 2)
+                .insert_vector("embedding", &[0.0f32, 1.0, 0.0, 0.0])
+                .build(),
+        )?;
+        Ok(())
+    })
+    .expect("Failed to update node");
+
+    // Get a timestamp that's safely within the first version's interval
+    // (after the first version starts but before the second version starts)
+    let historical_timestamp = {
+        let historical = db.__test_historical_storage();
+        let hist_guard = historical.read().unwrap();
+        let current_version_id = hist_guard.get_current_node_version(node_id).unwrap();
+        let current_version = hist_guard.get_node_version(current_version_id).unwrap();
+        let prev_version_id = current_version.prev_version.unwrap();
+        let prev_version = hist_guard.get_node_version(prev_version_id).unwrap();
+
+        println!(
+            "DEBUG: Current version: {:?}, temporal={}",
+            current_version_id, current_version.temporal
+        );
+        println!(
+            "DEBUG: Previous version: {:?}, temporal={}",
+            prev_version_id, prev_version.temporal
+        );
+
+        // Use a timestamp in the middle of the first version's interval
+        let start = prev_version.temporal.valid_time().start();
+        let end = prev_version.temporal.valid_time().end();
+        let midpoint = (start + end) / 2;
+        println!("DEBUG: Using midpoint timestamp: {}", midpoint);
+        midpoint
+    };
+
+    // Make another update to ensure we have enough versions for anchoring
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    db.write(|tx| {
+        tx.update_node(
+            node_id,
+            PropertyMapBuilder::new()
+                .insert("title", "Final Title")
+                .insert("content", "Final Content")
+                .insert("version", 3)
+                .insert_vector("embedding", &[0.0f32, 0.0, 1.0, 0.0])
+                .build(),
+        )?;
+        Ok(())
+    })
+    .expect("Failed to update node again");
+
+    // Debug: Check version chain at query time
+    println!("\n=== Version chain at query time ===");
+    {
+        let historical = db.__test_historical_storage();
+        let hist_guard = historical.read().unwrap();
+        if let Some(head_version_id) = hist_guard.get_current_node_version(node_id) {
+            let mut current_id = head_version_id;
+            let mut index = 0;
+            while let Some(version) = hist_guard.get_node_version(current_id) {
+                println!(
+                    "Version {}: id={:?}, temporal={}, prev={:?}",
+                    index, current_id, version.temporal, version.prev_version
+                );
+                println!(
+                    "  is_visible_at({}, {})? {}",
+                    historical_timestamp,
+                    historical_timestamp,
+                    version
+                        .temporal
+                        .is_visible_at(historical_timestamp, historical_timestamp)
+                );
+                if let Some(prev) = version.prev_version {
+                    current_id = prev;
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Query the node at the historical timestamp (after first creation, before first update)
+    let query = db
+        .query()
+        .as_of(historical_timestamp, historical_timestamp)
+        .start(node_id)
+        .build();
+
+    let results = db
+        .execute_query(query)
+        .expect("Temporal query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should return exactly one row
+    assert_eq!(
+        rows.len(),
+        1,
+        "Expected exactly one result from temporal query"
+    );
+
+    // Verify it returns the HISTORICAL state, not the current state
+    let row = &rows[0];
+    let node = row.entity.as_node().expect("Expected a node");
+    assert_eq!(node.id, node_id, "Should return the same node ID");
+
+    // The critical assertion: should return historical properties
+    assert_eq!(
+        node.get_property("title").and_then(|v| v.as_str()),
+        Some("Original Title"),
+        "Should return historical title, not current/updated title"
+    );
+    assert_eq!(
+        node.get_property("content").and_then(|v| v.as_str()),
+        Some("Original Content"),
+        "Should return historical content, not current/updated content"
+    );
+    assert_eq!(
+        node.get_property("version").and_then(|v| v.as_int()),
+        Some(1),
+        "Should return historical version (1), not current version (3)"
+    );
+
+    // Verify the embedding is also historical
+    let embedding = node
+        .get_property("embedding")
+        .and_then(|v| v.as_vector())
+        .expect("Should have historical embedding");
+    assert_eq!(
+        embedding,
+        &[1.0f32, 0.0, 0.0, 0.0],
+        "Should return historical embedding, not current embedding"
+    );
+
+    println!("✓ Temporal node lookup returns historical state (Issue #306)");
+}

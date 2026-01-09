@@ -81,6 +81,8 @@ pub enum PhysicalOp {
         valid_time: Timestamp,
         /// Transaction time for the query
         transaction_time: Timestamp,
+        /// Whether to use batch iterator (holds lock across all lookups)
+        use_batch: bool,
     },
 
     /// Temporal vector search using historical snapshots
@@ -323,10 +325,11 @@ impl PhysicalOp {
                 node_ids,
                 valid_time,
                 transaction_time,
+                use_batch,
             } => {
                 format!(
-                    "{prefix}{name} (ids: {:?}, vt: {}, tt: {})",
-                    node_ids, valid_time, transaction_time
+                    "{prefix}{name} (ids: {:?}, vt: {}, tt: {}, batch: {})",
+                    node_ids, valid_time, transaction_time, use_batch
                 )
             }
             PhysicalOp::IndexedTraversal {
@@ -526,7 +529,8 @@ mod tests {
             PhysicalOp::TemporalNodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
                 valid_time: 1000,
-                transaction_time: 2000
+                transaction_time: 2000,
+                use_batch: false,
             }
             .name(),
             "TemporalNodeLookup"
@@ -708,7 +712,8 @@ mod tests {
             PhysicalOp::TemporalNodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
                 valid_time: 1000,
-                transaction_time: 2000
+                transaction_time: 2000,
+                use_batch: false,
             }
             .is_leaf()
         );
@@ -820,7 +825,8 @@ mod tests {
             PhysicalOp::TemporalNodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
                 valid_time: 1000,
-                transaction_time: 2000
+                transaction_time: 2000,
+                use_batch: false,
             }
             .depth(),
             1
@@ -992,12 +998,14 @@ mod tests {
             node_ids: vec![NodeId::new(42).unwrap()],
             valid_time: 1000,
             transaction_time: 2000,
+            use_batch: false,
         };
 
         let explain = plan.explain();
         assert!(explain.contains("TemporalNodeLookup"));
         assert!(explain.contains("vt: 1000"));
         assert!(explain.contains("tt: 2000"));
+        assert!(explain.contains("batch: false"));
     }
 
     #[test]

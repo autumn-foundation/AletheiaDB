@@ -383,8 +383,11 @@ impl HistoricalStorage {
 
             // Decide whether to create anchor or delta
             if versions_since_anchor >= self.config.anchor_interval as usize {
-                // Create anchor
-                NodeVersion::new_anchor(version_id, node_id, temporal, label, properties)
+                // Create anchor (but we'll set prev_version manually below to maintain the chain)
+                let mut anchor =
+                    NodeVersion::new_anchor(version_id, node_id, temporal, label, properties);
+                anchor.prev_version = Some(prev_id); // Link to previous version
+                anchor
             } else {
                 // Create delta from previous version
                 let old_properties = self.reconstruct_node_properties(prev_id)?;
@@ -441,11 +444,27 @@ impl HistoricalStorage {
             }
         }
 
-        // Link the previous version to this one
+        // Link the previous version to this one and close its temporal interval if needed
         if let Some(prev_id) = prev_version_id
             && let Some(prev) = self.node_versions.get_mut(&prev_id)
         {
             prev.next_version = Some(version_id);
+
+            // Close the previous version's temporal interval at the new version's start time
+            // Only close if the interval is currently open and the new start time is after the previous start time
+            let new_start_time = temporal.valid_time().start();
+            let new_tx_time = temporal.transaction_time().start();
+
+            if prev.temporal.is_currently_valid()
+                && new_start_time > prev.temporal.valid_time().start()
+            {
+                prev.temporal = prev.temporal.close_valid_time(new_start_time);
+            }
+            if prev.temporal.is_currently_recorded()
+                && new_tx_time > prev.temporal.transaction_time().start()
+            {
+                prev.temporal = prev.temporal.close_transaction_time(new_tx_time);
+            }
         }
 
         // Check if this is an anchor before storing (for observer notification)
@@ -521,9 +540,12 @@ impl HistoricalStorage {
             let versions_since_anchor = self.count_versions_since_anchor_edge(prev_id) + 1;
 
             if versions_since_anchor >= self.config.anchor_interval as usize {
-                EdgeVersion::new_anchor(
+                // Create anchor (but we'll set prev_version manually to maintain the chain)
+                let mut anchor = EdgeVersion::new_anchor(
                     version_id, edge_id, temporal, label, source, target, properties,
-                )
+                );
+                anchor.prev_version = Some(prev_id); // Link to previous version
+                anchor
             } else {
                 let old_properties = self.reconstruct_edge_properties(prev_id)?;
                 EdgeVersion::new_delta(
@@ -582,10 +604,27 @@ impl HistoricalStorage {
             }
         }
 
+        // Link the previous version to this one and close its temporal interval if needed
         if let Some(prev_id) = prev_version_id
             && let Some(prev) = self.edge_versions.get_mut(&prev_id)
         {
             prev.next_version = Some(version_id);
+
+            // Close the previous version's temporal interval at the new version's start time
+            // Only close if the interval is currently open and the new start time is after the previous start time
+            let new_start_time = temporal.valid_time().start();
+            let new_tx_time = temporal.transaction_time().start();
+
+            if prev.temporal.is_currently_valid()
+                && new_start_time > prev.temporal.valid_time().start()
+            {
+                prev.temporal = prev.temporal.close_valid_time(new_start_time);
+            }
+            if prev.temporal.is_currently_recorded()
+                && new_tx_time > prev.temporal.transaction_time().start()
+            {
+                prev.temporal = prev.temporal.close_transaction_time(new_tx_time);
+            }
         }
 
         // Check if this is an anchor before storing (for observer notification)
