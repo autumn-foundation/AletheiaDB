@@ -1617,11 +1617,11 @@ impl TemporalVectorIndex {
     ///
     /// let results = index.find_similar_in_range(&query, 10, time_range)?;
     ///
-    /// for snapshot_result in results.snapshots {
+    /// for (timestamp, snapshot_results) in results {
     ///     println!("At {}: found {} results",
-    ///              snapshot_result.timestamp,
-    ///              snapshot_result.results.len());
-    ///     for (node_id, score) in snapshot_result.results {
+    ///              timestamp,
+    ///              snapshot_results.len());
+    ///     for (node_id, score) in snapshot_results {
     ///         println!("  Node {}: {:.3}", node_id, score);
     ///     }
     /// }

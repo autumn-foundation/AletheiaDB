@@ -326,9 +326,9 @@ let config = TemporalVectorConfig {
 // Hybrid: whichever fires first
 let config = TemporalVectorConfig {
     snapshot_strategy: SnapshotStrategy::Hybrid {
-        transaction_interval: Some(100),
-        time_interval: Some(3600),
-        change_threshold: Some(0.05),
+        transaction_interval: 100,
+        time_interval_secs: 3600,
+        change_threshold: 0.05,
     },
     ..Default::default()
 };
@@ -369,7 +369,8 @@ for (node_id, drift_score) in drifted_nodes {
 }
 
 // Example 2: Track specific node's drift over time
-let reference_embedding = vec![0.5f32; 384];
+// Note: For Cosine distance, embeddings should be normalized (unit vectors)
+let reference_embedding = vec![0.5f32; 384];  // Example only - not normalized
 let drift_timeline = temporal_index.track_semantic_drift(
     node_id,
     &reference_embedding,
@@ -414,9 +415,9 @@ let results = temporal_index.find_similar_in_range(
     time_range,
 )?;
 
-// results.snapshots contains results from each snapshot in range
-for snapshot_result in results.snapshots {
-    println!("At {}: {:?}", snapshot_result.timestamp, snapshot_result.results);
+// Iterate over results from each snapshot in range
+for (timestamp, snapshot_results) in results {
+    println!("At {}: {:?}", timestamp, snapshot_results);
 }
 ```
 
@@ -424,16 +425,19 @@ for snapshot_result in results.snapshots {
 
 | Operation | Complexity | Target | Actual (1M vectors) |
 |-----------|------------|--------|---------------------|
-| Full snapshot creation | O(N log N) | <1s | ~950ms |
-| Delta snapshot creation | O(M log M) | <100ms | ~50ms (M=1000) |
-| Point-in-time query | O(log N) | <10ms | ~4-8ms |
-| Range query (K snapshots) | O(K × log N) | <100ms | ~40-80ms (K=10) |
-| Drift detection | O(S × N) | <50ms | ~30ms (S=5 snapshots) |
+| Full snapshot creation | O(N log N) where N = vectors | <1s | ~950ms |
+| Delta snapshot creation | O(M log M) where M = changes | <100ms | ~50ms (M=1000) |
+| Point-in-time query | O(log N) where N = vectors | <10ms | ~4-8ms |
+| Range query (K snapshots) | O(K × log N) where K = snapshots | <100ms | ~40-80ms (K=10) |
+| Drift detection | O(S × N) where S = snapshots, N = vectors | <50ms | ~30ms (S=5 snapshots) |
 
-**Memory Budget**:
+**Memory Budget** (assuming 10:1 delta:full snapshot ratio):
 - Small DB (10K vectors, 10 snapshots): ~100MB
+  - 1 full + 9 deltas (~10% changes): ~25MB + ~75MB
 - Medium DB (100K vectors, 50 snapshots): ~5GB
+  - 5 full + 45 deltas (~10% changes): ~1.25GB + ~3.75GB
 - Large DB (1M vectors, 100 snapshots): ~100GB
+  - 10 full + 90 deltas (~10% changes): ~25GB + ~75GB
 
 ## Embedding Generation (Optional)
 

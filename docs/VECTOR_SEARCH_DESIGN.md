@@ -417,10 +417,10 @@ Drift tracking identifies nodes whose embeddings have changed significantly over
    ```rust
    pub fn find_semantic_drift(
        &self,
-       threshold: f64,
+       threshold: f32,
        time_range: TimeRange,
        metric: DriftMetric,
-   ) -> Result<Vec<(NodeId, f64)>>
+   ) -> Result<Vec<(NodeId, f32)>>
    ```
 
 2. **Per-Node Drift Tracking**: Track drift timeline for specific node
@@ -500,10 +500,10 @@ impl TemporalVectorIndex {
     // Drift Tracking
     pub fn find_semantic_drift(
         &self,
-        threshold: f64,
+        threshold: f32,
         time_range: TimeRange,
         metric: DriftMetric,
-    ) -> Result<Vec<(NodeId, f64)>>;
+    ) -> Result<Vec<(NodeId, f32)>>;
 
     pub fn track_semantic_drift(
         &self,
