@@ -59,14 +59,25 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run all benchmarks once
+      - name: Run benchmarks
         run: |
           set -o pipefail  # Ensure piped commands propagate failures
-          echo "Running all benchmarks..."
+
+          # Determine which benchmarks to run based on trigger type
+          # Weekly (scheduled) and manual runs: all benchmarks
+          # CI runs (push/PR): core benchmarks only for faster feedback
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Running ALL benchmarks (weekly/manual run)..."
+            BENCH_TARGETS="--bench checkpoints --bench current_state --bench durability_modes --bench gallifreydb --bench hnsw_index --bench temporal_query --bench temporal_vector --bench transactions --bench vector_similarity"
+          else
+            echo "Running CORE benchmarks only (CI run)..."
+            # Core benchmarks: storage layer, high-level API, transactions
+            BENCH_TARGETS="--bench current_state --bench gallifreydb --bench transactions"
+          fi
+
           # Run benchmarks and capture output for github-action-benchmark 'cargo' tool support
           # Use --sample-size 10 for balance between CI speed and statistical validity
-          # Exclude temporal_vector benchmark (slowest) to keep CI times reasonable
-          cargo bench --all-features --bench concurrent_reads --bench current_state --bench gallifreydb --bench hnsw_index --bench id_generation --bench persistence --bench string_interning --bench transactions --bench vector_similarity -- --sample-size 10 | tee output.txt
+          cargo bench --all-features $BENCH_TARGETS -- --sample-size 10 | tee output.txt
 
           # Verify that Criterion generated output
           if [ ! -d "target/criterion" ]; then
