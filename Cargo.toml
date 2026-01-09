@@ -121,30 +121,52 @@ exclude = [
     "tests/*",
 ]
 
+# Storage layer - raw storage primitives and fast path
 [[bench]]
 name = "current_state"
 harness = false
 path = "benches/current_state.rs"
 required-features = []
 
+# High-level API - includes transaction overhead and API layer
 [[bench]]
 name = "gallifreydb"
 harness = false
 path = "benches/gallifreydb.rs"
 required-features = []
 
+# Persistence layer - durability modes and checkpoint operations
 [[bench]]
-name = "persistence"
+name = "durability_modes"
 harness = false
-path = "benches/persistence.rs"
-required-features = []
+path = "benches/durability_modes.rs"
 
+[[bench]]
+name = "checkpoints"
+harness = false
+path = "benches/checkpoints.rs"
+
+# Transaction layer - ACID guarantees and transaction overhead
 [[bench]]
 name = "transactions"
 harness = false
 path = "benches/transactions.rs"
 required-features = []
 
+# Temporal layer - time-travel queries and version reconstruction
+[[bench]]
+name = "temporal_query"
+harness = false
+path = "benches/temporal_query.rs"
+required-features = []
+
+[[bench]]
+name = "temporal_vector"
+harness = false
+path = "benches/temporal_vector.rs"
+required-features = []
+
+# Vector operations - similarity metrics and HNSW k-NN search
 [[bench]]
 name = "vector_similarity"
 harness = false
@@ -155,36 +177,6 @@ required-features = []
 name = "hnsw_index"
 harness = false
 path = "benches/hnsw_index.rs"
-required-features = []
-
-[[bench]]
-name = "id_generation"
-harness = false
-path = "benches/id_generation.rs"
-required-features = []
-
-[[bench]]
-name = "string_interning"
-harness = false
-path = "benches/string_interning.rs"
-required-features = []
-
-[[bench]]
-name = "temporal_vector"
-harness = false
-path = "benches/temporal_vector.rs"
-required-features = []
-
-[[bench]]
-name = "concurrent_reads"
-harness = false
-path = "benches/concurrent_reads.rs"
-required-features = []
-
-[[bench]]
-name = "temporal_query"
-harness = false
-path = "benches/temporal_query.rs"
 required-features = []
 
 # Patch libhoney-rust to use git version with updated dependencies

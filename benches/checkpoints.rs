@@ -1,6 +1,6 @@
-//! Benchmarks for persistence layer (WAL, checkpoints, recovery)
+//! Benchmarks for checkpoint creation, loading, and recovery operations
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::{
     property::PropertyMapBuilder,
     temporal::{BiTemporalInterval, time},
@@ -11,109 +11,6 @@ use gallifreydb::storage::{
     wal::{WalConfig, WalOperation, WriteAheadLog},
 };
 use tempfile::TempDir;
-
-fn bench_wal_append(c: &mut Criterion) {
-    let mut group = c.benchmark_group("wal_append");
-
-    // Benchmark appending different operation types
-    for op_type in &["create_node", "create_edge", "update_node"] {
-        group.bench_function(BenchmarkId::from_parameter(op_type), |b| {
-            let temp_dir = TempDir::new().unwrap();
-            let config = WalConfig {
-                wal_dir: temp_dir.path().to_path_buf(),
-                ..Default::default()
-            };
-            let mut wal = WriteAheadLog::new(config).unwrap();
-
-            b.iter(|| {
-                let operation = match *op_type {
-                    "create_node" => WalOperation::CreateNode {
-                        node_id: black_box(gallifreydb::core::id::NodeId::new(1).unwrap()),
-                        label: "Person".to_string(),
-                        properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
-                    },
-                    "create_edge" => WalOperation::CreateEdge {
-                        edge_id: black_box(gallifreydb::core::id::EdgeId::new(1).unwrap()),
-                        source: gallifreydb::core::id::NodeId::new(1).unwrap(),
-                        target: gallifreydb::core::id::NodeId::new(2).unwrap(),
-                        label: "KNOWS".to_string(),
-                        properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
-                    },
-                    _ => WalOperation::UpdateNode {
-                        node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
-                        version_id: gallifreydb::core::id::VersionId::new(2).unwrap(),
-                        label: "Person".to_string(),
-                        properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
-                    },
-                };
-                wal.append(operation).unwrap();
-            });
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_wal_throughput(c: &mut Criterion) {
-    let mut group = c.benchmark_group("wal_throughput");
-    group.throughput(Throughput::Elements(1000));
-
-    group.bench_function("batch_1000_operations", |b| {
-        b.iter(|| {
-            let temp_dir = TempDir::new().unwrap();
-            let config = WalConfig {
-                wal_dir: temp_dir.path().to_path_buf(),
-                ..Default::default()
-            };
-            let mut wal = WriteAheadLog::new(config).unwrap();
-
-            for i in 0..1000 {
-                let operation = WalOperation::CreateNode {
-                    node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
-                    label: "Person".to_string(),
-                    properties: PropertyMapBuilder::new().build(),
-                    temporal: BiTemporalInterval::current(time::now()),
-                };
-                black_box(wal.append(operation).unwrap());
-            }
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_wal_with_sync(c: &mut Criterion) {
-    let mut group = c.benchmark_group("wal_sync_modes");
-
-    for sync_enabled in &[false, true] {
-        group.bench_function(
-            BenchmarkId::from_parameter(if *sync_enabled { "sync_on" } else { "sync_off" }),
-            |b| {
-                let temp_dir = TempDir::new().unwrap();
-                let config = WalConfig {
-                    wal_dir: temp_dir.path().to_path_buf(),
-                    ..Default::default()
-                };
-                let mut wal = WriteAheadLog::new(config).unwrap();
-
-                b.iter(|| {
-                    let operation = WalOperation::CreateNode {
-                        node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
-                        label: "Person".to_string(),
-                        properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
-                    };
-                    wal.append(operation).unwrap();
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
 
 fn bench_checkpoint_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("checkpoint_creation");
@@ -133,6 +30,15 @@ fn bench_checkpoint_creation(c: &mut Criterion) {
                     )
                     .unwrap();
             }
+
+            // Verify setup succeeded before benchmarking
+            assert_eq!(
+                current.node_count(),
+                *node_count,
+                "Setup failed - expected {} nodes, got {}",
+                node_count,
+                current.node_count()
+            );
 
             let temp_dir = TempDir::new().unwrap();
             let wal_config = WalConfig {
@@ -177,6 +83,14 @@ fn bench_checkpoint_load(c: &mut Criterion) {
                 )
                 .unwrap();
         }
+
+        // Verify setup succeeded
+        assert_eq!(
+            current.node_count(),
+            *node_count,
+            "Setup failed - expected {} nodes",
+            node_count
+        );
 
         let wal_config = WalConfig {
             wal_dir: temp_dir.path().join("wal"),
@@ -270,44 +184,6 @@ fn bench_recovery(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_checkpoint_frequency(c: &mut Criterion) {
-    let mut group = c.benchmark_group("checkpoint_frequency");
-
-    // Test different checkpoint intervals
-    for interval_secs in &[1, 60, 300] {
-        group.bench_function(BenchmarkId::from_parameter(interval_secs), |b| {
-            let temp_dir = TempDir::new().unwrap();
-            let wal_config = WalConfig {
-                wal_dir: temp_dir.path().join("wal"),
-                ..Default::default()
-            };
-            let mut wal = WriteAheadLog::new(wal_config).unwrap();
-
-            let checkpoint_config = CheckpointConfig {
-                checkpoint_dir: temp_dir.path().join("checkpoints"),
-                checkpoint_interval: std::time::Duration::from_secs(*interval_secs),
-                ..Default::default()
-            };
-            let mut persistence = PersistenceManager::new(checkpoint_config).unwrap();
-
-            let current = CurrentStorage::new();
-            let historical = HistoricalStorage::new();
-
-            b.iter(|| {
-                let lsn = wal.current_lsn();
-                if persistence.should_checkpoint(lsn) {
-                    persistence
-                        .create_checkpoint(lsn, &current, &historical, &mut wal)
-                        .unwrap();
-                    black_box(());
-                }
-            });
-        });
-    }
-
-    group.finish();
-}
-
 fn configure_criterion() -> Criterion {
     let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
         .map(|s| s.parse().unwrap_or(50))
@@ -319,12 +195,8 @@ fn configure_criterion() -> Criterion {
 criterion_group!(
     name = benches;
     config = configure_criterion();
-    targets = bench_wal_append,
-    bench_wal_throughput,
-    bench_wal_with_sync,
-    bench_checkpoint_creation,
+    targets = bench_checkpoint_creation,
     bench_checkpoint_load,
-    bench_recovery,
-    bench_checkpoint_frequency
+    bench_recovery
 );
 criterion_main!(benches);
