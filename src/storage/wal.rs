@@ -64,6 +64,13 @@ pub mod durability;
 pub mod flush_guard;
 pub mod group_commit;
 
+// Concurrent WAL modules
+pub mod concurrent;
+pub mod flush_coordinator;
+pub mod lsn_allocator;
+pub mod ring_buffer;
+pub mod stripe;
+
 // Re-export key types
 pub use async_writer::{AsyncWalMetrics, AsyncWalWriter, WalEvent, WalObserver};
 pub use durability::{DurabilityMode, WriteOptions};
