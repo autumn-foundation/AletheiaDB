@@ -824,6 +824,39 @@ mod tests {
             vec![NodeId::new(0).unwrap(), NodeId::new(1).unwrap()]
         );
     }
+
+    /// Test AdjacencyGuard Debug implementation for coverage.
+    #[test]
+    fn test_adjacency_guard_debug() {
+        let indexes = CurrentIndexes::new();
+
+        indexes.insert_edge(create_test_edge(0, 5, 10, "KNOWS"));
+        indexes.rebuild_adjacency();
+
+        // Get guard and format with Debug
+        let guard = indexes.get_outgoing(NodeId::new(5).unwrap());
+        let debug_str = format!("{:?}", guard);
+
+        // Should contain node ID and show it's an AdjacencyGuard
+        assert!(debug_str.contains("AdjacencyGuard"));
+        assert!(debug_str.contains("node"));
+        assert!(debug_str.contains("entries"));
+    }
+
+    /// Test AdjacencyGuard with empty list for Debug coverage.
+    #[test]
+    fn test_adjacency_guard_debug_empty() {
+        let indexes = CurrentIndexes::new();
+        indexes.rebuild_adjacency();
+
+        // Get guard for non-existent node (empty adjacency list)
+        let guard = indexes.get_outgoing(NodeId::new(99).unwrap());
+        let debug_str = format!("{:?}", guard);
+
+        // Should format successfully even with empty entries
+        assert!(debug_str.contains("AdjacencyGuard"));
+        assert!(debug_str.contains("entries"));
+    }
 }
 
 // Property-based tests for rebuild safety
