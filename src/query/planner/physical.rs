@@ -650,7 +650,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::TemporalTrack {
                 input: Box::new(PhysicalOp::Empty),
-                time_range: TimeRange::new(1000, 2000)
+                time_range: TimeRange::new(1000, 2000).unwrap()
             }
             .name(),
             "TemporalTrack"
@@ -924,7 +924,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::TemporalTrack {
                 input: Box::new(base.clone()),
-                time_range: TimeRange::new(1000, 2000)
+                time_range: TimeRange::new(1000, 2000).unwrap()
             }
             .depth(),
             2
@@ -1178,7 +1178,7 @@ mod tests {
     fn test_explain_temporal_track() {
         let plan = PhysicalOp::TemporalTrack {
             input: Box::new(PhysicalOp::Empty),
-            time_range: TimeRange::new(1000, 2000),
+            time_range: TimeRange::new(1000, 2000).unwrap(),
         };
 
         let explain = plan.explain();
@@ -1222,7 +1222,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::TemporalTrack {
                 input: Box::new(PhysicalOp::Empty),
-                time_range: TimeRange::new(1000, 2000),
+                time_range: TimeRange::new(1000, 2000).unwrap(),
             }
             .name(),
             "TemporalTrack"
@@ -1267,7 +1267,7 @@ mod tests {
             input: Box::new(PhysicalOp::NodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
             }),
-            time_range: TimeRange::new(1000, 2000),
+            time_range: TimeRange::new(1000, 2000).unwrap(),
         };
         assert_eq!(temporal_track.depth(), 2); // 1 + 1
     }
@@ -1280,7 +1280,7 @@ mod tests {
         assert!(
             !PhysicalOp::TemporalTrack {
                 input: Box::new(PhysicalOp::Empty),
-                time_range: TimeRange::new(1000, 2000),
+                time_range: TimeRange::new(1000, 2000).unwrap(),
             }
             .is_leaf()
         );

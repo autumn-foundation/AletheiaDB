@@ -333,7 +333,9 @@ impl<S: QueryState> QueryBuilder<S> {
     /// Set temporal context: query across a time range
     #[must_use]
     pub fn between(mut self, start: Timestamp, end: Timestamp) -> Self {
-        self.temporal_context = Some(TemporalContext::between(TimeRange::between(start, end)));
+        self.temporal_context = Some(TemporalContext::between(
+            TimeRange::between(start, end).unwrap(),
+        ));
         self
     }
 
