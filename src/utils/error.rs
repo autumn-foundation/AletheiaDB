@@ -348,6 +348,17 @@ pub enum TemporalError {
         /// The entity ID being reconstructed
         entity_id: String,
     },
+    /// Node did not exist at the specified point in bi-temporal time.
+    NodeNotFoundAtTime {
+        /// The node ID that was queried
+        node_id: NodeId,
+        /// The valid time timestamp
+        valid_time: Timestamp,
+        /// The transaction time timestamp
+        transaction_time: Timestamp,
+    },
+    /// Version was not found.
+    VersionNotFound(VersionId),
 }
 
 impl fmt::Display for TemporalError {
@@ -400,6 +411,20 @@ impl fmt::Display for TemporalError {
                     "Maximum recursion depth ({}) exceeded while reconstructing {}: possible corrupted version chain or cycle",
                     max_depth, entity_id
                 )
+            }
+            TemporalError::NodeNotFoundAtTime {
+                node_id,
+                valid_time,
+                transaction_time,
+            } => {
+                write!(
+                    f,
+                    "Node {} did not exist at valid_time={}, transaction_time={}",
+                    node_id, valid_time, transaction_time
+                )
+            }
+            TemporalError::VersionNotFound(version_id) => {
+                write!(f, "Version {} not found", version_id)
             }
         }
     }

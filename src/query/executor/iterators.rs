@@ -197,25 +197,21 @@ impl ResultIterator for VectorResultIterator {
 
 /// Iterator for temporal node lookups.
 ///
-/// # Current Limitations (TODO)
+/// This iterator reconstructs nodes at a specific point in bi-temporal time
+/// by querying the historical storage for the appropriate version and
+/// reconstructing properties using the anchor+delta compression strategy.
 ///
-/// **WARNING**: This iterator currently returns CURRENT state, not historical state.
-/// The temporal lookup is not yet implemented - it just annotates results with the
-/// requested timestamp but returns current node data.
-///
-/// A complete implementation requires:
-/// 1. Looking up the node's version chain in HistoricalStorage
-/// 2. Finding the anchor version at or before the requested time
-/// 3. Applying delta reconstructions to get the state at that point
-/// 4. Returning the reconstructed historical node
-///
-/// For now, use `db.as_of().get_node()` directly for accurate temporal queries.
+/// The reconstruction process:
+/// 1. Find the version valid at the requested (valid_time, transaction_time)
+/// 2. Reconstruct properties from the version using anchor+delta
+/// 3. Return a Node with the historical label and properties
 pub struct TemporalNodeIterator {
     node_ids: std::vec::IntoIter<NodeId>,
     valid_time: Timestamp,
-    _transaction_time: Timestamp,
+    transaction_time: Timestamp,
+    #[allow(dead_code)]
     current: Arc<CurrentStorage>,
-    _historical: Arc<RwLock<HistoricalStorage>>,
+    historical: Arc<RwLock<HistoricalStorage>>,
 }
 
 impl TemporalNodeIterator {
@@ -229,9 +225,9 @@ impl TemporalNodeIterator {
         TemporalNodeIterator {
             node_ids: node_ids.into_iter(),
             valid_time,
-            _transaction_time: transaction_time,
+            transaction_time,
             current,
-            _historical: historical,
+            historical,
         }
     }
 }
@@ -239,13 +235,52 @@ impl TemporalNodeIterator {
 impl ResultIterator for TemporalNodeIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         self.node_ids.next().map(|id| {
-            // TODO: Implement proper temporal lookup using HistoricalStorage
-            // For now, just get the current node and annotate with timestamp
-            // A full implementation would reconstruct the node at the given time
-            // using anchor+delta from historical storage.
-            self.current.get_node(id).map(|node| {
-                QueryRow::from_entity(EntityResult::Node(node)).at_time(self.valid_time)
-            })
+            // Look up the version valid at the requested time
+            // Acquire read lock on historical storage
+            let historical = match self.historical.read() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    return Err(crate::utils::error::StorageError::LockPoisoned {
+                        lock_type: "historical_storage_read",
+                    }
+                    .into());
+                }
+            };
+
+            match historical.find_node_version_at_time(id, self.valid_time, self.transaction_time) {
+                Some(version_id) => {
+                    // Get the version metadata
+                    let version = match historical.get_node_version(version_id) {
+                        Some(v) => v,
+                        None => {
+                            return Err(crate::utils::error::TemporalError::VersionNotFound(
+                                version_id,
+                            )
+                            .into());
+                        }
+                    };
+
+                    // Reconstruct the properties from the version
+                    let properties = match historical.reconstruct_node_properties(version_id) {
+                        Ok(props) => props,
+                        Err(e) => return Err(e),
+                    };
+
+                    // Construct a node with the historical data
+                    let node = Node::new(id, version.label, properties, version_id);
+
+                    Ok(QueryRow::from_entity(EntityResult::Node(node)).at_time(self.valid_time))
+                }
+                None => {
+                    // Node did not exist at the requested time - return not found
+                    Err(crate::utils::error::TemporalError::NodeNotFoundAtTime {
+                        node_id: id,
+                        valid_time: self.valid_time,
+                        transaction_time: self.transaction_time,
+                    }
+                    .into())
+                }
+            }
         })
     }
 
