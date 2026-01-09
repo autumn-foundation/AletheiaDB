@@ -76,38 +76,16 @@ fn bench_3_hop_target(c: &mut Criterion) {
         b.iter(|| {
             let start_node = black_box(nodes[0]);
 
-            // Hop 1
-            let hop1_edges = storage.get_outgoing_edges(start_node);
-            let mut hop1_targets = Vec::new();
-            for edge_id in &hop1_edges {
-                if let Ok(edge) = storage.get_edge(*edge_id) {
-                    hop1_targets.push(edge.target);
-                }
+            // Perform 3-hop traversal using get_outgoing_targets for efficiency
+            let mut current_nodes = vec![start_node];
+            for _ in 0..3 {
+                current_nodes = current_nodes
+                    .iter()
+                    .flat_map(|&node| storage.get_outgoing_targets(node))
+                    .collect();
             }
 
-            // Hop 2
-            let mut hop2_targets = Vec::new();
-            for node in &hop1_targets {
-                let hop2_edges = storage.get_outgoing_edges(*node);
-                for edge_id in &hop2_edges {
-                    if let Ok(edge) = storage.get_edge(*edge_id) {
-                        hop2_targets.push(edge.target);
-                    }
-                }
-            }
-
-            // Hop 3
-            let mut hop3_targets = Vec::new();
-            for node in &hop2_targets {
-                let hop3_edges = storage.get_outgoing_edges(*node);
-                for edge_id in &hop3_edges {
-                    if let Ok(edge) = storage.get_edge(*edge_id) {
-                        hop3_targets.push(edge.target);
-                    }
-                }
-            }
-
-            black_box(hop3_targets.len())
+            black_box(current_nodes.len())
         })
     });
 
@@ -287,8 +265,8 @@ fn bench_batch_insertion_target(c: &mut Criterion) {
                 }
             }
 
-            // Return edge count instead of reference to storage
-            black_box(nodes.len())
+            // Return edge count to prevent optimization
+            black_box(storage.edge_count())
         })
     });
 

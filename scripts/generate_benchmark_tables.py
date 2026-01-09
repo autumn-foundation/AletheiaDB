@@ -159,10 +159,13 @@ def generate_html_table(suite_name: str, results: list[BenchmarkResult]) -> str:
 
 def parse_target_value(target_str: str) -> tuple[Optional[float], str]:
     """
-    Parse a target string like '<1µs' or '>100k edges/sec' into (value_ns, operator).
+    Parse a target string like '<1µs' or '>100k edges/sec' into (value, operator).
+
+    For time-based targets, value is in nanoseconds.
+    For throughput-based targets, value is in units/sec.
 
     Returns:
-        (target_value_in_ns, operator) where operator is '<' or '>'
+        (target_value, operator) where operator is '<' or '>'
         Returns (None, '') if parsing fails
     """
     target_str = target_str.strip()
@@ -182,23 +185,39 @@ def parse_target_value(target_str: str) -> tuple[Optional[float], str]:
         try:
             return (float(value_str.replace('ns', '').strip()), operator)
         except ValueError:
-            return (None, '')
+            pass
     elif 'µs' in value_str or 'us' in value_str:
         try:
             val = value_str.replace('µs', '').replace('us', '').strip()
             return (float(val) * 1000, operator)  # Convert to ns
         except ValueError:
-            return (None, '')
+            pass
     elif 'ms' in value_str:
         try:
             return (float(value_str.replace('ms', '').strip()) * 1_000_000, operator)
         except ValueError:
-            return (None, '')
+            pass
     elif 's' in value_str and 'sec' not in value_str:
         try:
             return (float(value_str.replace('s', '').strip()) * 1_000_000_000, operator)
         except ValueError:
-            return (None, '')
+            pass
+
+    # Parse throughput values
+    if '/sec' in value_str:
+        num_part = value_str.split('/')[0].strip()
+        multiplier = 1.0
+        if num_part.lower().endswith('k'):
+            multiplier = 1000.0
+            num_part = num_part[:-1].strip()
+        elif num_part.lower().endswith('m'):
+            multiplier = 1_000_000.0
+            num_part = num_part[:-1].strip()
+
+        try:
+            return (float(num_part) * multiplier, operator)
+        except ValueError:
+            pass
 
     return (None, '')
 
@@ -258,27 +277,40 @@ def generate_index_page(all_results: dict[str, list[BenchmarkResult]], output_di
         for bench in results:
             match = match_benchmark_to_target(bench.name, targets)
             if match:
-                target_dict, target_val_ns, operator = match
-                # Calculate percentage difference
+                target_dict, target_val, operator = match
                 actual_val_ns = bench.mean_ns
+                actual_display = f"{bench.mean:.2f} {bench.unit}"
+
+                # Calculate percentage difference
                 if operator == '<':
-                    # Lower is better
-                    pct = ((actual_val_ns - target_val_ns) / target_val_ns) * 100
-                    status = '✅ PASS' if actual_val_ns < target_val_ns else '❌ FAIL'
-                    if actual_val_ns < target_val_ns:
+                    # Lower is better (time)
+                    pct = ((actual_val_ns - target_val) / target_val) * 100
+                    status = '✅ PASS' if actual_val_ns < target_val else '❌ FAIL'
+                    if actual_val_ns < target_val:
                         pct_text = f"{abs(pct):.1f}% faster than target"
                     else:
                         pct_text = f"{pct:.1f}% slower than target"
-                else:
+                elif operator == '>':
                     # Higher is better (throughput)
-                    pct = ((actual_val_ns - target_val_ns) / target_val_ns) * 100
-                    status = '✅ PASS' if actual_val_ns > target_val_ns else '❌ FAIL'
-                    pct_text = f"{pct:+.1f}% vs target"
+                    # This is specific to the batch insertion benchmark which inserts 1000 edges
+                    if 'insert_1000_edges' in bench.name:
+                        actual_throughput = 1000 / (actual_val_ns / 1e9)  # edges/sec
+                        pct = ((actual_throughput - target_val) / target_val) * 100
+                        status = '✅ PASS' if actual_throughput > target_val else '❌ FAIL'
+                        pct_text = f"{pct:+.1f}% vs target"
+                        actual_display = f"{actual_throughput / 1000:.1f}k edges/sec"
+                    else:
+                        # Fallback for other throughput benchmarks if any
+                        status = "🤷 UNKNOWN"
+                        pct_text = "Throughput logic not implemented"
+                else:
+                    status = "🤷 UNKNOWN"
+                    pct_text = "Unknown operator"
 
                 target_results.append({
                     'metric': target_dict['metric'],
                     'target': target_dict['target'],
-                    'actual': f"{bench.mean:.2f} {bench.unit}",
+                    'actual': actual_display,
                     'status': status,
                     'pct_text': pct_text,
                 })
