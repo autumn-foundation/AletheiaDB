@@ -1680,4 +1680,225 @@ mod tests {
         let filter = FilterIterator::new(Box::new(EmptyIterator), predicate);
         assert!(!filter.evaluate(&node));
     }
+
+    // ==================== NodeLookupIterator Tests ====================
+
+    #[test]
+    fn test_node_lookup_iterator_success() {
+        let current = Arc::new(CurrentStorage::new());
+
+        // Create test nodes
+        let node1 = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        let node2 = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+
+        let node_ids = vec![node1, node2];
+        let mut iter = NodeLookupIterator::new(node_ids, current);
+
+        // Should get both nodes
+        let row1 = iter.next().unwrap().unwrap();
+        assert_eq!(row1.entity.node_id(), Some(node1));
+
+        let row2 = iter.next().unwrap().unwrap();
+        assert_eq!(row2.entity.node_id(), Some(node2));
+
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_node_lookup_iterator_missing_node() {
+        let current = Arc::new(CurrentStorage::new());
+
+        // Don't add the node
+        let node_ids = vec![NodeId::new(999).unwrap()];
+        let mut iter = NodeLookupIterator::new(node_ids, current);
+
+        // Should return error for missing node
+        let result = iter.next().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_lookup_iterator_size_hint() {
+        let current = Arc::new(CurrentStorage::new());
+        let node_ids = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let iter = NodeLookupIterator::new(node_ids, current);
+
+        let (lower, upper) = iter.size_hint();
+        assert_eq!(lower, 2);
+        assert_eq!(upper, Some(2));
+    }
+
+    // ==================== NodeScanIterator Tests ====================
+
+    #[test]
+    fn test_node_scan_iterator_all_nodes() {
+        let current = Arc::new(CurrentStorage::new());
+
+        current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+
+        let mut iter = NodeScanIterator::new(None, current);
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            results.push(row);
+        }
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_node_scan_iterator_with_label_filter() {
+        let current = Arc::new(CurrentStorage::new());
+
+        let person = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+        current
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("name", "Acme").build(),
+            )
+            .unwrap();
+
+        let mut iter = NodeScanIterator::new(Some("Person".to_string()), current);
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            results.push(row);
+        }
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entity.node_id(), Some(person));
+    }
+
+    #[test]
+    fn test_node_scan_iterator_empty_storage() {
+        let current = Arc::new(CurrentStorage::new());
+        let mut iter = NodeScanIterator::new(None, current);
+
+        assert!(iter.next().is_none());
+    }
+
+    // ==================== VectorResultIterator Tests ====================
+
+    #[test]
+    fn test_vector_result_iterator_with_scores() {
+        let current = Arc::new(CurrentStorage::new());
+
+        let node1 = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        let node2 = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Bob")
+                    .insert_vector("embedding", &[0.0f32, 1.0, 0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let results = vec![(node1, 0.95), (node2, 0.85)];
+
+        let mut iter = VectorResultIterator::new(results, current);
+
+        let row1 = iter.next().unwrap().unwrap();
+        assert_eq!(row1.entity.node_id(), Some(node1));
+        assert_eq!(row1.score, Some(0.95));
+
+        let row2 = iter.next().unwrap().unwrap();
+        assert_eq!(row2.entity.node_id(), Some(node2));
+        assert_eq!(row2.score, Some(0.85));
+
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_vector_result_iterator_missing_node() {
+        let current = Arc::new(CurrentStorage::new());
+
+        // Node doesn't exist
+        let results = vec![(NodeId::new(999).unwrap(), 0.95)];
+        let mut iter = VectorResultIterator::new(results, current);
+
+        let result = iter.next().unwrap();
+        assert!(result.is_err());
+    }
+
+    // ==================== TemporalNodeIterator Tests ====================
+
+    #[test]
+    fn test_temporal_node_iterator_returns_current_state() {
+        use crate::storage::historical::HistoricalStorage;
+        use crate::storage::version::AnchorConfig;
+
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
+            AnchorConfig::default(),
+        )));
+
+        let node = current
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+
+        let node_ids = vec![node];
+        let now = crate::core::temporal::time::now();
+
+        let mut iter = TemporalNodeIterator::new(node_ids, now, now, current, historical);
+
+        let row = iter.next().unwrap().unwrap();
+        assert_eq!(row.entity.node_id(), Some(node));
+        assert_eq!(row.timestamp, Some(now));
+    }
+
+    #[test]
+    fn test_temporal_node_iterator_empty() {
+        use crate::storage::historical::HistoricalStorage;
+        use crate::storage::version::AnchorConfig;
+
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
+            AnchorConfig::default(),
+        )));
+
+        let node_ids = vec![];
+        let now = crate::core::temporal::time::now();
+
+        let mut iter = TemporalNodeIterator::new(node_ids, now, now, current, historical);
+
+        assert!(iter.next().is_none());
+    }
 }
