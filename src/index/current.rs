@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 /// Guard for accessing adjacency list without allocation.
 ///
 /// This guard holds an `Arc<AdjacencyIndex>` to keep the data alive,
-/// and provides zero-copy access to the adjacency slice.
+/// and provides zero-copy access to the adjacency slice using indices.
 ///
 /// # Performance
 ///
@@ -26,30 +26,24 @@ use std::sync::{Arc, RwLock};
 /// - Just an Arc clone (atomic increment, ~5-10ns)
 /// - Derefs directly to `&[AdjacencyEntry]`
 ///
-/// # Safety
+/// # Implementation
 ///
-/// The internal raw pointer is valid as long as the Arc is held,
-/// which is guaranteed by storing both in the same struct.
+/// Uses start/end indices instead of raw pointers to avoid unsafe code.
+/// The NodeId is stored to enable index lookup on each dereference.
 pub struct AdjacencyGuard {
-    /// Keeps the adjacency index alive.
-    _index: Arc<AdjacencyIndex>,
-    /// Pointer to the adjacency slice within the index.
-    /// Valid as long as `_index` is held.
-    slice: *const [AdjacencyEntry],
+    /// Keeps the adjacency index alive and provides data access.
+    index: Arc<AdjacencyIndex>,
+    /// Node whose adjacency list we're accessing.
+    node: NodeId,
 }
 
 impl AdjacencyGuard {
-    /// Create a new adjacency guard.
+    /// Create a new adjacency guard for a node's adjacency list.
     ///
-    /// # Safety
-    ///
-    /// The slice pointer must point to valid data within the provided Arc,
-    /// and must remain valid for the lifetime of the Arc.
-    fn new(index: Arc<AdjacencyIndex>, slice: &[AdjacencyEntry]) -> Self {
-        AdjacencyGuard {
-            _index: index,
-            slice: slice as *const [AdjacencyEntry],
-        }
+    /// The guard will keep the index alive and provide zero-copy access
+    /// to the node's adjacency slice.
+    fn new(index: Arc<AdjacencyIndex>, node: NodeId) -> Self {
+        AdjacencyGuard { index, node }
     }
 }
 
@@ -58,22 +52,30 @@ impl Deref for AdjacencyGuard {
 
     #[inline]
     fn deref(&self) -> &[AdjacencyEntry] {
-        // SAFETY: The slice pointer is valid as long as _index is held.
-        // We construct the pointer from a valid slice in `new()`, and
-        // the Arc ensures the data remains alive.
-        unsafe { &*self.slice }
+        // Safe: Returns &'a [AdjacencyEntry] where 'a is tied to &self lifetime.
+        // The Arc ensures the AdjacencyIndex remains alive for the lifetime of
+        // the guard, and AdjacencyIndex is immutable after construction.
+        self.index.get_adjacency(self.node)
     }
 }
 
-// Safety: AdjacencyGuard can be sent between threads because:
-// - Arc<AdjacencyIndex> is Send
-// - The raw pointer is just data, and we only dereference it via Deref
-unsafe impl Send for AdjacencyGuard {}
+impl std::fmt::Debug for AdjacencyGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdjacencyGuard")
+            .field("node", &self.node)
+            .field("entries", &self.deref())
+            .finish()
+    }
+}
 
-// Safety: AdjacencyGuard can be shared between threads because:
-// - The underlying data is immutable (AdjacencyIndex is immutable after construction)
-// - Arc provides synchronization
-unsafe impl Sync for AdjacencyGuard {}
+impl PartialEq for AdjacencyGuard {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare the actual adjacency slice contents, not the internal fields
+        self.deref() == other.deref()
+    }
+}
+
+impl Eq for AdjacencyGuard {}
 
 /// Concurrent indexes for current-state graph queries.
 ///
@@ -273,8 +275,7 @@ impl CurrentIndexes {
     pub fn get_outgoing(&self, source: NodeId) -> AdjacencyGuard {
         self.ensure_adjacency_current();
         let index = self.outgoing.load_full();
-        let slice = index.get_adjacency(source);
-        AdjacencyGuard::new(index, slice)
+        AdjacencyGuard::new(index, source)
     }
 
     /// Get incoming edges for a node.
@@ -288,8 +289,7 @@ impl CurrentIndexes {
     pub fn get_incoming(&self, target: NodeId) -> AdjacencyGuard {
         self.ensure_adjacency_current();
         let index = self.incoming.load_full();
-        let slice = index.get_adjacency(target);
-        AdjacencyGuard::new(index, slice)
+        AdjacencyGuard::new(index, target)
     }
 
     /// Get outgoing edges with a specific label.
@@ -817,10 +817,12 @@ mod tests {
         let guard = indexes.get_incoming(NodeId::new(2).unwrap());
         assert_eq!(guard.len(), 2);
 
-        // Should have edges from nodes 0 and 1
+        // AdjacencyIndex guarantees sorted order by target node
         let sources: Vec<_> = guard.iter().map(|e| e.target).collect();
-        assert!(sources.contains(&NodeId::new(0).unwrap()));
-        assert!(sources.contains(&NodeId::new(1).unwrap()));
+        assert_eq!(
+            sources,
+            vec![NodeId::new(0).unwrap(), NodeId::new(1).unwrap()]
+        );
     }
 }
 
