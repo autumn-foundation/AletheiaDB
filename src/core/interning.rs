@@ -91,6 +91,17 @@ pub struct StringInterner {
     id_exhaustion_threshold: u32,
 }
 
+/// Metrics for the string interner.
+#[derive(Debug, Clone)]
+pub struct InternerMetrics {
+    /// Total IDs allocated (monotonically increasing)
+    pub total_ids_allocated: u32,
+    /// Active cache size (may be less than total due to eviction)
+    pub active_cache_size: usize,
+    /// Permanent entries in id_to_string (never evicted)
+    pub permanent_entries: usize,
+}
+
 impl StringInterner {
     /// Create a new empty string interner with default capacity limit.
     pub fn new() -> Self {
@@ -293,6 +304,15 @@ impl StringInterner {
         self.all_strings.clear();
         self.id_to_string.clear();
         self.next_id.store(0, Ordering::Relaxed);
+    }
+
+    /// Get metrics about the interner state.
+    pub fn metrics(&self) -> InternerMetrics {
+        InternerMetrics {
+            total_ids_allocated: self.next_id.load(Ordering::Relaxed),
+            active_cache_size: self.active_cache.len(),
+            permanent_entries: self.id_to_string.len(),
+        }
     }
 }
 
@@ -823,4 +843,23 @@ fn test_id_exhaustion_warning() {
     // Next intern should return error (ID exhaustion warning)
     let result = interner.intern("key_100");
     assert!(result.is_err(), "Should fail at threshold");
+}
+
+#[test]
+fn test_interner_metrics() {
+    let config = InternerConfig {
+        max_cache_size: 100,
+        ..Default::default()
+    };
+    let interner = StringInterner::with_config(config);
+
+    // Intern 150 strings (causes cache eviction)
+    for i in 0..150 {
+        interner.intern(format!("key_{}", i)).unwrap();
+    }
+
+    let metrics = interner.metrics();
+    assert_eq!(metrics.total_ids_allocated, 150);
+    assert_eq!(metrics.active_cache_size, 100); // Capped at max
+    assert_eq!(metrics.permanent_entries, 150); // id_to_string never evicts
 }
