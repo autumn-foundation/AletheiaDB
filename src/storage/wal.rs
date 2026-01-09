@@ -338,8 +338,8 @@ pub struct WriteAheadLog {
     /// Tracks whether there's unflushed data (for piggybacking optimization)
     has_pending_data: bool,
     /// Reusable serialization buffer to avoid allocating Vec per entry (Issue #20)
-    /// Mutex allows lock to be released before I/O, minimizing contention
-    serialize_buffer: std::sync::Mutex<Vec<u8>>,
+    /// No Mutex needed - append() has &mut self, guaranteeing exclusive access
+    serialize_buffer: Vec<u8>,
 }
 
 /// Helper to deserialize and validate a NodeId from WAL buffer
@@ -535,9 +535,7 @@ impl WriteAheadLog {
             group_commit: None,
             async_writer: None,
             has_pending_data: false,
-            serialize_buffer: std::sync::Mutex::new(Vec::with_capacity(
-                SERIALIZE_BUFFER_INITIAL_CAPACITY,
-            )),
+            serialize_buffer: Vec::with_capacity(SERIALIZE_BUFFER_INITIAL_CAPACITY),
         };
 
         // Initialize background infrastructure based on durability mode
@@ -820,23 +818,16 @@ impl WriteAheadLog {
 
         let entry = WalEntry::new(self.current_lsn, operation);
 
-        // Serialize with lock held (fast ~500ns-1µs), then copy and release
-        // This minimizes lock contention - I/O happens without holding the lock
-        let serialized_data = {
-            let mut buffer = self.serialize_buffer.lock().map_err(|e| {
-                StorageError::IoError(format!("Serialize buffer lock poisoned: {}", e))
-            })?;
-            buffer.clear();
-            serialize_entry_into(&entry, &mut buffer)?;
-            buffer.to_vec() // Copy ~100-200ns, but releases lock immediately
-        };
+        // Serialize using the reusable buffer (zero-allocation after warmup)
+        self.serialize_buffer.clear();
+        serialize_entry_into(&entry, &mut self.serialize_buffer)?;
 
-        let serialized_len = serialized_data.len();
+        let serialized_len = self.serialize_buffer.len();
 
-        // Write without lock (slow I/O ~100µs-1ms doesn't block other threads)
+        // Write directly from the reused buffer
         if let Some(writer) = &mut self.writer {
             writer
-                .write_all(&serialized_data)
+                .write_all(&self.serialize_buffer)
                 .map_err(|e| StorageError::IoError(format!("Failed to write WAL entry: {}", e)))?;
         }
 
