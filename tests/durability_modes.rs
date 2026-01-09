@@ -555,6 +555,103 @@ fn test_write_with_options_closure_semantics() {
     assert_eq!(name_str, "test_node");
 }
 
+#[test]
+fn test_write_options_bulk_import_preset_integration() {
+    let db = GallifreyDB::new();
+
+    // Use bulk_import preset for fast loading - all writes in ONE transaction
+    let node_ids = db
+        .write_with_options(WriteOptions::bulk_import(), |tx| {
+            let mut ids = Vec::with_capacity(100);
+            for i in 0..100 {
+                let node_id = tx.create_node(
+                    "BulkData",
+                    PropertyMapBuilder::new()
+                        .insert("index", i as i64)
+                        .insert("data", format!("bulk_item_{}", i))
+                        .build(),
+                )?;
+                ids.push(node_id);
+            }
+            Ok(ids)
+        })
+        .expect("bulk import write failed");
+
+    // All nodes should be visible
+    for (i, node_id) in node_ids.iter().enumerate() {
+        let node = db.get_node(*node_id).expect("node should exist");
+        assert_eq!(get_label(&node), "BulkData");
+        assert_eq!(
+            node.properties.get("index"),
+            Some(&(i as i64).into()),
+            "node should have correct index"
+        );
+    }
+}
+
+#[test]
+fn test_write_options_critical_preset_integration() {
+    let db = GallifreyDB::new();
+
+    // Use critical preset for important data
+    let node_id = db
+        .write_with_options(WriteOptions::critical(), |tx| {
+            tx.create_node(
+                "Payment",
+                PropertyMapBuilder::new()
+                    .insert("amount", 10000i64)
+                    .insert("currency", "USD")
+                    .insert("status", "completed")
+                    .build(),
+            )
+        })
+        .expect("critical write failed");
+
+    // Data should be immediately durable and visible
+    let node = db.get_node(node_id).expect("payment node should exist");
+    assert_eq!(get_label(&node), "Payment");
+    assert_eq!(node.properties.get("amount"), Some(&10000i64.into()));
+    assert_eq!(
+        node.properties.get("status"),
+        Some(&"completed".to_string().into())
+    );
+}
+
+#[test]
+fn test_preset_methods_mixed_usage() {
+    let db = GallifreyDB::new();
+
+    // Use bulk_import for initial data
+    let bulk_node = db
+        .write_with_options(WriteOptions::bulk_import(), |tx| {
+            tx.create_node(
+                "InitialData",
+                PropertyMapBuilder::new().insert("type", "bulk").build(),
+            )
+        })
+        .expect("bulk write failed");
+
+    // Use critical for important update
+    let critical_node = db
+        .write_with_options(WriteOptions::critical(), |tx| {
+            tx.create_node(
+                "CriticalData",
+                PropertyMapBuilder::new().insert("type", "critical").build(),
+            )
+        })
+        .expect("critical write failed");
+
+    // Both should be visible
+    assert_eq!(
+        get_label(&db.get_node(bulk_node).expect("lookup")),
+        "InitialData"
+    );
+    assert_eq!(
+        get_label(&db.get_node(critical_node).expect("lookup")),
+        "CriticalData"
+    );
+}
+
 // =============================================================================
 // Error Propagation Tests
 // =============================================================================

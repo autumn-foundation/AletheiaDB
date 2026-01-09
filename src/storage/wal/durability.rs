@@ -480,6 +480,12 @@ pub struct WriteOptions {
 }
 
 impl WriteOptions {
+    /// Flush interval for bulk import operations (in milliseconds).
+    ///
+    /// This value provides a good balance between throughput and data-at-risk
+    /// window for typical bulk loading scenarios.
+    const BULK_IMPORT_FLUSH_INTERVAL_MS: u64 = 100;
+
     /// Create new WriteOptions with default settings.
     pub fn new() -> Self {
         Self::default()
@@ -494,6 +500,76 @@ impl WriteOptions {
     /// Get the effective durability mode, falling back to the provided default.
     pub fn effective_durability(&self, default: DurabilityMode) -> DurabilityMode {
         self.durability_mode.unwrap_or(default)
+    }
+
+    /// Preset for bulk imports - uses Async mode for maximum throughput.
+    ///
+    /// This preset configures the transaction to use asynchronous durability
+    /// with a 100ms flush interval, providing high write throughput at the
+    /// cost of a small data-at-risk window on crash.
+    ///
+    /// # Use Cases
+    ///
+    /// - Bulk data loading from external sources
+    /// - ETL pipelines where source data can be replayed
+    /// - Initial database population
+    /// - Non-critical data ingestion
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::{GallifreyDB, WriteOptions};
+    ///
+    /// let db = GallifreyDB::new();
+    ///
+    /// // Use bulk_import preset for high-throughput loading
+    /// db.write_with_options(WriteOptions::bulk_import(), |tx| {
+    ///     for record in million_records {
+    ///         tx.create_node("Event", record.into())?;
+    ///     }
+    ///     Ok(())
+    /// })?;
+    /// ```
+    pub fn bulk_import() -> Self {
+        Self {
+            durability_mode: Some(DurabilityMode::Async {
+                flush_interval_ms: Self::BULK_IMPORT_FLUSH_INTERVAL_MS,
+            }),
+        }
+    }
+
+    /// Preset for critical operations - uses Synchronous mode for maximum durability.
+    ///
+    /// This preset configures the transaction to use synchronous durability,
+    /// waiting for fsync to complete before returning. This ensures that data
+    /// is durably written to disk before the transaction completes, providing
+    /// full ACID guarantees.
+    ///
+    /// # Use Cases
+    ///
+    /// - Financial transactions
+    /// - Critical business data
+    /// - Audit log entries
+    /// - Any data that cannot be lost or replayed
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::{GallifreyDB, WriteOptions};
+    ///
+    /// let db = GallifreyDB::new();
+    ///
+    /// // Use critical preset for important data
+    /// db.write_with_options(WriteOptions::critical(), |tx| {
+    ///     tx.create_node("Payment", payment_data)?;
+    ///     tx.create_edge(user_id, payment_id, "MADE_PAYMENT", props)?;
+    ///     Ok(())
+    /// })?;
+    /// ```
+    pub fn critical() -> Self {
+        Self {
+            durability_mode: Some(DurabilityMode::Synchronous),
+        }
     }
 }
 
@@ -621,6 +697,53 @@ mod tests {
         let opts = WriteOptions::new();
         let effective = opts.effective_durability(DurabilityMode::Synchronous);
         assert_eq!(effective, DurabilityMode::Synchronous);
+    }
+
+    #[test]
+    fn test_write_options_bulk_import_preset() {
+        let opts = WriteOptions::bulk_import();
+        assert!(opts.durability_mode.is_some());
+        let mode = opts.durability_mode.unwrap();
+
+        // bulk_import should use Async mode with exact 100ms flush interval
+        match mode {
+            DurabilityMode::Async { flush_interval_ms } => {
+                assert_eq!(
+                    flush_interval_ms,
+                    WriteOptions::BULK_IMPORT_FLUSH_INTERVAL_MS,
+                    "bulk_import preset should use the defined flush interval constant"
+                );
+            }
+            _ => panic!("bulk_import should return Async mode, got {:?}", mode),
+        }
+    }
+
+    #[test]
+    fn test_write_options_critical_preset() {
+        let opts = WriteOptions::critical();
+        assert!(opts.durability_mode.is_some());
+        let mode = opts.durability_mode.unwrap();
+
+        // critical should use Synchronous mode for maximum durability
+        assert_eq!(
+            mode,
+            DurabilityMode::Synchronous,
+            "critical should return Synchronous mode"
+        );
+    }
+
+    #[test]
+    fn test_preset_methods_can_chain_with_other_methods() {
+        // Test that presets can be further customized if needed
+        let opts = WriteOptions::bulk_import();
+
+        // Verify the preset is set
+        assert!(opts.durability_mode.is_some());
+
+        // Could be chained with other future WriteOptions fields
+        // (currently only durability_mode exists, but this tests API design)
+        let effective = opts.effective_durability(DurabilityMode::Synchronous);
+        assert!(matches!(effective, DurabilityMode::Async { .. }));
     }
 
     #[test]
