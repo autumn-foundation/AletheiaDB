@@ -31,6 +31,13 @@
 use super::WalEntry;
 use crate::core::temporal::{Timestamp, time};
 use crate::utils::error::{Result, StorageError};
+
+// Using crossbeam_channel instead of std::sync::mpsc because:
+// 1. Bounded channels with try_send() for backpressure handling
+// 2. Better performance characteristics (lock-free fast path)
+// 3. recv_timeout() support (std::mpsc only has recv_timeout on Receiver)
+// 4. More reliable disconnect semantics for graceful shutdown
+// 5. Well-tested in production systems (used by tokio, rayon, etc.)
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -104,13 +111,22 @@ pub struct AsyncWalWriter {
 }
 
 /// Metrics for async WAL operations.
+///
+/// # Thread Safety
+///
+/// All metrics use `Ordering::Relaxed` for performance. This means:
+/// - Values are **approximate** and may be slightly stale
+/// - `buffer_depth` may not exactly match the channel size due to race conditions
+/// - Suitable for observability/monitoring but not for correctness guarantees
+///
+/// This is acceptable because metrics are for observability, not synchronization.
 #[derive(Debug)]
 pub struct AsyncWalMetrics {
-    /// Current number of entries in buffer
+    /// Approximate number of entries in buffer (may be stale)
     pub buffer_depth: AtomicUsize,
-    /// Total number of entries written
+    /// Total number of entries written (approximate)
     pub total_entries: AtomicU64,
-    /// Total number of fsyncs performed
+    /// Total number of fsyncs performed (approximate)
     pub total_syncs: AtomicU64,
 }
 
@@ -240,6 +256,16 @@ impl AsyncWalWriter {
     /// 1. Drains all remaining entries from the channel
     /// 2. Performs final fsync
     /// 3. Exits cleanly
+    ///
+    /// # Channel Disconnect Guarantees
+    ///
+    /// The `crossbeam_channel` provides critical ordering guarantees:
+    /// 1. When the sender is dropped, `recv_timeout()` will return `Disconnected`
+    /// 2. This happens **AFTER** all pending entries have been delivered
+    /// 3. Therefore, calling `try_recv()` in a loop will retrieve all remaining entries
+    /// 4. No entries are lost during shutdown - all are fsynced before thread exit
+    ///
+    /// This guarantee is essential for data durability on graceful shutdown.
     fn sync_loop<F>(
         receiver: Receiver<WalEntry>,
         write_fn: F,
@@ -334,7 +360,17 @@ impl Drop for AsyncWalWriter {
 
         // Wait for background thread to drain and exit
         if let Some(handle) = self.sync_thread.take() {
-            let _ = handle.join(); // Blocks until thread completes
+            // CRITICAL: Capture and log background thread panics to prevent silent data loss
+            if let Err(e) = handle.join() {
+                // In production, this should use proper logging (e.g., tracing)
+                eprintln!(
+                    "CRITICAL: AsyncWalWriter background thread panicked: {:?}",
+                    e
+                );
+                eprintln!("This may indicate data loss. Check WAL integrity.");
+                // Note: We can't return an error from Drop, but logging is essential
+                // for debugging and alerting operators to potential data corruption
+            }
         }
     }
 }
@@ -354,7 +390,9 @@ mod tests {
             lsn: LSN(lsn),
             timestamp: 0,
             operation: WalOperation::CreateNode {
-                node_id: NodeId::new_unchecked(lsn),
+                // SECURITY: Use validated NodeId::new() instead of new_unchecked()
+                // per CODING_STANDARDS.md to prevent DoS attacks from invalid IDs
+                node_id: NodeId::new(lsn).expect("valid node ID"),
                 label: "TestNode".to_string(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(0),
