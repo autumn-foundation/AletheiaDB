@@ -32,6 +32,13 @@ pub const DEFAULT_MAX_VERSIONS_PER_ENTITY: usize = 1_000;
 /// Default maximum age for versions in milliseconds (365 days)
 pub const DEFAULT_MAX_VERSION_AGE_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 
+/// Maximum recursion depth for version reconstruction (DoS protection).
+///
+/// This limit prevents stack overflow from corrupted version chains or cycles.
+/// A depth of 100 is sufficient for any legitimate use case since anchors are
+/// typically created every 10-20 versions.
+pub const MAX_RECONSTRUCTION_DEPTH: usize = 100;
+
 /// Retention policy for version history (DoS protection).
 ///
 /// Controls how many versions are kept and for how long to prevent
@@ -624,7 +631,41 @@ impl HistoricalStorage {
     /// immutable per version and temporal visibility is checked separately in
     /// `find_node_version_at_time()`, cached properties are always valid and don't
     /// require invalidation when temporal intervals are modified.
+    ///
+    /// **Depth Limit**: Returns `TemporalError::MaxDepthExceeded` if the delta
+    /// chain exceeds `MAX_RECONSTRUCTION_DEPTH` (100). This protects against
+    /// stack overflow from corrupted version chains or cycles.
     pub fn reconstruct_node_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
+        self.reconstruct_node_properties_with_depth(version_id, 0)
+    }
+
+    /// Internal helper for node property reconstruction with depth tracking.
+    ///
+    /// The depth parameter tracks how many delta versions have been traversed.
+    /// If depth exceeds MAX_RECONSTRUCTION_DEPTH, returns an error to prevent
+    /// stack overflow from corrupted version chains or cycles.
+    fn reconstruct_node_properties_with_depth(
+        &self,
+        version_id: VersionId,
+        depth: usize,
+    ) -> Result<PropertyMap> {
+        // Check depth limit first (DoS protection)
+        // Using >= for clarity: depth is 0-indexed, so this limits to exactly
+        // MAX_RECONSTRUCTION_DEPTH recursive calls (depths 0..99 = 100 calls)
+        if depth >= MAX_RECONSTRUCTION_DEPTH {
+            // Get the node ID for error reporting
+            let entity_id = self
+                .node_versions
+                .get(&version_id)
+                .map(|v| v.node_id.to_string())
+                .unwrap_or_else(|| format!("version {}", version_id));
+            return Err(TemporalError::MaxDepthExceeded {
+                max_depth: MAX_RECONSTRUCTION_DEPTH,
+                entity_id,
+            }
+            .into());
+        }
+
         // Check cache first (fast path for concurrent reads)
         if let Some(cached) = self.node_property_cache.get(&version_id) {
             return Ok(cached.as_ref().clone());
@@ -647,8 +688,9 @@ impl HistoricalStorage {
                         reason: "Delta version has no previous version".to_string(),
                     })?;
 
-                // Recursively reconstruct previous version (may hit cache)
-                let base_properties = self.reconstruct_node_properties(prev_id)?;
+                // Recursively reconstruct previous version with incremented depth
+                let base_properties =
+                    self.reconstruct_node_properties_with_depth(prev_id, depth + 1)?;
 
                 // Apply this delta
                 delta.apply(&base_properties)
@@ -666,7 +708,41 @@ impl HistoricalStorage {
     ///
     /// **Cache Behavior**: Same as `reconstruct_node_properties()` - properties are
     /// immutable per VersionId, so caching doesn't require invalidation.
+    ///
+    /// **Depth Limit**: Returns `TemporalError::MaxDepthExceeded` if the delta
+    /// chain exceeds `MAX_RECONSTRUCTION_DEPTH` (100). This protects against
+    /// stack overflow from corrupted version chains or cycles.
     pub fn reconstruct_edge_properties(&self, version_id: VersionId) -> Result<PropertyMap> {
+        self.reconstruct_edge_properties_with_depth(version_id, 0)
+    }
+
+    /// Internal helper for edge property reconstruction with depth tracking.
+    ///
+    /// The depth parameter tracks how many delta versions have been traversed.
+    /// If depth exceeds MAX_RECONSTRUCTION_DEPTH, returns an error to prevent
+    /// stack overflow from corrupted version chains or cycles.
+    fn reconstruct_edge_properties_with_depth(
+        &self,
+        version_id: VersionId,
+        depth: usize,
+    ) -> Result<PropertyMap> {
+        // Check depth limit first (DoS protection)
+        // Using >= for clarity: depth is 0-indexed, so this limits to exactly
+        // MAX_RECONSTRUCTION_DEPTH recursive calls (depths 0..99 = 100 calls)
+        if depth >= MAX_RECONSTRUCTION_DEPTH {
+            // Get the edge ID for error reporting
+            let entity_id = self
+                .edge_versions
+                .get(&version_id)
+                .map(|v| v.edge_id.to_string())
+                .unwrap_or_else(|| format!("version {}", version_id));
+            return Err(TemporalError::MaxDepthExceeded {
+                max_depth: MAX_RECONSTRUCTION_DEPTH,
+                entity_id,
+            }
+            .into());
+        }
+
         // Check cache first (fast path for concurrent reads)
         if let Some(cached) = self.edge_property_cache.get(&version_id) {
             return Ok(cached.as_ref().clone());
@@ -688,8 +764,9 @@ impl HistoricalStorage {
                         reason: "Delta version has no previous version".to_string(),
                     })?;
 
-                // Recursively reconstruct previous version (may hit cache)
-                let base_properties = self.reconstruct_edge_properties(prev_id)?;
+                // Recursively reconstruct previous version with incremented depth
+                let base_properties =
+                    self.reconstruct_edge_properties_with_depth(prev_id, depth + 1)?;
                 delta.apply(&base_properties)
             }
         };
@@ -1147,7 +1224,10 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::new(TimeRange::new(0, 1000), TimeRange::new(0, Timestamp::MAX)),
+                BiTemporalInterval::new(
+                    TimeRange::new(0, 1000).unwrap(),
+                    TimeRange::new(0, Timestamp::MAX).unwrap(),
+                ),
                 label,
                 PropertyMapBuilder::new().insert("age", 30i64).build(),
             )
@@ -1158,8 +1238,8 @@ mod tests {
                 node_id,
                 v2,
                 BiTemporalInterval::new(
-                    TimeRange::new(1000, 2000),
-                    TimeRange::new(0, Timestamp::MAX),
+                    TimeRange::new(1000, 2000).unwrap(),
+                    TimeRange::new(0, Timestamp::MAX).unwrap(),
                 ),
                 label,
                 PropertyMapBuilder::new().insert("age", 31i64).build(),
@@ -1171,8 +1251,8 @@ mod tests {
                 node_id,
                 v3,
                 BiTemporalInterval::new(
-                    TimeRange::new(2000, Timestamp::MAX),
-                    TimeRange::new(0, Timestamp::MAX),
+                    TimeRange::new(2000, Timestamp::MAX).unwrap(),
+                    TimeRange::new(0, Timestamp::MAX).unwrap(),
                 ),
                 label,
                 PropertyMapBuilder::new().insert("age", 32i64).build(),
@@ -1765,8 +1845,8 @@ mod tests {
                     node_id,
                     VersionId::new(i as u64).unwrap(),
                     BiTemporalInterval::new(
-                        TimeRange::new(*start, *end),
-                        TimeRange::new(0, Timestamp::MAX),
+                        TimeRange::new(*start, *end).unwrap(),
+                        TimeRange::new(0, Timestamp::MAX).unwrap(),
                     ),
                     label,
                     PropertyMapBuilder::new()
@@ -2782,5 +2862,261 @@ mod tests {
             .unwrap();
         assert_eq!(node_version.data.get_vector_snapshot_id(), Some(1));
         assert_eq!(edge_version.data.get_vector_snapshot_id(), Some(2));
+    }
+
+    // ========================================================================
+    // Tests for Issue #17: Recursion depth limit in version reconstruction
+    // ========================================================================
+
+    use super::{MAX_RECONSTRUCTION_DEPTH, RetentionPolicy};
+
+    #[test]
+    fn test_reconstruction_depth_limit_exceeded_for_nodes() {
+        // Create storage with very high anchor interval to force delta creation
+        // and cache_size=0 to prevent caching from defeating the depth test
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 200, // Won't create anchors until 200 versions
+                max_delta_chain: 200,
+            },
+            RetentionPolicy::default(),
+            0, // Disable cache to test full depth traversal
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create first version (anchor)
+        let v0 = VersionId::new(0).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v0,
+                BiTemporalInterval::current(0),
+                label,
+                PropertyMapBuilder::new().insert("counter", 0i64).build(),
+            )
+            .unwrap();
+
+        // Create 100 more versions (deltas) to exceed the depth limit
+        // With >= check, depth 100 triggers error, so 100 deltas will exceed
+        for i in 1..=MAX_RECONSTRUCTION_DEPTH {
+            let vid = VersionId::new(i as u64).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current(i as i64 * 1000),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("counter", i as i64)
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        // Reconstruction should fail with MaxDepthExceeded
+        let last_version_id = VersionId::new(MAX_RECONSTRUCTION_DEPTH as u64).unwrap();
+        let result = storage.reconstruct_node_properties(last_version_id);
+
+        assert!(result.is_err(), "Expected MaxDepthExceeded error");
+        let err = result.unwrap_err();
+        match err {
+            crate::utils::error::Error::Temporal(
+                crate::utils::error::TemporalError::MaxDepthExceeded { max_depth, .. },
+            ) => {
+                assert_eq!(max_depth, MAX_RECONSTRUCTION_DEPTH);
+            }
+            other => panic!("Expected MaxDepthExceeded error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_reconstruction_within_depth_limit_works_for_nodes() {
+        // Create storage with high anchor interval to force delta creation
+        // and cache_size=0 to test full depth traversal
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 200,
+                max_delta_chain: 200,
+            },
+            RetentionPolicy::default(),
+            0, // Disable cache to test full depth traversal
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create first version (anchor)
+        let v0 = VersionId::new(0).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v0,
+                BiTemporalInterval::current(0),
+                label,
+                PropertyMapBuilder::new().insert("counter", 0i64).build(),
+            )
+            .unwrap();
+
+        // Create exactly MAX_RECONSTRUCTION_DEPTH - 1 versions (should be within limit)
+        // With >= check, 99 deltas means max depth of 99 which is < 100
+        for i in 1..MAX_RECONSTRUCTION_DEPTH {
+            let vid = VersionId::new(i as u64).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current(i as i64 * 1000),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("counter", i as i64)
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        // Reconstruction should succeed for version at depth limit
+        let last_version_id = VersionId::new((MAX_RECONSTRUCTION_DEPTH - 1) as u64).unwrap();
+        let result = storage.reconstruct_node_properties(last_version_id);
+
+        assert!(
+            result.is_ok(),
+            "Expected successful reconstruction within depth limit"
+        );
+        let props = result.unwrap();
+        assert_eq!(
+            props.get("counter").and_then(|v| v.as_int()),
+            Some((MAX_RECONSTRUCTION_DEPTH - 1) as i64)
+        );
+    }
+
+    #[test]
+    fn test_reconstruction_depth_limit_exceeded_for_edges() {
+        // Create storage with very high anchor interval to force delta creation
+        // and cache_size=0 to prevent caching from defeating the depth test
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 200,
+                max_delta_chain: 200,
+            },
+            RetentionPolicy::default(),
+            0, // Disable cache to test full depth traversal
+        );
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(100).unwrap();
+        let target = NodeId::new(200).unwrap();
+        let label = GLOBAL_INTERNER.intern("TestEdge").unwrap();
+
+        // Create first version (anchor)
+        let v0 = VersionId::new(0).unwrap();
+        storage
+            .add_edge_version(
+                edge_id,
+                v0,
+                BiTemporalInterval::current(0),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new().insert("weight", 0.0f64).build(),
+            )
+            .unwrap();
+
+        // Create 100 more versions (deltas) to exceed the depth limit
+        // With >= check, depth 100 triggers error, so 100 deltas will exceed
+        for i in 1..=MAX_RECONSTRUCTION_DEPTH {
+            let vid = VersionId::new(i as u64).unwrap();
+            storage
+                .add_edge_version(
+                    edge_id,
+                    vid,
+                    BiTemporalInterval::current(i as i64 * 1000),
+                    label,
+                    source,
+                    target,
+                    PropertyMapBuilder::new().insert("weight", i as f64).build(),
+                )
+                .unwrap();
+        }
+
+        // Reconstruction should fail with MaxDepthExceeded
+        let last_version_id = VersionId::new(MAX_RECONSTRUCTION_DEPTH as u64).unwrap();
+        let result = storage.reconstruct_edge_properties(last_version_id);
+
+        assert!(result.is_err(), "Expected MaxDepthExceeded error");
+        let err = result.unwrap_err();
+        match err {
+            crate::utils::error::Error::Temporal(
+                crate::utils::error::TemporalError::MaxDepthExceeded { max_depth, .. },
+            ) => {
+                assert_eq!(max_depth, MAX_RECONSTRUCTION_DEPTH);
+            }
+            other => panic!("Expected MaxDepthExceeded error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_reconstruction_within_depth_limit_works_for_edges() {
+        // Create storage with high anchor interval to force delta creation
+        // and cache_size=0 to test full depth traversal
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 200,
+                max_delta_chain: 200,
+            },
+            RetentionPolicy::default(),
+            0, // Disable cache to test full depth traversal
+        );
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(100).unwrap();
+        let target = NodeId::new(200).unwrap();
+        let label = GLOBAL_INTERNER.intern("TestEdge").unwrap();
+
+        // Create first version (anchor)
+        let v0 = VersionId::new(0).unwrap();
+        storage
+            .add_edge_version(
+                edge_id,
+                v0,
+                BiTemporalInterval::current(0),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new().insert("weight", 0.0f64).build(),
+            )
+            .unwrap();
+
+        // Create exactly MAX_RECONSTRUCTION_DEPTH - 1 versions (should be within limit)
+        // With >= check, 99 deltas means max depth of 99 which is < 100
+        for i in 1..MAX_RECONSTRUCTION_DEPTH {
+            let vid = VersionId::new(i as u64).unwrap();
+            storage
+                .add_edge_version(
+                    edge_id,
+                    vid,
+                    BiTemporalInterval::current(i as i64 * 1000),
+                    label,
+                    source,
+                    target,
+                    PropertyMapBuilder::new().insert("weight", i as f64).build(),
+                )
+                .unwrap();
+        }
+
+        // Reconstruction should succeed for version at depth limit
+        let last_version_id = VersionId::new((MAX_RECONSTRUCTION_DEPTH - 1) as u64).unwrap();
+        let result = storage.reconstruct_edge_properties(last_version_id);
+
+        assert!(
+            result.is_ok(),
+            "Expected successful reconstruction within depth limit"
+        );
+        let props = result.unwrap();
+        assert_eq!(
+            props.get("weight").and_then(|v| v.as_float()),
+            Some((MAX_RECONSTRUCTION_DEPTH - 1) as f64)
+        );
     }
 }

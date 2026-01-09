@@ -166,22 +166,6 @@ fn bench_read_transaction_overhead(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_wal_overhead(c: &mut Criterion) {
-    let db = GallifreyDB::new();
-
-    c.bench_function("write_with_wal_flush", |b| {
-        b.iter(|| {
-            db.write(|tx| {
-                tx.create_node(
-                    "Person",
-                    PropertyMapBuilder::new().insert("name", "Test").build(),
-                )
-            })
-            .unwrap();
-        });
-    });
-}
-
 /// Benchmark batch edge insertions to verify adjacency rebuild optimization.
 /// This measures the improvement from batching rebuilds at transaction commit.
 fn bench_batch_edge_insertions(c: &mut Criterion) {
@@ -875,7 +859,6 @@ criterion_group!(
     bench_explicit_transaction_commit,
     bench_implicit_vs_explicit,
     bench_read_transaction_overhead,
-    bench_wal_overhead,
     bench_batch_edge_insertions,
     bench_batch_edge_updates,
     bench_batch_edge_deletions,

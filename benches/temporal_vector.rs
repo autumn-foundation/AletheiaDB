@@ -146,7 +146,7 @@ fn bench_time_range_queries(c: &mut Criterion) {
                 }
 
                 let query_vector = gen_vector(128, 0);
-                let time_range = TimeRange::between(0, (snapshot_count * 10000) as i64);
+                let time_range = TimeRange::between(0, (snapshot_count * 10000) as i64).unwrap();
 
                 b.iter(|| {
                     let _ = index.find_similar_in_range(
@@ -342,7 +342,7 @@ fn bench_semantic_evolution(c: &mut Criterion) {
                     let _ = index.on_transaction();
                 }
 
-                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
+                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000).unwrap();
 
                 b.iter(|| {
                     let _ = index.semantic_evolution(black_box(node_id), black_box(time_range));
@@ -391,7 +391,7 @@ fn bench_track_semantic_drift(c: &mut Criterion) {
                     v[0] = 1.0;
                     v
                 };
-                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
+                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000).unwrap();
 
                 b.iter(|| {
                     let _ = index.track_semantic_drift(
@@ -438,7 +438,7 @@ fn bench_calculate_consecutive_drift(c: &mut Criterion) {
                     let _ = index.on_transaction();
                 }
 
-                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000);
+                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000).unwrap();
 
                 b.iter(|| {
                     let _ = index
@@ -490,7 +490,7 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
                     |index| {
                         // Measure semantic evolution retrieval
                         let node_id = NodeId::new(vector_count as u64 / 2).unwrap();
-                        let time_range = TimeRange::between(0, 10000);
+                        let time_range = TimeRange::between(0, 10000).unwrap();
                         let _ = index.semantic_evolution(node_id, time_range);
                     },
                     criterion::BatchSize::SmallInput,

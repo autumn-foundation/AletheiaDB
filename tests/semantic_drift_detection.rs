@@ -121,7 +121,7 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
     index.on_transaction_at(ts)?;
 
     // Query with threshold 0.3 - should get docs 4-9
-    let time_range = TimeRange::new(0, i64::MAX);
+    let time_range = TimeRange::new(0, i64::MAX).unwrap();
     let results = index.find_semantic_drift(0.3, time_range, DriftMetric::Cosine)?;
 
     // Verify results
@@ -235,7 +235,7 @@ fn test_semantic_drift_with_multiple_snapshots() -> Result<()> {
     }
 
     // Query for drift - should find the node
-    let time_range = TimeRange::new(0, i64::MAX);
+    let time_range = TimeRange::new(0, i64::MAX).unwrap();
     let results = index.find_semantic_drift(0.05, time_range, DriftMetric::Cosine)?;
 
     assert!(
@@ -296,7 +296,7 @@ fn test_semantic_drift_different_metrics() -> Result<()> {
     index.add(node_id, &embedding2, ts)?;
     index.on_transaction_at(ts)?;
 
-    let time_range = TimeRange::new(0, i64::MAX);
+    let time_range = TimeRange::new(0, i64::MAX).unwrap();
 
     // Test all three metrics
     let cosine_results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;

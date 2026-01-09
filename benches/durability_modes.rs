@@ -1,15 +1,26 @@
-//! Benchmarks for WAL durability modes
+//! Benchmarks for WAL durability modes and low-level WAL operations
 //!
 //! Compares performance of:
 //! - Synchronous: fsync per commit (baseline)
 //! - Async: Background flush thread
 //! - GroupCommit: Batched fsync with ACID guarantees
 //! - AsyncBatched: Async with intelligent batching (<100µs target)
+//!
+//! Also includes low-level WAL benchmarks:
+//! - WAL append operations (different operation types)
+//! - WAL throughput (batch operations)
+//! - Sync vs async WAL modes
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{
+    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
+};
 use gallifreydb::{
-    GallifreyDB, WriteOps, WriteOptions, core::PropertyMapBuilder, storage::wal::DurabilityMode,
-    storage::wal::WalConfig,
+    GallifreyDB, WriteOps, WriteOptions,
+    core::{
+        PropertyMapBuilder,
+        temporal::{BiTemporalInterval, time},
+    },
+    storage::wal::{DurabilityMode, WalConfig, WalOperation, WriteAheadLog},
 };
 use std::sync::Arc;
 use std::thread;
@@ -617,6 +628,146 @@ fn bench_async_batched_delays(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark low-level WAL append performance for different operation types.
+fn bench_wal_append(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wal_append");
+
+    // Benchmark appending different operation types
+    for op_type in &["create_node", "create_edge", "update_node"] {
+        group.bench_function(BenchmarkId::from_parameter(op_type), |b| {
+            let temp_dir = TempDir::new().unwrap();
+            let config = WalConfig {
+                wal_dir: temp_dir.path().to_path_buf(),
+                ..Default::default()
+            };
+            let mut wal = WriteAheadLog::new(config).unwrap();
+
+            b.iter(|| {
+                let operation = match *op_type {
+                    "create_node" => WalOperation::CreateNode {
+                        node_id: black_box(gallifreydb::core::id::NodeId::new(1).unwrap()),
+                        label: "Person".to_string(),
+                        properties: PropertyMapBuilder::new().build(),
+                        temporal: BiTemporalInterval::current(time::now()),
+                    },
+                    "create_edge" => WalOperation::CreateEdge {
+                        edge_id: black_box(gallifreydb::core::id::EdgeId::new(1).unwrap()),
+                        source: gallifreydb::core::id::NodeId::new(1).unwrap(),
+                        target: gallifreydb::core::id::NodeId::new(2).unwrap(),
+                        label: "KNOWS".to_string(),
+                        properties: PropertyMapBuilder::new().build(),
+                        temporal: BiTemporalInterval::current(time::now()),
+                    },
+                    _ => WalOperation::UpdateNode {
+                        node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
+                        version_id: gallifreydb::core::id::VersionId::new(2).unwrap(),
+                        label: "Person".to_string(),
+                        properties: PropertyMapBuilder::new().build(),
+                        temporal: BiTemporalInterval::current(time::now()),
+                    },
+                };
+                wal.append(operation).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmark WAL throughput with batched operations.
+/// Fixed: Now uses iter_batched to separate setup from measurement.
+fn bench_wal_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wal_throughput");
+    group.throughput(Throughput::Elements(1000));
+
+    group.bench_function("batch_1000_operations", |b| {
+        b.iter_batched(
+            || {
+                // SETUP (not measured)
+                let temp_dir = TempDir::new().unwrap();
+                let config = WalConfig {
+                    wal_dir: temp_dir.path().to_path_buf(),
+                    ..Default::default()
+                };
+                let wal = WriteAheadLog::new(config).unwrap();
+                (temp_dir, wal) // Keep temp_dir alive
+            },
+            |(temp_dir, mut wal)| {
+                // MEASUREMENT (only this is timed)
+                let start_lsn = wal.current_lsn();
+                for i in 0..1000 {
+                    let operation = WalOperation::CreateNode {
+                        node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
+                        label: "Person".to_string(),
+                        properties: PropertyMapBuilder::new().build(),
+                        temporal: BiTemporalInterval::current(time::now()),
+                    };
+                    black_box(wal.append(operation).unwrap());
+                }
+                // Verify we actually appended 1000 operations
+                let end_lsn = wal.current_lsn();
+                assert_eq!(
+                    end_lsn.0 - start_lsn.0,
+                    1000,
+                    "Expected 1000 operations appended, got {}",
+                    end_lsn.0 - start_lsn.0
+                );
+                drop(temp_dir); // Ensure cleanup
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+/// Benchmark WAL with different sync modes (sync vs async).
+/// Fixed: Now actually uses different durability modes.
+fn bench_wal_with_sync(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wal_sync_modes");
+
+    for (name, mode) in &[
+        (
+            "sync_off",
+            DurabilityMode::Async {
+                flush_interval_ms: 100,
+            },
+        ),
+        ("sync_on", DurabilityMode::Synchronous),
+    ] {
+        group.bench_function(BenchmarkId::from_parameter(name), |b| {
+            let temp_dir = TempDir::new().unwrap();
+            let config = WalConfig {
+                wal_dir: temp_dir.path().to_path_buf(),
+                ..Default::default()
+            }
+            .with_durability_mode(*mode);
+
+            // Verify config is using the correct durability mode
+            assert_eq!(
+                config.durability_mode, *mode,
+                "Config durability mode mismatch for {} benchmark",
+                name
+            );
+
+            let mut wal = WriteAheadLog::new(config).unwrap();
+
+            b.iter(|| {
+                let operation = WalOperation::CreateNode {
+                    node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
+                    label: "Person".to_string(),
+                    properties: PropertyMapBuilder::new().build(),
+                    temporal: BiTemporalInterval::current(time::now()),
+                };
+                wal.append(operation).unwrap();
+                wal.commit_with_mode(*mode).unwrap(); // ✅ Actually test durability!
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_single_transaction_latency,
@@ -628,5 +779,8 @@ criterion_group!(
     bench_async_batched_delays,
     bench_per_transaction_override,
     bench_mixed_workload,
+    bench_wal_append,
+    bench_wal_throughput,
+    bench_wal_with_sync,
 );
 criterion_main!(benches);

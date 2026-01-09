@@ -116,7 +116,7 @@ fn test_time_range_vector_query() -> Result<()> {
 
     // Query across time range
     let query = vec![1.0, 0.0, 0.0, 0.0];
-    let time_range = TimeRange::between(base_time, base_time + 3000);
+    let time_range = TimeRange::between(base_time, base_time + 3000).unwrap();
     let results = index.find_similar_in_range(&query, 5, time_range)?;
 
     // Should have results for multiple snapshots
@@ -350,7 +350,7 @@ fn test_semantic_evolution_end_to_end() -> Result<()> {
 
     // Get semantic evolution
     // Use a very wide time range to capture all snapshots (which use real timestamps)
-    let time_range = TimeRange::between(0, i64::MAX);
+    let time_range = TimeRange::between(0, i64::MAX).unwrap();
     let evolution = index.semantic_evolution(node_id, time_range)?;
 
     // Verify we captured all changes
@@ -395,7 +395,7 @@ fn test_track_semantic_drift_over_time() -> Result<()> {
     // Track drift from original vector
     let reference = vec![1.0, 0.0, 0.0, 0.0];
     // Use wide time range to capture all snapshots
-    let time_range = TimeRange::between(0, i64::MAX);
+    let time_range = TimeRange::between(0, i64::MAX).unwrap();
     let drift = index.track_semantic_drift(node_id, &reference, time_range)?;
 
     // Should have 4 measurements
@@ -433,7 +433,7 @@ fn test_calculate_consecutive_drift_end_to_end() -> Result<()> {
 
     // Calculate consecutive drift
     // Use wide time range to capture all snapshots
-    let time_range = TimeRange::between(0, i64::MAX);
+    let time_range = TimeRange::between(0, i64::MAX).unwrap();
     let drift = index.calculate_consecutive_drift(node_id, time_range)?;
 
     // Should have 3 drift measurements (4 vectors -> 3 pairs)
@@ -476,7 +476,7 @@ fn test_semantic_evolution_with_gaps() -> Result<()> {
 
     // Get evolution for node1
     // Use wide time range to capture all snapshots
-    let time_range = TimeRange::between(0, i64::MAX);
+    let time_range = TimeRange::between(0, i64::MAX).unwrap();
     let evolution = index.semantic_evolution(node1, time_range)?;
 
     // Node1 appears in all 3 snapshots:
@@ -504,7 +504,7 @@ fn test_empty_evolution_for_nonexistent_node() -> Result<()> {
 
     // Query for non-existent node
     let nonexistent = NodeId::new(999).unwrap();
-    let time_range = TimeRange::between(base_time, base_time + 1000);
+    let time_range = TimeRange::between(base_time, base_time + 1000).unwrap();
     let evolution = index.semantic_evolution(nonexistent, time_range)?;
 
     // Should return empty, not error
@@ -541,7 +541,7 @@ fn test_drift_calculation_with_normalized_vectors() -> Result<()> {
 
     // Calculate consecutive drift
     // Use wide time range to capture all snapshots
-    let time_range = TimeRange::between(0, i64::MAX);
+    let time_range = TimeRange::between(0, i64::MAX).unwrap();
     let drift = index.calculate_consecutive_drift(node_id, time_range)?;
 
     // Should have 2 drift measurements

@@ -114,7 +114,7 @@ fn test_find_similar_in_range() -> Result<()> {
 
     // Query range from 1500 to 2500
     let query = vec![1.0, 0.0, 0.0, 0.0];
-    let time_range = TimeRange::new(1500, 2500);
+    let time_range = TimeRange::new(1500, 2500).unwrap();
     let results = index.find_similar_in_range(&query, 5, time_range)?;
 
     // Should have results for timestamps in range
