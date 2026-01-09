@@ -60,6 +60,10 @@ jobs:
           python-version: '3.11'
 
       - name: Run benchmarks
+        env:
+          BENCH_SAMPLE_SIZE: 10
+          BENCH_MEASUREMENT_TIME: 1
+          BENCH_WARMUP_TIME: 1
         run: |
           set -o pipefail  # Ensure piped commands propagate failures
 
@@ -75,9 +79,9 @@ jobs:
             BENCH_TARGETS="--bench current_state --bench gallifreydb --bench transactions"
           fi
 
-          # Run benchmarks and capture output for github-action-benchmark 'cargo' tool support
-          # Use --sample-size 10 for balance between CI speed and statistical validity
-          cargo bench --all-features $BENCH_TARGETS -- --sample-size 10 | tee output.txt
+          # Run benchmarks with configured timing parameters
+          # BENCH_SAMPLE_SIZE, BENCH_MEASUREMENT_TIME, and BENCH_WARMUP_TIME are read from env
+          cargo bench --all-features $BENCH_TARGETS | tee output.txt
 
           # Verify that Criterion generated output
           if [ ! -d "target/criterion" ]; then

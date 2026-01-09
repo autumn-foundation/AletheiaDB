@@ -11,6 +11,8 @@
 //! - 1536: OpenAI text-embedding-3-small
 //! - 3072: OpenAI text-embedding-3-large
 
+mod common;
+
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::core::vector::{
     cosine_similarity, cosine_similarity_normalized, dot_product, euclidean_distance,
@@ -439,17 +441,9 @@ fn bench_dot_product_batch(c: &mut Criterion) {
     group.finish();
 }
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
-
-    Criterion::default().sample_size(sample_size)
-}
-
 criterion_group!(
     name = benches;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_cosine_similarity_dimensions,
     bench_cosine_similarity_openai,
     bench_cosine_similarity_normalized,

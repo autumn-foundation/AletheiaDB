@@ -7,6 +7,8 @@
 //! - Snapshot pruning
 //! - Temporal vector index overhead vs current-only index
 
+mod common;
+
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::core::id::NodeId;
 use gallifreydb::core::temporal::TimeRange;
@@ -502,17 +504,9 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
     group.finish();
 }
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
-
-    Criterion::default().sample_size(sample_size)
-}
-
 criterion_group!(
     name = benches;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_snapshot_creation,
     bench_point_in_time_queries,
     bench_time_range_queries,

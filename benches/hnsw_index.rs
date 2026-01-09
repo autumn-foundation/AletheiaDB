@@ -7,6 +7,8 @@
 //! - Filtered search (by label)
 //! - HNSW parameter tuning (M, ef_construction, ef_search)
 
+mod common;
+
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::core::id::NodeId;
 use gallifreydb::index::vector::hnsw::{HnswConfig, HnswIndex};
@@ -330,17 +332,9 @@ fn bench_distance_metrics(c: &mut Criterion) {
 // Benchmark Groups
 // ============================================================================
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
-
-    Criterion::default().sample_size(sample_size)
-}
-
 criterion_group!(
     name = index_ops;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_index_creation,
     bench_vector_addition_single,
     bench_vector_addition_batch,
@@ -348,14 +342,14 @@ criterion_group!(
 
 criterion_group!(
     name = search_ops;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_knn_search,
     bench_knn_search_index_size,
 );
 
 criterion_group!(
     name = tuning_ops;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_hnsw_parameter_m,
     bench_hnsw_parameter_ef_construction,
     bench_hnsw_parameter_ef_search,

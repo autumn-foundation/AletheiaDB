@@ -11,6 +11,8 @@
 //! - WAL throughput (batch operations)
 //! - Sync vs async WAL modes
 
+mod common;
+
 use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
@@ -769,8 +771,9 @@ fn bench_wal_with_sync(c: &mut Criterion) {
 }
 
 criterion_group!(
-    benches,
-    bench_single_transaction_latency,
+    name = benches;
+    config = common::configure_criterion();
+    targets = bench_single_transaction_latency,
     bench_batch_throughput,
     bench_concurrent_writes,
     bench_group_commit_batch_sizes,

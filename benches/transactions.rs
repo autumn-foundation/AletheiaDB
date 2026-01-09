@@ -3,6 +3,8 @@
 //! These benchmarks measure the overhead introduced by the transaction layer
 //! compared to direct operations.
 
+mod common;
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::{GallifreyDB, PropertyMapBuilder, ReadOps, WriteOps};
 use std::sync::Arc;
@@ -840,17 +842,9 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     group.finish();
 }
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
-
-    Criterion::default().sample_size(sample_size)
-}
-
 criterion_group!(
     name = benches;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_read_transaction_creation,
     bench_write_transaction_creation,
     bench_closure_based_write_empty,
