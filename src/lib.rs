@@ -53,6 +53,7 @@ pub mod api;
 pub mod core;
 pub mod db;
 pub mod index;
+pub mod query;
 pub mod storage;
 pub mod utils;
 // Optional embedding generation module
@@ -78,3 +79,11 @@ pub use index::{
 pub use storage::CurrentStorage;
 pub use storage::wal::{DurabilityMode, WriteOptions};
 pub use utils::{Error, QueryError, Result, StorageError, TemporalError, TransactionError};
+
+// Query planner re-exports (VS-060)
+pub use query::{
+    Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults, QueryRow,
+    ir::{Direction, Predicate, QueryOp, TraversalDepth},
+    plan::{LogicalOp, LogicalPlan},
+    planner::{Cost, CostModel, PhysicalOp, PhysicalPlan, Statistics},
+};
