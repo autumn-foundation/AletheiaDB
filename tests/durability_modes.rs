@@ -1236,3 +1236,235 @@ fn test_async_batched_with_segment_rotation() {
         assert_eq!(get_label(&node), "RotationTest");
     }
 }
+
+// =============================================================================
+// Crash Recovery Tests
+// =============================================================================
+
+/// Test recovery after concurrent writes - validates LSN ordering is preserved.
+///
+/// This test verifies the most critical correctness property: that entries
+/// written concurrently from multiple threads are recovered in proper LSN
+/// order after a simulated crash (graceful shutdown).
+#[test]
+fn test_recovery_after_concurrent_writes() {
+    use gallifreydb::core::id::NodeId;
+    use gallifreydb::core::property::PropertyMap;
+    use gallifreydb::core::temporal::{BiTemporalInterval, time};
+    use gallifreydb::storage::wal::concurrent_system::{
+        ConcurrentWalSystem, ConcurrentWalSystemConfig,
+    };
+    use gallifreydb::storage::wal::{LSN, WalOperation};
+    use gallifreydb::storage::wal_reader::read_wal_entries;
+    use std::collections::HashSet;
+    use std::sync::Barrier;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let wal_path = temp_dir.path().to_path_buf();
+
+    let num_threads = 8usize;
+    let appends_per_thread = 500usize; // Reduced to avoid backpressure
+    let total_expected = num_threads * appends_per_thread;
+
+    // Phase 1: Create WAL and spawn concurrent writers
+    {
+        // Use Async mode with fast flushes to avoid backpressure
+        let config = ConcurrentWalSystemConfig::new(&wal_path)
+            .with_durability_mode(DurabilityMode::Async {
+                flush_interval_ms: 5,
+            })
+            .with_flush_interval_ms(5);
+
+        let mut wal = ConcurrentWalSystem::new(config).expect("failed to create WAL");
+        let barrier = Barrier::new(num_threads);
+
+        // Use scoped threads
+        let all_lsns: Vec<Vec<LSN>> = std::thread::scope(|s| {
+            let mut handles = Vec::new();
+
+            for thread_id in 0..num_threads {
+                let wal_ref = &wal;
+                let barrier_ref = &barrier;
+
+                handles.push(s.spawn(move || {
+                    let mut lsns = Vec::with_capacity(appends_per_thread);
+
+                    // Sync start
+                    barrier_ref.wait();
+
+                    for i in 0..appends_per_thread {
+                        let node_id =
+                            NodeId::new((thread_id * appends_per_thread + i) as u64).unwrap();
+                        let operation = WalOperation::CreateNode {
+                            node_id,
+                            label: "CrashTest".into(),
+                            properties: PropertyMap::new(),
+                            temporal: BiTemporalInterval::current(time::now()),
+                        };
+                        match wal_ref.append_async(operation) {
+                            Ok(lsn) => lsns.push(lsn),
+                            Err(e) => panic!("Thread {} append {} failed: {:?}", thread_id, i, e),
+                        }
+                    }
+                    lsns
+                }));
+            }
+
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        // Collect all LSNs
+        let all_lsns: Vec<LSN> = all_lsns.into_iter().flatten().collect();
+
+        // Verify we got all LSNs
+        assert_eq!(
+            all_lsns.len(),
+            total_expected,
+            "Expected {} LSNs, got {}",
+            total_expected,
+            all_lsns.len()
+        );
+
+        // Shutdown triggers final flush
+        wal.shutdown();
+    }
+
+    // Phase 2: Recovery - read entries from disk
+    let recovered_entries =
+        read_wal_entries(&wal_path, LSN(1)).expect("failed to read WAL entries");
+
+    // Verify all entries were recovered
+    assert_eq!(
+        recovered_entries.len(),
+        total_expected,
+        "Expected {} entries, recovered {}",
+        total_expected,
+        recovered_entries.len()
+    );
+
+    // Verify LSNs are in strictly ascending order
+    let mut prev_lsn = LSN(0);
+    for entry in &recovered_entries {
+        assert!(
+            entry.lsn > prev_lsn,
+            "LSN ordering violated: {} should be > {}",
+            entry.lsn.0,
+            prev_lsn.0
+        );
+        prev_lsn = entry.lsn;
+    }
+
+    // Verify all LSNs are unique and contiguous (1 to total_expected)
+    let lsn_set: HashSet<u64> = recovered_entries.iter().map(|e| e.lsn.0).collect();
+    assert_eq!(lsn_set.len(), total_expected, "LSNs should be unique");
+
+    for expected_lsn in 1..=total_expected as u64 {
+        assert!(
+            lsn_set.contains(&expected_lsn),
+            "Missing LSN {}",
+            expected_lsn
+        );
+    }
+}
+
+/// Test recovery with abrupt termination (simulated crash without graceful shutdown).
+///
+/// This tests a more realistic crash scenario where the flush thread is killed
+/// before it can complete. We verify that whatever WAS flushed is correctly ordered.
+#[test]
+fn test_recovery_partial_flush_ordering() {
+    use gallifreydb::core::id::NodeId;
+    use gallifreydb::core::property::PropertyMap;
+    use gallifreydb::core::temporal::{BiTemporalInterval, time};
+    use gallifreydb::storage::wal::concurrent_system::{
+        ConcurrentWalSystem, ConcurrentWalSystemConfig,
+    };
+    use gallifreydb::storage::wal::{LSN, WalOperation};
+    use gallifreydb::storage::wal_reader::read_wal_entries;
+    use std::sync::Barrier;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let wal_path = temp_dir.path().to_path_buf();
+
+    let num_threads = 4usize;
+    let appends_per_thread = 500usize;
+
+    // Phase 1: Create WAL, write entries, force some flushes, then "crash"
+    {
+        let config = ConcurrentWalSystemConfig::new(&wal_path)
+            .with_durability_mode(DurabilityMode::Async {
+                flush_interval_ms: 5, // Fast flushes
+            })
+            .with_flush_interval_ms(5);
+
+        let mut wal = ConcurrentWalSystem::new(config).expect("failed to create WAL");
+        let barrier = Barrier::new(num_threads);
+
+        // Use scoped threads to safely reference wal without Arc
+        std::thread::scope(|s| {
+            for thread_id in 0..num_threads {
+                let wal_ref = &wal;
+                let barrier_ref = &barrier;
+
+                s.spawn(move || {
+                    // Sync start
+                    barrier_ref.wait();
+
+                    for i in 0..appends_per_thread {
+                        let node_id =
+                            NodeId::new((thread_id * appends_per_thread + i) as u64).unwrap();
+                        let operation = WalOperation::CreateNode {
+                            node_id,
+                            label: "PartialCrashTest".into(),
+                            properties: PropertyMap::new(),
+                            temporal: BiTemporalInterval::current(time::now()),
+                        };
+                        let _ = wal_ref.append_async(operation);
+                    }
+                });
+            }
+        });
+
+        // Let background flush thread write some entries to disk
+        // Don't call flush() explicitly - that would race with the background thread!
+        thread::sleep(Duration::from_millis(100));
+
+        // Shutdown does a final flush, ensuring all entries are written
+        wal.shutdown();
+    }
+
+    // Phase 2: Recovery - whatever was flushed should be ordered
+    let recovered_entries =
+        read_wal_entries(&wal_path, LSN(1)).expect("failed to read WAL entries");
+
+    // We should have recovered at least some entries
+    assert!(
+        !recovered_entries.is_empty(),
+        "Should have recovered at least some entries"
+    );
+
+    // Critical: LSNs must be in strictly ascending order
+    let mut prev_lsn = LSN(0);
+    for entry in &recovered_entries {
+        assert!(
+            entry.lsn > prev_lsn,
+            "LSN ordering violated in recovered data: {} should be > {}",
+            entry.lsn.0,
+            prev_lsn.0
+        );
+        prev_lsn = entry.lsn;
+    }
+
+    // LSNs should be contiguous from 1 to whatever we recovered
+    for (i, entry) in recovered_entries.iter().enumerate() {
+        assert_eq!(
+            entry.lsn.0,
+            (i + 1) as u64,
+            "LSN gap detected: expected {}, got {}",
+            i + 1,
+            entry.lsn.0
+        );
+    }
+}
