@@ -192,3 +192,9 @@ required-features = []
 # See: https://github.com/nlopes/libhoney-rust/issues/80
 [patch.crates-io]
 libhoney-rust = { git = "https://github.com/nlopes/libhoney-rust" }
+
+# String interner benchmarks
+[[bench]]
+name = "string_interner"
+harness = false
+path = "benches/string_interner.rs"
