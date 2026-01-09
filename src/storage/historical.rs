@@ -419,13 +419,13 @@ impl HistoricalStorage {
                             node_id
                         );
                     }
-                    Err(_e) => {
+                    Err(e) => {
                         // Hook failed - log but don't block anchor creation (graceful degradation)
                         #[cfg(feature = "observability")]
                         tracing::warn!(
                             "Pre-anchor hook failed for node {}: {:?} (anchor will still be created)",
                             node_id,
-                            _e
+                            e
                         );
                     }
                 }
@@ -558,13 +558,13 @@ impl HistoricalStorage {
                             edge_id
                         );
                     }
-                    Err(_e) => {
+                    Err(e) => {
                         // Hook failed - log but don't block anchor creation (graceful degradation)
                         #[cfg(feature = "observability")]
                         tracing::warn!(
                             "Pre-anchor hook failed for edge {}: {:?} (anchor will still be created)",
                             edge_id,
-                            _e
+                            e
                         );
                     }
                 }
@@ -946,10 +946,13 @@ impl HistoricalStorage {
 
     /// Get an iterator over all node versions (test-only helper).
     ///
-    /// This method is only available in test builds and provides access to the
-    /// node versions for integration test verification purposes.
-    #[cfg(test)]
-    pub fn get_node_versions_iterator(&self) -> impl Iterator<Item = &NodeVersion> {
+    /// This method provides access to the node versions for integration test
+    /// verification purposes. It is public to allow access from integration tests.
+    ///
+    /// **Warning**: This method exposes internal implementation details and
+    /// should only be used in tests.
+    #[doc(hidden)]
+    pub fn __test_get_node_versions_iterator(&self) -> impl Iterator<Item = &NodeVersion> {
         self.node_versions.values()
     }
 }

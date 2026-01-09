@@ -181,13 +181,17 @@ pub fn enable_temporal_vector_index(&self, property_name: &str, config: Temporal
     let temporal_index = self.current.get_temporal_vector_index().ok_or(...)?;
 
     // 2. Register pre-anchor hooks (strong consistency)
-    let node_hook: PreAnchorHook = Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
-        temporal_index.create_snapshot_for_anchor(timestamp)
-    });
+    // Both node and edge hooks perform the same action, so we create one and clone it
+    let hook: PreAnchorHook = {
+        let index = Arc::clone(&temporal_index);
+        Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
+            index.create_snapshot_for_anchor(timestamp)
+        })
+    };
 
     let mut historical = self.historical.write()?;
-    historical.register_pre_node_anchor_hook(node_hook);
-    historical.register_pre_edge_anchor_hook(edge_hook);
+    historical.register_pre_node_anchor_hook(Arc::clone(&hook));
+    historical.register_pre_edge_anchor_hook(hook);
 
     // 3. Register observer (extensibility)
     let observer = VectorIndexObserver::new(temporal_index);

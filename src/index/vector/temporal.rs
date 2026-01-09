@@ -1591,7 +1591,8 @@ pub struct SnapshotInfo {
 /// # }
 /// ```
 pub struct VectorIndexObserver {
-    /// The temporal vector index to create snapshots in
+    /// The temporal vector index (reserved for future use in metrics/monitoring)
+    #[allow(dead_code)]
     index: Arc<TemporalVectorIndex>,
 }
 
@@ -1627,38 +1628,29 @@ impl crate::storage::observer::StorageObserver for VectorIndexObserver {
         use crate::storage::observer::StorageEvent;
 
         match event {
-            // React to anchor creation by creating aligned vector snapshot
-            StorageEvent::NodeAnchorCreated { timestamp, .. }
-            | StorageEvent::EdgeAnchorCreated { timestamp, .. } => {
-                // Create snapshot for this anchor
-                // Note: We don't return the snapshot_id here because StorageObserver
-                // doesn't have a way to return values. The snapshot_id linking happens
-                // through a different mechanism (to be implemented in CurrentStorage).
-                match self.index.create_snapshot_for_anchor(*timestamp) {
-                    Ok(Some(_snapshot_id)) => {
-                        #[cfg(feature = "observability")]
-                        tracing::debug!(
-                            "Created vector snapshot {} for anchor at timestamp {}",
-                            _snapshot_id,
-                            timestamp
-                        );
-                        Ok(())
-                    }
-                    Ok(None) => {
-                        // No snapshot created (empty index), this is fine
-                        Ok(())
-                    }
-                    Err(e) => {
-                        // Log error but don't fail - observer errors shouldn't block storage
-                        #[cfg(feature = "observability")]
-                        tracing::warn!(
-                            "Failed to create vector snapshot for anchor at timestamp {}: {:?}",
-                            timestamp,
-                            e
-                        );
-                        Err(e)
-                    }
-                }
+            // Note: The PreAnchorHook already creates the snapshot and links the snapshot_id
+            // to the anchor. This observer is only for post-commit actions like logging/metrics.
+            StorageEvent::NodeAnchorCreated {
+                node_id, timestamp, ..
+            } => {
+                #[cfg(feature = "observability")]
+                tracing::debug!(
+                    "VectorIndexObserver: Node anchor created for {} at timestamp {} (snapshot already created by pre-anchor hook)",
+                    node_id,
+                    timestamp
+                );
+                Ok(())
+            }
+            StorageEvent::EdgeAnchorCreated {
+                edge_id, timestamp, ..
+            } => {
+                #[cfg(feature = "observability")]
+                tracing::debug!(
+                    "VectorIndexObserver: Edge anchor created for {} at timestamp {} (snapshot already created by pre-anchor hook)",
+                    edge_id,
+                    timestamp
+                );
+                Ok(())
             }
             // Ignore other events
             _ => Ok(()),
@@ -1666,7 +1658,7 @@ impl crate::storage::observer::StorageObserver for VectorIndexObserver {
     }
 
     fn interested_in(&self, event: &crate::storage::observer::StorageEvent) -> bool {
-        // Only interested in anchor creation events
+        // Only interested in anchor creation events for logging/metrics
         event.is_anchor_event()
     }
 }

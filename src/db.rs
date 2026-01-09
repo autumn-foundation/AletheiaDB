@@ -577,17 +577,16 @@ impl GallifreyDB {
         })?;
 
         // Register pre-anchor hooks with historical storage (for strong consistency)
-        let index_for_node_hook = std::sync::Arc::clone(&temporal_index);
-        let node_hook: crate::storage::historical::PreAnchorHook =
-            std::sync::Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
-                index_for_node_hook.create_snapshot_for_anchor(timestamp)
-            });
+        // Both node and edge hooks perform the same action, so we create one and clone it
+        let hook: crate::storage::historical::PreAnchorHook = {
+            let index = Arc::clone(&temporal_index);
+            Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
+                index.create_snapshot_for_anchor(timestamp)
+            })
+        };
 
-        let index_for_edge_hook = std::sync::Arc::clone(&temporal_index);
-        let edge_hook: crate::storage::historical::PreAnchorHook =
-            std::sync::Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
-                index_for_edge_hook.create_snapshot_for_anchor(timestamp)
-            });
+        let node_hook = Arc::clone(&hook);
+        let edge_hook = hook;
 
         let mut historical = self.historical.write().map_err(|_| {
             crate::utils::error::Error::Storage(
@@ -808,6 +807,19 @@ impl GallifreyDB {
     #[allow(dead_code)]
     pub(crate) fn storage(&self) -> &Arc<CurrentStorage> {
         &self.current
+    }
+
+    /// Access the internal HistoricalStorage for testing purposes.
+    ///
+    /// This method provides access to the internal HistoricalStorage for
+    /// integration test verification purposes. It is public to allow access
+    /// from integration tests.
+    ///
+    /// **Warning**: This method exposes internal implementation details and
+    /// should only be used in tests.
+    #[doc(hidden)]
+    pub fn __test_historical_storage(&self) -> &Arc<RwLock<HistoricalStorage>> {
+        &self.historical
     }
 }
 

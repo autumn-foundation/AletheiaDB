@@ -269,3 +269,87 @@ fn test_edge_versions_with_temporal_vectors() {
 
     println!("✓ Edge anchors work with temporal vectors");
 }
+
+#[test]
+fn test_vector_snapshot_id_stored_in_anchors() {
+    // Create database with custom anchor config (anchor every 3 versions)
+    let anchor_config = AnchorConfig {
+        anchor_interval: 3,
+        max_delta_chain: 10,
+    };
+    let db = GallifreyDB::with_config(anchor_config);
+
+    // Enable temporal vector indexing
+    let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
+    let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+
+    db.enable_temporal_vector_index("embedding", temporal_config)
+        .expect("Failed to enable temporal vector index");
+
+    // Create initial node with vector (version 0 = anchor)
+    let initial_vector = vec![1.0f32, 0.0, 0.0, 0.0];
+    let node_id = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Test Document")
+                .insert_vector("embedding", &initial_vector)
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    // Update the node 6 more times to trigger anchors at versions 0, 3, 6
+    for i in 1..7 {
+        let new_vector = vec![1.0f32 - (i as f32 * 0.1), i as f32 * 0.1, 0.0, 0.0];
+
+        db.write(|tx| {
+            let new_props = PropertyMapBuilder::new()
+                .insert("title", "Test Document")
+                .insert("iteration", i as i64)
+                .insert_vector("embedding", &new_vector)
+                .build();
+            tx.update_node(node_id, new_props)?;
+            Ok(())
+        })
+        .expect("Failed to update node");
+    }
+
+    // Access historical storage to verify snapshot IDs
+    let historical = db.__test_historical_storage();
+    let historical_read = historical.read().expect("Failed to acquire read lock");
+
+    // Check all node versions
+    let mut anchor_count = 0;
+    let mut anchors_with_snapshot_id = 0;
+
+    for version in historical_read.__test_get_node_versions_iterator() {
+        if version.is_anchor() {
+            anchor_count += 1;
+            if let Some(snapshot_id) = version.data.get_vector_snapshot_id() {
+                anchors_with_snapshot_id += 1;
+                println!("✓ Anchor has snapshot_id: {}", snapshot_id);
+            } else {
+                panic!("Anchor version found without vector_snapshot_id!");
+            }
+        }
+    }
+
+    // We should have at least 3 anchors (versions 0, 3, 6)
+    assert!(
+        anchor_count >= 3,
+        "Expected at least 3 anchors, found {}",
+        anchor_count
+    );
+
+    // All anchors should have snapshot IDs
+    assert_eq!(
+        anchor_count, anchors_with_snapshot_id,
+        "Not all anchors have snapshot IDs: {} anchors, {} with IDs",
+        anchor_count, anchors_with_snapshot_id
+    );
+
+    println!(
+        "✓ All {} anchors have vector_snapshot_id populated",
+        anchor_count
+    );
+}
