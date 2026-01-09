@@ -892,6 +892,110 @@ impl CurrentStorage {
             edge_count: self.edge_count(),
         }
     }
+
+    // ========================================================================
+    // Query Executor Support Methods (VS-060)
+    // ========================================================================
+
+    /// Get all node IDs in the current storage.
+    ///
+    /// This is used by the query executor for full node scans.
+    /// For large graphs, prefer using label-filtered scans instead.
+    pub fn get_all_node_ids(&self) -> Vec<NodeId> {
+        self.indexes.iter_nodes().map(|n| n.id).collect()
+    }
+
+    /// Get nodes by label.
+    ///
+    /// Returns an iterator over all nodes with the given label.
+    /// This is more efficient than scanning all nodes and filtering.
+    pub fn get_nodes_by_label(&self, label: &str) -> Vec<Node> {
+        let label_id = match crate::core::interning::GLOBAL_INTERNER.get_id(label) {
+            Some(id) => id,
+            None => return Vec::new(), // Label doesn't exist
+        };
+        self.indexes
+            .iter_nodes()
+            .filter(|n| n.label == label_id)
+            .collect()
+    }
+
+    /// Get the name of the property used for vector indexing.
+    ///
+    /// Returns `None` if vector indexing is not enabled.
+    /// This is used by the query executor for vector reranking operations.
+    pub fn get_vector_property_name(&self) -> Option<String> {
+        self.vector_index_state.read().property_name.clone()
+    }
+
+    /// Get average out-degree across all nodes.
+    ///
+    /// Used by the query planner for cost estimation.
+    pub fn avg_out_degree(&self) -> f64 {
+        let node_count = self.node_count();
+        if node_count == 0 {
+            return 0.0;
+        }
+        self.edge_count() as f64 / node_count as f64
+    }
+
+    /// Get target node IDs from outgoing edges (used for traversal iterators).
+    ///
+    /// Returns the target node IDs of all outgoing edges from the source node.
+    pub fn get_outgoing_targets(&self, source: NodeId) -> Vec<NodeId> {
+        self.indexes
+            .get_outgoing(source)
+            .iter()
+            .map(|entry| entry.target)
+            .collect()
+    }
+
+    /// Get target node IDs from outgoing edges with a specific label.
+    pub fn get_outgoing_targets_with_label(&self, source: NodeId, label: &str) -> Vec<NodeId> {
+        let label_id = match GLOBAL_INTERNER.get_id(label) {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
+        self.indexes
+            .get_outgoing_with_label(source, label_id)
+            .into_iter()
+            .map(|entry| entry.target)
+            .collect()
+    }
+
+    /// Get source node IDs from incoming edges (used for traversal iterators).
+    ///
+    /// Returns the source node IDs of all incoming edges to the target node.
+    /// Note: For incoming edges, the "target" field in AdjacencyEntry represents
+    /// the source node (the node the edge is coming from).
+    pub fn get_incoming_sources(&self, target: NodeId) -> Vec<NodeId> {
+        self.indexes
+            .get_incoming(target)
+            .iter()
+            .map(|entry| entry.target) // target field stores the source for incoming edges
+            .collect()
+    }
+
+    /// Get source node IDs from incoming edges with a specific label.
+    pub fn get_incoming_sources_with_label(&self, target: NodeId, label: &str) -> Vec<NodeId> {
+        let label_id = match GLOBAL_INTERNER.get_id(label) {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
+        self.indexes
+            .get_incoming_with_label(target, label_id)
+            .into_iter()
+            .map(|entry| entry.target) // target field stores the source for incoming edges
+            .collect()
+    }
+
+    /// Get the number of vectors in the HNSW index.
+    ///
+    /// Used by the query planner for statistics.
+    pub fn vector_count(&self) -> usize {
+        let state = self.vector_index_state.read();
+        state.index.as_ref().map(|idx| idx.len()).unwrap_or(0)
+    }
 }
 
 impl Default for CurrentStorage {
