@@ -1500,6 +1500,60 @@ impl TemporalVectorIndex {
     }
 
     /// Finds k-nearest neighbors at a specific point in time.
+    ///
+    /// Performs semantic search as of a specific timestamp by reconstructing the vector
+    /// index state at that point in time and querying it.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_embedding` - The query vector to search for
+    /// * `k` - Number of nearest neighbors to return
+    /// * `timestamp` - The point in time to query at
+    ///
+    /// # Returns
+    ///
+    /// A vector of `(node_id, similarity_score)` pairs, sorted by similarity in descending
+    /// order (most similar first). The similarity score depends on the configured distance
+    /// metric (e.g., for Cosine: 1.0 = identical, 0.0 = orthogonal).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::index::vector::temporal::TemporalVectorIndex;
+    ///
+    /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
+    /// let query = vec![0.1f32; 384];
+    /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
+    ///
+    /// // Find what was semantically similar in 2023
+    /// let results = index.find_similar_as_of(&query, 10, timestamp_2023)?;
+    ///
+    /// for (node_id, score) in results {
+    ///     println!("Node {}: similarity = {:.3}", node_id, score);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// - "What did we know about X in 2023?" - Time-travel semantic search
+    /// - "What was relevant to this concept last year?" - Historical context retrieval
+    /// - LLM reasoning about how knowledge evolved
+    /// - Audit trails for retrieval-augmented generation (RAG)
+    ///
+    /// # Performance
+    ///
+    /// - If no snapshot exists at the timestamp, finds nearest earlier snapshot
+    /// - Delta snapshots are reconstructed by merging with base snapshot
+    /// - Target: <10ms for 1M vectors (same as current-state queries)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Query embedding dimensions don't match index dimensions
+    /// - Timestamp is before first snapshot
+    /// - k exceeds MAX_K (10,000)
     pub fn find_similar_as_of(
         &self,
         query_embedding: &[f32],
@@ -1536,6 +1590,57 @@ impl TemporalVectorIndex {
     }
 
     /// Finds k-nearest neighbors across a time range.
+    ///
+    /// Performs semantic search across all snapshots in a time range, returning results
+    /// from each snapshot to show how similarity changed over time.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_embedding` - The query vector to search for
+    /// * `k` - Number of nearest neighbors to return per snapshot
+    /// * `time_range` - The time period to search across
+    ///
+    /// # Returns
+    ///
+    /// A [`TemporalSearchResults`] containing search results from each snapshot in the range.
+    /// Each snapshot result includes the timestamp and k-nearest neighbors at that point.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::index::vector::temporal::TemporalVectorIndex;
+    /// use gallifreydb::core::temporal::TimeRange;
+    ///
+    /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
+    /// let query = vec![0.1f32; 384];
+    /// let time_range = TimeRange::new(1672531200000000, 1704067200000000); // 2023-2024
+    ///
+    /// let results = index.find_similar_in_range(&query, 10, time_range)?;
+    ///
+    /// for (timestamp, snapshot_results) in results {
+    ///     println!("At {}: found {} results",
+    ///              timestamp,
+    ///              snapshot_results.len());
+    ///     for (node_id, score) in snapshot_results {
+    ///         println!("  Node {}: {:.3}", node_id, score);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// - Track how relevant documents changed over time
+    /// - Analyze knowledge evolution trends
+    /// - Compare semantic shifts across periods
+    /// - Historical trend analysis for LLM reasoning
+    ///
+    /// # Performance
+    ///
+    /// - Queries all snapshots in range sequentially
+    /// - Target: <100ms for 10 snapshots, 1M vectors each
+    /// - Results include both Full and Delta snapshot data
     pub fn find_similar_in_range(
         &self,
         query_embedding: &[f32],
@@ -1583,6 +1688,51 @@ impl TemporalVectorIndex {
     }
 
     /// Tracks semantic drift: how a node's similarity to a reference changed over time.
+    ///
+    /// Measures how much a specific node's embedding drifted from a reference embedding
+    /// across all snapshots in the time range. Returns a timeline of drift measurements.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The node whose drift to track
+    /// * `reference_embedding` - The reference embedding to compare against (typically the
+    ///   node's original or current embedding)
+    /// * `time_range` - The time period to analyze
+    ///
+    /// # Returns
+    ///
+    /// A vector of `(timestamp, drift_distance)` pairs, one for each snapshot where the node
+    /// existed. The drift_distance is the cosine distance (1.0 - similarity).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::index::vector::temporal::TemporalVectorIndex;
+    /// use gallifreydb::core::temporal::TimeRange;
+    /// use gallifreydb::core::id::NodeId;
+    ///
+    /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
+    /// let node_id = NodeId::new(42).unwrap();
+    /// let reference = vec![0.5f32; 384];
+    /// let time_range = TimeRange::new(1000000, 2000000);
+    ///
+    /// let drift_timeline = index.track_semantic_drift(node_id, &reference, time_range)?;
+    ///
+    /// for (timestamp, drift) in drift_timeline {
+    ///     if drift > 0.3 {
+    ///         println!("Significant drift at {}: {:.3}", timestamp, drift);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// - Detect when document content significantly changed
+    /// - Track concept evolution over time
+    /// - Identify anomalous updates
+    /// - Monitor knowledge base consistency
     pub fn track_semantic_drift(
         &self,
         node_id: NodeId,
@@ -1636,6 +1786,52 @@ impl TemporalVectorIndex {
     }
 
     /// Finds all nodes whose semantic drift exceeds a threshold within a time range.
+    ///
+    /// Compares the earliest and latest embeddings for each node in the time range,
+    /// measuring how much they drifted. Returns all nodes exceeding the drift threshold.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` - Minimum drift value to include in results
+    /// * `time_range` - The time period to analyze
+    /// * `metric` - Distance metric for measuring drift (Cosine, Euclidean, or Angular)
+    ///
+    /// # Returns
+    ///
+    /// A vector of `(node_id, drift_value)` pairs for all nodes exceeding the threshold,
+    /// sorted by drift value in descending order (highest drift first).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gallifreydb::index::vector::temporal::{TemporalVectorIndex, DriftMetric};
+    /// use gallifreydb::core::temporal::TimeRange;
+    ///
+    /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
+    /// let time_range = TimeRange::new(1000000, 2000000);
+    ///
+    /// // Find documents that changed significantly (cosine distance > 0.3)
+    /// let drifted = index.find_semantic_drift(0.3, time_range, DriftMetric::Cosine)?;
+    ///
+    /// for (node_id, drift) in drifted {
+    ///     println!("Node {} drifted by {:.3}", node_id, drift);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// - Find contradictions in knowledge base (facts that changed meaning)
+    /// - Identify documents with major content updates
+    /// - Detect concept drift in ML datasets
+    /// - Audit trails for semantic changes
+    ///
+    /// # Notes
+    ///
+    /// - Nodes with only one version in the time range are excluded
+    /// - Uses earliest and latest embeddings; intermediate changes are not considered
+    /// - For per-node detailed drift timeline, use [`track_semantic_drift`](Self::track_semantic_drift)
     pub fn find_semantic_drift(
         &self,
         threshold: f32,
@@ -1865,24 +2061,28 @@ impl crate::storage::observer::StorageObserver for VectorIndexObserver {
             // Note: The PreAnchorHook already creates the snapshot and links the snapshot_id
             // to the anchor. This observer is only for post-commit actions like logging/metrics.
             StorageEvent::NodeAnchorCreated {
-                node_id, timestamp, ..
+                node_id: _node_id,
+                timestamp: _timestamp,
+                ..
             } => {
                 #[cfg(feature = "observability")]
                 tracing::debug!(
                     "VectorIndexObserver: Node anchor created for {} at timestamp {} (snapshot already created by pre-anchor hook)",
-                    node_id,
-                    timestamp
+                    _node_id,
+                    _timestamp
                 );
                 Ok(())
             }
             StorageEvent::EdgeAnchorCreated {
-                edge_id, timestamp, ..
+                edge_id: _edge_id,
+                timestamp: _timestamp,
+                ..
             } => {
                 #[cfg(feature = "observability")]
                 tracing::debug!(
                     "VectorIndexObserver: Edge anchor created for {} at timestamp {} (snapshot already created by pre-anchor hook)",
-                    edge_id,
-                    timestamp
+                    _edge_id,
+                    _timestamp
                 );
                 Ok(())
             }
