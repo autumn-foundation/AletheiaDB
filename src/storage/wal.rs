@@ -416,6 +416,17 @@ impl WriteAheadLog {
                     max_batch_size,
                 )));
             }
+            DurabilityMode::AsyncBatched {
+                max_delay_ms,
+                max_batch_size,
+            } => {
+                // Set up group commit coordinator for epoch tracking (like GroupCommit)
+                // but transactions won't block on waiting
+                self.group_commit = Some(Arc::new(GroupCommitCoordinator::new(
+                    max_delay_ms,
+                    max_batch_size,
+                )));
+            }
         }
         Ok(())
     }
@@ -463,6 +474,9 @@ impl WriteAheadLog {
             }
             DurabilityMode::Async { flush_interval_ms } => Duration::from_millis(flush_interval_ms),
             DurabilityMode::GroupCommit { max_delay_ms, .. } => Duration::from_millis(max_delay_ms),
+            DurabilityMode::AsyncBatched { max_delay_ms, .. } => {
+                Duration::from_millis(max_delay_ms)
+            }
         };
 
         let wal_clone: Arc<Mutex<WriteAheadLog>> = Arc::clone(&wal);
@@ -1321,6 +1335,7 @@ impl WriteAheadLog {
     /// - For Synchronous: Returns `None` (already durable)
     /// - For Async: Returns `None` (will be flushed by background thread)
     /// - For GroupCommit: Returns `Some(epoch)` to wait for
+    /// - For AsyncBatched: Returns `Some(epoch)` for optional tracking (caller doesn't block)
     pub fn commit_with_mode(&mut self, mode: DurabilityMode) -> Result<Option<u64>> {
         match mode {
             DurabilityMode::Synchronous => {
@@ -1355,6 +1370,29 @@ impl WriteAheadLog {
                     Ok(Some(epoch))
                 } else {
                     // Fallback to sync if no coordinator (shouldn't happen)
+                    self.sync_to_disk()?;
+                    Ok(None)
+                }
+            }
+            DurabilityMode::AsyncBatched { .. } => {
+                // Phase 1: Flush to OS cache (fast, <100µs)
+                self.flush_to_os()?;
+
+                if let Some(coordinator) = &self.group_commit {
+                    // Register with coordinator but DON'T WAIT (key difference from GroupCommit)
+                    // The transaction returns immediately, but the epoch can be used for
+                    // optional durability tracking if needed.
+                    let (epoch, should_trigger) = coordinator.register_transaction();
+
+                    // Wake flush thread if batch is full
+                    if should_trigger && let Some(signal) = &self.flush_signal {
+                        signal.request_flush();
+                    }
+
+                    // Return epoch for optional tracking, but transaction doesn't block!
+                    Ok(Some(epoch))
+                } else {
+                    // Fallback: immediate sync (shouldn't happen in normal operation)
                     self.sync_to_disk()?;
                     Ok(None)
                 }
