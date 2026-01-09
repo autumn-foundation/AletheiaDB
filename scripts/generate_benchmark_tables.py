@@ -242,13 +242,12 @@ def match_benchmark_to_target(bench_name: str, targets: list[dict]) -> Optional[
         (target_dict, target_value_ns, operator) if matched, None otherwise
     """
     # Map benchmark names to target metrics
+    # Note: Time-travel targets are validated by benches/temporal_query.rs (full suite only)
     bench_to_metric = {
         'target_single_hop/traverse_one_hop': 'Current-state single-hop traversal',
         'target_3_hop/traverse_three_hops': 'Current-state 3-hop traversal',
-        'target_time_travel_anchor/query_at_anchor': 'Time-travel at anchor',
-        'target_time_travel_deltas/query_with_5_deltas': 'Time-travel with deltas (avg 5)',
-        'target_time_travel_worst_case/query_with_9_deltas': 'Time-travel worst case (9 deltas)',
         'target_batch_insertion/insert_1000_edges': 'Batch insertion throughput',
+        # Time-travel benchmarks are in temporal_query.rs for weekly runs
     }
 
     metric_name = bench_to_metric.get(bench_name)
