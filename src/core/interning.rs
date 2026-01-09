@@ -78,6 +78,8 @@ impl Default for InternerConfig {
 pub struct StringInterner {
     /// Maps strings to their IDs.
     active_cache: Arc<Cache<Arc<str>, InternedString>>,
+    /// Complete mapping for O(1) deduplication (never evicted)
+    all_strings: DashMap<Arc<str>, InternedString>,
     /// Maps IDs back to strings.
     id_to_string: DashMap<InternedString, Arc<str>>,
     /// Next ID to assign.
@@ -97,6 +99,7 @@ impl StringInterner {
     pub fn with_max_capacity(max_capacity: usize) -> Self {
         StringInterner {
             active_cache: Arc::new(Cache::new(max_capacity)),
+            all_strings: DashMap::new(),
             id_to_string: DashMap::new(),
             next_id: AtomicU32::new(0),
             max_capacity,
@@ -107,6 +110,7 @@ impl StringInterner {
     pub fn with_config(config: InternerConfig) -> Self {
         StringInterner {
             active_cache: Arc::new(Cache::new(config.max_cache_size)),
+            all_strings: DashMap::new(),
             id_to_string: DashMap::new(),
             next_id: AtomicU32::new(0),
             max_capacity: config.max_cache_size,
@@ -132,16 +136,16 @@ impl StringInterner {
             return Ok(id);
         }
         let arc_str: Arc<str> = Arc::from(string);
-        for entry in self.id_to_string.iter() {
-            if entry.value().as_ref() == string {
-                let existing_id = *entry.key();
-                self.active_cache.insert(arc_str, existing_id);
-                return Ok(existing_id);
-            }
+
+        // O(1) deduplication check
+        if let Some(existing_id) = self.all_strings.get(&arc_str) {
+            self.active_cache.insert(arc_str, *existing_id);
+            return Ok(*existing_id);
         }
         let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = InternedString(id_value);
         self.id_to_string.insert(id, arc_str.clone());
+        self.all_strings.insert(arc_str.clone(), id);
         self.active_cache.insert(arc_str, id);
         Ok(id)
     }
@@ -162,16 +166,14 @@ impl StringInterner {
             return id;
         }
         let arc_str: Arc<str> = Arc::from(string);
-        for entry in self.id_to_string.iter() {
-            if entry.value().as_ref() == string {
-                let existing_id = *entry.key();
-                self.active_cache.insert(arc_str, existing_id);
-                return existing_id;
-            }
+        if let Some(existing_id) = self.all_strings.get(&arc_str) {
+            self.active_cache.insert(arc_str, *existing_id);
+            return *existing_id;
         }
         let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = InternedString(id_value);
         self.id_to_string.insert(id, arc_str.clone());
+        self.all_strings.insert(arc_str.clone(), id);
         self.active_cache.insert(arc_str, id);
         id
     }
@@ -272,6 +274,7 @@ impl StringInterner {
     /// This invalidates all existing InternedString IDs!
     pub fn clear(&self) {
         self.active_cache.clear();
+        self.all_strings.clear();
         self.id_to_string.clear();
         self.next_id.store(0, Ordering::Relaxed);
     }
@@ -748,7 +751,7 @@ mod tests {
         let interner = StringInterner::with_config(config);
         let mut ids = Vec::new();
         for i in 0..200 {
-            ids.push(interner.intern(&format!("key_{}", i)).unwrap());
+            ids.push(interner.intern(format!("key_{}", i)).unwrap());
         }
         for (i, id) in ids.iter().enumerate() {
             assert_eq!(
@@ -758,4 +761,31 @@ mod tests {
         }
         assert_eq!(ids[0], interner.intern("key_0").unwrap());
     }
+}
+
+#[test]
+fn test_reverse_lookup_performance() {
+    use std::time::Instant;
+    let config = InternerConfig {
+        max_cache_size: 1000,
+        ..Default::default()
+    };
+    let interner = StringInterner::with_config(config);
+
+    // Intern 10,000 strings (causes cache eviction)
+    for i in 0..10_000 {
+        interner.intern(format!("key_{}", i)).unwrap();
+    }
+
+    // Re-intern early string (definitely evicted) - should be fast
+    let start = Instant::now();
+    interner.intern("key_0").unwrap();
+    let duration = start.elapsed();
+
+    // Should be O(1), not O(N) slow
+    assert!(
+        duration.as_micros() < 100,
+        "Reverse lookup too slow: {:?}",
+        duration
+    );
 }
