@@ -753,11 +753,18 @@ mod tests {
 
     #[test]
     fn test_background_thread_panic_detection() {
-        // Create writer with a write_fn that panics
+        use std::sync::atomic::AtomicBool;
+
+        // Flag to signal when write_fn is called (ensures panic actually happens)
+        let write_fn_called = Arc::new(AtomicBool::new(false));
+        let write_fn_called_clone = Arc::clone(&write_fn_called);
+
+        // Create writer with a write_fn that panics after setting flag
         let writer = AsyncWalWriter::new(
             100,
             Duration::from_millis(10),
-            |_batch| {
+            move |_batch| {
+                write_fn_called_clone.store(true, Ordering::SeqCst);
                 panic!("Simulated background thread panic");
             },
             vec![],
@@ -766,22 +773,25 @@ mod tests {
         // Append an entry to trigger the panic
         writer.append(create_test_entry(1)).unwrap();
 
-        // Poll with retries until append fails (more robust than fixed sleep for CI)
-        // The background thread should panic within 10ms (recv_timeout), but give
-        // extra time for scheduling delays on slow CI systems
-        let mut succeeded = true;
-        for _ in 0..20 {
-            thread::sleep(Duration::from_millis(10));
-            let result = writer.append(create_test_entry(2));
-            if result.is_err() {
-                succeeded = false;
-                break;
+        // Wait for write_fn to be called (with 5s timeout for slow CI)
+        let start = std::time::Instant::now();
+        while !write_fn_called.load(Ordering::SeqCst) {
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!(
+                    "write_fn was never called after 5 seconds - background thread not processing entries"
+                );
             }
+            thread::sleep(Duration::from_millis(10));
         }
 
+        // Give the panic catch_unwind time to set thread_alive = false
+        thread::sleep(Duration::from_millis(50));
+
+        // Try to append another entry - should fail since thread is dead
+        let result = writer.append(create_test_entry(2));
         assert!(
-            !succeeded,
-            "append should fail after background thread panics (waited up to 200ms)"
+            result.is_err(),
+            "append should fail after background thread panics"
         );
 
         // Drop should capture the panic (verified by stderr output in real run)
