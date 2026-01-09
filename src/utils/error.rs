@@ -1026,4 +1026,62 @@ mod tests {
         // Test that Display works on converted error
         assert!(format!("{}", converted).contains("Vector error"));
     }
+
+    // ==================== Error Coverage Tests ====================
+
+    #[test]
+    fn test_temporal_error_node_not_found_at_time() {
+        let node_id = NodeId::new(42).unwrap();
+        let err = TemporalError::NodeNotFoundAtTime {
+            node_id,
+            valid_time: 1000,
+            transaction_time: 2000,
+        };
+
+        let display = format!("{}", err);
+        assert!(display.contains("Node"));
+        assert!(display.contains("42"));
+        assert!(display.contains("1000"));
+        assert!(display.contains("2000"));
+        assert!(display.contains("did not exist"));
+    }
+
+    #[test]
+    fn test_temporal_error_version_not_found() {
+        let version_id = VersionId::new(123).unwrap();
+        let err = TemporalError::VersionNotFound(version_id);
+
+        let display = format!("{}", err);
+        assert!(display.contains("Version"));
+        assert!(display.contains("123"));
+        assert!(display.contains("not found"));
+    }
+
+    #[test]
+    fn test_temporal_error_node_not_found_at_time_conversion() {
+        let node_id = NodeId::new(1).unwrap();
+        let err = TemporalError::NodeNotFoundAtTime {
+            node_id,
+            valid_time: 1000,
+            transaction_time: 2000,
+        };
+
+        let converted: Error = err.into();
+        assert!(matches!(converted, Error::Temporal(_)));
+
+        let display = format!("{}", converted);
+        assert!(display.contains("Temporal error"));
+    }
+
+    #[test]
+    fn test_temporal_error_version_not_found_conversion() {
+        let version_id = VersionId::new(123).unwrap();
+        let err = TemporalError::VersionNotFound(version_id);
+
+        let converted: Error = err.into();
+        assert!(matches!(converted, Error::Temporal(_)));
+
+        let display = format!("{}", converted);
+        assert!(display.contains("Temporal error"));
+    }
 }

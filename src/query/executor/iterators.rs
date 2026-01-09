@@ -2029,4 +2029,75 @@ mod tests {
 
         assert!(iter.next().is_none());
     }
+
+    // ==================== BatchTemporalNodeIterator Tests ====================
+
+    #[test]
+    fn test_batch_temporal_node_iterator_success() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let mut hist = historical.write().unwrap();
+
+        // Add 3 nodes
+        for i in 1..=3 {
+            let node_id = NodeId::new(i).unwrap();
+            let version_id = VersionId::new(i * 100).unwrap();
+            let label = GLOBAL_INTERNER.intern("Person").unwrap();
+            let timestamp = (i * 1000) as i64;
+
+            let props = PropertyMapBuilder::new()
+                .insert("name", format!("Person{}", i).as_str())
+                .build();
+
+            hist.add_node_version(
+                node_id,
+                version_id,
+                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                label,
+                props,
+            )
+            .unwrap();
+        }
+        drop(hist);
+
+        // Create batch iterator
+        let node_ids = vec![
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            NodeId::new(3).unwrap(),
+        ];
+        let mut iter = BatchTemporalNodeIterator::new(node_ids, 5000, 5000, historical).unwrap();
+
+        // Verify all nodes retrieved
+        let mut count = 0;
+        while let Some(Ok(_)) = iter.next() {
+            count += 1;
+        }
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_batch_temporal_node_iterator_node_not_found() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+
+        let node_ids = vec![NodeId::new(999).unwrap()];
+        let mut iter = BatchTemporalNodeIterator::new(node_ids, 1000, 1000, historical).unwrap();
+
+        let result = iter.next().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batch_temporal_node_iterator_empty() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let node_ids = vec![];
+        let mut iter = BatchTemporalNodeIterator::new(node_ids, 1000, 1000, historical).unwrap();
+
+        assert!(iter.next().is_none());
+    }
 }
