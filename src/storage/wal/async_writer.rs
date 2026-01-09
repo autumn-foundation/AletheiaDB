@@ -336,6 +336,19 @@ impl AsyncWalWriter {
     /// This is safe because the caller will fsync anyway, persisting any entries
     /// that weren't drained.
     ///
+    /// ## Timeout Trade-offs
+    ///
+    /// The 1ms timeout is chosen to balance several concerns:
+    /// - **Fast path**: Most drains complete in <100µs on modern systems
+    /// - **Graceful degradation**: On timeout, entries are synced by caller (no data loss)
+    /// - **Bounded latency**: Prevents caller from blocking too long on slow systems
+    /// - **Observability**: Timeouts can be monitored via metrics if needed
+    ///
+    /// Under heavy load or slow systems, timeouts may occur more frequently, resulting
+    /// in redundant fsyncs but no correctness issues. If this becomes a performance
+    /// concern, consider using the async-only durability mode or tuning the timeout
+    /// value in future versions.
+    ///
     /// # Returns
     ///
     /// The actual number of entries that were drained.
