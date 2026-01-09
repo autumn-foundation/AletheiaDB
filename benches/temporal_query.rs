@@ -6,6 +6,8 @@
 //! - Concurrent read/write patterns
 //! - Cache effectiveness
 
+mod common;
+
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::GallifreyDB;
 use gallifreydb::api::transaction::WriteOps;
@@ -645,8 +647,9 @@ fn setup_database_with_versions(count: usize) -> GallifreyDB {
 }
 
 criterion_group!(
-    benches,
-    bench_valid_at_query,
+    name = benches;
+    config = common::configure_criterion();
+    targets = bench_valid_at_query,
     bench_insert_performance,
     bench_concurrent_write_throughput,
     bench_read_latency_under_write_contention,

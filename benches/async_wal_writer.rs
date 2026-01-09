@@ -23,6 +23,8 @@
 //! - Smaller buffer → lower latency to disk, less memory, more frequent fsync
 //! - Optimal buffer size depends on workload (typically 1000-10000)
 
+mod common;
+
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::core::id::NodeId;
 use gallifreydb::core::property::PropertyMap;
@@ -156,8 +158,9 @@ fn bench_async_write_batching(c: &mut Criterion) {
 }
 
 criterion_group!(
-    benches,
-    bench_async_write_latency,
+    name = benches;
+    config = common::configure_criterion();
+    targets = bench_async_write_latency,
     bench_async_write_throughput,
     bench_async_write_batching
 );

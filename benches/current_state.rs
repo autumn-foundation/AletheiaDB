@@ -12,6 +12,8 @@
 //! - Node lookup: <100ns
 //! - Edge creation: <10µs
 
+mod common;
+
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::id::IdGenerator;
 use gallifreydb::core::interning::StringInterner;
@@ -548,17 +550,9 @@ fn bench_string_hot_path(c: &mut Criterion) {
     group.finish();
 }
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
-
-    Criterion::default().sample_size(sample_size)
-}
-
 criterion_group!(
     name = benches;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_single_hop_traversal,
     bench_multi_hop_traversal,
     bench_node_lookup,

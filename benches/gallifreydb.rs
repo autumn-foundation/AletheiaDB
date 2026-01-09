@@ -8,6 +8,8 @@
 //! NOTE: These benchmarks use Async durability mode to isolate graph performance
 //! from WAL flush overhead. See durability_modes.rs for durability-focused benchmarks.
 
+mod common;
+
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::{
     GallifreyDB, NodeId, PropertyMapBuilder, WriteOps,
@@ -330,17 +332,9 @@ fn bench_batch_operations(c: &mut Criterion) {
     group.finish();
 }
 
-fn configure_criterion() -> Criterion {
-    let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
-        .map(|s| s.parse().unwrap_or(50))
-        .unwrap_or(50);
-
-    Criterion::default().sample_size(sample_size)
-}
-
 criterion_group!(
     name = benches;
-    config = configure_criterion();
+    config = common::configure_criterion();
     targets = bench_node_creation_with_versioning,
     bench_edge_creation_with_versioning,
     bench_current_state_queries,
