@@ -84,9 +84,6 @@ pub struct StringInterner {
     id_to_string: DashMap<InternedString, Arc<str>>,
     /// Next ID to assign.
     next_id: AtomicU32,
-    /// Maximum number of strings to intern (DoS protection)
-    #[allow(dead_code)] // Will be used in Phase 5 (ID exhaustion warning)
-    max_capacity: usize,
     /// ID exhaustion warning threshold
     id_exhaustion_threshold: u32,
 }
@@ -110,14 +107,10 @@ impl StringInterner {
 
     /// Create a new string interner with a custom maximum capacity.
     pub fn with_max_capacity(max_capacity: usize) -> Self {
-        StringInterner {
-            active_cache: Arc::new(Cache::new(max_capacity)),
-            all_strings: DashMap::new(),
-            id_to_string: DashMap::new(),
-            next_id: AtomicU32::new(0),
-            max_capacity,
-            id_exhaustion_threshold: u32::MAX - 1_000_000,
-        }
+        Self::with_config(InternerConfig {
+            max_cache_size: max_capacity,
+            ..Default::default()
+        })
     }
 
     /// Create a new string interner with custom configuration.
@@ -127,7 +120,6 @@ impl StringInterner {
             all_strings: DashMap::new(),
             id_to_string: DashMap::new(),
             next_id: AtomicU32::new(0),
-            max_capacity: config.max_cache_size,
             id_exhaustion_threshold: config.id_exhaustion_warning_threshold,
         }
     }
@@ -160,8 +152,9 @@ impl StringInterner {
         let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         // Check if approaching ID exhaustion
+        // Note: We "burn" the ID rather than using fetch_sub to avoid race conditions
+        // where multiple threads could be assigned duplicate IDs
         if id_value >= self.id_exhaustion_threshold {
-            self.next_id.fetch_sub(1, Ordering::Relaxed); // Undo
             return Err(crate::utils::error::Error::Storage(
                 crate::utils::error::StorageError::CapacityExceeded {
                     resource: "string interner (ID exhaustion)".to_string(),
@@ -278,22 +271,33 @@ impl StringInterner {
 
     /// Check if a string has been interned.
     pub fn contains<S: AsRef<str>>(&self, string: S) -> bool {
-        self.active_cache.get(string.as_ref()).is_some()
+        self.all_strings.contains_key(string.as_ref())
     }
 
     /// Get the ID of a string if it has been interned.
+    /// If the string is found but evicted from cache, it will be re-promoted.
     pub fn get_id<S: AsRef<str>>(&self, string: S) -> Option<InternedString> {
-        self.active_cache.get(string.as_ref())
+        let string_ref = string.as_ref();
+        // Check cache first (hot path)
+        self.active_cache.get(string_ref).or_else(|| {
+            // Check all_strings and re-promote to cache if found
+            self.all_strings.get(string_ref).map(|entry| {
+                let id = *entry.value();
+                let arc_str: Arc<str> = Arc::from(string_ref);
+                self.active_cache.insert(arc_str, id);
+                id
+            })
+        })
     }
 
-    /// Get the number of interned strings.
+    /// Get the total number of unique strings ever interned.
     pub fn len(&self) -> usize {
-        self.active_cache.len()
+        self.all_strings.len()
     }
 
     /// Check if the interner is empty.
     pub fn is_empty(&self) -> bool {
-        self.active_cache.len() == 0
+        self.all_strings.is_empty()
     }
 
     /// Clear all interned strings.
@@ -797,69 +801,69 @@ mod tests {
         }
         assert_eq!(ids[0], interner.intern("key_0").unwrap());
     }
-}
 
-#[test]
-fn test_reverse_lookup_performance() {
-    use std::time::Instant;
-    let config = InternerConfig {
-        max_cache_size: 1000,
-        ..Default::default()
-    };
-    let interner = StringInterner::with_config(config);
+    #[test]
+    fn test_reintern_evicted_string_is_fast() {
+        use std::time::Instant;
+        let config = InternerConfig {
+            max_cache_size: 1000,
+            ..Default::default()
+        };
+        let interner = StringInterner::with_config(config);
 
-    // Intern 10,000 strings (causes cache eviction)
-    for i in 0..10_000 {
-        interner.intern(format!("key_{}", i)).unwrap();
+        // Intern 10,000 strings (causes cache eviction)
+        for i in 0..10_000 {
+            interner.intern(format!("key_{}", i)).unwrap();
+        }
+
+        // Re-intern early string (definitely evicted) - should be fast (O(1) deduplication)
+        let start = Instant::now();
+        interner.intern("key_0").unwrap();
+        let duration = start.elapsed();
+
+        // Should be O(1), not O(N) slow
+        assert!(
+            duration.as_micros() < 100,
+            "Re-interning evicted string too slow: {:?}",
+            duration
+        );
     }
 
-    // Re-intern early string (definitely evicted) - should be fast
-    let start = Instant::now();
-    interner.intern("key_0").unwrap();
-    let duration = start.elapsed();
+    #[test]
+    fn test_id_exhaustion_warning() {
+        let config = InternerConfig {
+            max_cache_size: 10,
+            id_exhaustion_warning_threshold: 100,
+        };
+        let interner = StringInterner::with_config(config);
 
-    // Should be O(1), not O(N) slow
-    assert!(
-        duration.as_micros() < 100,
-        "Reverse lookup too slow: {:?}",
-        duration
-    );
-}
+        // Intern up to threshold
+        for i in 0..100 {
+            let result = interner.intern(format!("key_{}", i));
+            assert!(result.is_ok(), "Should succeed before threshold");
+        }
 
-#[test]
-fn test_id_exhaustion_warning() {
-    let config = InternerConfig {
-        max_cache_size: 10,
-        id_exhaustion_warning_threshold: 100,
-    };
-    let interner = StringInterner::with_config(config);
-
-    // Intern up to threshold
-    for i in 0..100 {
-        let result = interner.intern(format!("key_{}", i));
-        assert!(result.is_ok(), "Should succeed before threshold");
+        // Next intern should return error (ID exhaustion warning)
+        let result = interner.intern("key_100");
+        assert!(result.is_err(), "Should fail at threshold");
     }
 
-    // Next intern should return error (ID exhaustion warning)
-    let result = interner.intern("key_100");
-    assert!(result.is_err(), "Should fail at threshold");
-}
+    #[test]
+    fn test_interner_metrics() {
+        let config = InternerConfig {
+            max_cache_size: 100,
+            ..Default::default()
+        };
+        let interner = StringInterner::with_config(config);
 
-#[test]
-fn test_interner_metrics() {
-    let config = InternerConfig {
-        max_cache_size: 100,
-        ..Default::default()
-    };
-    let interner = StringInterner::with_config(config);
+        // Intern 150 strings (causes cache eviction)
+        for i in 0..150 {
+            interner.intern(format!("key_{}", i)).unwrap();
+        }
 
-    // Intern 150 strings (causes cache eviction)
-    for i in 0..150 {
-        interner.intern(format!("key_{}", i)).unwrap();
+        let metrics = interner.metrics();
+        assert_eq!(metrics.total_ids_allocated, 150);
+        assert_eq!(metrics.active_cache_size, 100); // Capped at max
+        assert_eq!(metrics.permanent_entries, 150); // id_to_string never evicts
     }
-
-    let metrics = interner.metrics();
-    assert_eq!(metrics.total_ids_allocated, 150);
-    assert_eq!(metrics.active_cache_size, 100); // Capped at max
-    assert_eq!(metrics.permanent_entries, 150); // id_to_string never evicts
 }

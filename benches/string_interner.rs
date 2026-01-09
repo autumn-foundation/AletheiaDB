@@ -6,7 +6,7 @@ fn bench_intern_cached(c: &mut Criterion) {
     interner.intern("hot_key").unwrap();
 
     c.bench_function("intern_cached", |b| {
-        b.iter(|| interner.intern(black_box("hot_key")))
+        b.iter(|| interner.intern(black_box("hot_key")).unwrap())
     });
 }
 
@@ -35,7 +35,7 @@ fn bench_intern_evicted(c: &mut Criterion) {
     }
 
     c.bench_function("intern_evicted", |b| {
-        b.iter(|| interner.intern(black_box("key_0")))
+        b.iter(|| interner.intern(black_box("key_0")).unwrap())
     });
 }
 
