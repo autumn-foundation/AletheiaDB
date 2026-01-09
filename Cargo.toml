@@ -16,6 +16,7 @@ parking_lot = "0.12"
 hnsw_rs = "0.3"
 arc-swap = "1.7"
 quick_cache = "0.6"
+crossbeam-channel = "0.5"
 
 # Optional Tracy profiling support
 tracy-client = { version = "0.17", optional = true, default-features = false }
@@ -179,6 +180,11 @@ harness = false
 path = "benches/hnsw_index.rs"
 required-features = []
 
+[[bench]]
+name = "async_wal_writer"
+harness = false
+path = "benches/async_wal_writer.rs"
+required-features = []
 # Patch libhoney-rust to use git version with updated dependencies
 # This overrides the crates.io version for ALL dependencies (including tracing-honeycomb)
 # Reason: crates.io v0.1.6 uses reqwest 0.10 with known CVEs
