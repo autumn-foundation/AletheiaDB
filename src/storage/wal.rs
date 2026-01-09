@@ -66,6 +66,7 @@ pub mod group_commit;
 
 // Concurrent WAL modules
 pub mod concurrent;
+pub mod concurrent_system;
 pub mod flush_coordinator;
 pub mod lsn_allocator;
 pub mod ring_buffer;

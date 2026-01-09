@@ -13,6 +13,7 @@ pub mod observer;
 pub mod persistence;
 pub mod version;
 pub mod wal;
+pub mod wal_reader;
 
 // Re-export commonly used types
 pub use current::{CurrentStats, CurrentStorage};
@@ -23,3 +24,4 @@ pub use version::{
     AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData, VersionMetadata,
 };
 pub use wal::{LSN, WalConfig, WalEntry, WalOperation, WriteAheadLog};
+pub use wal_reader::read_wal_entries;

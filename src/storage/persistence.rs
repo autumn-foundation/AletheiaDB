@@ -17,7 +17,7 @@ use crate::index::vector::HnswConfig;
 use crate::storage::{
     current::CurrentStorage,
     historical::HistoricalStorage,
-    wal::{LSN, WalOperation, WriteAheadLog},
+    wal::{LSN, WalOperation, WriteAheadLog, concurrent_system::ConcurrentWalSystem},
 };
 use crate::utils::error::{Result, StorageError};
 use std::fs::File;
@@ -471,7 +471,7 @@ impl PersistenceManager {
     /// Recover database state from checkpoint and WAL
     pub fn recover(
         &mut self,
-        wal: &WriteAheadLog,
+        wal: &ConcurrentWalSystem,
     ) -> Result<(CurrentStorage, HistoricalStorage, LSN)> {
         // Try to load latest checkpoint
         let checkpoint = self.find_latest_checkpoint()?;
@@ -1011,14 +1011,13 @@ mod tests {
 
     #[test]
     fn test_recovery_from_empty_checkpoint_dir() -> Result<()> {
+        use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+
         let temp_dir = TempDir::new().unwrap();
 
         // Create empty WAL
-        let wal_config = crate::storage::wal::WalConfig {
-            wal_dir: temp_dir.path().join("wal"),
-            ..Default::default()
-        };
-        let wal = crate::storage::wal::WriteAheadLog::new(wal_config)?;
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path().join("wal"));
+        let wal = ConcurrentWalSystem::new(wal_config)?;
 
         // Create persistence manager with empty checkpoint directory
         let config = CheckpointConfig {
@@ -1052,16 +1051,14 @@ mod tests {
         use crate::core::id::NodeId;
         use crate::core::property::PropertyMap;
         use crate::core::temporal::BiTemporalInterval;
+        use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
 
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
 
         // Create WAL with some entries
-        let wal_config = crate::storage::wal::WalConfig {
-            wal_dir: wal_dir.clone(),
-            ..Default::default()
-        };
-        let mut wal = crate::storage::wal::WriteAheadLog::new(wal_config)?;
+        let wal_config = ConcurrentWalSystemConfig::new(wal_dir.clone());
+        let wal = ConcurrentWalSystem::new(wal_config)?;
 
         // Append entries to WAL (LSN 1-5)
         for i in 1..=5 {

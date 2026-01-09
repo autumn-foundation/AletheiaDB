@@ -10,7 +10,10 @@ use gallifreydb::core::{
 use gallifreydb::storage::{
     CurrentStorage, HistoricalStorage,
     persistence::{CheckpointConfig, PersistenceManager},
-    wal::{WalConfig, WalOperation, WriteAheadLog},
+    wal::{
+        WalConfig, WalOperation, WriteAheadLog,
+        concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
+    },
 };
 use tempfile::TempDir;
 
@@ -177,7 +180,9 @@ fn bench_recovery(c: &mut Criterion) {
             // Benchmark recovery
             b.iter(|| {
                 let mut manager = PersistenceManager::new(checkpoint_config.clone()).unwrap();
-                let wal = WriteAheadLog::new(wal_config.clone()).unwrap();
+                // Use ConcurrentWalSystem for recovery (reads same segment files)
+                let wal_sys_config = ConcurrentWalSystemConfig::new(wal_config.wal_dir.clone());
+                let wal = ConcurrentWalSystem::new(wal_sys_config).unwrap();
                 black_box(manager.recover(&wal).unwrap());
             });
         });
