@@ -763,17 +763,25 @@ mod tests {
             vec![],
         );
 
-        // Append an entry
+        // Append an entry to trigger the panic
         writer.append(create_test_entry(1)).unwrap();
 
-        // Give thread time to panic
-        thread::sleep(Duration::from_millis(50));
+        // Poll with retries until append fails (more robust than fixed sleep for CI)
+        // The background thread should panic within 10ms (recv_timeout), but give
+        // extra time for scheduling delays on slow CI systems
+        let mut succeeded = true;
+        for _ in 0..20 {
+            thread::sleep(Duration::from_millis(10));
+            let result = writer.append(create_test_entry(2));
+            if result.is_err() {
+                succeeded = false;
+                break;
+            }
+        }
 
-        // Try to append another entry - should fail since thread is dead
-        let result = writer.append(create_test_entry(2));
         assert!(
-            result.is_err(),
-            "append should fail after background thread panics"
+            !succeeded,
+            "append should fail after background thread panics (waited up to 200ms)"
         );
 
         // Drop should capture the panic (verified by stderr output in real run)
