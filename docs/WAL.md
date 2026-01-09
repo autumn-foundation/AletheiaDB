@@ -25,10 +25,10 @@ GallifreyDB uses a **Concurrent WAL with Striped Lock-Free Ring Buffers** for hi
                                ▼
                     ┌─────────────────────┐
                     │  Flush Coordinator  │
-                    │  - Drains all stripes│
-                    │  - Sorts by LSN     │
-                    │  - Writes to segment│
-                    │  - fsync per mode   │
+                    │ - Drains all stripes│
+                    │ - Sorts by LSN      │
+                    │ - Writes to segment │
+                    │ - fsync per mode    │
                     └─────────────────────┘
 ```
 

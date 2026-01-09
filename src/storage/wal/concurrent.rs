@@ -39,9 +39,15 @@
 //! - **Throughput**: 500K+ entries/sec with 16+ stripes
 //! - **Scalability**: Linear up to 64 concurrent writers
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+// Thread-local serialization buffer to avoid lock contention on the hot path.
+// Each thread gets its own buffer, eliminating the need for synchronization.
+thread_local! {
+    static SERIALIZE_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
+}
 
 use super::lsn_allocator::LsnAllocator;
 use super::ring_buffer::{CompletionHandle, PendingEntry};
@@ -133,8 +139,6 @@ pub struct ConcurrentWal {
     stripe_mask: usize,
     /// Total entries appended across all stripes.
     total_appends: AtomicU64,
-    /// Reusable serialization buffer (per-WAL, not per-thread for now).
-    serialize_buffer: std::sync::Mutex<Vec<u8>>,
 }
 
 impl ConcurrentWal {
@@ -155,7 +159,6 @@ impl ConcurrentWal {
             num_stripes,
             stripe_mask,
             total_appends: AtomicU64::new(0),
-            serialize_buffer: std::sync::Mutex::new(Vec::with_capacity(4096)),
         })
     }
 
@@ -291,22 +294,22 @@ impl ConcurrentWal {
     }
 
     /// Serialize a WAL entry to bytes.
+    ///
+    /// Uses a thread-local buffer to avoid lock contention on the hot path.
+    /// Each thread has its own serialization buffer, eliminating synchronization overhead.
     fn serialize_entry(&self, lsn: LSN, operation: &WalOperation) -> Result<Vec<u8>> {
-        // Get or create buffer
-        let mut buffer = self
-            .serialize_buffer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        buffer.clear();
+        SERIALIZE_BUFFER.with(|cell| {
+            let mut buffer = cell.borrow_mut();
+            buffer.clear();
 
-        let entry = WalEntry::new(lsn, operation.clone());
+            let entry = WalEntry::new(lsn, operation.clone());
 
-        // Serialize using the existing function
-        super::serialize_entry_into(&entry, &mut buffer)?;
+            // Serialize using the existing function
+            super::serialize_entry_into(&entry, &mut buffer)?;
 
-        // Clone the buffer contents (we reuse the buffer itself)
-        let result = buffer.clone();
-        Ok(result)
+            // Clone the buffer contents (we reuse the buffer itself)
+            Ok(buffer.clone())
+        })
     }
 
     /// Drain all pending entries from all stripes.

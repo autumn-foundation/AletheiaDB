@@ -70,8 +70,10 @@ pub struct LsnAllocator {
 
 impl LsnAllocator {
     pub fn allocate(&self) -> LSN {
-        // Single atomic operation - the ONLY synchronization point
-        LSN(self.next_lsn.fetch_add(1, Ordering::SeqCst))
+        // Relaxed is sufficient - LSN ordering comes from the atomic counter itself,
+        // not from memory visibility of other data. The monotonic increment guarantees
+        // unique, ordered LSNs without requiring happens-before relationships.
+        LSN(self.next_lsn.fetch_add(1, Ordering::Relaxed))
     }
 }
 ```

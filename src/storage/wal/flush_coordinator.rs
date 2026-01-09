@@ -246,6 +246,13 @@ impl FlushCoordinator {
     }
 
     /// Rotate to a new segment if current exceeds size limit.
+    ///
+    /// # Safety Invariant
+    ///
+    /// This method assumes single-threaded access from the flush coordinator.
+    /// Multiple threads should not call `flush()` concurrently, which is the
+    /// only caller of this method. The FlushCoordinator is designed for use
+    /// with a single background flush thread.
     fn maybe_rotate_segment(&self) -> Result<bool> {
         let current_size = self.current_segment_size.load(Ordering::Relaxed);
 
@@ -475,6 +482,9 @@ impl FlushSignal {
     }
 
     /// Wait for flush request with timeout.
+    ///
+    /// Returns true if a flush was requested, false if timeout occurred.
+    /// Handles spurious wakeups by checking the actual requested flag.
     pub fn wait_for_request(&self, timeout: Duration) -> bool {
         let guard = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -482,12 +492,14 @@ impl FlushSignal {
             return true;
         }
 
-        let (_guard, result) = self
+        let (_guard, _result) = self
             .condvar
             .wait_timeout(guard, timeout)
             .unwrap_or_else(|e| e.into_inner());
 
-        !result.timed_out() || self.requested.load(Ordering::Acquire)
+        // Only return true if actually requested, regardless of spurious wakeups
+        // or timeout status. This is the source of truth.
+        self.requested.load(Ordering::Acquire)
     }
 }
 

@@ -45,6 +45,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -119,6 +120,52 @@ impl ConcurrentWalSystemConfig {
     }
 }
 
+/// Signal for waking up the flush thread when batch is full.
+struct FlushNotifier {
+    /// Lock for condvar.
+    lock: Mutex<bool>,
+    /// Condvar to signal immediate flush.
+    condvar: Condvar,
+}
+
+impl FlushNotifier {
+    fn new() -> Self {
+        Self {
+            lock: Mutex::new(false),
+            condvar: Condvar::new(),
+        }
+    }
+
+    /// Signal the flush thread to wake up immediately.
+    fn notify(&self) {
+        let mut guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = true;
+        self.condvar.notify_one();
+    }
+
+    /// Wait for a signal or timeout, returns true if signaled.
+    fn wait_timeout(&self, duration: Duration) -> bool {
+        let mut guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Check if already signaled before waiting.
+        // This handles the race where notify() is called before we enter wait_timeout().
+        if *guard {
+            *guard = false; // Reset signal
+            return true;
+        }
+
+        let (new_guard, result) = self
+            .condvar
+            .wait_timeout(guard, duration)
+            .unwrap_or_else(|e| e.into_inner());
+        guard = new_guard;
+
+        let was_signaled = *guard && !result.timed_out();
+        *guard = false; // Reset signal
+        was_signaled
+    }
+}
+
 /// Unified concurrent WAL system.
 ///
 /// This combines the striped concurrent WAL with the flush coordinator
@@ -132,6 +179,8 @@ pub struct ConcurrentWalSystem {
     flush_thread: Option<JoinHandle<()>>,
     /// Signal to stop the flush thread.
     shutdown_signal: Arc<AtomicBool>,
+    /// Signal to wake up flush thread immediately (batch full).
+    flush_notifier: Arc<FlushNotifier>,
     /// Durability mode.
     durability_mode: DurabilityMode,
     /// Group commit coordinator for epoch-based waiting (GroupCommit mode only).
@@ -187,6 +236,9 @@ impl ConcurrentWalSystem {
             _ => None,
         };
 
+        // Create flush notifier for batch-size-triggered flushes
+        let flush_notifier = Arc::new(FlushNotifier::new());
+
         // Start background flush thread for async/group-commit modes
         let flush_thread = if matches!(
             config.durability_mode,
@@ -197,6 +249,7 @@ impl ConcurrentWalSystem {
             let wal_clone = Arc::clone(&wal);
             let coordinator_clone = Arc::clone(&coordinator);
             let shutdown_clone = Arc::clone(&shutdown_signal);
+            let flush_notifier_clone = Arc::clone(&flush_notifier);
             let group_commit_clone = group_commit.clone();
             let flush_interval = Duration::from_millis(config.flush_interval_ms);
             let sync_on_flush =
@@ -207,6 +260,7 @@ impl ConcurrentWalSystem {
                     wal_clone,
                     coordinator_clone,
                     shutdown_clone,
+                    flush_notifier_clone,
                     group_commit_clone,
                     flush_interval,
                     sync_on_flush,
@@ -221,16 +275,23 @@ impl ConcurrentWalSystem {
             coordinator,
             flush_thread,
             shutdown_signal,
+            flush_notifier,
             durability_mode: config.durability_mode,
             group_commit,
         })
     }
 
     /// Background flush loop.
+    ///
+    /// Wakes up either when:
+    /// - The flush interval expires (normal periodic flush)
+    /// - The flush_notifier is signaled (batch size reached)
+    /// - Shutdown is requested
     fn flush_loop(
         wal: Arc<ConcurrentWal>,
         coordinator: Arc<FlushCoordinator>,
         shutdown: Arc<AtomicBool>,
+        flush_notifier: Arc<FlushNotifier>,
         group_commit: Option<Arc<GroupCommitCoordinator>>,
         interval: Duration,
         sync_on_flush: bool,
@@ -238,6 +299,15 @@ impl ConcurrentWalSystem {
         while !shutdown.load(Ordering::Relaxed) {
             // Drain all entries from stripes
             let entries = wal.drain_all();
+
+            // Always try to advance the epoch when there are entries OR when
+            // group commit has pending transactions. This handles the race where
+            // transactions register with GroupCommitCoordinator but their entries
+            // were already drained by a previous flush iteration.
+            let should_mark_flushed = !entries.is_empty()
+                || group_commit
+                    .as_ref()
+                    .is_some_and(|gc| gc.current_batch_size() > 0);
 
             if !entries.is_empty() {
                 // Flush to coordinator
@@ -259,10 +329,18 @@ impl ConcurrentWalSystem {
                         eprintln!("WAL flush error: {}", e);
                     }
                 }
+            } else if should_mark_flushed {
+                // No entries but there are pending transactions - advance epoch anyway
+                // This handles the race where entries were flushed before transactions
+                // called register_transaction()
+                if let Some(ref gc) = group_commit {
+                    gc.mark_flushed(Ok(()));
+                }
             }
 
-            // Sleep until next flush interval
-            thread::sleep(interval);
+            // Wait for flush interval OR immediate signal (batch full)
+            // This allows batch-triggered flushes to happen immediately
+            flush_notifier.wait_timeout(interval);
         }
 
         // Final flush on shutdown
@@ -356,9 +434,13 @@ impl ConcurrentWalSystem {
             DurabilityMode::GroupCommit { .. } | DurabilityMode::AsyncBatched { .. } => {
                 // Register with coordinator and return epoch to wait for
                 if let Some(ref gc) = self.group_commit {
-                    let (epoch, _should_trigger) = gc.register_transaction();
-                    // Note: we don't trigger immediate flush here - the background
-                    // thread handles batching. Transaction can wait on epoch.
+                    let (epoch, should_trigger) = gc.register_transaction();
+
+                    // If batch is full, signal flush thread to wake up immediately
+                    if should_trigger {
+                        self.flush_notifier.notify();
+                    }
+
                     Ok(Some(epoch))
                 } else {
                     // Fallback to sync if no coordinator (shouldn't happen)
@@ -418,6 +500,9 @@ impl ConcurrentWalSystem {
     pub fn shutdown(&mut self) {
         // Signal shutdown
         self.shutdown_signal.store(true, Ordering::Relaxed);
+
+        // Wake up flush thread so it can see the shutdown signal
+        self.flush_notifier.notify();
 
         // Wait for flush thread to finish
         if let Some(handle) = self.flush_thread.take() {
