@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::interning::{InternerConfig, StringInterner};
 
 fn bench_intern_cached(c: &mut Criterion) {
@@ -17,7 +17,7 @@ fn bench_intern_new(c: &mut Criterion) {
     c.bench_function("intern_new", |b| {
         b.iter(|| {
             counter += 1;
-            interner.intern(&format!("key_{}", counter))
+            interner.intern(format!("key_{}", counter))
         })
     });
 }
@@ -31,7 +31,7 @@ fn bench_intern_evicted(c: &mut Criterion) {
 
     // Pre-populate and cause eviction
     for i in 0..10_000 {
-        interner.intern(&format!("key_{}", i)).unwrap();
+        interner.intern(format!("key_{}", i)).unwrap();
     }
 
     c.bench_function("intern_evicted", |b| {
@@ -39,5 +39,10 @@ fn bench_intern_evicted(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_intern_cached, bench_intern_new, bench_intern_evicted);
+criterion_group!(
+    benches,
+    bench_intern_cached,
+    bench_intern_new,
+    bench_intern_evicted
+);
 criterion_main!(benches);
