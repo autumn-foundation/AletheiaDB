@@ -35,6 +35,26 @@ use std::sync::Arc;
 use std::thread;
 use tempfile::TempDir;
 
+#[cfg(feature = "observability-tracy")]
+use tracing_subscriber::layer::SubscriberExt;
+
+/// Initialize Tracy subscriber for profiling
+#[cfg(feature = "observability-tracy")]
+fn init_tracy() {
+    use tracing_subscriber::Registry;
+
+    let tracy_layer = tracing_tracy::TracyLayer::default();
+    let subscriber = Registry::default().with(tracy_layer);
+
+    // Try to set as global default, ignore error if already set
+    let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
+#[cfg(not(feature = "observability-tracy"))]
+fn init_tracy() {
+    // No-op when Tracy not enabled
+}
+
 /// Helper to create a database with Synchronous durability for profiling
 fn create_db_for_profiling() -> (GallifreyDB, TempDir) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
@@ -49,6 +69,8 @@ fn create_db_for_profiling() -> (GallifreyDB, TempDir) {
 
 /// Profile sequential commits (baseline - no lock contention)
 fn profile_sequential_commits(c: &mut Criterion) {
+    init_tracy();
+
     let mut group = c.benchmark_group("sequential");
     group.sample_size(50); // Enough samples for Tracy profiling
     group.sampling_mode(SamplingMode::Flat); // All iterations equally weighted
@@ -87,6 +109,8 @@ fn profile_sequential_commits(c: &mut Criterion) {
 
 /// Profile concurrent commits (expose lock contention)
 fn profile_concurrent_commits(c: &mut Criterion) {
+    init_tracy();
+
     let mut group = c.benchmark_group("concurrent");
     group.sample_size(20); // Fewer samples for heavier concurrent test
     group.sampling_mode(SamplingMode::Flat);
@@ -130,6 +154,8 @@ fn profile_concurrent_commits(c: &mut Criterion) {
 
 /// Profile heavy transactions (large graph operations to stress apply_changes)
 fn profile_heavy_transactions(c: &mut Criterion) {
+    init_tracy();
+
     let mut group = c.benchmark_group("heavy");
     group.sample_size(10); // Even fewer samples for very heavy workload
     group.sampling_mode(SamplingMode::Flat);
@@ -180,6 +206,8 @@ fn profile_heavy_transactions(c: &mut Criterion) {
 
 /// Profile mixed workload (realistic scenario with multiple threads and mixed operations)
 fn profile_mixed_workload(c: &mut Criterion) {
+    init_tracy();
+
     let mut group = c.benchmark_group("mixed");
     group.sample_size(20);
     group.sampling_mode(SamplingMode::Flat);
