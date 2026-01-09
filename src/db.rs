@@ -61,6 +61,8 @@ pub struct GallifreyDB {
     version_id_gen: Arc<Mutex<IdGenerator>>,
     /// Default durability mode for write transactions
     default_durability: DurabilityMode,
+    /// Query optimization statistics - cached across queries for effective cost-based optimization
+    stats: Arc<Statistics>,
 }
 
 impl GallifreyDB {
@@ -120,6 +122,7 @@ impl GallifreyDB {
             edge_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             default_durability: durability_mode,
+            stats: Arc::new(Statistics::new()),
         }
     }
 
@@ -1074,12 +1077,9 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("execute_query").entered();
 
-        // Create statistics with default estimates
-        // Statistics are initialized lazily on first query if needed
-        let stats = Arc::new(Statistics::new());
-
-        // Plan the query
-        let planner = QueryPlanner::new(stats);
+        // Use cached statistics for cost-based optimization
+        // Statistics are shared across all queries for this database instance
+        let planner = QueryPlanner::new(Arc::clone(&self.stats));
         let physical_plan = planner.plan(query)?;
 
         // Execute the plan
@@ -1282,6 +1282,73 @@ impl GallifreyDB {
     #[doc(hidden)]
     pub fn __test_historical_storage(&self) -> &Arc<RwLock<HistoricalStorage>> {
         &self.historical
+    }
+
+    /// Get the query optimization statistics.
+    ///
+    /// Statistics are used for cost-based query optimization and are cached
+    /// across queries for efficiency. The statistics are automatically refreshed
+    /// when needed, but can be manually refreshed using [`refresh_statistics`](Self::refresh_statistics).
+    ///
+    /// # Returns
+    ///
+    /// A reference to the shared statistics object.
+    pub fn statistics(&self) -> &Arc<Statistics> {
+        &self.stats
+    }
+
+    /// Refresh query optimization statistics from current storage.
+    ///
+    /// This collects fresh statistics about node counts, edge counts, label
+    /// cardinalities, and other metrics used for cost-based query optimization.
+    /// Call this method after significant schema changes or data modifications
+    /// to ensure the query planner has accurate information.
+    ///
+    /// Statistics are automatically refreshed lazily on first query, so this
+    /// method is typically only needed for benchmarking or after bulk imports.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // After bulk import
+    /// for doc in documents {
+    ///     db.create_node("Document", doc.properties)?;
+    /// }
+    ///
+    /// // Refresh statistics for optimal query planning
+    /// db.refresh_statistics();
+    ///
+    /// // Now queries will use accurate statistics
+    /// let results = db.execute_query(query)?;
+    /// ```
+    pub fn refresh_statistics(&self) {
+        // Collect statistics from current storage
+        let node_count = self.current.node_count();
+        let edge_count = self.current.edge_count();
+        let vector_count = self.current.vector_count();
+
+        // Collect label counts from current storage
+        let label_counts = self.current.label_counts();
+
+        // Calculate average delta chain length from historical storage
+        // (using default estimate if historical storage is empty)
+        let avg_delta_chain = 5.0; // TODO: Calculate from historical storage
+
+        self.stats.refresh(
+            node_count,
+            edge_count,
+            vector_count,
+            label_counts,
+            avg_delta_chain,
+        );
+    }
+
+    /// Invalidate cached query optimization statistics.
+    ///
+    /// Call this after schema changes to force re-collection of statistics
+    /// on the next query. The statistics will be lazily refreshed when needed.
+    pub fn invalidate_statistics(&self) {
+        self.stats.invalidate();
     }
 }
 

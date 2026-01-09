@@ -75,6 +75,33 @@ impl ResultIterator for NodeLookupIterator {
 }
 
 /// Iterator for node scans with optional label filter.
+///
+/// # Memory Considerations
+///
+/// **WARNING**: This iterator collects all node IDs into a `Vec` upfront during
+/// initialization. For very large graphs (millions of nodes), this can cause:
+///
+/// - **High memory consumption**: O(n) where n = number of nodes
+/// - **Initial latency**: Delay before the first result is produced
+///
+/// This design is a trade-off due to the `Send` bound on `ResultIterator` and
+/// the fact that DashMap's iterators hold internal locks that cannot be sent
+/// across threads. The current implementation prioritizes correctness and
+/// simplicity over optimal memory usage for full scans.
+///
+/// ## Mitigation Strategies
+///
+/// For production workloads with large graphs:
+/// 1. **Use label filters** - `scan(Some("Person"))` limits the scan scope
+/// 2. **Use LIMIT** - Add `.limit(n)` to queries to enable early termination
+/// 3. **Prefer targeted queries** - Use `start(node_id)` instead of full scans
+///
+/// ## Future Improvements (Issue #307)
+///
+/// Possible optimizations include:
+/// - Streaming iteration using channels (`std::sync::mpsc`)
+/// - Chunked iteration to limit memory per batch
+/// - Index-based iteration that doesn't require holding locks
 pub struct NodeScanIterator {
     label: Option<String>,
     current: Arc<CurrentStorage>,
@@ -98,9 +125,14 @@ impl NodeScanIterator {
         }
         self.initialized = true;
 
-        // Get all node IDs from current storage
-        // Note: This is a simplified implementation; real implementation
-        // would use proper iterators from storage
+        // Collect all node IDs upfront.
+        //
+        // NOTE: This is a known memory concern for large graphs. See the struct
+        // documentation above for details and mitigation strategies.
+        //
+        // The current implementation trades memory efficiency for correctness:
+        // DashMap iterators cannot be sent across threads (not Send), and the
+        // ResultIterator trait requires Send for parallel query execution.
         let ids: Vec<NodeId> = self.current.get_all_node_ids();
         self.node_ids = Some(ids.into_iter());
     }
@@ -584,7 +616,8 @@ pub struct VectorRerankIterator {
     embedding: Arc<[f32]>,
     k: usize,
     _current: Arc<CurrentStorage>,
-    vector_property: String,
+    /// Vector property name, or None if no vector index is configured
+    vector_property: Option<String>,
 }
 
 impl VectorRerankIterator {
@@ -595,9 +628,8 @@ impl VectorRerankIterator {
         current: Arc<CurrentStorage>,
     ) -> Self {
         // Get the vector property name from the current storage
-        let vector_property = current
-            .get_vector_property_name()
-            .unwrap_or_else(|| "embedding".to_string());
+        // If no vector index is configured, we'll return an error on first next() call
+        let vector_property = current.get_vector_property_name();
 
         VectorRerankIterator {
             sorted: None,
@@ -611,9 +643,9 @@ impl VectorRerankIterator {
 
     /// Compute similarity score for a query row if it has a vector property.
     /// Returns None if the node has no vector, or if the similarity is invalid (NaN/Inf).
-    fn compute_similarity(&self, row: &QueryRow) -> Option<f32> {
+    fn compute_similarity(&self, row: &QueryRow, vector_property: &str) -> Option<f32> {
         let node = row.entity.as_node()?;
-        let PropertyValue::Vector(vec) = node.properties.get(&self.vector_property)? else {
+        let PropertyValue::Vector(vec) = node.properties.get(vector_property)? else {
             return None;
         };
         let similarity = cosine_similarity(&self.embedding, vec).ok()?;
@@ -636,6 +668,20 @@ impl ResultIterator for VectorRerankIterator {
     fn next(&mut self) -> Option<Result<QueryRow>> {
         // Lazy initialization: collect and sort on first call
         if self.sorted.is_none() && self.input.is_some() {
+            // Check if vector index is configured
+            let vector_property = match &self.vector_property {
+                Some(prop) => prop.clone(),
+                None => {
+                    return Some(Err(crate::utils::error::Error::Vector(
+                        crate::utils::error::VectorError::IndexError(
+                            "VectorRerank requires a vector index to be enabled. \
+                             Call db.enable_vector_index() first."
+                                .to_string(),
+                        ),
+                    )));
+                }
+            };
+
             let mut input = self.input.take().unwrap();
             let mut scored: Vec<(QueryRow, f32)> = Vec::new();
 
@@ -643,7 +689,7 @@ impl ResultIterator for VectorRerankIterator {
                 match result {
                     Ok(row) => {
                         // Get vector from node and compute similarity
-                        if let Some(similarity) = self.compute_similarity(&row) {
+                        if let Some(similarity) = self.compute_similarity(&row, &vector_property) {
                             scored.push((row, similarity));
                         }
                     }

@@ -510,3 +510,337 @@ fn test_full_hybrid_temporal_graph_vector() {
 
     println!("✓ Full hybrid query (temporal + graph + vector) works");
 }
+
+// =============================================================================
+// End-to-End Execution Tests
+// =============================================================================
+// These tests verify the complete query execution pipeline, not just planning.
+
+#[test]
+fn test_execute_node_lookup() {
+    let db = create_test_db();
+    let (alice, _bob, _carol, _dave) = create_social_graph(&db);
+
+    // Execute a simple node lookup query
+    let query = db.query().start(alice).build();
+    let results = db.execute_query(query).expect("Query execution failed");
+
+    // Collect all results
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should return exactly one row (Alice)
+    assert_eq!(rows.len(), 1, "Expected exactly one result");
+
+    // Verify it's Alice
+    let row = &rows[0];
+    let node = row.entity.as_node().expect("Expected a node");
+    assert_eq!(node.id, alice);
+    assert_eq!(
+        node.get_property("name").and_then(|v| v.as_str()),
+        Some("Alice")
+    );
+
+    println!("✓ Execute node lookup returns correct result");
+}
+
+#[test]
+fn test_execute_traversal() {
+    let db = create_test_db();
+    let (alice, bob, carol, _dave) = create_social_graph(&db);
+
+    // Execute traversal: Alice -> KNOWS -> ?
+    let query = db.query().start(alice).traverse("KNOWS").build();
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Alice knows Bob and Carol
+    assert_eq!(rows.len(), 2, "Expected two results (Bob and Carol)");
+
+    // Collect the node IDs from results
+    let result_ids: std::collections::HashSet<_> = rows
+        .iter()
+        .filter_map(|r| r.entity.as_node())
+        .map(|n| n.id)
+        .collect();
+
+    assert!(result_ids.contains(&bob), "Results should contain Bob");
+    assert!(result_ids.contains(&carol), "Results should contain Carol");
+
+    println!("✓ Execute traversal returns correct neighbors");
+}
+
+#[test]
+fn test_execute_traverse_and_rank() {
+    let db = create_test_db();
+    let (alice, bob, carol, _dave) = create_social_graph(&db);
+
+    // Alice knows Bob (embedding [0.9, 0.1, 0.0, 0.0] - similar to Alice)
+    // Alice knows Carol (embedding [0.0, 1.0, 0.0, 0.0] - dissimilar to Alice)
+    // Query: Find people Alice knows, ranked by similarity to Alice's embedding
+    let alice_embedding = [1.0f32, 0.0, 0.0, 0.0];
+
+    let query = db
+        .query()
+        .start(alice)
+        .traverse("KNOWS")
+        .rank_by_similarity(&alice_embedding, 10)
+        .build();
+
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should have Bob and Carol
+    assert_eq!(rows.len(), 2, "Expected two results");
+
+    // Bob should be first (more similar to Alice's embedding)
+    let first = rows[0].entity.as_node().expect("Expected a node");
+    let second = rows[1].entity.as_node().expect("Expected a node");
+
+    assert_eq!(first.id, bob, "Bob should be first (most similar)");
+    assert_eq!(second.id, carol, "Carol should be second (less similar)");
+
+    // Verify scores are present and in descending order
+    assert!(rows[0].score.is_some(), "First result should have a score");
+    assert!(rows[1].score.is_some(), "Second result should have a score");
+    assert!(
+        rows[0].score.unwrap() > rows[1].score.unwrap(),
+        "Scores should be in descending order"
+    );
+
+    println!("✓ Execute traverse_and_rank returns correctly ordered results");
+}
+
+#[test]
+fn test_execute_filter() {
+    let db = create_test_db();
+    let (alice, bob, _carol, _dave) = create_social_graph(&db);
+
+    // Traverse from Alice and filter for "Bob"
+    let query = db
+        .query()
+        .start(alice)
+        .traverse("KNOWS")
+        .filter(gallifreydb::query::Predicate::eq("name", "Bob"))
+        .build();
+
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should only return Bob
+    assert_eq!(rows.len(), 1, "Expected one result after filter");
+    let node = rows[0].entity.as_node().expect("Expected a node");
+    assert_eq!(node.id, bob, "Should be Bob");
+
+    println!("✓ Execute with filter returns filtered results");
+}
+
+#[test]
+fn test_execute_limit() {
+    let db = create_test_db();
+    let (alice, _bob, _carol, _dave) = create_social_graph(&db);
+
+    // Alice knows 2 people, but limit to 1
+    let query = db.query().start(alice).traverse("KNOWS").limit(1).build();
+
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should only return 1 result due to limit
+    assert_eq!(rows.len(), 1, "Expected one result due to limit");
+
+    println!("✓ Execute with limit truncates results");
+}
+
+#[test]
+fn test_execute_node_scan() {
+    let db = create_test_db();
+    let (alice, bob, carol, dave) = create_social_graph(&db);
+
+    // Scan all Person nodes
+    let query = db.query().scan(Some("Person")).build();
+
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should return all 4 people
+    assert_eq!(rows.len(), 4, "Expected four Person nodes");
+
+    let result_ids: std::collections::HashSet<_> = rows
+        .iter()
+        .filter_map(|r| r.entity.as_node())
+        .map(|n| n.id)
+        .collect();
+
+    assert!(result_ids.contains(&alice));
+    assert!(result_ids.contains(&bob));
+    assert!(result_ids.contains(&carol));
+    assert!(result_ids.contains(&dave));
+
+    println!("✓ Execute node scan returns all matching nodes");
+}
+
+#[test]
+fn test_execute_vector_search() {
+    let db = create_test_db();
+    let (_alice, _bob, _carol, _dave) = create_social_graph(&db);
+
+    // Search for nodes similar to Alice's embedding
+    let alice_embedding = [1.0f32, 0.0, 0.0, 0.0];
+    let query = db.query().find_similar(&alice_embedding, 2).build();
+
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should return k=2 results, ordered by similarity
+    assert_eq!(rows.len(), 2, "Expected 2 results for k=2");
+
+    // The results should be Alice (exact match) and Bob (most similar)
+    // But Alice is excluded in find_similar typically - let's just verify ordering
+    if rows.len() >= 2 {
+        assert!(
+            rows[0].score.unwrap_or(0.0) >= rows[1].score.unwrap_or(0.0),
+            "Results should be ordered by similarity descending"
+        );
+    }
+
+    println!("✓ Execute vector search returns similar nodes");
+}
+
+#[test]
+fn test_execute_convenience_traverse_and_rank() {
+    let db = create_test_db();
+    let (alice, bob, _carol, _dave) = create_social_graph(&db);
+
+    // Use convenience method
+    let bob_embedding = [0.9f32, 0.1, 0.0, 0.0];
+    let results = db
+        .traverse_and_rank(alice, "KNOWS", &bob_embedding, 10)
+        .expect("Query execution failed");
+
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should return neighbors ranked by similarity to Bob's embedding
+    assert!(!rows.is_empty(), "Should have results");
+
+    // Bob should be first (most similar to his own embedding)
+    let first = rows[0].entity.as_node().expect("Expected a node");
+    assert_eq!(
+        first.id, bob,
+        "Bob should be most similar to his own embedding"
+    );
+
+    println!("✓ Convenience method traverse_and_rank works");
+}
+
+#[test]
+fn test_execute_multi_hop_traversal() {
+    let db = create_test_db();
+    let (alice, _bob, _carol, dave) = create_social_graph(&db);
+
+    // 2-hop traversal: Alice -> Bob -> Dave
+    let query = db.query().start(alice).traverse_n("KNOWS", 2).build();
+
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should reach Dave through Bob (Alice -> Bob -> Dave)
+    let result_ids: std::collections::HashSet<_> = rows
+        .iter()
+        .filter_map(|r| r.entity.as_node())
+        .map(|n| n.id)
+        .collect();
+
+    // In a 2-hop BFS, we should reach nodes at depth 1 and 2
+    // Alice -> Bob (depth 1), Alice -> Carol (depth 1), Bob -> Dave (depth 2)
+    assert!(
+        result_ids.contains(&dave),
+        "Should reach Dave at depth 2 through Bob"
+    );
+
+    println!("✓ Execute multi-hop traversal reaches transitive neighbors");
+}
+
+#[test]
+fn test_execute_empty_result() {
+    let db = create_test_db();
+    let (alice, _bob, _carol, _dave) = create_social_graph(&db);
+
+    // Filter that matches nothing
+    let query = db
+        .query()
+        .start(alice)
+        .traverse("KNOWS")
+        .filter(gallifreydb::query::Predicate::eq("name", "NonExistent"))
+        .build();
+
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should return empty results
+    assert!(
+        rows.is_empty(),
+        "Filter for nonexistent name should return no results"
+    );
+
+    println!("✓ Execute with no matches returns empty results");
+}
+
+#[test]
+fn test_execute_chained_operations() {
+    let db = create_test_db();
+    let (alice, bob, _carol, _dave) = create_social_graph(&db);
+
+    // Chain multiple operations: start -> traverse -> filter -> limit
+    let query = db
+        .query()
+        .start(alice)
+        .traverse("KNOWS")
+        .filter(gallifreydb::query::Predicate::ne("name", "Carol"))
+        .limit(5)
+        .build();
+
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+
+    // Should return only Bob (Carol filtered out)
+    assert_eq!(
+        rows.len(),
+        1,
+        "Should have one result after filtering Carol"
+    );
+    let node = rows[0].entity.as_node().expect("Expected a node");
+    assert_eq!(node.id, bob, "Should be Bob");
+
+    println!("✓ Execute chained operations works correctly");
+}
+
+#[test]
+fn test_statistics_caching() {
+    let db = create_test_db();
+    let (_alice, _bob, _carol, _dave) = create_social_graph(&db);
+
+    // Refresh statistics
+    db.refresh_statistics();
+
+    // Verify statistics are populated
+    let stats = db.statistics();
+    assert!(
+        stats.is_initialized(),
+        "Statistics should be initialized after refresh"
+    );
+    assert_eq!(stats.node_count(), 4, "Should count 4 nodes");
+
+    // Run a query - it should use the cached statistics
+    let query = db.query().scan(Some("Person")).limit(1).build();
+    let results = db.execute_query(query).expect("Query execution failed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+    assert_eq!(rows.len(), 1);
+
+    // Statistics should still be cached (same Arc)
+    assert!(
+        stats.is_initialized(),
+        "Statistics should remain initialized"
+    );
+
+    println!("✓ Statistics caching works correctly");
+}

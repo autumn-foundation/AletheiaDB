@@ -928,6 +928,19 @@ impl CurrentStorage {
         self.vector_index_state.read().property_name.clone()
     }
 
+    /// Get node counts grouped by label.
+    ///
+    /// Returns an iterator of (interned_label, count) pairs.
+    /// Used by the query planner for cost estimation and cardinality estimation.
+    pub fn label_counts(&self) -> Vec<(crate::core::interning::InternedString, usize)> {
+        use std::collections::HashMap;
+        let mut counts: HashMap<crate::core::interning::InternedString, usize> = HashMap::new();
+        for node in self.indexes.iter_nodes() {
+            *counts.entry(node.label).or_insert(0) += 1;
+        }
+        counts.into_iter().collect()
+    }
+
     /// Get average out-degree across all nodes.
     ///
     /// Used by the query planner for cost estimation.
