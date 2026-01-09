@@ -40,8 +40,77 @@ use super::LSN;
 /// Default capacity for WAL ring buffers (must be power of 2).
 pub const DEFAULT_RING_BUFFER_CAPACITY: usize = 1024;
 
-/// Maximum spin iterations before yielding when buffer is full.
-const MAX_SPIN_ITERATIONS: u32 = 100;
+/// Backpressure configuration for ring buffer operations.
+///
+/// Controls how writers behave when the buffer is full, using an
+/// exponential backoff strategy to balance latency vs CPU usage.
+///
+/// # Strategy
+///
+/// 1. **Spin phase**: Start with `initial_spins` iterations, doubling each
+///    retry up to `max_spins`. Uses `spin_loop()` hint for efficiency.
+///
+/// 2. **Yield phase**: After max spins, yield the thread. For blocking
+///    operations, sleep with exponential backoff from `base_sleep_us` to
+///    `max_sleep_us`.
+///
+/// # Tuning Guidelines
+///
+/// - **Low-latency workloads**: Higher `initial_spins` (100-1000), lower sleep times
+/// - **High-throughput batch**: Lower `initial_spins` (10-50), higher sleep times
+/// - **Mixed workloads**: Use defaults, which balance both
+#[derive(Debug, Clone)]
+pub struct BackpressureConfig {
+    /// Initial spin loop iterations on first contention (default: 10).
+    pub initial_spins: u32,
+    /// Maximum spin iterations before yielding (default: 1000).
+    /// Spins double each retry: 10 → 20 → 40 → ... → 1000.
+    pub max_spins: u32,
+    /// Base sleep duration in microseconds for blocking backoff (default: 1).
+    pub base_sleep_us: u64,
+    /// Maximum sleep duration in microseconds (default: 1000 = 1ms).
+    /// Sleeps double each retry: 1µs → 2µs → 4µs → ... → 1000µs.
+    pub max_sleep_us: u64,
+}
+
+impl Default for BackpressureConfig {
+    fn default() -> Self {
+        Self {
+            initial_spins: 10,
+            max_spins: 1000,
+            base_sleep_us: 1,
+            max_sleep_us: 1000,
+        }
+    }
+}
+
+impl BackpressureConfig {
+    /// Configuration optimized for low-latency operations.
+    ///
+    /// More aggressive spinning, shorter sleeps. Use when latency matters
+    /// more than CPU efficiency.
+    pub fn low_latency() -> Self {
+        Self {
+            initial_spins: 100,
+            max_spins: 10_000,
+            base_sleep_us: 1,
+            max_sleep_us: 100,
+        }
+    }
+
+    /// Configuration optimized for high-throughput batch operations.
+    ///
+    /// Less spinning, longer sleeps. Use when throughput matters more
+    /// than individual operation latency.
+    pub fn high_throughput() -> Self {
+        Self {
+            initial_spins: 5,
+            max_spins: 100,
+            base_sleep_us: 10,
+            max_sleep_us: 10_000,
+        }
+    }
+}
 
 /// A pending WAL entry waiting to be flushed to disk.
 #[derive(Debug)]
@@ -288,6 +357,14 @@ impl<T> std::ops::Deref for CacheLinePadded<T> {
 ///
 /// The capacity must be a power of 2 for efficient modulo operations.
 /// If a non-power-of-2 is provided, it will be rounded up.
+///
+/// # Backpressure
+///
+/// When the buffer is full, writers use exponential backoff:
+/// 1. Spin with doubling iterations (10 → 20 → 40 → ... → max)
+/// 2. Yield/sleep with doubling duration (1µs → 2µs → ... → max)
+///
+/// Configure via [`BackpressureConfig`] for your workload.
 pub struct WalRingBuffer {
     /// Pre-allocated slots.
     slots: Box<[Slot]>,
@@ -303,6 +380,8 @@ pub struct WalRingBuffer {
     read_pos: CacheLinePadded<AtomicU64>,
     /// Flag indicating if the buffer is closed (no more appends allowed).
     closed: AtomicBool,
+    /// Backpressure configuration.
+    backpressure: BackpressureConfig,
 }
 
 // SAFETY: WalRingBuffer access is coordinated through atomic operations.
@@ -312,7 +391,7 @@ unsafe impl Send for WalRingBuffer {}
 unsafe impl Sync for WalRingBuffer {}
 
 impl WalRingBuffer {
-    /// Create a new ring buffer with the specified capacity.
+    /// Create a new ring buffer with the specified capacity and default backpressure.
     ///
     /// The capacity will be rounded up to the next power of 2.
     ///
@@ -320,6 +399,17 @@ impl WalRingBuffer {
     ///
     /// Panics if `capacity` is 0.
     pub fn new(capacity: usize) -> Self {
+        Self::with_config(capacity, BackpressureConfig::default())
+    }
+
+    /// Create a new ring buffer with the specified capacity and backpressure config.
+    ///
+    /// The capacity will be rounded up to the next power of 2.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
+    pub fn with_config(capacity: usize, backpressure: BackpressureConfig) -> Self {
         assert!(capacity > 0, "Ring buffer capacity must be > 0");
 
         // Round up to power of 2
@@ -341,10 +431,11 @@ impl WalRingBuffer {
             write_pos: CacheLinePadded::new(AtomicU64::new(0)),
             read_pos: CacheLinePadded::new(AtomicU64::new(0)),
             closed: AtomicBool::new(false),
+            backpressure,
         }
     }
 
-    /// Create a new ring buffer with the default capacity.
+    /// Create a new ring buffer with the default capacity and backpressure.
     pub fn with_default_capacity() -> Self {
         Self::new(DEFAULT_RING_BUFFER_CAPACITY)
     }
@@ -380,7 +471,13 @@ impl WalRingBuffer {
     /// # Performance
     ///
     /// This method has ~50-100ns latency on the fast path (single CAS).
-    /// When the buffer is full, it spins briefly before returning an error.
+    /// When the buffer is full, it uses exponential backoff spinning before
+    /// returning an error.
+    ///
+    /// # Backpressure
+    ///
+    /// Uses exponential backoff: starts with `initial_spins` iterations,
+    /// doubling each round until `max_spins` is reached, then returns `Err`.
     pub fn try_append(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
         // Check if closed
         if self.is_closed() {
@@ -388,6 +485,7 @@ impl WalRingBuffer {
         }
 
         let mut spin_count = 0u32;
+        let mut current_spin_limit = self.backpressure.initial_spins;
 
         loop {
             let pos = self.write_pos.load(Ordering::Relaxed);
@@ -428,9 +526,18 @@ impl WalRingBuffer {
             } else if current_seq < expected_seq {
                 // Buffer is full - the consumer hasn't caught up
                 spin_count += 1;
-                if spin_count >= MAX_SPIN_ITERATIONS {
-                    return Err(entry);
+
+                if spin_count >= current_spin_limit {
+                    // Check if we've hit max spins
+                    if current_spin_limit >= self.backpressure.max_spins {
+                        return Err(entry);
+                    }
+                    // Exponential backoff: double the spin limit
+                    current_spin_limit =
+                        (current_spin_limit.saturating_mul(2)).min(self.backpressure.max_spins);
+                    spin_count = 0;
                 }
+
                 std::hint::spin_loop();
             } else {
                 // current_seq > expected_seq: This shouldn't happen in normal operation.
@@ -443,14 +550,22 @@ impl WalRingBuffer {
 
     /// Append an entry, blocking if the buffer is full.
     ///
-    /// This method will spin and yield while waiting for space.
+    /// This method will spin and sleep with exponential backoff while waiting
+    /// for space.
     ///
     /// # Returns
     ///
     /// - `Ok(())` if the entry was successfully appended
     /// - `Err(entry)` if the buffer is closed
+    ///
+    /// # Backpressure
+    ///
+    /// After `try_append` exhausts spinning, this method sleeps with
+    /// exponential backoff: starts at `base_sleep_us`, doubling each
+    /// iteration until `max_sleep_us` is reached.
     pub fn append_blocking(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
         let mut current_entry = entry;
+        let mut sleep_us = self.backpressure.base_sleep_us;
 
         loop {
             match self.try_append(current_entry) {
@@ -459,8 +574,17 @@ impl WalRingBuffer {
                     if self.is_closed() {
                         return Err(e);
                     }
-                    // Buffer is full - yield and retry
-                    std::thread::yield_now();
+
+                    // Buffer is full - sleep with exponential backoff
+                    if sleep_us > 0 {
+                        std::thread::sleep(std::time::Duration::from_micros(sleep_us));
+                        // Double sleep time up to max
+                        sleep_us = (sleep_us.saturating_mul(2)).min(self.backpressure.max_sleep_us);
+                    } else {
+                        // If base_sleep_us is 0, just yield
+                        std::thread::yield_now();
+                    }
+
                     current_entry = e;
                 }
             }
@@ -773,5 +897,65 @@ mod tests {
             let entries = buf.drain();
             assert_eq!(entries.len(), 3);
         }
+    }
+
+    #[test]
+    fn test_backpressure_config_default() {
+        let config = BackpressureConfig::default();
+        assert_eq!(config.initial_spins, 10);
+        assert_eq!(config.max_spins, 1000);
+        assert_eq!(config.base_sleep_us, 1);
+        assert_eq!(config.max_sleep_us, 1000);
+    }
+
+    #[test]
+    fn test_backpressure_config_presets() {
+        let low_latency = BackpressureConfig::low_latency();
+        assert!(low_latency.initial_spins > BackpressureConfig::default().initial_spins);
+        assert!(low_latency.max_sleep_us < BackpressureConfig::default().max_sleep_us);
+
+        let high_throughput = BackpressureConfig::high_throughput();
+        assert!(high_throughput.initial_spins < BackpressureConfig::default().initial_spins);
+        assert!(high_throughput.max_sleep_us > BackpressureConfig::default().max_sleep_us);
+    }
+
+    #[test]
+    fn test_ring_buffer_with_custom_backpressure() {
+        let config = BackpressureConfig {
+            initial_spins: 5,
+            max_spins: 50,
+            base_sleep_us: 10,
+            max_sleep_us: 100,
+        };
+        let buf = WalRingBuffer::with_config(4, config);
+
+        // Should work normally
+        let entry = PendingEntry::new_async(LSN(1), vec![1, 2, 3]);
+        assert!(buf.try_append(entry).is_ok());
+
+        let entries = buf.drain();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_backpressure_exponential_spin() {
+        // Create a buffer with very low spin limits to test backoff kicks in quickly
+        let config = BackpressureConfig {
+            initial_spins: 2,
+            max_spins: 8, // 2 -> 4 -> 8 (3 rounds)
+            base_sleep_us: 0,
+            max_sleep_us: 0,
+        };
+        let buf = WalRingBuffer::with_config(2, config);
+
+        // Fill the buffer
+        buf.try_append(PendingEntry::new_async(LSN(1), vec![]))
+            .unwrap();
+        buf.try_append(PendingEntry::new_async(LSN(2), vec![]))
+            .unwrap();
+
+        // Next append should fail after exponential backoff
+        let result = buf.try_append(PendingEntry::new_async(LSN(3), vec![]));
+        assert!(result.is_err());
     }
 }
