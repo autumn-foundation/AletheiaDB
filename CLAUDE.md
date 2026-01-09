@@ -234,6 +234,68 @@ let dot = dot_product(&a, &b)?;            // MaxSim, ColBERT
 - **[Troubleshooting Guide](docs/guides/vector-search-troubleshooting.md)** - Common issues and solutions
 - **[Design Document](docs/VECTOR_SEARCH_DESIGN.md)** - Architecture and roadmap (Phases 3-5)
 
+### Temporal Vector Integration (VS-047)
+
+GallifreyDB integrates temporal vector indexes with historical storage using a **hybrid pre-anchor hooks + post-commit observers** pattern. This enables provenance tracking between graph data anchors and vector snapshots.
+
+#### Key Features
+
+| Feature | Details |
+|---------|---------|
+| **Strong Consistency** | Snapshot IDs stored atomically with anchors - no consistency window |
+| **Provenance Tracking** | Direct linkage from graph anchor → vector snapshot |
+| **Graceful Degradation** | Hook failures don't block anchor creation |
+| **Observer Extensibility** | Post-commit notifications for metrics, logging |
+
+#### Quick Start
+
+```rust
+use gallifreydb::index::vector::temporal::TemporalVectorConfig;
+
+let db = GallifreyDB::with_config(AnchorConfig {
+    anchor_interval: 10,  // Create anchor every 10 versions
+    max_delta_chain: 10,
+});
+
+// Enable temporal vector indexing (registers hooks + observers)
+let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
+let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+db.enable_temporal_vector_index("embedding", temporal_config)?;
+
+// Now graph anchors automatically trigger vector snapshots
+let node_id = db.create_node("Document",
+    PropertyMapBuilder::new()
+        .insert_vector("embedding", &embedding)
+        .build()
+)?;
+
+// Update multiple times - snapshot created when anchor triggered
+for i in 0..20 {
+    db.update_node(node_id,
+        PropertyMapBuilder::new()
+            .insert_vector("embedding", &updated_embedding)
+            .build()
+    )?;
+}
+// Anchors at v0, v10, v20 each have vector snapshot IDs
+```
+
+#### Architecture: Hooks vs Observers
+
+**Pre-Anchor Hooks** (strong consistency):
+- Fire **BEFORE** anchor storage
+- Return `Option<snapshot_id>` to be stored atomically
+- Enable provenance: `anchor.vector_snapshot_id → temporal_index.snapshot(id)`
+- Use case: Snapshot ID provenance tracking
+
+**Post-Commit Observers** (extensibility):
+- Fire **AFTER** anchor storage
+- Notify of events for metrics, logging
+- Don't block storage operations
+- Use case: Observability, notifications, future indexes
+
+See **[ADR-0018](docs/adr/0018-temporal-vector-historical-integration.md)** for complete architecture and design decisions.
+
 ## Embedding Generation (Optional)
 
 GallifreyDB provides **optional** embedding providers via feature flags. Embedding generation is separate from the database - generate embeddings first, then store them.

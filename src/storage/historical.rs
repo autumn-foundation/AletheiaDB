@@ -14,6 +14,7 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
+use crate::storage::observer::{Observer, StorageEvent, notify_observers};
 use crate::storage::version::{
     AnchorConfig, EdgeVersion, NodeVersion, TemporalVersion, VersionData,
 };
@@ -21,6 +22,9 @@ use crate::utils::error::{Result, StorageError, TemporalError};
 use quick_cache::sync::Cache;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+#[cfg(feature = "observability")]
+use tracing;
 
 /// Default maximum number of versions per entity (DoS protection)
 pub const DEFAULT_MAX_VERSIONS_PER_ENTITY: usize = 1_000;
@@ -67,6 +71,48 @@ impl RetentionPolicy {
     }
 }
 
+/// Pre-anchor hook for creating snapshots before anchor storage.
+///
+/// This hook is called **before** storing an anchor to create synchronized snapshots
+/// and return a snapshot ID to be stored atomically with the anchor. This enables
+/// strong consistency for provenance tracking between graph versioning and vector indexing.
+///
+/// # Arguments
+///
+/// * `entity_type` - Type of entity ("node" or "edge")
+/// * `entity_id` - ID of the entity as u64
+/// * `timestamp` - Transaction timestamp when the anchor is being created
+/// * `properties` - Property map that will be stored in the anchor
+///
+/// # Returns
+///
+/// * `Ok(Some(snapshot_id))` - Snapshot created successfully, link to anchor
+/// * `Ok(None)` - No snapshot needed or empty index
+/// * `Err(e)` - Snapshot creation failed (anchor will still be created, graceful degradation)
+///
+/// # Examples
+///
+/// ```ignore
+/// use gallifreydb::storage::historical::PreAnchorHook;
+/// use std::sync::Arc;
+///
+/// let hook: PreAnchorHook = Arc::new(|entity_type, entity_id, timestamp, properties| {
+///     // Create vector snapshot before anchor is stored
+///     let snapshot_id = create_vector_snapshot(timestamp, properties)?;
+///     Ok(Some(snapshot_id))
+/// });
+/// ```
+pub type PreAnchorHook = Arc<
+    dyn Fn(
+            /* entity_type */ &str,
+            /* entity_id */ u64,
+            /* timestamp */ Timestamp,
+            /* properties */ &PropertyMap,
+        ) -> Result<Option<usize>>
+        + Send
+        + Sync,
+>;
+
 /// Default cache size for reconstructed properties (10,000 entries)
 const DEFAULT_RECONSTRUCTION_CACHE_SIZE: usize = 10_000;
 
@@ -96,6 +142,24 @@ pub struct HistoricalStorage {
     node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
     /// TinyLFU cache for reconstructed edge properties
     edge_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// Observers subscribed to storage events
+    ///
+    /// Multiple components can observe storage events (anchors, deletes, etc.)
+    /// for indexing, metrics, logging, or coordination. Observers are notified
+    /// asynchronously and errors don't block storage operations.
+    observers: Vec<Observer>,
+    /// Pre-anchor hook for node anchors (called before storage).
+    ///
+    /// This hook is called **before** storing a node anchor to create synchronized
+    /// snapshots. The returned snapshot ID is stored atomically with the anchor,
+    /// enabling strong consistency for provenance tracking.
+    pre_node_anchor_hook: Option<PreAnchorHook>,
+    /// Pre-anchor hook for edge anchors (called before storage).
+    ///
+    /// This hook is called **before** storing an edge anchor to create synchronized
+    /// snapshots. The returned snapshot ID is stored atomically with the anchor,
+    /// enabling strong consistency for provenance tracking.
+    pre_edge_anchor_hook: Option<PreAnchorHook>,
 }
 
 impl HistoricalStorage {
@@ -149,7 +213,125 @@ impl HistoricalStorage {
             edge_version_counts: HashMap::new(),
             node_property_cache: Arc::new(Cache::new(cache_size)),
             edge_property_cache: Arc::new(Cache::new(cache_size)),
+            observers: Vec::new(),
+            pre_node_anchor_hook: None,
+            pre_edge_anchor_hook: None,
         }
+    }
+
+    /// Add an observer to receive storage events.
+    ///
+    /// Observers are notified of storage events (anchors, deletes, etc.) for indexing,
+    /// metrics, logging, or coordination. Multiple observers can be registered, and all
+    /// will be notified of events they're interested in.
+    ///
+    /// # Arguments
+    /// * `observer` - Component implementing the StorageObserver trait
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// # use gallifreydb::storage::observer::{StorageObserver, StorageEvent};
+    /// # use std::sync::Arc;
+    /// struct VectorIndexObserver;
+    ///
+    /// impl StorageObserver for VectorIndexObserver {
+    ///     fn on_event(&self, event: &StorageEvent) -> gallifreydb::utils::Result<()> {
+    ///         match event {
+    ///             StorageEvent::NodeAnchorCreated { version_id, timestamp, .. } => {
+    ///                 println!("Anchor {} created at {}", version_id, timestamp);
+    ///                 Ok(())
+    ///             }
+    ///             _ => Ok(())
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// let mut storage = HistoricalStorage::new();
+    /// storage.add_observer(Arc::new(VectorIndexObserver));
+    /// ```
+    pub fn add_observer(&mut self, observer: Observer) {
+        self.observers.push(observer);
+    }
+
+    /// Register a pre-anchor hook for nodes.
+    ///
+    /// This hook is called **before** storing a node anchor, allowing the hook
+    /// to create synchronized snapshots and return a snapshot ID to be stored
+    /// atomically with the anchor. This enables strong consistency for provenance
+    /// tracking between graph versioning and vector indexing.
+    ///
+    /// # Arguments
+    /// * `hook` - Function that creates snapshots and returns snapshot IDs
+    ///
+    /// # Hook Signature
+    /// The hook receives:
+    /// * `entity_type` - Always "node" for this hook
+    /// * `entity_id` - Node ID as u64
+    /// * `timestamp` - Transaction timestamp
+    /// * `properties` - Property map being stored in the anchor
+    ///
+    /// The hook returns:
+    /// * `Ok(Some(snapshot_id))` - Snapshot created, link to anchor
+    /// * `Ok(None)` - No snapshot needed (e.g., empty index)
+    /// * `Err(e)` - Error (anchor still created, graceful degradation)
+    ///
+    /// # Example
+    /// ```ignore
+    /// use gallifreydb::storage::historical::PreAnchorHook;
+    /// use std::sync::Arc;
+    ///
+    /// let hook: PreAnchorHook = Arc::new(|_entity_type, _entity_id, timestamp, _properties| {
+    ///     // Create vector snapshot before anchor storage
+    ///     let snapshot_id = temporal_vector_index.create_snapshot_for_anchor(timestamp)?;
+    ///     Ok(snapshot_id)
+    /// });
+    ///
+    /// let mut storage = HistoricalStorage::new();
+    /// storage.register_pre_node_anchor_hook(hook);
+    /// ```
+    pub fn register_pre_node_anchor_hook(&mut self, hook: PreAnchorHook) {
+        self.pre_node_anchor_hook = Some(hook);
+    }
+
+    /// Register a pre-anchor hook for edges.
+    ///
+    /// This hook is called **before** storing an edge anchor, allowing the hook
+    /// to create synchronized snapshots and return a snapshot ID to be stored
+    /// atomically with the anchor. This enables strong consistency for provenance
+    /// tracking between graph versioning and vector indexing.
+    ///
+    /// # Arguments
+    /// * `hook` - Function that creates snapshots and returns snapshot IDs
+    ///
+    /// # Hook Signature
+    /// The hook receives:
+    /// * `entity_type` - Always "edge" for this hook
+    /// * `entity_id` - Edge ID as u64
+    /// * `timestamp` - Transaction timestamp
+    /// * `properties` - Property map being stored in the anchor
+    ///
+    /// The hook returns:
+    /// * `Ok(Some(snapshot_id))` - Snapshot created, link to anchor
+    /// * `Ok(None)` - No snapshot needed (e.g., empty index)
+    /// * `Err(e)` - Error (anchor still created, graceful degradation)
+    ///
+    /// # Example
+    /// ```ignore
+    /// use gallifreydb::storage::historical::PreAnchorHook;
+    /// use std::sync::Arc;
+    ///
+    /// let hook: PreAnchorHook = Arc::new(|_entity_type, _entity_id, timestamp, _properties| {
+    ///     // Create vector snapshot before anchor storage
+    ///     let snapshot_id = temporal_vector_index.create_snapshot_for_anchor(timestamp)?;
+    ///     Ok(snapshot_id)
+    /// });
+    ///
+    /// let mut storage = HistoricalStorage::new();
+    /// storage.register_pre_edge_anchor_hook(hook);
+    /// ```
+    pub fn register_pre_edge_anchor_hook(&mut self, hook: PreAnchorHook) {
+        self.pre_edge_anchor_hook = Some(hook);
     }
 
     /// Add a new version of a node.
@@ -179,7 +361,10 @@ impl HistoricalStorage {
         // Check if this node already has versions
         let prev_version_id = self.node_version_heads.get(&node_id).copied();
 
-        let version = if let Some(prev_id) = prev_version_id {
+        // Clone properties for hook call (since new_anchor takes ownership)
+        let properties_for_hook = properties.clone();
+
+        let mut version = if let Some(prev_id) = prev_version_id {
             // Get the previous version (verify it exists)
             let _prev_version = self
                 .node_versions
@@ -211,6 +396,44 @@ impl HistoricalStorage {
             NodeVersion::new_anchor(version_id, node_id, temporal, label, properties)
         };
 
+        // Call pre-anchor hook if this is an anchor (BEFORE storing)
+        if version.is_anchor() {
+            let timestamp = temporal.transaction_time().start();
+            if let Some(ref hook) = self.pre_node_anchor_hook {
+                match hook("node", node_id.as_u64(), timestamp, &properties_for_hook) {
+                    Ok(Some(snapshot_id)) => {
+                        // Set snapshot ID in anchor data (strong consistency)
+                        version.data.set_vector_snapshot_id(snapshot_id);
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            "Pre-anchor hook returned snapshot ID {} for node {}",
+                            snapshot_id,
+                            node_id
+                        );
+                    }
+                    Ok(None) => {
+                        // Hook returned None, no snapshot needed (e.g., empty index)
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            "Pre-anchor hook returned None for node {} (no snapshot needed)",
+                            node_id
+                        );
+                    }
+                    Err(e) => {
+                        // Hook failed - log but don't block anchor creation (graceful degradation)
+                        #[cfg(feature = "observability")]
+                        tracing::warn!(
+                            "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
+                            "node",
+                            node_id,
+                            timestamp,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
         // Link the previous version to this one
         if let Some(prev_id) = prev_version_id
             && let Some(prev) = self.node_versions.get_mut(&prev_id)
@@ -218,12 +441,37 @@ impl HistoricalStorage {
             prev.next_version = Some(version_id);
         }
 
+        // Check if this is an anchor before storing (for observer notification)
+        let is_anchor = version.is_anchor();
+
         // Store the version
         self.node_versions.insert(version_id, version);
         self.node_version_heads.insert(node_id, version_id);
 
         // Increment cached version count (for O(1) capacity checks)
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+
+        // Notify observers - emit appropriate events
+        let timestamp = temporal.transaction_time().start();
+
+        // Emit version created event (for all versions)
+        let version_event = StorageEvent::NodeVersionCreated {
+            version_id,
+            node_id,
+            timestamp,
+            is_anchor,
+        };
+        notify_observers(&self.observers, &version_event);
+
+        // Emit anchor created event (only for anchors)
+        if is_anchor {
+            let anchor_event = StorageEvent::NodeAnchorCreated {
+                version_id,
+                node_id,
+                timestamp,
+            };
+            notify_observers(&self.observers, &anchor_event);
+        }
 
         Ok(())
     }
@@ -254,7 +502,10 @@ impl HistoricalStorage {
 
         let prev_version_id = self.edge_version_heads.get(&edge_id).copied();
 
-        let version = if let Some(prev_id) = prev_version_id {
+        // Clone properties for hook call (since new_anchor takes ownership)
+        let properties_for_hook = properties.clone();
+
+        let mut version = if let Some(prev_id) = prev_version_id {
             let _prev_version = self
                 .edge_versions
                 .get(&prev_id)
@@ -286,17 +537,80 @@ impl HistoricalStorage {
             )
         };
 
+        // Call pre-anchor hook if this is an anchor (BEFORE storing)
+        if version.is_anchor() {
+            let timestamp = temporal.transaction_time().start();
+            if let Some(ref hook) = self.pre_edge_anchor_hook {
+                match hook("edge", edge_id.as_u64(), timestamp, &properties_for_hook) {
+                    Ok(Some(snapshot_id)) => {
+                        // Set snapshot ID in anchor data (strong consistency)
+                        version.data.set_vector_snapshot_id(snapshot_id);
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            "Pre-anchor hook returned snapshot ID {} for edge {}",
+                            snapshot_id,
+                            edge_id
+                        );
+                    }
+                    Ok(None) => {
+                        // Hook returned None, no snapshot needed (e.g., empty index)
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            "Pre-anchor hook returned None for edge {} (no snapshot needed)",
+                            edge_id
+                        );
+                    }
+                    Err(e) => {
+                        // Hook failed - log but don't block anchor creation (graceful degradation)
+                        #[cfg(feature = "observability")]
+                        tracing::warn!(
+                            "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
+                            "edge",
+                            edge_id,
+                            timestamp,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
         if let Some(prev_id) = prev_version_id
             && let Some(prev) = self.edge_versions.get_mut(&prev_id)
         {
             prev.next_version = Some(version_id);
         }
 
+        // Check if this is an anchor before storing (for observer notification)
+        let is_anchor = version.is_anchor();
+
         self.edge_versions.insert(version_id, version);
         self.edge_version_heads.insert(edge_id, version_id);
 
         // Increment cached version count (for O(1) capacity checks)
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+
+        // Notify observers - emit appropriate events
+        let timestamp = temporal.transaction_time().start();
+
+        // Emit version created event (for all versions)
+        let version_event = StorageEvent::EdgeVersionCreated {
+            version_id,
+            edge_id,
+            timestamp,
+            is_anchor,
+        };
+        notify_observers(&self.observers, &version_event);
+
+        // Emit anchor created event (only for anchors)
+        if is_anchor {
+            let anchor_event = StorageEvent::EdgeAnchorCreated {
+                version_id,
+                edge_id,
+                timestamp,
+            };
+            notify_observers(&self.observers, &anchor_event);
+        }
 
         Ok(())
     }
@@ -323,7 +637,7 @@ impl HistoricalStorage {
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
         let properties = match &version.data {
-            VersionData::Anchor { properties } => properties.clone(),
+            VersionData::Anchor { properties, .. } => properties.clone(),
             VersionData::Delta { delta } => {
                 // Find the previous version
                 let prev_id = version
@@ -365,7 +679,7 @@ impl HistoricalStorage {
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
         let properties = match &version.data {
-            VersionData::Anchor { properties } => properties.clone(),
+            VersionData::Anchor { properties, .. } => properties.clone(),
             VersionData::Delta { delta } => {
                 let prev_id = version
                     .prev_version
@@ -633,6 +947,20 @@ impl HistoricalStorage {
             edge_cache_entries: self.edge_property_cache.len(),
         }
     }
+
+    /// Get an iterator over all node versions (test-only helper).
+    ///
+    /// This method provides access to the node versions for integration test
+    /// verification purposes. It is public to allow access from integration tests
+    /// but is hidden from documentation and marked with `__test_` prefix to
+    /// discourage production use.
+    ///
+    /// **Warning**: This method exposes internal implementation details and
+    /// should only be used in tests.
+    #[doc(hidden)]
+    pub fn __test_get_node_versions_iterator(&self) -> impl Iterator<Item = &NodeVersion> {
+        self.node_versions.values()
+    }
 }
 
 impl Default for HistoricalStorage {
@@ -686,6 +1014,7 @@ mod tests {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::TimeRange;
+    use crate::storage::{StorageEvent, StorageObserver};
 
     #[test]
     fn test_create_first_version() {
@@ -1877,7 +2206,7 @@ mod tests {
 
         // Verify data can be used for copy-out reconstruction
         match data {
-            VersionData::Anchor { properties } => {
+            VersionData::Anchor { properties, .. } => {
                 assert_eq!(properties.get("name").and_then(|v| v.as_str()), Some("Bob"));
             }
             _ => panic!("Expected anchor"),
@@ -1909,10 +2238,549 @@ mod tests {
 
         // Verify data
         match data {
-            VersionData::Anchor { properties } => {
+            VersionData::Anchor { properties, .. } => {
                 assert_eq!(properties.get("since").and_then(|v| v.as_int()), Some(2021));
             }
             _ => panic!("Expected anchor"),
         }
+    }
+
+    // ============================================================
+    // Observer Pattern Tests (VS-047)
+    // ============================================================
+
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Mock observer that counts anchor events
+    struct CountingObserver {
+        anchor_count: AtomicUsize,
+        version_count: AtomicUsize,
+    }
+
+    impl StorageObserver for CountingObserver {
+        fn on_event(&self, event: &StorageEvent) -> Result<()> {
+            match event {
+                StorageEvent::NodeAnchorCreated { .. } | StorageEvent::EdgeAnchorCreated { .. } => {
+                    self.anchor_count.fetch_add(1, Ordering::SeqCst);
+                }
+                StorageEvent::NodeVersionCreated { .. }
+                | StorageEvent::EdgeVersionCreated { .. } => {
+                    self.version_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Mock observer that only cares about node anchors
+    struct NodeAnchorObserver {
+        count: AtomicUsize,
+    }
+
+    impl StorageObserver for NodeAnchorObserver {
+        fn on_event(&self, _event: &StorageEvent) -> Result<()> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn interested_in(&self, event: &StorageEvent) -> bool {
+            matches!(event, StorageEvent::NodeAnchorCreated { .. })
+        }
+    }
+
+    /// Mock observer that collects events
+    struct CollectingObserver {
+        events: StdMutex<Vec<StorageEvent>>,
+    }
+
+    impl StorageObserver for CollectingObserver {
+        fn on_event(&self, event: &StorageEvent) -> Result<()> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_observer_triggered_on_node_anchor_creation() {
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        });
+
+        let observer = Arc::new(CountingObserver {
+            anchor_count: AtomicUsize::new(0),
+            version_count: AtomicUsize::new(0),
+        });
+        storage.add_observer(observer.clone());
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create 5 versions: anchor, delta, delta, anchor, delta
+        for i in 0..5 {
+            storage
+                .add_node_version(
+                    node_id,
+                    VersionId::new(i).unwrap(),
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    PropertyMapBuilder::new().insert("value", i as i64).build(),
+                )
+                .unwrap();
+        }
+
+        // Should have 2 anchors (v0 and v3)
+        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2);
+        // Should have 5 total version events
+        assert_eq!(observer.version_count.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn test_observer_triggered_on_edge_anchor_creation() {
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 2,
+            max_delta_chain: 10,
+        });
+
+        let observer = Arc::new(CountingObserver {
+            anchor_count: AtomicUsize::new(0),
+            version_count: AtomicUsize::new(0),
+        });
+        storage.add_observer(observer.clone());
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(10).unwrap();
+        let target = NodeId::new(20).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Create 3 versions: anchor, delta, anchor
+        for i in 0..3 {
+            storage
+                .add_edge_version(
+                    edge_id,
+                    VersionId::new(i).unwrap(),
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    source,
+                    target,
+                    PropertyMapBuilder::new().build(),
+                )
+                .unwrap();
+        }
+
+        // Should have 2 anchors
+        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_observer_filtering() {
+        let mut storage = HistoricalStorage::new();
+
+        // Observer only interested in node anchors
+        let observer = Arc::new(NodeAnchorObserver {
+            count: AtomicUsize::new(0),
+        });
+        storage.add_observer(observer.clone());
+
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create node anchor
+        storage
+            .add_node_version(
+                node_id,
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        // Create edge anchor
+        storage
+            .add_edge_version(
+                edge_id,
+                VersionId::new(2).unwrap(),
+                BiTemporalInterval::current(2000),
+                label,
+                node_id,
+                node_id,
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        // Should only count node anchor (not edge anchor)
+        assert_eq!(observer.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_observer_receives_correct_event_data() {
+        let mut storage = HistoricalStorage::new();
+
+        let collector = Arc::new(CollectingObserver {
+            events: StdMutex::new(Vec::new()),
+        });
+        storage.add_observer(collector.clone());
+
+        let node_id = NodeId::new(42).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+        let timestamp = 5000i64;
+
+        storage
+            .add_node_version(
+                node_id,
+                version_id,
+                BiTemporalInterval::current(timestamp),
+                label,
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        let events = collector.events.lock().unwrap();
+        assert_eq!(events.len(), 2); // NodeAnchorCreated + NodeVersionCreated
+
+        // Check anchor event
+        let anchor_event = events
+            .iter()
+            .find(|e| matches!(e, StorageEvent::NodeAnchorCreated { .. }))
+            .expect("Should have NodeAnchorCreated event");
+
+        match anchor_event {
+            StorageEvent::NodeAnchorCreated {
+                version_id: vid,
+                node_id: nid,
+                timestamp: ts,
+            } => {
+                assert_eq!(*vid, version_id);
+                assert_eq!(*nid, node_id);
+                assert_eq!(*ts, timestamp);
+            }
+            _ => panic!("Wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_observers() {
+        let mut storage = HistoricalStorage::new();
+
+        let observer1 = Arc::new(CountingObserver {
+            anchor_count: AtomicUsize::new(0),
+            version_count: AtomicUsize::new(0),
+        });
+        let observer2 = Arc::new(CountingObserver {
+            anchor_count: AtomicUsize::new(0),
+            version_count: AtomicUsize::new(0),
+        });
+
+        storage.add_observer(observer1.clone());
+        storage.add_observer(observer2.clone());
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        storage
+            .add_node_version(
+                node_id,
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        // Both observers should be notified
+        assert_eq!(observer1.anchor_count.load(Ordering::SeqCst), 1);
+        assert_eq!(observer2.anchor_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_observer_error_doesnt_block_storage() {
+        /// Observer that always returns an error
+        struct FailingObserver;
+
+        impl StorageObserver for FailingObserver {
+            fn on_event(&self, _event: &StorageEvent) -> Result<()> {
+                Err(crate::utils::error::Error::Storage(
+                    StorageError::InconsistentState {
+                        reason: "Test error".to_string(),
+                    },
+                ))
+            }
+        }
+
+        let mut storage = HistoricalStorage::new();
+        storage.add_observer(Arc::new(FailingObserver));
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Should succeed even though observer fails
+        let result = storage.add_node_version(
+            node_id,
+            VersionId::new(1).unwrap(),
+            BiTemporalInterval::current(1000),
+            label,
+            PropertyMapBuilder::new().build(),
+        );
+
+        assert!(result.is_ok());
+
+        // Verify version was created
+        let version = storage.get_node_version(VersionId::new(1).unwrap());
+        assert!(version.is_some());
+    }
+
+    // ========================================================================
+    // Pre-Anchor Hook Tests
+    // ========================================================================
+
+    #[test]
+    fn test_pre_anchor_hook_called_before_storage() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut storage = HistoricalStorage::new();
+        let hook_called = Arc::new(AtomicBool::new(false));
+        let hook_called_clone = Arc::clone(&hook_called);
+
+        // Hook that sets flag when called
+        let hook: PreAnchorHook =
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
+                hook_called_clone.store(true, Ordering::SeqCst);
+                Ok(Some(42))
+            });
+
+        storage.register_pre_node_anchor_hook(hook);
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create anchor (first version is always anchor)
+        storage
+            .add_node_version(
+                node_id,
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        // Hook should have been called
+        assert!(hook_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_pre_anchor_hook_returns_snapshot_id() {
+        let mut storage = HistoricalStorage::new();
+
+        // Hook that returns snapshot ID 123
+        let hook: PreAnchorHook =
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| Ok(Some(123)));
+
+        storage.register_pre_node_anchor_hook(hook);
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create anchor
+        storage
+            .add_node_version(
+                node_id,
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        // Verify snapshot ID was stored in anchor
+        let version = storage
+            .get_node_version(VersionId::new(1).unwrap())
+            .unwrap();
+        assert!(version.is_anchor());
+        assert_eq!(version.data.get_vector_snapshot_id(), Some(123));
+    }
+
+    #[test]
+    fn test_pre_anchor_hook_none_handling() {
+        let mut storage = HistoricalStorage::new();
+
+        // Hook that returns None (no snapshot needed)
+        let hook: PreAnchorHook =
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| Ok(None));
+
+        storage.register_pre_node_anchor_hook(hook);
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create anchor - should succeed even with None
+        storage
+            .add_node_version(
+                node_id,
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        // Verify anchor created without snapshot ID
+        let version = storage
+            .get_node_version(VersionId::new(1).unwrap())
+            .unwrap();
+        assert!(version.is_anchor());
+        assert_eq!(version.data.get_vector_snapshot_id(), None);
+    }
+
+    #[test]
+    fn test_pre_anchor_hook_error_graceful_degradation() {
+        let mut storage = HistoricalStorage::new();
+
+        // Hook that always fails
+        let hook: PreAnchorHook =
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
+                Err(crate::utils::error::Error::Storage(
+                    StorageError::InconsistentState {
+                        reason: "Test hook error".to_string(),
+                    },
+                ))
+            });
+
+        storage.register_pre_node_anchor_hook(hook);
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create anchor - should succeed despite hook failure (graceful degradation)
+        let result = storage.add_node_version(
+            node_id,
+            VersionId::new(1).unwrap(),
+            BiTemporalInterval::current(1000),
+            label,
+            PropertyMapBuilder::new().build(),
+        );
+
+        assert!(result.is_ok());
+
+        // Verify anchor created without snapshot ID
+        let version = storage
+            .get_node_version(VersionId::new(1).unwrap())
+            .unwrap();
+        assert!(version.is_anchor());
+        assert_eq!(version.data.get_vector_snapshot_id(), None);
+    }
+
+    #[test]
+    fn test_pre_anchor_hook_not_called_for_delta() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        });
+
+        let hook_call_count = Arc::new(AtomicUsize::new(0));
+        let hook_call_count_clone = Arc::clone(&hook_call_count);
+
+        // Hook that counts calls
+        let hook: PreAnchorHook =
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
+                hook_call_count_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(42))
+            });
+
+        storage.register_pre_node_anchor_hook(hook);
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create 5 versions (anchor at v0, deltas at v1-v2, anchor at v3, delta at v4)
+        for i in 0..5 {
+            storage
+                .add_node_version(
+                    node_id,
+                    VersionId::new(100 + i).unwrap(),
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    PropertyMapBuilder::new().build(),
+                )
+                .unwrap();
+        }
+
+        // Hook should be called only for anchors (v0 and v3)
+        assert_eq!(hook_call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_pre_anchor_hook_node_and_edge_separate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut storage = HistoricalStorage::new();
+
+        let node_hook_count = Arc::new(AtomicUsize::new(0));
+        let node_hook_count_clone = Arc::clone(&node_hook_count);
+        let node_hook: PreAnchorHook =
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
+                node_hook_count_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(1))
+            });
+
+        let edge_hook_count = Arc::new(AtomicUsize::new(0));
+        let edge_hook_count_clone = Arc::clone(&edge_hook_count);
+        let edge_hook: PreAnchorHook =
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
+                edge_hook_count_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(2))
+            });
+
+        storage.register_pre_node_anchor_hook(node_hook);
+        storage.register_pre_edge_anchor_hook(edge_hook);
+
+        let node1_id = NodeId::new(1).unwrap();
+        let node2_id = NodeId::new(2).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create node version
+        storage
+            .add_node_version(
+                node1_id,
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(1000),
+                label,
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        // Create edge version
+        storage
+            .add_edge_version(
+                edge_id,
+                VersionId::new(2).unwrap(),
+                BiTemporalInterval::current(2000),
+                label,
+                node1_id,
+                node2_id,
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        // Each hook should be called once
+        assert_eq!(node_hook_count.load(Ordering::SeqCst), 1);
+        assert_eq!(edge_hook_count.load(Ordering::SeqCst), 1);
+
+        // Verify snapshot IDs are different
+        let node_version = storage
+            .get_node_version(VersionId::new(1).unwrap())
+            .unwrap();
+        let edge_version = storage
+            .get_edge_version(VersionId::new(2).unwrap())
+            .unwrap();
+        assert_eq!(node_version.data.get_vector_snapshot_id(), Some(1));
+        assert_eq!(edge_version.data.get_vector_snapshot_id(), Some(2));
     }
 }

@@ -1,8 +1,8 @@
 # Vector Search Integration Design
 
-> **Status**: Phase 2 Complete (Milestone M2)
+> **Status**: Phase 3 Complete (VS-047)
 > **Created**: 2024-12-30
-> **Updated**: 2026-01-04
+> **Updated**: 2026-01-08
 > **Goal**: Position GallifreyDB as SUPERRAG - Graph + Vector + Bi-temporal
 >
 > ## Implementation Progress
@@ -11,7 +11,7 @@
 > |-------|--------|-------------|
 > | Phase 1 | ✅ Complete (PR #138) | Vector storage foundation (`PropertyValue::Vector`, similarity functions) |
 > | Phase 2 | ✅ Complete (Milestone M2) | HNSW index integration, benchmarks, tests, documentation |
-> | Phase 3 | 🔲 Planned | Temporal vector support |
+> | Phase 3 | ✅ Complete (Issue #67) | Temporal vector-historical integration, provenance tracking |
 > | Phase 4 | 🔲 Planned | Hybrid query engine |
 > | Phase 5 | 🔲 Planned | Persistence & performance optimization |
 
@@ -241,24 +241,70 @@ impl GallifreyDB {
 - k-NN search (k=10, 1k vectors): ~2-4µs
 - Memory overhead: ~1KB per vector
 
-### Phase 3: Temporal Vector Support
-**Estimated effort**: 3-5 days
+### Phase 3: Temporal Vector-Historical Integration ✅ Complete
 
-**Goals**:
-- Version vector changes using existing anchor+delta system
-- Temporal vector index (snapshots at key timestamps)
-- Point-in-time vector queries
-- Semantic drift tracking
+**Issue**: #67 (VS-047) - Integrate Temporal Vectors with HistoricalStorage
+**Completed**: 2026-01-08
+**Implementation**: Hybrid Pre-Anchor Hooks + Post-Commit Observers
 
-**Key challenge**: Efficient temporal vector indexing
-- Option A: Rebuild HNSW at query time (slow, accurate)
-- Option B: Maintain periodic snapshots (fast, more storage)
-- Option C: Delta-based vector reconstruction (balanced)
+**Goals Achieved**:
+- ✅ Vector snapshot creation synchronized with graph anchors
+- ✅ Provenance tracking: `anchor.vector_snapshot_id → temporal_index.snapshot(id)`
+- ✅ Strong consistency (snapshot IDs stored atomically)
+- ✅ Observer extensibility (metrics, logging, future indexes)
+- ✅ Graceful degradation (hook failures don't block anchors)
 
-**Recommendation**: Option B for MVP - maintain HNSW snapshots at configurable intervals.
+**Architecture Pattern**:
+- **Pre-anchor hooks**: Fire BEFORE anchor storage, return snapshot IDs → strong consistency
+- **Post-commit observers**: Fire AFTER storage for metrics/logging → extensibility
 
-**Files to create**:
-- `src/index/temporal_vector.rs` - Time-aware vector index
+**Key Implementation**:
+```rust
+// GallifreyDB.enable_temporal_vector_index() registers both:
+pub fn enable_temporal_vector_index(&self, property_name: &str, config: TemporalVectorConfig) -> Result<()> {
+    // 1. Create temporal vector index
+    self.current.enable_temporal_vector_index(property_name, config)?;
+    let temporal_index = self.current.get_temporal_vector_index().ok_or(...)?;
+
+    // 2. Register pre-anchor hooks (strong consistency)
+    // Both node and edge hooks perform the same action, so we create one and clone it
+    let hook: PreAnchorHook = {
+        let index = Arc::clone(&temporal_index);
+        Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
+            index.create_snapshot_for_anchor(timestamp)  // Returns Option<snapshot_id>
+        })
+    };
+    historical.register_pre_node_anchor_hook(Arc::clone(&hook));
+    historical.register_pre_edge_anchor_hook(hook);
+
+    // 3. Register observer (extensibility)
+    let observer = VectorIndexObserver::new(temporal_index);
+    historical.add_observer(Arc::new(observer));
+
+    Ok(())
+}
+```
+
+**Provenance Tracking**:
+- Every graph anchor stores `vector_snapshot_id` atomically
+- Enables reconstruction: anchor → snapshot ID → temporal vector state
+- 1:1 alignment: anchor interval matches snapshot creation
+
+**Test Coverage**:
+- 6 unit tests in `src/storage/historical.rs` (hook behavior)
+- 5 integration tests in `tests/temporal_vector_integration.rs`
+- All 684 tests pass, clippy clean
+
+**Documentation**:
+- ADR-0018: Complete architecture and design decisions
+- Updated CLAUDE.md with integration guide
+- Module-level documentation in observer.rs
+
+**Files Modified**:
+- `src/storage/historical.rs` - PreAnchorHook infrastructure, hook calls in add_*_version()
+- `src/db.rs` - Hook and observer registration in enable_temporal_vector_index()
+- `src/storage/observer.rs` - Module docs explaining hook vs observer patterns
+- `docs/adr/0018-temporal-vector-historical-integration.md` - NEW ADR
 
 ### Phase 4: Hybrid Query Engine
 **Estimated effort**: 2-3 days

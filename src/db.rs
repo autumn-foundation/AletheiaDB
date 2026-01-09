@@ -12,6 +12,7 @@ use crate::core::property::PropertyMap;
 use crate::core::temporal::{Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
 use crate::index::vector::hnsw::HnswConfig;
+use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
@@ -771,6 +772,88 @@ impl GallifreyDB {
         self.current.is_vector_index_enabled()
     }
 
+    /// Enable temporal vector indexing for a specific property.
+    ///
+    /// Once enabled, vector changes will be tracked over time using snapshot-based
+    /// indexing, enabling point-in-time vector queries and semantic drift tracking.
+    /// This also integrates with the historical storage's observer pattern to create
+    /// vector snapshots aligned with graph anchors.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - Name of the property containing vectors
+    /// * `config` - Temporal vector index configuration
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
+    /// use gallifreydb::index::vector::HnswConfig;
+    ///
+    /// let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
+    /// let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+    /// db.enable_temporal_vector_index("embedding", temporal_config)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector indexing is already enabled
+    /// - The historical storage lock is poisoned
+    pub fn enable_temporal_vector_index(
+        &self,
+        property_name: &str,
+        config: TemporalVectorConfig,
+    ) -> Result<()> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("enable_temporal_vector_index").entered();
+
+        // Enable temporal vector index in current storage
+        self.current
+            .enable_temporal_vector_index(property_name, config)?;
+
+        // Get the temporal vector index from current storage
+        let temporal_index = self.current.get_temporal_vector_index().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index not found after enabling".to_string(),
+            ))
+        })?;
+
+        // Register pre-anchor hooks with historical storage (for strong consistency)
+        // Both node and edge hooks perform the same action, so we create one and clone it
+        let hook: crate::storage::historical::PreAnchorHook = {
+            let index = Arc::clone(&temporal_index);
+            Arc::new(move |_entity_type, _entity_id, timestamp, _properties| {
+                index.create_snapshot_for_anchor(timestamp)
+            })
+        };
+
+        let node_hook = Arc::clone(&hook);
+        let edge_hook = hook;
+
+        let mut historical = self.historical.write().map_err(|_| {
+            crate::utils::error::Error::Storage(
+                crate::utils::error::StorageError::InconsistentState {
+                    reason: "Historical storage lock poisoned".to_string(),
+                },
+            )
+        })?;
+
+        historical.register_pre_node_anchor_hook(node_hook);
+        historical.register_pre_edge_anchor_hook(edge_hook);
+
+        // Create observer and register with historical storage (for extensibility)
+        let observer = VectorIndexObserver::new(temporal_index);
+        historical.add_observer(std::sync::Arc::new(observer));
+
+        Ok(())
+    }
+
+    /// Check if temporal vector indexing is enabled.
+    pub fn is_temporal_vector_index_enabled(&self) -> bool {
+        self.current.is_temporal_vector_index_enabled()
+    }
+
     /// Find k most similar nodes to a query node based on vector similarity.
     ///
     /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
@@ -957,6 +1040,30 @@ impl GallifreyDB {
     /// Returns an error if the historical storage lock is poisoned.
     pub fn historical_stats(&self) -> Result<crate::storage::historical::HistoricalStats> {
         Ok(self.historical.read_or_err()?.stats())
+    }
+
+    /// Get a reference to the current storage (test-only helper).
+    ///
+    /// This method is only available in test builds and provides access to the
+    /// internal CurrentStorage for integration test verification purposes.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn storage(&self) -> &Arc<CurrentStorage> {
+        &self.current
+    }
+
+    /// Access the internal HistoricalStorage for testing purposes.
+    ///
+    /// This method provides access to the internal HistoricalStorage for
+    /// integration test verification purposes. It is public to allow access from
+    /// integration tests but is hidden from documentation and marked with
+    /// `__test_` prefix to discourage production use.
+    ///
+    /// **Warning**: This method exposes internal implementation details and
+    /// should only be used in tests.
+    #[doc(hidden)]
+    pub fn __test_historical_storage(&self) -> &Arc<RwLock<HistoricalStorage>> {
+        &self.historical
     }
 }
 
