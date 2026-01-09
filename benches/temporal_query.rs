@@ -1,5 +1,7 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use gallifreydb::GallifreyDB;
 use gallifreydb::core::id::{NodeId, VersionId};
+use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
 use gallifreydb::index::temporal::TemporalIndexes;
 use std::sync::Arc;
@@ -485,6 +487,133 @@ fn bench_mixed_read_write_same_entity(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_batch_vs_loop_time_travel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_vs_loop_time_travel");
+
+    // Benchmark the primary value proposition: batch API vs loop
+    // This validates that get_nodes_at_time is actually faster than N individual calls
+    for batch_size in [10, 50, 100, 500] {
+        // Setup: Create database with historical data
+        let db = GallifreyDB::new();
+
+        // Create nodes with some historical versions
+        let node_ids: Vec<NodeId> = (0..batch_size)
+            .map(|i| {
+                db.create_node(
+                    "Person",
+                    PropertyMapBuilder::new()
+                        .insert("name", format!("Person{}", i))
+                        .insert("index", i as i64)
+                        .build(),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // Use a timestamp that's guaranteed to be after all creates
+        // GallifreyDB uses logical timestamps (sequential integers), not wall-clock time
+        // Since entities are created with sequential timestamps, use a value well beyond the batch size
+        let query_time = (batch_size as i64) * 10;
+
+        // Benchmark 1: Batch API (single lock acquisition)
+        group.bench_with_input(
+            BenchmarkId::new("batch_api", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    let results = db
+                        .get_nodes_at_time(&node_ids, query_time, query_time)
+                        .unwrap();
+                    black_box(results)
+                });
+            },
+        );
+
+        // Benchmark 2: Loop with individual calls (N lock acquisitions)
+        group.bench_with_input(
+            BenchmarkId::new("loop_individual", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    let results: Vec<_> = node_ids
+                        .iter()
+                        .map(|&node_id| db.get_node_at_time(node_id, query_time, query_time).ok())
+                        .collect();
+                    black_box(results)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_batch_edges_vs_loop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_edges_vs_loop");
+
+    // Same benchmark but for edges
+    for batch_size in [10, 50, 100, 500] {
+        let db = GallifreyDB::new();
+
+        // Create nodes
+        let source = db
+            .create_node("Node", PropertyMapBuilder::new().build())
+            .unwrap();
+        let target = db
+            .create_node("Node", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create edges
+        let edge_ids = (0..batch_size)
+            .map(|i| {
+                db.create_edge(
+                    source,
+                    target,
+                    "LINK",
+                    PropertyMapBuilder::new().insert("index", i as i64).build(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        // Use a timestamp that's guaranteed to be after all creates
+        // GallifreyDB uses logical timestamps (sequential integers), not wall-clock time
+        // Since entities are created with sequential timestamps, use a value well beyond the batch size
+        let query_time = (batch_size as i64) * 10;
+
+        // Benchmark 1: Batch API
+        group.bench_with_input(
+            BenchmarkId::new("batch_api", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    let results = db
+                        .get_edges_at_time(&edge_ids, query_time, query_time)
+                        .unwrap();
+                    black_box(results)
+                });
+            },
+        );
+
+        // Benchmark 2: Loop
+        group.bench_with_input(
+            BenchmarkId::new("loop_individual", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    let results: Vec<_> = edge_ids
+                        .iter()
+                        .map(|&edge_id| db.get_edge_at_time(edge_id, query_time, query_time).ok())
+                        .collect();
+                    black_box(results)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_valid_at_query,
@@ -492,6 +621,8 @@ criterion_group!(
     bench_concurrent_write_throughput,
     bench_read_latency_under_write_contention,
     bench_concurrent_read_same_entity,
-    bench_mixed_read_write_same_entity
+    bench_mixed_read_write_same_entity,
+    bench_batch_vs_loop_time_travel,
+    bench_batch_edges_vs_loop
 );
 criterion_main!(benches);
