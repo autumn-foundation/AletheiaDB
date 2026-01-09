@@ -260,6 +260,60 @@ mod tests {
         )
     }
 
+    fn test_edge(id: u64) -> Edge {
+        Edge::new(
+            EdgeId::new(id).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        )
+    }
+
+    // Mock iterator for testing QueryResults
+    struct MockIterator {
+        items: std::vec::IntoIter<Result<QueryRow>>,
+    }
+
+    impl MockIterator {
+        fn new(rows: Vec<QueryRow>) -> Self {
+            MockIterator {
+                items: rows.into_iter().map(Ok).collect::<Vec<_>>().into_iter(),
+            }
+        }
+
+        fn with_error(mut rows: Vec<QueryRow>, error_at: usize) -> Self {
+            let mut results: Vec<Result<QueryRow>> = Vec::new();
+            for (i, row) in rows.drain(..).enumerate() {
+                if i == error_at {
+                    results.push(Err(crate::utils::error::Error::Other(
+                        "Test error".to_string(),
+                    )));
+                }
+                results.push(Ok(row));
+            }
+            if error_at >= results.len() {
+                results.push(Err(crate::utils::error::Error::Other(
+                    "Test error".to_string(),
+                )));
+            }
+            MockIterator {
+                items: results.into_iter(),
+            }
+        }
+    }
+
+    impl ResultIterator for MockIterator {
+        fn next(&mut self) -> Option<Result<QueryRow>> {
+            self.items.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.items.size_hint()
+        }
+    }
+
     #[test]
     fn test_entity_result() {
         let node = test_node(1);
@@ -268,6 +322,36 @@ mod tests {
         assert!(result.as_node().is_some());
         assert!(result.as_edge().is_none());
         assert_eq!(result.node_id(), Some(node.id));
+    }
+
+    #[test]
+    fn test_entity_result_edge() {
+        let edge = test_edge(1);
+        let result = EntityResult::Edge(edge.clone());
+
+        assert!(result.as_edge().is_some());
+        assert!(result.as_node().is_none());
+        assert_eq!(result.node_id(), None);
+
+        match result.id() {
+            EntityId::Edge(id) => assert_eq!(id, edge.id),
+            EntityId::Node(_) => panic!("Expected Edge"),
+        }
+    }
+
+    #[test]
+    fn test_entity_result_edge_id() {
+        let edge_id = EdgeId::new(1).unwrap();
+        let result = EntityResult::EdgeId(edge_id);
+
+        assert!(result.as_edge().is_none());
+        assert!(result.as_node().is_none());
+        assert_eq!(result.node_id(), None);
+
+        match result.id() {
+            EntityId::Edge(id) => assert_eq!(id, edge_id),
+            EntityId::Node(_) => panic!("Expected Edge"),
+        }
     }
 
     #[test]
@@ -290,6 +374,27 @@ mod tests {
     }
 
     #[test]
+    fn test_query_row_with_path() {
+        let node = test_node(1);
+        let path = vec![
+            EntityId::Node(NodeId::new(1).unwrap()),
+            EntityId::Node(NodeId::new(2).unwrap()),
+        ];
+        let row = QueryRow::with_path(EntityResult::Node(node), path.clone());
+
+        assert!(row.score.is_none());
+        assert_eq!(row.path, Some(path));
+    }
+
+    #[test]
+    fn test_query_row_at_time() {
+        let node = test_node(1);
+        let row = QueryRow::from_entity(EntityResult::Node(node)).at_time(12345);
+
+        assert_eq!(row.timestamp, Some(12345));
+    }
+
+    #[test]
     fn test_entity_id() {
         let node_id = NodeId::new(1).unwrap();
         let entity = EntityResult::NodeId(node_id);
@@ -298,5 +403,184 @@ mod tests {
             EntityId::Node(id) => assert_eq!(id, node_id),
             EntityId::Edge(_) => panic!("Expected Node"),
         }
+    }
+
+    #[test]
+    fn test_query_results_collect_all() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))),
+            QueryRow::from_entity(EntityResult::Node(test_node(3))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let collected = results.collect_all().unwrap();
+        assert_eq!(collected.len(), 3);
+    }
+
+    #[test]
+    fn test_query_results_collect_nodes() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap())), // Not a full node
+            QueryRow::from_entity(EntityResult::Node(test_node(3))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let nodes = results.collect_nodes().unwrap();
+        assert_eq!(nodes.len(), 2); // Only full nodes
+    }
+
+    #[test]
+    fn test_query_results_collect_nodes_with_scores() {
+        let rows = vec![
+            QueryRow::with_score(EntityResult::Node(test_node(1)), 0.9),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))), // No score
+            QueryRow::with_score(EntityResult::Node(test_node(3)), 0.8),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let nodes_with_scores = results.collect_nodes_with_scores().unwrap();
+        assert_eq!(nodes_with_scores.len(), 2); // Only nodes with scores
+        assert_eq!(nodes_with_scores[0].1, 0.9);
+        assert_eq!(nodes_with_scores[1].1, 0.8);
+    }
+
+    #[test]
+    fn test_query_results_take_n() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))),
+            QueryRow::from_entity(EntityResult::Node(test_node(3))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let taken = results.take_n(2).unwrap();
+        assert_eq!(taken.len(), 2);
+    }
+
+    #[test]
+    fn test_query_results_take_n_more_than_available() {
+        let rows = vec![QueryRow::from_entity(EntityResult::Node(test_node(1)))];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let taken = results.take_n(10).unwrap();
+        assert_eq!(taken.len(), 1);
+    }
+
+    #[test]
+    fn test_query_results_skip_n() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))),
+            QueryRow::from_entity(EntityResult::Node(test_node(3))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let remaining = results.skip_n(1).collect_all().unwrap();
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn test_query_results_skip_n_all() {
+        let rows = vec![QueryRow::from_entity(EntityResult::Node(test_node(1)))];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let remaining = results.skip_n(10).collect_all().unwrap();
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_query_results_count_all() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let count = results.count_all().unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_query_results_is_empty_check_false() {
+        let rows = vec![QueryRow::from_entity(EntityResult::Node(test_node(1)))];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        assert!(!results.is_empty_check().unwrap());
+    }
+
+    #[test]
+    fn test_query_results_is_empty_check_true() {
+        let rows: Vec<QueryRow> = vec![];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        assert!(results.is_empty_check().unwrap());
+    }
+
+    #[test]
+    fn test_query_results_estimated_size() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let (min, max) = results.estimated_size();
+        assert!(min <= 2);
+        assert!(max.is_some());
+    }
+
+    #[test]
+    fn test_query_results_iterator() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let mut count = 0;
+        for row in results {
+            assert!(row.is_ok());
+            count += 1;
+        }
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_query_results_size_hint() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let (min, max) = results.size_hint();
+        assert!(min <= 2);
+        assert!(max.is_some());
+    }
+
+    #[test]
+    fn test_query_results_collect_all_with_error() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::with_error(rows, 1)));
+
+        let result = results.collect_all();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_query_results_take_n_with_error() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(test_node(1))),
+            QueryRow::from_entity(EntityResult::Node(test_node(2))),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::with_error(rows, 0)));
+
+        let result = results.take_n(5);
+        assert!(result.is_err());
     }
 }
