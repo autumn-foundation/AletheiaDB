@@ -982,15 +982,23 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        // Give the panic catch_unwind time to set thread_alive = false
-        thread::sleep(Duration::from_millis(50));
+        // Poll until append() fails, indicating thread_alive was set to false
+        // (with 5s timeout for slow CI environments like Windows)
+        let start = std::time::Instant::now();
+        loop {
+            let result = writer.append(create_test_entry(2));
+            if result.is_err() {
+                // Success - append detected the dead thread
+                break;
+            }
 
-        // Try to append another entry - should fail since thread is dead
-        let result = writer.append(create_test_entry(2));
-        assert!(
-            result.is_err(),
-            "append should fail after background thread panics"
-        );
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!(
+                    "append() never failed after background thread panic - thread_alive not updated"
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
 
         // Drop should capture the panic (verified by stderr output in real run)
         drop(writer);
