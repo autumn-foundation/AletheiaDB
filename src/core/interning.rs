@@ -87,6 +87,8 @@ pub struct StringInterner {
     /// Maximum number of strings to intern (DoS protection)
     #[allow(dead_code)] // Will be used in Phase 5 (ID exhaustion warning)
     max_capacity: usize,
+    /// ID exhaustion warning threshold
+    id_exhaustion_threshold: u32,
 }
 
 impl StringInterner {
@@ -103,6 +105,7 @@ impl StringInterner {
             id_to_string: DashMap::new(),
             next_id: AtomicU32::new(0),
             max_capacity,
+            id_exhaustion_threshold: u32::MAX - 1_000_000,
         }
     }
 
@@ -114,6 +117,7 @@ impl StringInterner {
             id_to_string: DashMap::new(),
             next_id: AtomicU32::new(0),
             max_capacity: config.max_cache_size,
+            id_exhaustion_threshold: config.id_exhaustion_warning_threshold,
         }
     }
 
@@ -143,6 +147,18 @@ impl StringInterner {
             return Ok(*existing_id);
         }
         let id_value = self.next_id.fetch_add(1, Ordering::Relaxed);
+
+        // Check if approaching ID exhaustion
+        if id_value >= self.id_exhaustion_threshold {
+            self.next_id.fetch_sub(1, Ordering::Relaxed); // Undo
+            return Err(crate::utils::error::Error::Storage(
+                crate::utils::error::StorageError::CapacityExceeded {
+                    resource: "string interner (ID exhaustion)".to_string(),
+                    current: id_value as usize,
+                    limit: self.id_exhaustion_threshold as usize,
+                },
+            ));
+        }
         let id = InternedString(id_value);
         self.id_to_string.insert(id, arc_str.clone());
         self.all_strings.insert(arc_str.clone(), id);
@@ -788,4 +804,23 @@ fn test_reverse_lookup_performance() {
         "Reverse lookup too slow: {:?}",
         duration
     );
+}
+
+#[test]
+fn test_id_exhaustion_warning() {
+    let config = InternerConfig {
+        max_cache_size: 10,
+        id_exhaustion_warning_threshold: 100,
+    };
+    let interner = StringInterner::with_config(config);
+
+    // Intern up to threshold
+    for i in 0..100 {
+        let result = interner.intern(format!("key_{}", i));
+        assert!(result.is_ok(), "Should succeed before threshold");
+    }
+
+    // Next intern should return error (ID exhaustion warning)
+    let result = interner.intern("key_100");
+    assert!(result.is_err(), "Should fail at threshold");
 }
