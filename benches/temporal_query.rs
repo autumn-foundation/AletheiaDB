@@ -510,8 +510,8 @@ fn bench_batch_vs_loop_time_travel(c: &mut Criterion) {
             })
             .collect();
 
-        // Use a very large timestamp (far in the future) to ensure we query after all creates
-        // Since nodes were just created, they exist at this time
+        // Use a timestamp that's guaranteed to be after all creates
+        // GallifreyDB uses logical timestamps, not wall-clock time
         let query_time = i64::MAX / 2;
 
         // Benchmark 1: Batch API (single lock acquisition)
@@ -575,7 +575,8 @@ fn bench_batch_edges_vs_loop(c: &mut Criterion) {
             })
             .collect::<Vec<_>>();
 
-        // Use a very large timestamp to ensure we query after all creates
+        // Use a timestamp that's guaranteed to be after all creates
+        // GallifreyDB uses logical timestamps, not wall-clock time
         let query_time = i64::MAX / 2;
 
         // Benchmark 1: Batch API

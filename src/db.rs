@@ -496,6 +496,11 @@ impl GallifreyDB {
     /// This is more efficient than calling `get_node_at_time` in a loop because it
     /// acquires the historical storage lock only once for all queries.
     ///
+    /// **Note**: This implementation is similar to `get_edges_at_time()`. While the
+    /// duplication could be eliminated with a generic helper function, we keep them
+    /// separate for clarity and maintainability, as the type-specific operations
+    /// (Node vs Edge construction) would require complex trait bounds.
+    ///
     /// # Arguments
     ///
     /// * `node_ids` - Slice of node IDs to query
@@ -515,6 +520,26 @@ impl GallifreyDB {
     /// specified time. This allows partial results when querying multiple nodes.
     /// The method only returns `Err` for systemic failures (lock poisoning, storage
     /// corruption, property reconstruction failures).
+    ///
+    /// # Duplicate Handling
+    ///
+    /// If `node_ids` contains duplicate IDs, each will be processed independently
+    /// and appear in the results. No deduplication is performed. The caller is
+    /// responsible for deduplication if needed.
+    ///
+    /// # Performance Characteristics
+    ///
+    /// The current implementation holds a read lock on historical storage for the
+    /// entire batch processing duration, including property reconstruction. This
+    /// design prioritizes simplicity and correctness for the initial implementation.
+    ///
+    /// For very large batches (1000+ entities), consider:
+    /// - Breaking the batch into smaller chunks
+    /// - Using this method when temporal consistency across the batch is required
+    ///
+    /// Future optimization: A two-phase approach (gather version IDs, then reconstruct)
+    /// could reduce lock hold time for better concurrency, at the cost of additional
+    /// lock acquisitions.
     ///
     /// # Example
     ///
@@ -559,8 +584,20 @@ impl GallifreyDB {
                             .get_node_version(version_id)
                             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-                        // Reconstruct properties - propagate errors rather than silently converting to None
-                        let properties = historical.reconstruct_node_properties(version_id)?;
+                        // Reconstruct properties - log errors for observability before converting to None
+                        let properties = match historical.reconstruct_node_properties(version_id) {
+                            Ok(props) => props,
+                            Err(_e) => {
+                                #[cfg(feature = "observability")]
+                                tracing::warn!(
+                                    version_id = %version_id,
+                                    node_id = %node_id,
+                                    error = %_e,
+                                    "Failed to reconstruct node properties in batch query"
+                                );
+                                return Ok((node_id, None));
+                            }
+                        };
 
                         // Build node from version
                         Some(Node::new(
@@ -602,6 +639,26 @@ impl GallifreyDB {
     /// specified time. This allows partial results when querying multiple edges.
     /// The method only returns `Err` for systemic failures (lock poisoning, storage
     /// corruption, property reconstruction failures).
+    ///
+    /// # Duplicate Handling
+    ///
+    /// If `edge_ids` contains duplicate IDs, each will be processed independently
+    /// and appear in the results. No deduplication is performed. The caller is
+    /// responsible for deduplication if needed.
+    ///
+    /// # Performance Characteristics
+    ///
+    /// The current implementation holds a read lock on historical storage for the
+    /// entire batch processing duration, including property reconstruction. This
+    /// design prioritizes simplicity and correctness for the initial implementation.
+    ///
+    /// For very large batches (1000+ entities), consider:
+    /// - Breaking the batch into smaller chunks
+    /// - Using this method when temporal consistency across the batch is required
+    ///
+    /// Future optimization: A two-phase approach (gather version IDs, then reconstruct)
+    /// could reduce lock hold time for better concurrency, at the cost of additional
+    /// lock acquisitions.
     ///
     /// # Example
     ///
@@ -646,8 +703,20 @@ impl GallifreyDB {
                             .get_edge_version(version_id)
                             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-                        // Reconstruct properties - propagate errors rather than silently converting to None
-                        let properties = historical.reconstruct_edge_properties(version_id)?;
+                        // Reconstruct properties - log errors for observability before converting to None
+                        let properties = match historical.reconstruct_edge_properties(version_id) {
+                            Ok(props) => props,
+                            Err(_e) => {
+                                #[cfg(feature = "observability")]
+                                tracing::warn!(
+                                    version_id = %version_id,
+                                    edge_id = %edge_id,
+                                    error = %_e,
+                                    "Failed to reconstruct edge properties in batch query"
+                                );
+                                return Ok((edge_id, None));
+                            }
+                        };
 
                         // Build edge from version
                         Some(Edge::new(
@@ -1848,28 +1917,37 @@ mod tests {
         // Should return all three nodes
         assert_eq!(results.len(), 3);
 
-        // Verify each result
-        for (id, node_opt) in &results {
-            let node = node_opt.as_ref().expect("Node should exist");
-            assert_eq!(node.id, *id);
+        // Convert results to HashMap for easier verification
+        let results_map: std::collections::HashMap<NodeId, Node> = results
+            .into_iter()
+            .map(|(id, node_opt)| (id, node_opt.expect("Node should exist")))
+            .collect();
 
-            if *id == node1 {
-                assert_eq!(
-                    node.get_property("name").and_then(|v| v.as_str()),
-                    Some("Alice")
-                );
-            } else if *id == node2 {
-                assert_eq!(
-                    node.get_property("name").and_then(|v| v.as_str()),
-                    Some("Bob")
-                );
-            } else if *id == node3 {
-                assert_eq!(
-                    node.get_property("name").and_then(|v| v.as_str()),
-                    Some("Charlie")
-                );
-            }
-        }
+        assert_eq!(results_map.len(), 3);
+
+        // Verify node1
+        let n1 = results_map.get(&node1).unwrap();
+        assert_eq!(n1.id, node1);
+        assert_eq!(
+            n1.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+
+        // Verify node2
+        let n2 = results_map.get(&node2).unwrap();
+        assert_eq!(n2.id, node2);
+        assert_eq!(
+            n2.get_property("name").and_then(|v| v.as_str()),
+            Some("Bob")
+        );
+
+        // Verify node3
+        let n3 = results_map.get(&node3).unwrap();
+        assert_eq!(n3.id, node3);
+        assert_eq!(
+            n3.get_property("name").and_then(|v| v.as_str()),
+            Some("Charlie")
+        );
     }
 
     #[test]
@@ -2025,34 +2103,43 @@ mod tests {
         // Should return all three edges
         assert_eq!(results.len(), 3);
 
-        // Verify each result
-        for (id, edge_opt) in &results {
-            let edge = edge_opt.as_ref().expect("Edge should exist");
-            assert_eq!(edge.id, *id);
+        // Convert results to HashMap for easier verification
+        let results_map: std::collections::HashMap<EdgeId, Edge> = results
+            .into_iter()
+            .map(|(id, edge_opt)| (id, edge_opt.expect("Edge should exist")))
+            .collect();
 
-            if *id == edge1 {
-                assert_eq!(edge.source, alice);
-                assert_eq!(edge.target, bob);
-                assert_eq!(
-                    edge.get_property("since").and_then(|v| v.as_int()),
-                    Some(2020)
-                );
-            } else if *id == edge2 {
-                assert_eq!(edge.source, bob);
-                assert_eq!(edge.target, charlie);
-                assert_eq!(
-                    edge.get_property("since").and_then(|v| v.as_int()),
-                    Some(2021)
-                );
-            } else if *id == edge3 {
-                assert_eq!(edge.source, alice);
-                assert_eq!(edge.target, charlie);
-                assert_eq!(
-                    edge.get_property("since").and_then(|v| v.as_int()),
-                    Some(2022)
-                );
-            }
-        }
+        assert_eq!(results_map.len(), 3);
+
+        // Verify edge1
+        let e1 = results_map.get(&edge1).unwrap();
+        assert_eq!(e1.id, edge1);
+        assert_eq!(e1.source, alice);
+        assert_eq!(e1.target, bob);
+        assert_eq!(
+            e1.get_property("since").and_then(|v| v.as_int()),
+            Some(2020)
+        );
+
+        // Verify edge2
+        let e2 = results_map.get(&edge2).unwrap();
+        assert_eq!(e2.id, edge2);
+        assert_eq!(e2.source, bob);
+        assert_eq!(e2.target, charlie);
+        assert_eq!(
+            e2.get_property("since").and_then(|v| v.as_int()),
+            Some(2021)
+        );
+
+        // Verify edge3
+        let e3 = results_map.get(&edge3).unwrap();
+        assert_eq!(e3.id, edge3);
+        assert_eq!(e3.source, alice);
+        assert_eq!(e3.target, charlie);
+        assert_eq!(
+            e3.get_property("since").and_then(|v| v.as_int()),
+            Some(2022)
+        );
     }
 
     #[test]
