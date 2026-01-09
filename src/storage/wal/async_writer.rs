@@ -29,7 +29,7 @@
 //! - **Metrics**: Tracks buffer depth and sync lag
 
 use super::WalEntry;
-use crate::core::temporal::{Timestamp, time};
+use crate::core::temporal::{time, Timestamp};
 use crate::utils::error::{Result, StorageError};
 
 // Using crossbeam_channel instead of std::sync::mpsc because:
@@ -38,9 +38,9 @@ use crate::utils::error::{Result, StorageError};
 // 3. recv_timeout() support (std::mpsc only has recv_timeout on Receiver)
 // 4. More reliable disconnect semantics for graceful shutdown
 // 5. Well-tested in production systems (used by tokio, rayon, etc.)
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
-use std::sync::Arc;
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -85,10 +85,12 @@ pub trait WalObserver: Send + Sync {
 }
 
 /// Control messages for AsyncWalWriter background thread.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum ControlMessage {
     /// Drain all pending entries without calling write_fn (for piggyback optimization)
     DrainWithoutSync,
+    /// Drain all pending entries and send acknowledgment with count
+    DrainWithAck(Sender<usize>),
 }
 
 /// Async WAL writer that uses a background thread for fsync operations.
@@ -176,6 +178,14 @@ impl AsyncWalWriter {
     /// * `write_fn` - Function to write and sync entries (receives batch)
     /// * `observers` - List of observers to notify on WAL events
     ///
+    /// # Safety Requirements for write_fn
+    ///
+    /// The `write_fn` must be unwind-safe (panic-safe):
+    /// - Must not hold locks that would cause data corruption if poisoned
+    /// - Should not maintain internal state that could become inconsistent after panic
+    /// - The background thread catches panics and marks the writer as dead, but
+    ///   write_fn should still be designed to avoid leaving the system in a bad state
+    ///
     /// # Panics
     ///
     /// Panics if the background thread cannot be spawned (rare, resource exhaustion).
@@ -200,6 +210,11 @@ impl AsyncWalWriter {
             .name("gallifreydb-async-wal".to_string())
             .spawn(move || {
                 // Catch panics and mark thread as dead
+                // SAFETY: AssertUnwindSafe is safe here because:
+                // 1. sync_loop only holds internal locks (metrics) that use poisoning correctly
+                // 2. The write_fn is required to be unwind-safe (documented in new())
+                // 3. Channel state is guaranteed by crossbeam to be consistent after panic
+                // 4. We mark thread_alive=false to prevent further operations
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     Self::sync_loop(
                         receiver,
@@ -305,6 +320,53 @@ impl AsyncWalWriter {
         pending
     }
 
+    /// Drain all pending entries without fsyncing, with synchronous acknowledgment.
+    ///
+    /// This is similar to [`drain_without_sync`] but waits for the background thread
+    /// to acknowledge that the drain has completed. This eliminates race conditions
+    /// where the caller's fsync might happen before the drain completes.
+    ///
+    /// # How It Works
+    ///
+    /// Sends a DrainWithAck control message with a response channel, then waits
+    /// up to 1ms for the background thread to complete the drain and send back
+    /// the count of drained entries.
+    ///
+    /// # Timeout Behavior
+    ///
+    /// If the background thread doesn't respond within 1ms, returns Ok(0).
+    /// This is safe because the caller will fsync anyway, persisting any entries
+    /// that weren't drained.
+    ///
+    /// # Returns
+    ///
+    /// The actual number of entries that were drained.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the control channel is full (shouldn't happen with size 10)
+    /// or if the background thread has terminated.
+    pub fn drain_without_sync_sync(&self) -> Result<usize> {
+        let (ack_sender, ack_receiver) = bounded(1);
+
+        // Send drain command with acknowledgment channel
+        self.control_sender
+            .try_send(ControlMessage::DrainWithAck(ack_sender))
+            .map_err(|_| StorageError::WalError {
+                reason: "Failed to send drain command (control channel full or disconnected)"
+                    .to_string(),
+            })?;
+
+        // Wait up to 1ms for acknowledgment
+        match ack_receiver.recv_timeout(Duration::from_millis(1)) {
+            Ok(count) => Ok(count),
+            Err(_) => {
+                // Timeout or channel closed - return 0 (caller will fsync anyway)
+                Ok(0)
+            }
+        }
+    }
+
     /// Background sync loop (uses recv_timeout, NOT busy-wait).
     ///
     /// This is the main loop for the background thread. It:
@@ -343,26 +405,55 @@ impl AsyncWalWriter {
     {
         loop {
             // Check for control messages (non-blocking)
-            if let Ok(ControlMessage::DrainWithoutSync) = control_receiver.try_recv() {
-                // Drain all pending entries WITHOUT calling write_fn
-                // (they're already in the BufWriter and will be fsynced by the caller)
-                let mut drained_count = 0;
-                while receiver.try_recv().is_ok() {
-                    drained_count += 1;
-                }
+            match control_receiver.try_recv() {
+                Ok(ControlMessage::DrainWithoutSync) => {
+                    // Drain all pending entries WITHOUT calling write_fn
+                    // (they're already in the BufWriter and will be fsynced by the caller)
+                    let mut drained_count = 0;
+                    while receiver.try_recv().is_ok() {
+                        drained_count += 1;
+                    }
 
-                // Update metrics only (no sync, no observer notification)
-                if drained_count > 0 {
-                    metrics
-                        .buffer_depth
-                        .fetch_sub(drained_count, Ordering::Relaxed);
-                    metrics
-                        .total_entries
-                        .fetch_add(drained_count as u64, Ordering::Relaxed);
-                    // Note: total_syncs NOT incremented since we didn't fsync
-                }
+                    // Update metrics only (no sync, no observer notification)
+                    if drained_count > 0 {
+                        metrics
+                            .buffer_depth
+                            .fetch_sub(drained_count, Ordering::Relaxed);
+                        metrics
+                            .total_entries
+                            .fetch_add(drained_count as u64, Ordering::Relaxed);
+                        // Note: total_syncs NOT incremented since we didn't fsync
+                    }
 
-                continue; // Check for more control messages or entries
+                    continue; // Check for more control messages or entries
+                }
+                Ok(ControlMessage::DrainWithAck(ack_sender)) => {
+                    // Drain all pending entries WITHOUT calling write_fn, then send ack
+                    let mut drained_count = 0;
+                    while receiver.try_recv().is_ok() {
+                        drained_count += 1;
+                    }
+
+                    // Update metrics only (no sync, no observer notification)
+                    if drained_count > 0 {
+                        metrics
+                            .buffer_depth
+                            .fetch_sub(drained_count, Ordering::Relaxed);
+                        metrics
+                            .total_entries
+                            .fetch_add(drained_count as u64, Ordering::Relaxed);
+                        // Note: total_syncs NOT incremented since we didn't fsync
+                    }
+
+                    // Send acknowledgment with drained count
+                    // Ignore send errors (caller may have timed out)
+                    let _ = ack_sender.try_send(drained_count);
+
+                    continue; // Check for more control messages or entries
+                }
+                Err(_) => {
+                    // No control message, continue to entry processing
+                }
             }
 
             match receiver.recv_timeout(sync_interval) {
@@ -376,6 +467,40 @@ impl AsyncWalWriter {
                     }
 
                     let batch_size = batch.len();
+
+                    // Check for drain command before syncing (optimization)
+                    // If a drain arrives just before we sync, we can skip the sync
+                    // since the caller will fsync these entries anyway
+                    match control_receiver.try_recv() {
+                        Ok(ControlMessage::DrainWithoutSync) => {
+                            // Entries already drained (they're in the batch), just update metrics
+                            metrics
+                                .buffer_depth
+                                .fetch_sub(batch_size, Ordering::Relaxed);
+                            metrics
+                                .total_entries
+                                .fetch_add(batch_size as u64, Ordering::Relaxed);
+                            // Note: total_syncs NOT incremented since we didn't fsync
+                            continue; // Skip write_fn and observers
+                        }
+                        Ok(ControlMessage::DrainWithAck(ack_sender)) => {
+                            // Entries already drained, update metrics and send ack
+                            metrics
+                                .buffer_depth
+                                .fetch_sub(batch_size, Ordering::Relaxed);
+                            metrics
+                                .total_entries
+                                .fetch_add(batch_size as u64, Ordering::Relaxed);
+                            // Note: total_syncs NOT incremented since we didn't fsync
+
+                            // Send acknowledgment with batch size (these were "drained")
+                            let _ = ack_sender.try_send(batch_size);
+                            continue; // Skip write_fn and observers
+                        }
+                        Err(_) => {
+                            // No drain command, proceed with normal sync
+                        }
+                    }
 
                     // Write and sync the batch
                     write_fn(batch);
@@ -470,9 +595,9 @@ mod tests {
     use crate::core::id::NodeId;
     use crate::core::property::PropertyMap;
     use crate::core::temporal::BiTemporalInterval;
-    use crate::storage::wal::{LSN, WalOperation};
-    use std::sync::Mutex;
+    use crate::storage::wal::{WalOperation, LSN};
     use std::sync::atomic::AtomicU64;
+    use std::sync::Mutex;
 
     fn create_test_entry(lsn: u64) -> WalEntry {
         WalEntry {
@@ -948,8 +1073,8 @@ mod tests {
 
     #[test]
     fn test_drain_without_sync_optimization() {
-        use std::sync::Barrier;
         use std::sync::atomic::AtomicUsize;
+        use std::sync::Barrier;
 
         // Track sync calls to verify drain optimization reduces redundant fsyncs
         let sync_count = Arc::new(AtomicUsize::new(0));

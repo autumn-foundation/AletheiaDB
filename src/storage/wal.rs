@@ -46,8 +46,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
 
 /// Magic bytes identifying a GallifreyDB WAL segment file.
 const WAL_MAGIC: [u8; 4] = *b"GWAL";
@@ -1411,13 +1409,9 @@ impl WriteAheadLog {
                 // This avoids redundant fsync by the background thread, since these
                 // entries are already in the BufWriter and will be synced by our flush()
                 if let Some(ref async_writer) = self.async_writer {
-                    let drained = async_writer.drain_without_sync();
-                    if drained > 0 {
-                        // Give background thread a moment to process the drain command
-                        // This is a best-effort optimization - if entries haven't been
-                        // drained yet, they'll still be synced by our flush() below
-                        thread::sleep(Duration::from_micros(100));
-                    }
+                    // Use synchronous drain with acknowledgment to eliminate race conditions
+                    // If drain fails or times out (1ms), entries will still be synced by flush()
+                    let _ = async_writer.drain_without_sync_sync();
                 }
 
                 // Piggyback optimization: Wake background thread for GroupCommit

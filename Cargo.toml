@@ -181,24 +181,6 @@ path = "benches/hnsw_index.rs"
 required-features = []
 
 [[bench]]
-name = "id_generation"
-harness = false
-path = "benches/id_generation.rs"
-required-features = []
-
-[[bench]]
-name = "string_interning"
-harness = false
-path = "benches/string_interning.rs"
-required-features = []
-
-[[bench]]
-name = "concurrent_reads"
-harness = false
-path = "benches/concurrent_reads.rs"
-required-features = []
-
-[[bench]]
 name = "async_wal_writer"
 harness = false
 path = "benches/async_wal_writer.rs"
