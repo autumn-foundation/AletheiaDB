@@ -29,7 +29,7 @@
 //! - **Metrics**: Tracks buffer depth and sync lag
 
 use super::WalEntry;
-use crate::core::temporal::{time, Timestamp};
+use crate::core::temporal::{Timestamp, time};
 use crate::utils::error::{Result, StorageError};
 
 // Using crossbeam_channel instead of std::sync::mpsc because:
@@ -38,9 +38,9 @@ use crate::utils::error::{Result, StorageError};
 // 3. recv_timeout() support (std::mpsc only has recv_timeout on Receiver)
 // 4. More reliable disconnect semantics for graceful shutdown
 // 5. Well-tested in production systems (used by tokio, rayon, etc.)
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -600,9 +600,9 @@ mod tests {
     use crate::core::id::NodeId;
     use crate::core::property::PropertyMap;
     use crate::core::temporal::BiTemporalInterval;
-    use crate::storage::wal::{WalOperation, LSN};
-    use std::sync::atomic::AtomicU64;
+    use crate::storage::wal::{LSN, WalOperation};
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
 
     fn create_test_entry(lsn: u64) -> WalEntry {
         WalEntry {
@@ -1086,8 +1086,8 @@ mod tests {
 
     #[test]
     fn test_drain_without_sync_optimization() {
-        use std::sync::atomic::AtomicUsize;
         use std::sync::Barrier;
+        use std::sync::atomic::AtomicUsize;
 
         // Track sync calls to verify drain optimization reduces redundant fsyncs
         let sync_count = Arc::new(AtomicUsize::new(0));
