@@ -25,11 +25,13 @@
 //! See [`DurabilityMode`] for details.
 
 // Submodules for durability mode support
+pub mod async_writer;
 pub mod durability;
 pub mod flush_guard;
 pub mod group_commit;
 
 // Re-export key types
+pub use async_writer::{AsyncWalMetrics, AsyncWalWriter};
 pub use durability::{DurabilityMode, WriteOptions};
 pub use flush_guard::{FlushGuard, FlushSignal};
 pub use group_commit::GroupCommitCoordinator;
