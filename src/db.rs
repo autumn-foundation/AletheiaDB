@@ -273,7 +273,14 @@ impl GallifreyDB {
     /// ```
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
         let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
+
+        // Capture snapshot timestamp using current wallclock time, ensuring it's
+        // >= the last commit timestamp (monotonicity). This allows the transaction
+        // to see all commits that happened before it started.
+        let snapshot_timestamp = {
+            let ts = self.current_timestamp.lock_or_err()?;
+            std::cmp::max(crate::core::temporal::time::now(), *ts)
+        };
 
         // Register as active
         self.visibility_manager.register_active(tx_id);
@@ -375,7 +382,14 @@ impl GallifreyDB {
         options: WriteOptions,
     ) -> Result<WriteTransaction> {
         let tx_id = self.tx_id_gen.next();
-        let snapshot_timestamp = *self.current_timestamp.lock_or_err()?;
+
+        // Capture snapshot timestamp using current wallclock time, ensuring it's
+        // >= the last commit timestamp (monotonicity). This allows the transaction
+        // to see all commits that happened before it started.
+        let snapshot_timestamp = {
+            let ts = self.current_timestamp.lock_or_err()?;
+            std::cmp::max(crate::core::temporal::time::now(), *ts)
+        };
 
         // Register as active
         self.visibility_manager.register_active(tx_id);
@@ -1436,12 +1450,15 @@ mod tests {
             .build();
 
         let node_id = db.create_node("Person", props_v1).unwrap();
-        let t1 = *db.current_timestamp.lock().unwrap() - 1; // Timestamp when created
+
+        // Capture timestamp after creation (wallclock time)
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        let t1 = crate::core::temporal::time::now();
 
         // In a real implementation, we'd create a second version here with an update_node method
         // For now, just verify we can query at T1
 
-        // Query at time T1
+        // Query at time T1 (after node was created)
         let historical_node = db.get_node_at_time(node_id, t1, t1).unwrap();
         assert_eq!(
             historical_node.get_property("age").and_then(|v| v.as_int()),
@@ -1467,18 +1484,21 @@ mod tests {
             .build();
         let node_id = db.create_node("Person", props).unwrap();
 
-        // Record timestamp after creation
-        let t_after_create = *db.current_timestamp.lock().unwrap();
+        // Record timestamp after creation (wallclock time)
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        let t_after_create = crate::core::temporal::time::now();
 
         // Delete the node
+        std::thread::sleep(std::time::Duration::from_micros(100));
         db.write(|tx| {
             tx.delete_node(node_id)?;
             Ok(())
         })
         .unwrap();
 
-        // Record timestamp after deletion
-        let t_after_delete = *db.current_timestamp.lock().unwrap();
+        // Record timestamp after deletion (wallclock time)
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        let t_after_delete = crate::core::temporal::time::now();
 
         // Query BEFORE creation - should fail (node didn't exist)
         // Note: We can't easily test this without more control over timestamps

@@ -198,15 +198,16 @@ impl WriteTransaction {
         // CRITICAL: We must hold the timestamp lock until WAL logging is complete
         // to prevent a race condition where transactions commit out-of-order.
         //
-        // Timestamp management for Snapshot Isolation:
+        // Timestamp management for Bi-Temporal Database:
         //
-        // 1. Increment BEFORE using: ensures commit_ts > snapshot_ts for any
-        //    transaction that started before this commit. This enables write-write
-        //    conflict detection via the check (commit_ts > snapshot_ts).
+        // For temporal queries to work correctly, we MUST use wallclock timestamps
+        // for transaction_time, not a logical clock. This allows querying historical
+        // state at specific points in time (e.g., "what was the state at 2PM yesterday?").
         //
-        // 2. Increment AFTER using: ensures future snapshots will have a timestamp
-        //    greater than this commit, so visibility check (commit_ts < snapshot_ts)
-        //    will correctly include this commit in future reads.
+        // Monotonicity: Wallclock time is monotonically increasing (assuming NTP is working),
+        // which satisfies the ordering requirements for Snapshot Isolation:
+        // - commit_ts > snapshot_ts for transactions that started before this commit
+        // - future snapshots will have timestamp >= this commit
         //
         // DURABILITY MODES (handled by ConcurrentWalSystem):
         // - Synchronous: Appends drain and flush immediately with fsync
@@ -224,9 +225,15 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
 
-            *ts += 1; // Pre-increment for conflict detection
-            let commit = *ts;
-            *ts += 1; // Post-increment for visibility of this commit
+            // Use wallclock time for transaction_time (required for temporal queries)
+            let commit = crate::core::temporal::time::now();
+
+            // Ensure monotonicity: if wallclock went backwards (NTP adjustment),
+            // use previous timestamp + 1
+            let commit = std::cmp::max(commit, *ts + 1);
+
+            // Update current_timestamp for next transaction's snapshot
+            *ts = commit;
 
             #[cfg(feature = "observability")]
             let wal_start = std::time::Instant::now();
@@ -628,6 +635,12 @@ impl WriteTransaction {
     /// 2. `temporal_indexes` - temporal indexes (acquired second)
     /// 3. `version_id_gen` - version ID generator (acquired later for tombstones)
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
+        // Create temporal interval for all operations in this transaction.
+        // All operations in a transaction share the same commit_timestamp, which is
+        // semantically correct for transaction_time (when data was recorded).
+        // However, this means the auto-closing logic in add_node_version won't work
+        // for multiple updates in the same transaction (since new_tx_time == prev_tx_time).
+        // Therefore, we explicitly close previous versions before adding new ones.
         let temporal = BiTemporalInterval::current(commit_timestamp);
 
         // Acquire lock on historical storage once before processing all operations.
@@ -748,6 +761,18 @@ impl WriteTransaction {
                     );
                     self.current.update_node_direct(node, commit_timestamp)?;
 
+                    // Close the current version's transaction_time in historical storage.
+                    // This is necessary because when multiple updates occur in the same transaction,
+                    // they all have the same commit_timestamp, so the auto-closing logic in
+                    // add_node_version won't work (new_tx_time == prev_tx_time).
+                    if let Some(current_version_id) = historical.get_current_node_version(*node_id)
+                    {
+                        historical.close_node_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
+
                     // Add new version to historical storage
                     historical.add_node_version(
                         *node_id,
@@ -781,6 +806,18 @@ impl WriteTransaction {
                         metadata,
                     );
                     self.current.update_edge_direct(edge)?;
+
+                    // Close the current version's transaction_time in historical storage.
+                    // This is necessary because when multiple updates occur in the same transaction,
+                    // they all have the same commit_timestamp, so the auto-closing logic in
+                    // add_edge_version won't work (new_tx_time == prev_tx_time).
+                    if let Some(current_version_id) = historical.get_current_edge_version(*edge_id)
+                    {
+                        historical.close_edge_version_transaction_time(
+                            current_version_id,
+                            commit_timestamp,
+                        )?;
+                    }
 
                     // Add new version to historical storage
                     historical.add_edge_version(

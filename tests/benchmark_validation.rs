@@ -60,7 +60,10 @@ fn test_anchor_creation_matches_benchmark_assumptions() {
         stats.total_node_versions, 11,
         "Should have 11 versions (initial + 10 updates)"
     );
-    assert_eq!(stats.node_anchor_count, 2, "Should have 2 anchors (at updates 1 and 11)");
+    assert_eq!(
+        stats.node_anchor_count, 2,
+        "Should have 2 anchors (at updates 1 and 11)"
+    );
     assert_eq!(stats.node_delta_count, 9, "Should have 9 deltas");
 
     // Query at anchor point using actual timestamp
@@ -82,7 +85,6 @@ fn test_anchor_creation_matches_benchmark_assumptions() {
 /// NOTE: Currently just validates that queries don't fail. Full temporal
 /// validation requires deeper investigation of get_node_at_time semantics.
 #[test]
-#[ignore] // TODO: Temporal queries return latest version, not historical - needs investigation
 fn test_delta_reconstruction_produces_correct_state() {
     let db = GallifreyDB::new();
 
@@ -94,34 +96,16 @@ fn test_delta_reconstruction_produces_correct_state() {
         .expect("create_node should succeed");
 
     // Create 15 updates with incrementing values and capture timestamps
-    // We capture timestamps BEFORE doing the NEXT update to ensure we query
-    // for historical state before it gets overwritten
-    let mut timestamp_before_6 = 0i64;  // State should be at value=5
-    let mut timestamp_before_10 = 0i64; // State should be at value=9
-    let mut timestamp_before_11 = 0i64; // State should be at value=10
+    // We capture timestamps AFTER each update commits to ensure we have
+    // timestamps between committed transactions
+    let mut timestamp_after_5 = 0i64; // State should be at value=5
+    let mut timestamp_after_9 = 0i64; // State should be at value=9
+    let mut timestamp_after_10 = 0i64; // State should be at value=10
 
     for i in 1..=15 {
-        // Capture timestamp BEFORE doing updates 6, 10, 11
-        // This gives us a timestamp when the state was at the PREVIOUS update
-        if i == 6 {
-            timestamp_before_6 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        } else if i == 10 {
-            timestamp_before_10 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        } else if i == 11 {
-            timestamp_before_11 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        // Add small sleep before transaction to ensure different commit timestamps
+        // Without this, all transactions complete in <30 microseconds
+        std::thread::sleep(std::time::Duration::from_millis(2));
 
         db.write(|tx| {
             tx.update_node(
@@ -134,6 +118,28 @@ fn test_delta_reconstruction_produces_correct_state() {
             Ok(())
         })
         .expect("update_node should succeed");
+
+        // Capture timestamp AFTER commits 5, 9, 10
+        // This gives us a timestamp between committed transactions
+        if i == 5 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            timestamp_after_5 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+        } else if i == 9 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            timestamp_after_9 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+        } else if i == 10 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            timestamp_after_10 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+        }
     }
 
     // Capture timestamp after all updates
@@ -143,30 +149,54 @@ fn test_delta_reconstruction_produces_correct_state() {
         .unwrap()
         .as_micros() as i64;
 
+    // Verify historical stats
+    let stats = db.historical_stats().expect("Should get stats");
+    assert_eq!(
+        stats.total_node_versions, 16,
+        "Should have 16 versions (initial + 15 updates)"
+    );
+    assert_eq!(
+        stats.node_anchor_count, 2,
+        "Should have 2 anchors (at updates 1 and 11)"
+    );
+    assert_eq!(stats.node_delta_count, 14, "Should have 14 deltas");
+
     // Query at different time points using actual timestamps
-    // timestamp_before_6 should give us state at value=5 (after update 5, before update 6)
+    // timestamp_after_5 should give us state at value=5 (after update 5 committed)
     let node_at_5 = db
-        .get_node_at_time(node_id, timestamp_before_6, timestamp_before_6)
-        .expect("Query before update 6 should succeed");
+        .get_node_at_time(node_id, timestamp_after_5, timestamp_after_5)
+        .expect("Query after update 5 should succeed");
     let node_at_9 = db
-        .get_node_at_time(node_id, timestamp_before_10, timestamp_before_10)
-        .expect("Query before update 10 should succeed");
+        .get_node_at_time(node_id, timestamp_after_9, timestamp_after_9)
+        .expect("Query after update 9 should succeed");
     let node_at_10 = db
-        .get_node_at_time(node_id, timestamp_before_11, timestamp_before_11)
-        .expect("Query before update 11 should succeed");
+        .get_node_at_time(node_id, timestamp_after_10, timestamp_after_10)
+        .expect("Query after update 10 should succeed");
     let node_at_15 = db
         .get_node_at_time(node_id, timestamp_after_15, timestamp_after_15)
         .expect("Query after update 15 should succeed");
 
     // Verify each query returns the correct state for that time
-    assert_eq!(node_at_5.properties.get("value"), Some(&5i64.into()),
-        "Query before update 6 should show value=5");
-    assert_eq!(node_at_9.properties.get("value"), Some(&9i64.into()),
-        "Query before update 10 should show value=9");
-    assert_eq!(node_at_10.properties.get("value"), Some(&10i64.into()),
-        "Query before update 11 should show value=10");
-    assert_eq!(node_at_15.properties.get("value"), Some(&15i64.into()),
-        "Query after update 15 should show value=15");
+    assert_eq!(
+        node_at_5.properties.get("value"),
+        Some(&5i64.into()),
+        "Query after update 5 should show value=5"
+    );
+    assert_eq!(
+        node_at_9.properties.get("value"),
+        Some(&9i64.into()),
+        "Query after update 9 should show value=9"
+    );
+    assert_eq!(
+        node_at_10.properties.get("value"),
+        Some(&10i64.into()),
+        "Query after update 10 should show value=10"
+    );
+    assert_eq!(
+        node_at_15.properties.get("value"),
+        Some(&15i64.into()),
+        "Query after update 15 should show value=15"
+    );
 }
 
 /// Test performance targets benchmark runtime
