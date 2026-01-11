@@ -196,18 +196,11 @@ impl QueryPlanner {
             }
 
             QueryOp::SimilarTo { source_node, k } => {
-                // See issue #308: Implement SimilarTo operation
-                // SimilarTo requires multi-step planning:
-                // 1. Lookup source node to extract its embedding
-                // 2. Perform vector search with that embedding
-                // This requires runtime embedding extraction which isn't supported yet.
-                // Return error until properly implemented.
-                Err(Error::Query(QueryError::SyntaxError {
-                    message: format!(
-                        "SimilarTo operation not yet implemented: \
-                         finding {} nodes similar to {:?} requires runtime embedding extraction",
-                        k, source_node
-                    ),
+                Ok(LogicalOp::Scan(ScanOp::SimilarToNode {
+                    source_node: *source_node,
+                    property_key: "embedding".to_string(), // Default property key
+                    k: *k,
+                    label_filter: None,
                 }))
             }
 
@@ -453,6 +446,17 @@ impl QueryPlanner {
                 embedding: embedding.clone(),
                 k: *k,
                 timestamp: *timestamp,
+            }),
+            ScanOp::SimilarToNode {
+                source_node,
+                property_key,
+                k,
+                label_filter,
+            } => Ok(PhysicalOp::SimilarToNode {
+                source_node: *source_node,
+                property_key: property_key.clone(),
+                k: *k,
+                label_filter: label_filter.clone(),
             }),
         }
     }
@@ -845,21 +849,6 @@ mod tests {
         assert!(matches!(plan.root, PhysicalOp::VectorRerank { .. }));
     }
 
-    #[test]
-    fn test_similar_to_not_implemented() {
-        let planner = test_planner();
-        let query = Query {
-            ops: vec![QueryOp::SimilarTo {
-                source_node: NodeId::new(1).unwrap(),
-                k: 10,
-            }],
-            temporal_context: None,
-            hints: QueryHints::default(),
-        };
-
-        // SimilarTo is not yet implemented
-        assert!(planner.plan(query).is_err());
-    }
 
     // ==================== Temporal Tests ====================
 
@@ -1306,5 +1295,65 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("requires a source"));
+    }
+
+    // ==================== SimilarTo Tests ====================
+
+    #[test]
+    fn test_similar_to_planning() {
+        let planner = test_planner();
+        let source_node = NodeId::new(1).unwrap();
+        let query = QueryBuilder::new()
+            .start(source_node)
+            .similar_to(source_node, 10)
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        assert!(matches!(plan.root, PhysicalOp::SimilarToNode { .. }));
+    }
+
+    #[test]
+    fn test_similar_to_node_parameters() {
+        let planner = test_planner();
+        let source_node = NodeId::new(42).unwrap();
+        let k = 15;
+        let query = Query {
+            ops: vec![QueryOp::SimilarTo { source_node, k }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::SimilarToNode {
+                source_node: sn,
+                k: result_k,
+                ..
+            } => {
+                assert_eq!(*sn, source_node);
+                assert_eq!(*result_k, k);
+            }
+            _ => panic!("Expected SimilarToNode, got {:?}", plan.root.name()),
+        }
+    }
+
+    #[test]
+    fn test_similar_to_with_property_key() {
+        let planner = test_planner();
+        let source_node = NodeId::new(1).unwrap();
+        let query = Query {
+            ops: vec![QueryOp::SimilarTo { source_node, k: 10 }],
+            temporal_context: None,
+            hints: QueryHints::default(),
+        };
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::SimilarToNode { property_key, .. } => {
+                // Default property key should be "embedding"
+                assert_eq!(property_key, "embedding");
+            }
+            _ => panic!("Expected SimilarToNode"),
+        }
     }
 }

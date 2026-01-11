@@ -276,6 +276,15 @@ impl CostModel {
             | PhysicalOp::Materialize { input }
             | PhysicalOp::TemporalTrack { input, .. } => self.estimate(input, stats),
 
+            PhysicalOp::SimilarToNode {
+                k, label_filter, ..
+            } => {
+                // SimilarToNode = node lookup + HNSW search
+                let lookup_cost = self.estimate_node_lookup(1);
+                let search_cost = self.estimate_hnsw_search(*k, label_filter.is_some(), stats);
+                lookup_cost + search_cost
+            }
+
             PhysicalOp::Empty => Cost::zero(),
         }
     }
@@ -326,6 +335,7 @@ impl CostModel {
             PhysicalOp::Materialize { input } | PhysicalOp::TemporalTrack { input, .. } => {
                 self.estimate_cardinality(input, stats)
             }
+            PhysicalOp::SimilarToNode { k, .. } => *k,
             PhysicalOp::Empty => 0,
         }
     }
