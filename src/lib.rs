@@ -50,6 +50,7 @@
 #![warn(rust_2018_idioms)]
 
 pub mod api;
+pub mod config;
 pub mod core;
 pub mod db;
 pub mod index;
@@ -64,6 +65,11 @@ pub mod embeddings;
 pub mod observability;
 
 // Re-export commonly used types at the crate root
+pub use config::{
+    ConfigError, GallifreyDBConfig, GallifreyDBConfigBuilder, HistoricalConfig,
+    HistoricalConfigBuilder, VectorIndexConfig, VectorIndexConfigBuilder, WalConfig,
+    WalConfigBuilder,
+};
 pub use core::{
     BiTemporalInterval, Edge, EdgeId, EntityId, GLOBAL_INTERNER, InternedString, Node, NodeId,
     PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue, StringInterner, TimeRange,

@@ -3,9 +3,9 @@
 //! Tests the three durability modes (Synchronous, Async, GroupCommit)
 //! and their interactions including piggybacking.
 
-use gallifreydb::storage::wal::WalConfig;
 use gallifreydb::{
-    DurabilityMode, GLOBAL_INTERNER, GallifreyDB, Node, PropertyMapBuilder, WriteOps, WriteOptions,
+    DurabilityMode, GLOBAL_INTERNER, GallifreyDB, Node, PropertyMapBuilder, WalConfigBuilder,
+    WriteOps, WriteOptions,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,12 +24,14 @@ fn get_label(node: &Node) -> String {
 fn create_db_with_mode(mode: DurabilityMode) -> GallifreyDB {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let path = temp_dir.keep();
-    let config = WalConfig {
-        wal_dir: path,
-        segment_size: 10 * 1024 * 1024,
-        segments_to_retain: 3,
-        durability_mode: mode,
-    };
+    let config = WalConfigBuilder::new()
+        .wal_dir(path)
+        .segment_size(10 * 1024 * 1024)
+        .unwrap()
+        .segments_to_retain(3)
+        .unwrap()
+        .durability_mode(mode)
+        .build();
     GallifreyDB::with_wal_config(config)
 }
 
@@ -504,14 +506,16 @@ fn test_async_data_flushed_on_shutdown() {
 
     let node_id;
     {
-        let config = WalConfig {
-            wal_dir: wal_path.clone(),
-            segment_size: 10 * 1024 * 1024,
-            segments_to_retain: 3,
-            durability_mode: DurabilityMode::Async {
+        let config = WalConfigBuilder::new()
+            .wal_dir(wal_path.clone())
+            .segment_size(10 * 1024 * 1024)
+            .unwrap()
+            .segments_to_retain(3)
+            .unwrap()
+            .durability_mode(DurabilityMode::Async {
                 flush_interval_ms: 60000, // Very long - won't naturally flush
-            },
-        };
+            })
+            .build();
         let db = GallifreyDB::with_wal_config(config);
 
         let options = WriteOptions {
@@ -780,15 +784,17 @@ fn test_segment_rotation_with_background_thread() {
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().expect("failed to create temp dir");
-    let config = WalConfig {
-        wal_dir: temp_dir.path().to_path_buf(),
-        segment_size: 512, // Very small to force rotation quickly
-        segments_to_retain: 5,
-        durability_mode: DurabilityMode::GroupCommit {
+    let config = WalConfigBuilder::new()
+        .wal_dir(temp_dir.path().to_path_buf())
+        .segment_size(512)
+        .unwrap() // Very small to force rotation quickly
+        .segments_to_retain(5)
+        .unwrap()
+        .durability_mode(DurabilityMode::GroupCommit {
             max_delay_ms: 10,
             max_batch_size: 100,
-        },
-    };
+        })
+        .build();
 
     let db = GallifreyDB::with_wal_config(config);
 
@@ -1049,15 +1055,17 @@ fn test_async_batched_graceful_shutdown() {
 
     let node_id;
     {
-        let config = WalConfig {
-            wal_dir: wal_path.clone(),
-            segment_size: 10 * 1024 * 1024,
-            segments_to_retain: 3,
-            durability_mode: DurabilityMode::AsyncBatched {
+        let config = WalConfigBuilder::new()
+            .wal_dir(wal_path.clone())
+            .segment_size(10 * 1024 * 1024)
+            .unwrap()
+            .segments_to_retain(3)
+            .unwrap()
+            .durability_mode(DurabilityMode::AsyncBatched {
                 max_delay_ms: 60000, // Won't naturally flush
                 max_batch_size: 10000,
-            },
-        };
+            })
+            .build();
         let db = GallifreyDB::with_wal_config(config);
 
         let options = WriteOptions {
@@ -1190,15 +1198,17 @@ fn test_async_batched_with_segment_rotation() {
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().expect("failed to create temp dir");
-    let config = WalConfig {
-        wal_dir: temp_dir.path().to_path_buf(),
-        segment_size: 512, // Very small to force rotation
-        segments_to_retain: 5,
-        durability_mode: DurabilityMode::AsyncBatched {
+    let config = WalConfigBuilder::new()
+        .wal_dir(temp_dir.path().to_path_buf())
+        .segment_size(512)
+        .unwrap() // Very small to force rotation
+        .segments_to_retain(5)
+        .unwrap()
+        .durability_mode(DurabilityMode::AsyncBatched {
             max_delay_ms: 10,
             max_batch_size: 100,
-        },
-    };
+        })
+        .build();
 
     let db = GallifreyDB::with_wal_config(config);
 
