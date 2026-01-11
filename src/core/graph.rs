@@ -72,6 +72,43 @@ impl Node {
     pub fn has_label(&self, label: InternedString) -> bool {
         self.label == label
     }
+    /// Check if this node has a specific label using a string.
+    ///
+    /// This is a convenience method that accepts a `&str` instead of requiring
+    /// the caller to pre-intern the string. It uses `get_id()` internally,
+    /// which means it will NOT add the string to the interner if it doesn't
+    /// already exist - it will simply return `false`.
+    ///
+    /// # Performance Note
+    ///
+    /// For performance-critical code paths (e.g., tight loops checking many labels),
+    /// prefer pre-interning the label once and using [`has_label`](Self::has_label)
+    /// instead. This method has the overhead of a HashMap lookup on each call.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Convenient for one-off checks
+    /// if node.has_label_str("Person") {
+    ///     // ...
+    /// }
+    ///
+    /// // For performance-critical loops, pre-intern:
+    /// let person_label = GLOBAL_INTERNER.intern("Person")?;
+    /// for node in many_nodes {
+    ///     if node.has_label(person_label) {  // Faster!
+    ///         // ...
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub fn has_label_str(&self, label: &str) -> bool {
+        use crate::core::interning::GLOBAL_INTERNER;
+        GLOBAL_INTERNER
+            .get_id(label)
+            .map(|id| self.label == id)
+            .unwrap_or(false)
+    }
 }
 
 /// An edge in the current state of the graph.
@@ -148,6 +185,43 @@ impl Edge {
     #[inline]
     pub fn has_label(&self, label: InternedString) -> bool {
         self.label == label
+    }
+    /// Check if this edge has a specific label using a string.
+    ///
+    /// This is a convenience method that accepts a `&str` instead of requiring
+    /// the caller to pre-intern the string. It uses `get_id()` internally,
+    /// which means it will NOT add the string to the interner if it doesn't
+    /// already exist - it will simply return `false`.
+    ///
+    /// # Performance Note
+    ///
+    /// For performance-critical code paths (e.g., tight loops checking many labels),
+    /// prefer pre-interning the label once and using [`has_label`](Self::has_label)
+    /// instead. This method has the overhead of a HashMap lookup on each call.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Convenient for one-off checks
+    /// if edge.has_label_str("KNOWS") {
+    ///     // ...
+    /// }
+    ///
+    /// // For performance-critical loops, pre-intern:
+    /// let knows_label = GLOBAL_INTERNER.intern("KNOWS")?;
+    /// for edge in many_edges {
+    ///     if edge.has_label(knows_label) {  // Faster!
+    ///         // ...
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub fn has_label_str(&self, label: &str) -> bool {
+        use crate::core::interning::GLOBAL_INTERNER;
+        GLOBAL_INTERNER
+            .get_id(label)
+            .map(|id| self.label == id)
+            .unwrap_or(false)
     }
 
     /// Check if this edge connects the given source and target nodes.
@@ -243,5 +317,83 @@ mod tests {
         assert!(edge.connects(NodeId::new(1).unwrap(), NodeId::new(2).unwrap()));
         assert!(!edge.connects(NodeId::new(2).unwrap(), NodeId::new(1).unwrap()));
         assert!(!edge.connects(NodeId::new(1).unwrap(), NodeId::new(3).unwrap()));
+    }
+
+    #[test]
+    fn test_node_has_label_str() {
+        // Create a node with a "Person" label
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Test 1: Should return true for matching label (already interned)
+        assert!(
+            node.has_label_str("Person"),
+            "Should return true for matching label"
+        );
+
+        // Test 2: Should return false for non-matching label (but previously interned)
+        GLOBAL_INTERNER.intern("Company").unwrap();
+        assert!(
+            !node.has_label_str("Company"),
+            "Should return false for non-matching label"
+        );
+
+        // Test 3: Should return false for label that was never interned
+        // This is the key behavior - we don't pollute the interner
+        assert!(
+            !node.has_label_str("NeverInterned"),
+            "Should return false for label that was never interned"
+        );
+
+        // Test 4: Verify the interner was NOT polluted
+        assert!(
+            GLOBAL_INTERNER.get_id("NeverInterned").is_none(),
+            "Interner should not contain 'NeverInterned' after has_label_str call"
+        );
+    }
+
+    #[test]
+    fn test_edge_has_label_str() {
+        // Create an edge with a "KNOWS" label
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            label,
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        // Test 1: Should return true for matching label (already interned)
+        assert!(
+            edge.has_label_str("KNOWS"),
+            "Should return true for matching label"
+        );
+
+        // Test 2: Should return false for non-matching label (but previously interned)
+        GLOBAL_INTERNER.intern("LIKES").unwrap();
+        assert!(
+            !edge.has_label_str("LIKES"),
+            "Should return false for non-matching label"
+        );
+
+        // Test 3: Should return false for label that was never interned
+        // This is the key behavior - we don't pollute the interner
+        assert!(
+            !edge.has_label_str("NeverInternedEdge"),
+            "Should return false for label that was never interned"
+        );
+
+        // Test 4: Verify the interner was NOT polluted
+        assert!(
+            GLOBAL_INTERNER.get_id("NeverInternedEdge").is_none(),
+            "Interner should not contain 'NeverInternedEdge' after has_label_str call"
+        );
     }
 }
