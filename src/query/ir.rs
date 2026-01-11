@@ -82,14 +82,10 @@ pub enum QueryOp {
         source_node: NodeId,
         /// Number of results to return
         k: usize,
-    },
-
-    /// Rank/reorder current results by similarity to an embedding
-    RankBySimilarity {
-        /// Target embedding for similarity comparison
-        embedding: Arc<[f32]>,
-        /// Optional limit on results (if None, ranks all)
-        top_k: Option<usize>,
+        /// Property key containing the embedding (default: "embedding")
+        property_key: Option<String>,
+        /// Optional label filter for results
+        label_filter: Option<String>,
     },
 
     // === Temporal Operations ===

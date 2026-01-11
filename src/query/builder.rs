@@ -246,13 +246,61 @@ impl QueryBuilder<state::HasNodes> {
         source_node: NodeId,
         k: usize,
     ) -> QueryBuilder<state::HasVectorResults> {
-        self.add_op(QueryOp::SimilarTo { source_node, k })
+        self.add_op(QueryOp::SimilarTo {
+            source_node,
+            k,
+            property_key: None,
+            label_filter: None,
+        })
     }
 
-    /// Filter results by predicate
+    /// Find nodes similar to a source node with custom property key
     #[must_use]
-    pub fn filter(self, predicate: Predicate) -> QueryBuilder<state::HasNodes> {
-        self.add_op_same(QueryOp::Filter(predicate))
+    pub fn similar_to_with_property(
+        self,
+        source_node: NodeId,
+        k: usize,
+        property_key: impl Into<String>,
+    ) -> QueryBuilder<state::HasVectorResults> {
+        self.add_op(QueryOp::SimilarTo {
+            source_node,
+            k,
+            property_key: Some(property_key.into()),
+            label_filter: None,
+        })
+    }
+
+    /// Find nodes similar to a source node with label filter
+    #[must_use]
+    pub fn similar_to_with_label(
+        self,
+        source_node: NodeId,
+        k: usize,
+        label_filter: impl Into<String>,
+    ) -> QueryBuilder<state::HasVectorResults> {
+        self.add_op(QueryOp::SimilarTo {
+            source_node,
+            k,
+            property_key: None,
+            label_filter: Some(label_filter.into()),
+        })
+    }
+
+    /// Find nodes similar to a source node with custom property key and label filter
+    #[must_use]
+    pub fn similar_to_with_property_and_label(
+        self,
+        source_node: NodeId,
+        k: usize,
+        property_key: impl Into<String>,
+        label_filter: impl Into<String>,
+    ) -> QueryBuilder<state::HasVectorResults> {
+        self.add_op(QueryOp::SimilarTo {
+            source_node,
+            k,
+            property_key: Some(property_key.into()),
+            label_filter: Some(label_filter.into()),
+        })
     }
 
     /// Filter by label

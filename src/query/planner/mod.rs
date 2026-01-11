@@ -195,23 +195,22 @@ impl QueryPlanner {
                 ))
             }
 
-            QueryOp::SimilarTo { source_node, k } => {
+            QueryOp::SimilarTo {
+                source_node,
+                k,
+                property_key,
+                label_filter,
+            } => {
+                // SimilarTo is a scan operation that looks up a node, extracts its embedding,
+                // and performs k-NN search - all handled by the executor
                 Ok(LogicalOp::Scan(ScanOp::SimilarToNode {
                     source_node: *source_node,
-                    property_key: "embedding".to_string(), // Default property key
+                    property_key: property_key
+                        .clone()
+                        .unwrap_or_else(|| "embedding".to_string()),
                     k: *k,
-                    label_filter: None,
+                    label_filter: label_filter.clone(),
                 }))
-            }
-
-            // Filter operations
-            QueryOp::Filter(predicate) => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Filter requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(UnaryOp::Filter(predicate.clone()), input))
             }
 
             QueryOp::FilterLabel(label) => {
@@ -849,7 +848,6 @@ mod tests {
         assert!(matches!(plan.root, PhysicalOp::VectorRerank { .. }));
     }
 
-
     // ==================== Temporal Tests ====================
 
     #[test]
@@ -1318,7 +1316,12 @@ mod tests {
         let source_node = NodeId::new(42).unwrap();
         let k = 15;
         let query = Query {
-            ops: vec![QueryOp::SimilarTo { source_node, k }],
+            ops: vec![QueryOp::SimilarTo {
+                source_node,
+                k,
+                property_key: None,
+                label_filter: None,
+            }],
             temporal_context: None,
             hints: QueryHints::default(),
         };
@@ -1342,7 +1345,12 @@ mod tests {
         let planner = test_planner();
         let source_node = NodeId::new(1).unwrap();
         let query = Query {
-            ops: vec![QueryOp::SimilarTo { source_node, k: 10 }],
+            ops: vec![QueryOp::SimilarTo {
+                source_node,
+                k: 10,
+                property_key: None,
+                label_filter: None,
+            }],
             temporal_context: None,
             hints: QueryHints::default(),
         };
