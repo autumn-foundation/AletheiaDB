@@ -29,6 +29,7 @@
 
 pub mod builder;
 pub mod executor;
+pub mod hybrid;
 pub mod ir;
 pub mod plan;
 pub mod planner;
@@ -36,6 +37,7 @@ pub mod planner;
 // Re-export commonly used types
 pub use builder::{Query, QueryBuilder};
 pub use executor::{QueryExecutor, QueryResults, QueryRow};
+pub use hybrid::traverse_and_rank;
 pub use ir::{Direction, Predicate, QueryOp, TraversalDepth};
 pub use plan::{LogicalOp, LogicalPlan};
 pub use planner::{PhysicalPlan, QueryPlanner};
