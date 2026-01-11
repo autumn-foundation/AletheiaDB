@@ -31,7 +31,45 @@ use crate::core::id::NodeId;
 use crate::core::vector::{cosine_similarity, validate_vector};
 use crate::db::GallifreyDB;
 use crate::utils::Result;
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashSet};
+
+/// A candidate node with its similarity score, ordered by similarity (min-heap).
+///
+/// This is used internally for efficient top-k tracking with a BinaryHeap.
+/// The `Ord` implementation is reversed to create a min-heap (lowest similarity at the top).
+#[derive(Debug, Clone, PartialEq)]
+struct ScoredCandidate {
+    node_id: NodeId,
+    similarity: f32,
+}
+
+impl ScoredCandidate {
+    fn new(node_id: NodeId, similarity: f32) -> Self {
+        Self {
+            node_id,
+            similarity,
+        }
+    }
+}
+
+impl Eq for ScoredCandidate {}
+
+impl PartialOrd for ScoredCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoredCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse ordering for min-heap (lower similarity = higher priority to pop)
+        other
+            .similarity
+            .partial_cmp(&self.similarity)
+            .unwrap_or(Ordering::Equal)
+    }
+}
 
 /// Traverse graph from a starting node and rank results by vector similarity.
 ///
@@ -90,9 +128,11 @@ pub fn traverse_and_rank(
     // Get all outgoing edges from start node with matching label
     let edge_ids = db.get_outgoing_edges_with_label(start, edge_label);
 
-    // Collect target nodes with their embeddings
-    let mut candidates = Vec::new();
-    let mut visited = HashSet::new();
+    // Use a min-heap to track top-k candidates efficiently (O(N log k) instead of O(N log N))
+    let mut top_k_heap = BinaryHeap::with_capacity(k);
+
+    // Pre-allocate visited set for cycle detection
+    let mut visited = HashSet::with_capacity(edge_ids.len().min(k * 2));
 
     for edge_id in edge_ids {
         let edge = db.get_edge(edge_id)?;
@@ -122,20 +162,40 @@ pub fn traverse_and_rank(
         // Compute cosine similarity
         match cosine_similarity(target_embedding, embedding) {
             Ok(similarity) => {
-                candidates.push((target_id, similarity));
+                let candidate = ScoredCandidate::new(target_id, similarity);
+
+                if top_k_heap.len() < k {
+                    // Heap not full yet, add candidate
+                    top_k_heap.push(candidate);
+                } else if let Some(min_candidate) = top_k_heap.peek() {
+                    // Heap is full, only add if better than current minimum
+                    if similarity > min_candidate.similarity {
+                        top_k_heap.pop(); // Remove minimum
+                        top_k_heap.push(candidate); // Add new candidate
+                    }
+                }
             }
-            Err(_) => {
-                // Skip nodes with dimension mismatch or invalid embeddings
+            Err(_e) => {
+                // Skip nodes with dimension mismatch or invalid embeddings (with warning)
+                #[cfg(feature = "observability")]
+                tracing::warn!(
+                    target_id = %target_id,
+                    error = %_e,
+                    "Skipping node in traverse_and_rank due to incompatible embedding"
+                );
                 continue;
             }
         }
     }
 
-    // Sort by similarity in descending order (highest similarity first)
-    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Convert heap to sorted vector (highest similarity first)
+    let mut results: Vec<(NodeId, f32)> = top_k_heap
+        .into_iter()
+        .map(|c| (c.node_id, c.similarity))
+        .collect();
 
-    // Return top-k results
-    let results: Vec<(NodeId, f32)> = candidates.into_iter().take(k).collect();
+    // Sort in descending order (highest similarity first)
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
     Ok(results)
 }
