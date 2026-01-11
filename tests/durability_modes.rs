@@ -829,7 +829,7 @@ fn test_segment_rotation_with_background_thread() {
     // Drop database to trigger final flush and ensure proper cleanup
     drop(db);
 
-    // TODO: Add recovery test once GallifreyDB supports WAL replay on open
+    // See issue #365: Add recovery test once GallifreyDB supports WAL replay on open
     // For now, this test verifies:
     // 1. Writes succeed across segment rotation
     // 2. Background thread doesn't crash when segment rotates

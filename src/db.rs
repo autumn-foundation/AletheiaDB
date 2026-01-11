@@ -1345,7 +1345,8 @@ impl GallifreyDB {
 
         // Calculate average delta chain length from historical storage
         // (using default estimate if historical storage is empty)
-        let avg_delta_chain = 5.0; // TODO: Calculate from historical storage
+        // See issue #366: Calculate from historical storage instead of hardcoding
+        let avg_delta_chain = 5.0;
 
         self.stats.refresh(
             node_count,

@@ -298,7 +298,7 @@ impl CurrentStorage {
     /// Delete a node.
     ///
     /// Note: This does not delete edges connected to the node.
-    /// TODO: Add cascade delete option.
+    /// See issue #364 for cascade delete option.
     pub fn delete_node(&self, id: NodeId) -> Result<Node> {
         self.indexes
             .remove_node(id)

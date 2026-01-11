@@ -911,7 +911,7 @@ fn test_update_node_updates_index() {
 }
 
 // Note: test_delete_node_removes_from_index skipped - delete_node not yet implemented
-// TODO: Add this test when delete_node is implemented in GallifreyDB
+// See issue #367: Add test when delete_node is implemented in GallifreyDB
 
 #[test]
 fn test_node_without_vector_property_not_indexed() {
