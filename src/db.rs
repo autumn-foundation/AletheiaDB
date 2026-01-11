@@ -6,6 +6,7 @@
 use crate::api::transaction::{
     ReadTransaction, TxIdGenerator, TxVisibilityManager, WriteOps, WriteTransaction,
 };
+use crate::config::{GallifreyDBConfig, WalSystemConfig};
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId};
 use crate::core::property::PropertyMap;
@@ -103,25 +104,62 @@ impl GallifreyDB {
         Self::with_full_config(AnchorConfig::default(), wal_config)
     }
 
+    /// Create a new database with unified configuration.
+    ///
+    /// This method accepts a [`GallifreyDBConfig`] which consolidates all configuration
+    /// settings for the database.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+    ///
+    /// let config = GallifreyDBConfig::builder()
+    ///     .wal(WalSystemConfigBuilder::new()
+    ///         .num_stripes(32)
+    ///         .build())
+    ///     .build();
+    ///
+    /// let db = GallifreyDB::with_unified_config(config);
+    /// ```
+    pub fn with_unified_config(config: GallifreyDBConfig, wal_config: WalConfig) -> Self {
+        Self::with_full_config_internal(AnchorConfig::default(), wal_config, Some(config.wal))
+    }
+
     /// Create a new database with both anchor and WAL configuration.
+    ///
+    /// This maintains backward compatibility with the old API.
+    /// For new code, prefer using [`with_unified_config`](Self::with_unified_config).
     pub fn with_full_config(anchor_config: AnchorConfig, wal_config: WalConfig) -> Self {
+        Self::with_full_config_internal(anchor_config, wal_config, None)
+    }
+
+    /// Internal implementation for database creation with optional unified config.
+    fn with_full_config_internal(
+        anchor_config: AnchorConfig,
+        wal_config: WalConfig,
+        wal_system_config: Option<WalSystemConfig>,
+    ) -> Self {
         let durability_mode = wal_config.durability_mode;
 
-        // Create ConcurrentWalSystem config from WalConfig
+        // Use unified config if provided, otherwise use defaults
+        let wal_sys_cfg = wal_system_config.unwrap_or_default();
+
+        // Create ConcurrentWalSystem config from WalConfig and WalSystemConfig
         let wal_system_config = ConcurrentWalSystemConfig {
             wal_dir: wal_config.wal_dir,
-            num_stripes: 16, // Default stripe count for good concurrency
-            stripe_capacity: 1024,
+            num_stripes: wal_sys_cfg.num_stripes,
+            stripe_capacity: wal_sys_cfg.stripe_capacity,
             segment_size: wal_config.segment_size,
             segments_to_retain: wal_config.segments_to_retain,
             flush_interval_ms: match durability_mode {
                 DurabilityMode::Async { flush_interval_ms } => flush_interval_ms,
                 DurabilityMode::GroupCommit { max_delay_ms, .. } => max_delay_ms,
                 DurabilityMode::AsyncBatched { max_delay_ms, .. } => max_delay_ms,
-                _ => 10, // Default for Synchronous
+                _ => wal_sys_cfg.flush_interval_ms, // Use config default
             },
             durability_mode,
-            write_buffer_size: 64 * 1024, // 64KB default write buffer
+            write_buffer_size: wal_sys_cfg.write_buffer_size,
         };
 
         let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");
