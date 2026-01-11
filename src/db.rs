@@ -348,7 +348,7 @@ impl GallifreyDB {
     {
         let mut tx = self.write_transaction()?;
         let result = f(&mut tx)?;
-        let commit_ts = tx.commit()?;
+        let commit_ts = tx.commit_with_timestamp()?;
         Ok((result, commit_ts))
     }
 

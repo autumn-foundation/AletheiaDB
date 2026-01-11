@@ -29,6 +29,20 @@ use crate::utils::lock::{MutexExt, RwLockExt};
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
+/// Maximum allowed backward clock drift in microseconds (5 minutes).
+///
+/// If wallclock time goes backward by more than this (e.g., severe NTP adjustment),
+/// we reject the transaction to avoid timestamps jumping far into the future.
+/// 5 minutes allows for typical NTP corrections while preventing pathological cases.
+const MAX_BACKWARD_DRIFT_US: i64 = 5 * 60 * 1_000_000; // 5 minutes
+
+/// Maximum allowed forward clock jump in microseconds (1 hour).
+///
+/// If wallclock time jumps forward by more than this (e.g., system clock set manually),
+/// we reject the transaction to avoid creating timestamps in the far future that would
+/// break temporal query semantics.
+const MAX_FORWARD_JUMP_US: i64 = 60 * 60 * 1_000_000; // 1 hour
+
 /// Write transaction with full ACID guarantees.
 ///
 /// Write transactions buffer all operations in memory and apply them
@@ -164,7 +178,33 @@ impl WriteTransaction {
     /// - **Async**: Returns after flush to OS cache (background thread syncs)
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
-    pub fn commit(mut self) -> Result<Timestamp> {
+    pub fn commit(self) -> Result<()> {
+        self.commit_with_timestamp().map(|_| ())
+    }
+
+    /// Commit the transaction and return the commit timestamp.
+    ///
+    /// This is useful for benchmarks and tests that need to query the database
+    /// at the exact commit timestamp to verify temporal semantics.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut tx = db.write_transaction()?;
+    /// let node_id = tx.create_node("Person", properties)?;
+    /// let commit_ts = tx.commit_with_timestamp()?;
+    ///
+    /// // Query at exact commit timestamp
+    /// let node = db.get_node_at_time(node_id, commit_ts, commit_ts)?;
+    /// ```
+    ///
+    /// # Durability Modes
+    ///
+    /// - **Synchronous**: WAL fsynced to disk before returning (ACID, ~1.5ms)
+    /// - **Async**: Returns after flush to OS cache (background thread syncs)
+    /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
+    /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
+    pub fn commit_with_timestamp(mut self) -> Result<Timestamp> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!(
             "transaction_commit",
@@ -228,7 +268,32 @@ impl WriteTransaction {
             // Use wallclock time for transaction_time (required for temporal queries)
             let wallclock = crate::core::temporal::time::now();
 
-            // Ensure monotonicity: if wallclock went backwards (NTP adjustment),
+            // Check for pathological clock skew that would break temporal semantics
+            let drift = wallclock - *ts;
+
+            // Backward drift check: prevent timestamps jumping far into future
+            if drift < -MAX_BACKWARD_DRIFT_US {
+                return Err(TransactionError::ClockSkew {
+                    wallclock,
+                    previous: *ts,
+                    drift_us: drift,
+                    max_allowed: -MAX_BACKWARD_DRIFT_US,
+                }
+                .into());
+            }
+
+            // Forward jump check: prevent timestamps in far future
+            if drift > MAX_FORWARD_JUMP_US {
+                return Err(TransactionError::ClockSkew {
+                    wallclock,
+                    previous: *ts,
+                    drift_us: drift,
+                    max_allowed: MAX_FORWARD_JUMP_US,
+                }
+                .into());
+            }
+
+            // Ensure monotonicity: if wallclock went backwards (small NTP adjustment),
             // use previous timestamp + 1
             let commit = std::cmp::max(wallclock, *ts + 1);
 

@@ -271,25 +271,33 @@ fn test_performance_targets_benchmark_runtime() {
         )
         .expect("create_node should succeed");
 
-    // Create 19 versions (worst case benchmark)
+    // Create 19 versions and capture commit timestamps for queries
+    let mut timestamps = Vec::new();
     for i in 1..=19 {
-        db.write(|tx| {
-            tx.update_node(
-                node_id,
-                PropertyMapBuilder::new()
-                    .insert("name", "Alice")
-                    .insert("version", i)
-                    .build(),
-            )
-        })
-        .expect("update_node should succeed");
+        let (_result, commit_ts) = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("version", i)
+                        .build(),
+                )
+            })
+            .expect("update_node should succeed");
+        timestamps.push(commit_ts);
     }
+
+    // Use actual commit timestamps for queries (not hardcoded 10, 5, 9)
+    let ts_at_10 = timestamps[9]; // 10th update (0-indexed)
+    let ts_at_5 = timestamps[4]; // 5th update
+    let ts_at_9 = timestamps[8]; // 9th update
 
     // Perform queries (simulate benchmark iterations)
     for _ in 0..100 {
-        let _ = db.get_node_at_time(node_id, 10, 10); // at_anchor
-        let _ = db.get_node_at_time(node_id, 5, 5); // with_5_deltas
-        let _ = db.get_node_at_time(node_id, 9, 9); // worst_case
+        let _ = db.get_node_at_time(node_id, ts_at_10, ts_at_10); // at_anchor
+        let _ = db.get_node_at_time(node_id, ts_at_5, ts_at_5); // with_5_deltas
+        let _ = db.get_node_at_time(node_id, ts_at_9, ts_at_9); // worst_case
     }
 
     let elapsed = start.elapsed();
