@@ -143,13 +143,10 @@ fn bench_batch_insertion_target(c: &mut Criterion) {
 /// This tests the best-case scenario where we reconstruct directly from an anchor
 ///
 /// Version/Timestamp Semantics:
-/// - create_node happens at tx_time=0 (creates current state only, no historical version)
-/// - First update creates v1 at tx_time=1 (first historical version, anchor)
-/// - Second update creates v2 at tx_time=2 (delta)
-/// - ...
-/// - 10th update creates v10 at tx_time=10 (anchor)
-/// - Anchor interval is 10, so anchors are created at tx_time 1, 11, 21, etc.
-/// - In this benchmark, anchors are at tx_time 1 and 10 (after 10 updates)
+/// - Uses actual wallclock microsecond timestamps for tx_time and valid_time
+/// - Captures timestamp after 10th update (which should be an anchor)
+/// - Anchor interval is 10, so anchors are created every 10 updates
+/// - Query uses the captured timestamp to retrieve the anchor directly
 fn bench_time_travel_at_anchor(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
@@ -162,8 +159,8 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
         )
         .expect("Benchmark setup: create_node should succeed with valid input");
 
-    // Create 10 additional versions (v1-v10)
-    // This creates anchors at tx_time=0 (initial create) and tx_time=10
+    // Create 10 updates and capture the timestamp after update 10 (anchor)
+    let mut timestamp_at_10 = 0i64;
     for i in 1..=10 {
         db.write(|tx| {
             tx.update_node(
@@ -176,13 +173,25 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
             Ok(())
         })
         .expect("Benchmark setup: update_node should succeed with valid input");
+
+        // Capture timestamp after 10th update (anchor point)
+        if i == 10 {
+            timestamp_at_10 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+        }
     }
 
     group.bench_function("at_anchor", |b| {
         b.iter(|| {
-            // Query at anchor point (tx_time=10, valid_time=10)
+            // Query at anchor point using actual timestamp
             // This should hit the anchor directly with no delta reconstruction
-            let result = db.get_node_at_time(black_box(node_id), black_box(10), black_box(10));
+            let result = db.get_node_at_time(
+                black_box(node_id),
+                black_box(timestamp_at_10),
+                black_box(timestamp_at_10),
+            );
             black_box(result)
         })
     });
@@ -193,15 +202,15 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
 /// Target: Time-travel with deltas (avg 5) <1ms
 /// This tests mid-range reconstruction requiring delta application
 ///
-/// Query at tx_time=5 requires:
-/// 1. Find nearest anchor ≤ 5 → anchor@tx_time=1
-/// 2. Apply deltas for tx_time 2, 3, 4, 5
-/// 3. Reconstruct state at tx_time=5 (4 deltas applied)
+/// Version/Timestamp Semantics:
+/// - Uses actual wallclock microsecond timestamps
+/// - Captures timestamp after 5th update (delta, not anchor)
+/// - Query requires finding nearest anchor (after update 1) and applying ~4 deltas
 fn bench_time_travel_with_deltas(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
-    // Setup: Create database with 15 versions
-    // Anchors at tx_time 1, 11 (default anchor_interval = 10, after 15 updates)
+    // Setup: Create database with 15 updates
+    // Anchors at updates 1, 11 (default anchor_interval = 10)
     let db = GallifreyDB::new();
     let node_id = db
         .create_node(
@@ -210,7 +219,8 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
         )
         .expect("Benchmark setup: create_node should succeed with valid input");
 
-    // Create 15 additional versions (tx_time 1-15)
+    // Create 15 updates and capture timestamp after update 5 (delta)
+    let mut timestamp_at_5 = 0i64;
     for i in 1..=15 {
         db.write(|tx| {
             tx.update_node(
@@ -223,13 +233,25 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
             Ok(())
         })
         .expect("Benchmark setup: update_node should succeed with valid input");
+
+        // Capture timestamp after 5th update (delta point)
+        if i == 5 {
+            timestamp_at_5 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+        }
     }
 
     group.bench_function("with_5_deltas", |b| {
         b.iter(|| {
-            // Query at tx_time=5, valid_time=5
-            // This requires: anchor@tx_time=0 + 5 deltas (tx_time 1-5)
-            let result = db.get_node_at_time(black_box(node_id), black_box(5), black_box(5));
+            // Query at delta point using actual timestamp
+            // This requires: anchor@update_1 + deltas (updates 2-5)
+            let result = db.get_node_at_time(
+                black_box(node_id),
+                black_box(timestamp_at_5),
+                black_box(timestamp_at_5),
+            );
             black_box(result)
         })
     });
@@ -240,17 +262,17 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
 /// Target: Time-travel worst case (9 deltas) <5ms
 /// This tests worst-case reconstruction just before next anchor
 ///
-/// Query at tx_time=9 (just before anchor@10) requires:
-/// 1. Find nearest anchor ≤ 9 → anchor@tx_time=1
-/// 2. Apply maximum delta chain: tx_time 2, 3, 4, 5, 6, 7, 8, 9
-/// 3. Reconstruct state at tx_time=9 (8 deltas applied)
+/// Version/Timestamp Semantics:
+/// - Uses actual wallclock microsecond timestamps
+/// - Captures timestamp after 9th update (just before anchor at update 11)
+/// - Query requires finding nearest anchor (after update 1) and applying 8 deltas (updates 2-9)
 ///
 /// This is the worst case for anchor_interval=10 (9 versions between anchors)
 fn bench_time_travel_worst_case(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
-    // Setup: Create database with 19 versions
-    // Anchors at tx_time 1, 11 (default anchor_interval = 10, after 19 updates)
+    // Setup: Create database with 19 updates
+    // Anchors at updates 1, 11 (default anchor_interval = 10)
     let db = GallifreyDB::new();
     let node_id = db
         .create_node(
@@ -259,7 +281,8 @@ fn bench_time_travel_worst_case(c: &mut Criterion) {
         )
         .expect("Benchmark setup: create_node should succeed with valid input");
 
-    // Create 19 additional versions (tx_time 1-19)
+    // Create 19 updates and capture timestamp after update 9 (worst case delta)
+    let mut timestamp_at_9 = 0i64;
     for i in 1..=19 {
         db.write(|tx| {
             tx.update_node(
@@ -272,13 +295,25 @@ fn bench_time_travel_worst_case(c: &mut Criterion) {
             Ok(())
         })
         .expect("Benchmark setup: update_node should succeed with valid input");
+
+        // Capture timestamp after 9th update (worst case - just before anchor@11)
+        if i == 9 {
+            timestamp_at_9 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+        }
     }
 
     group.bench_function("worst_case_9_deltas", |b| {
         b.iter(|| {
-            // Query at tx_time=9, valid_time=9
-            // Worst case: anchor@tx_time=0 + 9 deltas (tx_time 1-9), just before next anchor@10
-            let result = db.get_node_at_time(black_box(node_id), black_box(9), black_box(9));
+            // Query at worst case point using actual timestamp
+            // Worst case: anchor@update_1 + deltas (updates 2-9), just before next anchor@11
+            let result = db.get_node_at_time(
+                black_box(node_id),
+                black_box(timestamp_at_9),
+                black_box(timestamp_at_9),
+            );
             black_box(result)
         })
     });
