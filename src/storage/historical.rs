@@ -792,6 +792,9 @@ impl HistoricalStorage {
         // Fallback to dedicated anchor cache (survives delta cache pressure)
         if let Some(cached) = self.node_anchor_cache.get(&version_id) {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            // Re-populate main cache to make this anchor "hot" again
+            // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
+            self.node_property_cache.insert(version_id, cached.clone());
             return Ok(cached.as_ref().clone());
         }
 
@@ -890,6 +893,9 @@ impl HistoricalStorage {
         // Fallback to dedicated anchor cache (survives delta cache pressure)
         if let Some(cached) = self.edge_anchor_cache.get(&version_id) {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            // Re-populate main cache to make this anchor "hot" again
+            // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
+            self.edge_property_cache.insert(version_id, cached.clone());
             return Ok(cached.as_ref().clone());
         }
 
@@ -3712,8 +3718,8 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_cache_grows_when_hit_rate_low() {
-        // Test that the cache automatically grows when hit rate falls below threshold
+    fn test_should_resize_cache_recommends_growth_on_low_hit_rate() {
+        // Test that `should_resize_cache` recommends resizing when hit rate is low.
         // Start with a very small cache to force low hit rate
         let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
             AnchorConfig {
@@ -3753,12 +3759,19 @@ mod tests {
 
         // Check if adaptive resizing recommends increasing cache size
         // With only 10 cache slots and 50 versions, hit rate should be low
-        if let Some(hit_rate) = storage.should_resize_cache(0.8, 10) {
-            println!(
-                "Cache hit rate {:.2}% is below threshold, resize recommended",
-                hit_rate * 100.0
-            );
-        }
+        let resize_recommendation = storage.should_resize_cache(0.8, 10);
+        assert!(
+            resize_recommendation.is_some(),
+            "should_resize_cache should recommend resizing with low hit rate"
+        );
+
+        let hit_rate = resize_recommendation.unwrap();
+        assert!(hit_rate < 0.8, "Hit rate should be below the threshold");
+
+        println!(
+            "Cache hit rate {:.2}% is below threshold, resize recommended",
+            hit_rate * 100.0
+        );
 
         let stats = storage.stats();
         assert!(
