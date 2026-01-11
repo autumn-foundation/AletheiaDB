@@ -25,7 +25,8 @@ use crate::storage::historical::HistoricalStorage;
 use crate::storage::wal::{DurabilityMode, WalOperation, WriteAheadLog};
 use crate::utils::error::{Result, StorageError, TransactionError};
 use crate::utils::lock::{MutexExt, RwLockExt};
-use std::sync::{Arc, Mutex, RwLock};
+use parking_lot::RwLock;
+use std::sync::{Arc, Mutex};
 
 /// Write transaction with full ACID guarantees.
 ///
@@ -1721,7 +1722,7 @@ mod tests {
         assert!(current.get_node(node_id).is_err());
 
         // Verify tombstone version was created in historical storage
-        let historical = historical.read().unwrap();
+        let historical = historical.read();
         let stats = historical.stats();
         assert!(
             stats.total_node_versions > 0,
@@ -1761,7 +1762,7 @@ mod tests {
         assert!(current.get_edge(edge_id).is_err());
 
         // Verify tombstone version was created in historical storage
-        let historical = historical.read().unwrap();
+        let historical = historical.read();
         let stats = historical.stats();
         assert!(
             stats.total_edge_versions > 0,

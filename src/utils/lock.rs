@@ -25,6 +25,12 @@ use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockW
 
 use super::error::{Error, StorageError};
 
+// Import parking_lot types for the implementation
+use parking_lot::{
+    RwLock as ParkingLotRwLock, RwLockReadGuard as ParkingLotRwLockReadGuard,
+    RwLockWriteGuard as ParkingLotRwLockWriteGuard,
+};
+
 /// Extension trait for `Mutex` providing graceful error handling.
 pub trait MutexExt<T> {
     /// Acquire the lock, returning an error if the lock is poisoned.
@@ -90,6 +96,18 @@ impl<T> MutexExt<T> for Mutex<T> {
 
 /// Extension trait for `RwLock` providing graceful error handling.
 pub trait RwLockExt<T> {
+    /// The type of the read guard returned by this lock
+    type ReadGuard<'a>
+    where
+        Self: 'a,
+        T: 'a;
+
+    /// The type of the write guard returned by this lock
+    type WriteGuard<'a>
+    where
+        Self: 'a,
+        T: 'a;
+
     /// Acquire a read lock, returning an error if the lock is poisoned.
     ///
     /// This method is equivalent to `read().unwrap()` but returns a `Result`
@@ -99,7 +117,7 @@ pub trait RwLockExt<T> {
     ///
     /// Returns `Error::Storage(StorageError::LockPoisoned)` if the lock has been
     /// poisoned by a panicking thread.
-    fn read_or_err(&self) -> Result<RwLockReadGuard<'_, T>, Error>;
+    fn read_or_err(&self) -> Result<Self::ReadGuard<'_>, Error>;
 
     /// Acquire a write lock, returning an error if the lock is poisoned.
     ///
@@ -110,20 +128,29 @@ pub trait RwLockExt<T> {
     ///
     /// Returns `Error::Storage(StorageError::LockPoisoned)` if the lock has been
     /// poisoned by a panicking thread.
-    fn write_or_err(&self) -> Result<RwLockWriteGuard<'_, T>, Error>;
+    fn write_or_err(&self) -> Result<Self::WriteGuard<'_>, Error>;
 
     /// Acquire a read lock, recovering even if poisoned.
     ///
     /// Use with caution - see `MutexExt::lock_or_recover` for safety considerations.
-    fn read_or_recover(&self) -> RwLockReadGuard<'_, T>;
+    fn read_or_recover(&self) -> Self::ReadGuard<'_>;
 
     /// Acquire a write lock, recovering even if poisoned.
     ///
     /// Use with caution - see `MutexExt::lock_or_recover` for safety considerations.
-    fn write_or_recover(&self) -> RwLockWriteGuard<'_, T>;
+    fn write_or_recover(&self) -> Self::WriteGuard<'_>;
 }
 
 impl<T> RwLockExt<T> for RwLock<T> {
+    type ReadGuard<'a>
+        = RwLockReadGuard<'a, T>
+    where
+        T: 'a;
+    type WriteGuard<'a>
+        = RwLockWriteGuard<'a, T>
+    where
+        T: 'a;
+
     fn read_or_err(&self) -> Result<RwLockReadGuard<'_, T>, Error> {
         // Debug-only: Track read lock acquisitions
         #[cfg(all(debug_assertions, feature = "observability"))]
@@ -192,6 +219,65 @@ impl<T> RwLockExt<T> for RwLock<T> {
 
     fn write_or_recover(&self) -> RwLockWriteGuard<'_, T> {
         self.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Implementation of `RwLockExt` for `parking_lot::RwLock`.
+///
+/// Since `parking_lot::RwLock` doesn't have lock poisoning, these methods
+/// simply acquire the lock and return it. This provides a consistent API
+/// across both lock types while maintaining the performance benefits of
+/// `parking_lot`.
+impl<T> RwLockExt<T> for ParkingLotRwLock<T> {
+    type ReadGuard<'a>
+        = ParkingLotRwLockReadGuard<'a, T>
+    where
+        T: 'a;
+    type WriteGuard<'a>
+        = ParkingLotRwLockWriteGuard<'a, T>
+    where
+        T: 'a;
+
+    fn read_or_err(&self) -> Result<ParkingLotRwLockReadGuard<'_, T>, Error> {
+        // Debug-only: Track read lock acquisitions
+        #[cfg(all(debug_assertions, feature = "observability"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static READ_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = READ_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count.is_multiple_of(10000) {
+                tracing::debug!(count, "parking_lot::RwLock read acquisition count");
+            }
+        }
+
+        // parking_lot::RwLock doesn't have poisoning, so we just acquire the lock
+        Ok(self.read())
+    }
+
+    fn write_or_err(&self) -> Result<ParkingLotRwLockWriteGuard<'_, T>, Error> {
+        // Debug-only: Track write lock acquisitions
+        #[cfg(all(debug_assertions, feature = "observability"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static WRITE_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = WRITE_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count.is_multiple_of(10000) {
+                tracing::debug!(count, "parking_lot::RwLock write acquisition count");
+            }
+        }
+
+        // parking_lot::RwLock doesn't have poisoning, so we just acquire the lock
+        Ok(self.write())
+    }
+
+    fn read_or_recover(&self) -> ParkingLotRwLockReadGuard<'_, T> {
+        // No poisoning in parking_lot, so just acquire the lock
+        self.read()
+    }
+
+    fn write_or_recover(&self) -> ParkingLotRwLockWriteGuard<'_, T> {
+        // No poisoning in parking_lot, so just acquire the lock
+        self.write()
     }
 }
 

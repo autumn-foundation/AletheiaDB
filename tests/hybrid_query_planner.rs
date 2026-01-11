@@ -895,7 +895,7 @@ fn test_execute_temporal_node_lookup_returns_historical_state() {
     // (after the first version starts but before the second version starts)
     let historical_timestamp = {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         let current_version_id = hist_guard.get_current_node_version(node_id).unwrap();
         let current_version = hist_guard.get_node_version(current_version_id).unwrap();
         let prev_version_id = current_version.prev_version.unwrap();
@@ -938,7 +938,7 @@ fn test_execute_temporal_node_lookup_returns_historical_state() {
     println!("\n=== Version chain at query time ===");
     {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         if let Some(head_version_id) = hist_guard.get_current_node_version(node_id) {
             let mut current_id = head_version_id;
             let mut index = 0;
