@@ -116,7 +116,7 @@ impl GallifreyDB {
     ///
     /// let config = GallifreyDBConfig::builder()
     ///     .wal(WalConfigBuilder::new()
-    ///         .num_stripes(32).unwrap()
+    ///         .with_validated(32, 2048, 64 * 1024, 64 * 1024 * 1024, 10, 10).unwrap()
     ///         .build())
     ///     .build();
     ///

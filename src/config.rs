@@ -16,8 +16,7 @@
 //!
 //! let config = GallifreyDBConfig::builder()
 //!     .wal(WalConfigBuilder::new()
-//!         .num_stripes(32).unwrap()
-//!         .stripe_capacity(2048).unwrap()
+//!         .with_validated(32, 2048, 64 * 1024, 64 * 1024 * 1024, 10, 10).unwrap()
 //!         .build())
 //!     .historical(HistoricalConfigBuilder::new()
 //!         .max_versions_per_entity(5000).unwrap()
@@ -119,6 +118,59 @@ impl WalConfigBuilder {
         Self {
             config: WalConfig::default(),
         }
+    }
+
+    /// Set all validated parameters at once (single validation point).
+    ///
+    /// This is a convenience method that sets all parameters requiring validation
+    /// in a single call, reducing the need for multiple `.unwrap()` calls.
+    ///
+    /// # Parameters
+    ///
+    /// - `num_stripes`: Number of stripes for concurrent appends (will be rounded to next power of 2)
+    /// - `stripe_capacity`: Ring buffer capacity per stripe
+    /// - `write_buffer_size`: Write buffer size in bytes
+    /// - `segment_size`: Maximum segment size before rotation in bytes (minimum 512)
+    /// - `segments_to_retain`: Number of WAL segments to keep for recovery
+    /// - `flush_interval_ms`: Flush interval in milliseconds for async/group-commit modes
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if any parameter is invalid:
+    /// - Any value is 0
+    /// - `segment_size` is less than 512 bytes
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::WalConfigBuilder;
+    ///
+    /// let config = WalConfigBuilder::new()
+    ///     .with_validated(
+    ///         32,              // num_stripes
+    ///         2048,            // stripe_capacity
+    ///         128 * 1024,      // write_buffer_size
+    ///         64 * 1024 * 1024, // segment_size
+    ///         10,              // segments_to_retain
+    ///         10,              // flush_interval_ms
+    ///     ).unwrap()  // Single unwrap!
+    ///     .build();
+    /// ```
+    pub fn with_validated(
+        self,
+        num_stripes: usize,
+        stripe_capacity: usize,
+        write_buffer_size: usize,
+        segment_size: usize,
+        segments_to_retain: usize,
+        flush_interval_ms: u64,
+    ) -> Result<Self, ConfigError> {
+        self.num_stripes(num_stripes)?
+            .stripe_capacity(stripe_capacity)?
+            .write_buffer_size(write_buffer_size)?
+            .segment_size(segment_size)?
+            .segments_to_retain(segments_to_retain)?
+            .flush_interval_ms(flush_interval_ms)
     }
 
     /// Set the number of stripes (will be rounded to next power of 2).
@@ -664,6 +716,43 @@ mod tests {
             .build();
 
         assert_eq!(config.num_stripes, 32); // Rounded up to next power of 2
+    }
+
+    #[test]
+    fn test_wal_config_with_validated() {
+        let config = WalConfigBuilder::new()
+            .with_validated(
+                32,               // num_stripes
+                2048,             // stripe_capacity
+                128 * 1024,       // write_buffer_size
+                64 * 1024 * 1024, // segment_size
+                10,               // segments_to_retain
+                20,               // flush_interval_ms
+            )
+            .unwrap() // Single unwrap!
+            .build();
+
+        assert_eq!(config.num_stripes, 32);
+        assert_eq!(config.stripe_capacity, 2048);
+        assert_eq!(config.write_buffer_size, 128 * 1024);
+        assert_eq!(config.segment_size, 64 * 1024 * 1024);
+        assert_eq!(config.segments_to_retain, 10);
+        assert_eq!(config.flush_interval_ms, 20);
+    }
+
+    #[test]
+    fn test_wal_config_with_validated_invalid() {
+        // Test that invalid values are caught
+        let result = WalConfigBuilder::new().with_validated(
+            0, // invalid: 0 stripes
+            2048,
+            128 * 1024,
+            64 * 1024 * 1024,
+            10,
+            20,
+        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
     }
 
     #[test]
