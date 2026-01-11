@@ -449,7 +449,8 @@ impl PersistenceManager {
         let wal_entries = wal.read_from(start_lsn)?;
 
         for _entry in wal_entries {
-            // TODO: Implement WAL operation replay
+            // See issue #287: Implement basic WAL replay loop
+            // See issue #290: Implement DeleteNode/DeleteEdge replay with correct bi-temporal semantics
             //
             // IMPORTANT: When implementing replay for DeleteNode/DeleteEdge operations,
             // you MUST close the previous version's transaction_time BEFORE creating

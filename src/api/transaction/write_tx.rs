@@ -15,7 +15,7 @@ use super::{
 };
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
-use crate::core::interning::GLOBAL_INTERNER;
+use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
@@ -634,6 +634,233 @@ impl WriteTransaction {
     /// 1. `historical` - historical storage (acquired first)
     /// 2. `temporal_indexes` - temporal indexes (acquired second)
     /// 3. `version_id_gen` - version ID generator (acquired later for tombstones)
+    ///
+    /// Helper function to apply node writes (both create and update operations).
+    ///
+    /// # Arguments
+    ///
+    /// * `is_create` - True for CreateNode, false for UpdateNode
+    /// * `node_id` - The ID of the node
+    /// * `version_id` - The version ID for this write
+    /// * `label` - The node label
+    /// * `properties` - The node properties
+    /// * `commit_timestamp` - The commit timestamp
+    /// * `temporal` - The bi-temporal interval
+    /// * `historical` - Mutable reference to historical storage
+    #[allow(clippy::too_many_arguments)]
+    fn apply_node_write(
+        &self,
+        is_create: bool,
+        node_id: NodeId,
+        version_id: VersionId,
+        label: InternedString,
+        properties: PropertyMap,
+        commit_timestamp: Timestamp,
+        temporal: BiTemporalInterval,
+        historical: &mut HistoricalStorage,
+    ) -> Result<()> {
+        // Create node with proper transaction metadata
+        let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
+        let node = Node::with_metadata(node_id, label, properties.clone(), version_id, metadata);
+
+        // Insert or update in current storage
+        if is_create {
+            self.current.insert_node_direct(node, commit_timestamp)?;
+        } else {
+            self.current.update_node_direct(node, commit_timestamp)?;
+
+            // For updates, close the current version's transaction_time in historical storage.
+            // This is necessary because when multiple updates occur in the same transaction,
+            // they all have the same commit_timestamp, so the auto-closing logic in
+            // add_node_version won't work (new_tx_time == prev_tx_time).
+            if let Some(current_version_id) = historical.get_current_node_version(node_id) {
+                historical
+                    .close_node_version_transaction_time(current_version_id, commit_timestamp)?;
+            }
+        }
+
+        // Store in historical storage (consume properties, avoiding second clone)
+        historical.add_node_version(node_id, version_id, temporal, label, properties)?;
+
+        // Index in temporal indexes
+        self.temporal_indexes
+            .insert_node_version(node_id, version_id, temporal)?;
+
+        Ok(())
+    }
+
+    /// Helper function to apply edge writes (both create and update operations).
+    ///
+    /// # Arguments
+    ///
+    /// * `is_create` - True for CreateEdge, false for UpdateEdge
+    /// * `edge_id` - The ID of the edge
+    /// * `version_id` - The version ID for this write
+    /// * `source` - The source node ID
+    /// * `target` - The target node ID
+    /// * `label` - The edge label
+    /// * `properties` - The edge properties
+    /// * `commit_timestamp` - The commit timestamp
+    /// * `temporal` - The bi-temporal interval
+    /// * `historical` - Mutable reference to historical storage
+    #[allow(clippy::too_many_arguments)]
+    fn apply_edge_write(
+        &self,
+        is_create: bool,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        source: NodeId,
+        target: NodeId,
+        label: InternedString,
+        properties: PropertyMap,
+        commit_timestamp: Timestamp,
+        temporal: BiTemporalInterval,
+        historical: &mut HistoricalStorage,
+    ) -> Result<()> {
+        // Create edge with proper transaction metadata
+        let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
+        let edge = Edge::with_metadata(
+            edge_id,
+            label,
+            source,
+            target,
+            properties.clone(),
+            version_id,
+            metadata,
+        );
+
+        // Insert or update in current storage
+        if is_create {
+            self.current.insert_edge_direct(edge)?;
+        } else {
+            self.current.update_edge_direct(edge)?;
+
+            // For updates, close the current version's transaction_time in historical storage.
+            // This is necessary because when multiple updates occur in the same transaction,
+            // they all have the same commit_timestamp, so the auto-closing logic in
+            // add_edge_version won't work (new_tx_time == prev_tx_time).
+            if let Some(current_version_id) = historical.get_current_edge_version(edge_id) {
+                historical
+                    .close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
+            }
+        }
+
+        // Store in historical storage (consume properties, avoiding second clone)
+        historical.add_edge_version(
+            edge_id, version_id, temporal, label, source, target, properties,
+        )?;
+
+        // Index in temporal indexes
+        self.temporal_indexes
+            .insert_edge_version(edge_id, version_id, temporal)?;
+
+        Ok(())
+    }
+
+    /// Helper function to apply node deletion.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The ID of the node to delete
+    /// * `commit_timestamp` - The commit timestamp
+    /// * `tombstone_id` - The version ID for the tombstone
+    /// * `historical` - Mutable reference to historical storage
+    fn apply_node_delete(
+        &self,
+        node_id: NodeId,
+        commit_timestamp: Timestamp,
+        tombstone_id: VersionId,
+        historical: &mut HistoricalStorage,
+    ) -> Result<()> {
+        // Get the node before deleting
+        let node = self.current.get_node(node_id)?;
+
+        // Close the current version's transaction_time in historical storage
+        // This marks the end of this version's visibility
+        if let Some(current_version_id) = historical.get_current_node_version(node_id) {
+            historical.close_node_version_transaction_time(current_version_id, commit_timestamp)?;
+        }
+
+        // Create tombstone temporal interval
+        // The tombstone marks when the deletion occurred. Its transaction_time
+        // starts at commit_timestamp and remains open (we know about the deletion
+        // from now on). Its valid_time is closed immediately since the entity
+        // no longer exists.
+        let tombstone_temporal =
+            BiTemporalInterval::current(commit_timestamp).close_valid_time(commit_timestamp);
+
+        // Add tombstone version to historical storage
+        historical.add_node_version(
+            node_id,
+            tombstone_id,
+            tombstone_temporal,
+            node.label,
+            node.properties.clone(),
+        )?;
+
+        // Index the tombstone version
+        self.temporal_indexes
+            .insert_node_version(node_id, tombstone_id, tombstone_temporal)?;
+
+        // Delete from current storage
+        self.current.delete_node_direct(node_id, commit_timestamp)?;
+
+        Ok(())
+    }
+
+    /// Helper function to apply edge deletion.
+    ///
+    /// # Arguments
+    ///
+    /// * `edge_id` - The ID of the edge to delete
+    /// * `commit_timestamp` - The commit timestamp
+    /// * `tombstone_id` - The version ID for the tombstone
+    /// * `historical` - Mutable reference to historical storage
+    fn apply_edge_delete(
+        &self,
+        edge_id: EdgeId,
+        commit_timestamp: Timestamp,
+        tombstone_id: VersionId,
+        historical: &mut HistoricalStorage,
+    ) -> Result<()> {
+        // Get the edge before deleting
+        let edge = self.current.get_edge(edge_id)?;
+
+        // Close the current version's transaction_time in historical storage
+        // This marks the end of this version's visibility
+        if let Some(current_version_id) = historical.get_current_edge_version(edge_id) {
+            historical.close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
+        }
+
+        // Create tombstone temporal interval
+        // The tombstone marks when the deletion occurred. Its transaction_time
+        // starts at commit_timestamp and remains open (we know about the deletion
+        // from now on). Its valid_time is closed immediately since the entity
+        // no longer exists.
+        let tombstone_temporal =
+            BiTemporalInterval::current(commit_timestamp).close_valid_time(commit_timestamp);
+
+        // Add tombstone version to historical storage
+        historical.add_edge_version(
+            edge_id,
+            tombstone_id,
+            tombstone_temporal,
+            edge.label,
+            edge.source,
+            edge.target,
+            edge.properties.clone(),
+        )?;
+
+        // Index the tombstone version
+        self.temporal_indexes
+            .insert_edge_version(edge_id, tombstone_id, tombstone_temporal)?;
+
+        // Delete from current storage
+        self.current.delete_edge_direct(edge_id)?;
+
+        Ok(())
+    }
+
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
         // Create temporal interval for all operations in this transaction.
         // All operations in a transaction share the same commit_timestamp, which is
@@ -646,7 +873,6 @@ impl WriteTransaction {
         // Acquire lock on historical storage once before processing all operations.
         // TemporalIndexes uses DashMap internally, so no outer lock needed.
         let mut historical = self.historical.write_or_err()?;
-        let temporal_indexes = &self.temporal_indexes;
 
         // Pre-generate all tombstone version IDs at once to reduce lock contention
         // on the ID generator. Count delete operations and generate IDs in batch.
@@ -684,28 +910,16 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    // Create in current storage with proper transaction metadata
-                    let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
-                    let node = Node::with_metadata(
+                    self.apply_node_write(
+                        true, // is_create
                         *node_id,
+                        *version_id,
                         *label,
                         properties.clone(),
-                        *version_id,
-                        metadata,
-                    );
-                    self.current.insert_node_direct(node, commit_timestamp)?;
-
-                    // Store in historical storage
-                    historical.add_node_version(
-                        *node_id,
-                        *version_id,
+                        commit_timestamp,
                         temporal,
-                        *label,
-                        properties.clone(),
+                        &mut historical,
                     )?;
-
-                    // Index in temporal indexes
-                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::CreateEdge {
                     edge_id,
@@ -716,32 +930,18 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    // Create in current storage with proper transaction metadata
-                    let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
-                    let edge = Edge::with_metadata(
+                    self.apply_edge_write(
+                        true, // is_create
                         *edge_id,
-                        *label,
+                        *version_id,
                         *source,
                         *target,
+                        *label,
                         properties.clone(),
-                        *version_id,
-                        metadata,
-                    );
-                    self.current.insert_edge_direct(edge)?;
-
-                    // Store in historical storage
-                    historical.add_edge_version(
-                        *edge_id,
-                        *version_id,
+                        commit_timestamp,
                         temporal,
-                        *label,
-                        *source,
-                        *target,
-                        properties.clone(),
+                        &mut historical,
                     )?;
-
-                    // Index in temporal indexes
-                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::UpdateNode {
                     node_id,
@@ -750,40 +950,16 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    // Update in current storage with proper transaction metadata
-                    let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
-                    let node = Node::with_metadata(
+                    self.apply_node_write(
+                        false, // is_create
                         *node_id,
+                        *version_id,
                         *label,
                         properties.clone(),
-                        *version_id,
-                        metadata,
-                    );
-                    self.current.update_node_direct(node, commit_timestamp)?;
-
-                    // Close the current version's transaction_time in historical storage.
-                    // This is necessary because when multiple updates occur in the same transaction,
-                    // they all have the same commit_timestamp, so the auto-closing logic in
-                    // add_node_version won't work (new_tx_time == prev_tx_time).
-                    if let Some(current_version_id) = historical.get_current_node_version(*node_id)
-                    {
-                        historical.close_node_version_transaction_time(
-                            current_version_id,
-                            commit_timestamp,
-                        )?;
-                    }
-
-                    // Add new version to historical storage
-                    historical.add_node_version(
-                        *node_id,
-                        *version_id,
+                        commit_timestamp,
                         temporal,
-                        *label,
-                        properties.clone(),
+                        &mut historical,
                     )?;
-
-                    // Index in temporal indexes
-                    temporal_indexes.insert_node_version(*node_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::UpdateEdge {
                     edge_id,
@@ -794,59 +970,20 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    // Update in current storage with proper transaction metadata
-                    let metadata = VersionMetadata::new(self.tx_id, commit_timestamp);
-                    let edge = Edge::with_metadata(
+                    self.apply_edge_write(
+                        false, // is_create
                         *edge_id,
-                        *label,
+                        *version_id,
                         *source,
                         *target,
+                        *label,
                         properties.clone(),
-                        *version_id,
-                        metadata,
-                    );
-                    self.current.update_edge_direct(edge)?;
-
-                    // Close the current version's transaction_time in historical storage.
-                    // This is necessary because when multiple updates occur in the same transaction,
-                    // they all have the same commit_timestamp, so the auto-closing logic in
-                    // add_edge_version won't work (new_tx_time == prev_tx_time).
-                    if let Some(current_version_id) = historical.get_current_edge_version(*edge_id)
-                    {
-                        historical.close_edge_version_transaction_time(
-                            current_version_id,
-                            commit_timestamp,
-                        )?;
-                    }
-
-                    // Add new version to historical storage
-                    historical.add_edge_version(
-                        *edge_id,
-                        *version_id,
+                        commit_timestamp,
                         temporal,
-                        *label,
-                        *source,
-                        *target,
-                        properties.clone(),
+                        &mut historical,
                     )?;
-
-                    // Index in temporal indexes
-                    temporal_indexes.insert_edge_version(*edge_id, *version_id, temporal)?;
                 }
                 super::BufferedWrite::DeleteNode { node_id } => {
-                    // Get the node before deleting
-                    let node = self.current.get_node(*node_id)?;
-
-                    // Close the current version's transaction_time in historical storage
-                    // This marks the end of this version's visibility
-                    if let Some(current_version_id) = historical.get_current_node_version(*node_id)
-                    {
-                        historical.close_node_version_transaction_time(
-                            current_version_id,
-                            commit_timestamp,
-                        )?;
-                    }
-
                     // Use pre-generated tombstone version ID (no lock needed)
                     // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
                     let tombstone_version_id = VersionId::new_unchecked(
@@ -860,48 +997,14 @@ impl WriteTransaction {
                         })?,
                     );
 
-                    // Create tombstone temporal interval
-                    // The tombstone marks when the deletion occurred. Its transaction_time
-                    // starts at commit_timestamp and remains open (we know about the deletion
-                    // from now on). Its valid_time is closed immediately since the entity
-                    // no longer exists.
-                    let tombstone_temporal = BiTemporalInterval::current(commit_timestamp)
-                        .close_valid_time(commit_timestamp);
-
-                    // Add tombstone version to historical storage
-                    historical.add_node_version(
+                    self.apply_node_delete(
                         *node_id,
+                        commit_timestamp,
                         tombstone_version_id,
-                        tombstone_temporal,
-                        node.label,
-                        node.properties.clone(),
+                        &mut historical,
                     )?;
-
-                    // Index the tombstone version
-                    temporal_indexes.insert_node_version(
-                        *node_id,
-                        tombstone_version_id,
-                        tombstone_temporal,
-                    )?;
-
-                    // Delete from current storage
-                    self.current
-                        .delete_node_direct(*node_id, commit_timestamp)?;
                 }
                 super::BufferedWrite::DeleteEdge { edge_id } => {
-                    // Get the edge before deleting
-                    let edge = self.current.get_edge(*edge_id)?;
-
-                    // Close the current version's transaction_time in historical storage
-                    // This marks the end of this version's visibility
-                    if let Some(current_version_id) = historical.get_current_edge_version(*edge_id)
-                    {
-                        historical.close_edge_version_transaction_time(
-                            current_version_id,
-                            commit_timestamp,
-                        )?;
-                    }
-
                     // Use pre-generated tombstone version ID (no lock needed)
                     // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
                     let tombstone_version_id = VersionId::new_unchecked(
@@ -915,34 +1018,12 @@ impl WriteTransaction {
                         })?,
                     );
 
-                    // Create tombstone temporal interval
-                    // The tombstone marks when the deletion occurred. Its transaction_time
-                    // starts at commit_timestamp and remains open (we know about the deletion
-                    // from now on). Its valid_time is closed immediately since the entity
-                    // no longer exists.
-                    let tombstone_temporal = BiTemporalInterval::current(commit_timestamp)
-                        .close_valid_time(commit_timestamp);
-
-                    // Add tombstone version to historical storage
-                    historical.add_edge_version(
+                    self.apply_edge_delete(
                         *edge_id,
+                        commit_timestamp,
                         tombstone_version_id,
-                        tombstone_temporal,
-                        edge.label,
-                        edge.source,
-                        edge.target,
-                        edge.properties.clone(),
+                        &mut historical,
                     )?;
-
-                    // Index the tombstone version
-                    temporal_indexes.insert_edge_version(
-                        *edge_id,
-                        tombstone_version_id,
-                        tombstone_temporal,
-                    )?;
-
-                    // Delete from current storage
-                    self.current.delete_edge_direct(*edge_id)?;
                 }
             }
         }

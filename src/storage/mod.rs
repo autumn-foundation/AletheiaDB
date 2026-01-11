@@ -17,7 +17,7 @@ pub mod wal_reader;
 
 // Re-export commonly used types
 pub use current::{CurrentStats, CurrentStorage};
-pub use historical::{HistoricalStats, HistoricalStorage};
+pub use historical::{CacheMetrics, HistoricalStats, HistoricalStorage};
 pub use observer::{Observer, StorageEvent, StorageObserver};
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
 pub use version::{
