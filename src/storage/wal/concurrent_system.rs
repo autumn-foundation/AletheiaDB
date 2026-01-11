@@ -733,11 +733,25 @@ mod tests {
             wal.append(create_test_operation(i)).unwrap();
         }
 
-        // Wait for background flush
-        std::thread::sleep(Duration::from_millis(50));
+        // Wait for background flush with polling (more resilient than single sleep)
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_millis(200); // Increased timeout for CI
+        let mut flushed = false;
+        while start.elapsed() < timeout {
+            if wal.total_flushed() >= 1 {
+                flushed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         // Should have been flushed by background thread
-        assert!(wal.total_flushed() >= 1);
+        assert!(
+            flushed,
+            "Expected at least 1 entry to be flushed within {}ms, but got {} flushed",
+            timeout.as_millis(),
+            wal.total_flushed()
+        );
 
         wal.shutdown();
     }
