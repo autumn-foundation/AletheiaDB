@@ -30,27 +30,26 @@ fn test_anchor_creation_matches_benchmark_assumptions() {
         )
         .expect("create_node should succeed");
 
-    // Create 10 updates and capture timestamp after update 10 (anchor)
+    // Create 10 updates and capture the commit timestamp at update 10 (anchor)
     let mut timestamp_at_10 = 0i64;
     for i in 1..=10 {
-        db.write(|tx| {
-            tx.update_node(
-                node_id,
-                PropertyMapBuilder::new()
-                    .insert("name", "Alice")
-                    .insert("version", i)
-                    .build(),
-            )?;
-            Ok(())
-        })
-        .expect("update_node should succeed");
+        let commit_ts = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("version", i)
+                        .build(),
+                )?;
+                Ok(())
+            })
+            .expect("update_node should succeed")
+            .1; // Extract commit timestamp
 
-        // Capture timestamp after 10th update (anchor point)
+        // Capture actual commit timestamp at 10th update (anchor point)
         if i == 10 {
-            timestamp_at_10 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
+            timestamp_at_10 = commit_ts;
         }
     }
 

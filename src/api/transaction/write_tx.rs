@@ -226,11 +226,32 @@ impl WriteTransaction {
             let ts_lock_acquired = std::time::Instant::now();
 
             // Use wallclock time for transaction_time (required for temporal queries)
-            let commit = crate::core::temporal::time::now();
+            let wallclock = crate::core::temporal::time::now();
 
             // Ensure monotonicity: if wallclock went backwards (NTP adjustment),
             // use previous timestamp + 1
-            let commit = std::cmp::max(commit, *ts + 1);
+            let commit = std::cmp::max(wallclock, *ts + 1);
+
+            // Observability: Warn about clock skew issues
+            #[cfg(feature = "observability")]
+            {
+                if commit == *ts + 1 && wallclock < *ts {
+                    tracing::warn!(
+                        wallclock_ts = wallclock,
+                        prev_ts = *ts,
+                        skew_us = *ts - wallclock,
+                        "Clock skew detected: wallclock went backwards (NTP adjustment?)"
+                    );
+                } else if commit > *ts + 60_000_000 {
+                    // Large forward jump (>60 seconds)
+                    tracing::warn!(
+                        wallclock_ts = wallclock,
+                        prev_ts = *ts,
+                        jump_us = commit - *ts,
+                        "Large clock jump detected: timestamps will be lumpy"
+                    );
+                }
+            }
 
             // Update current_timestamp for next transaction's snapshot
             *ts = commit;
