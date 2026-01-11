@@ -6,7 +6,7 @@
 use crate::api::transaction::{
     ReadTransaction, TxIdGenerator, TxVisibilityManager, WriteOps, WriteTransaction,
 };
-use crate::config::{GallifreyDBConfig, WalSystemConfig};
+use crate::config::GallifreyDBConfig;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId};
 use crate::core::property::PropertyMap;
@@ -107,23 +107,63 @@ impl GallifreyDB {
     /// Create a new database with unified configuration.
     ///
     /// This method accepts a [`GallifreyDBConfig`] which consolidates all configuration
-    /// settings for the database.
+    /// settings for the database, including WAL, historical storage, and vector indexes.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+    /// use gallifreydb::{GallifreyDB, config::GallifreyDBConfig, config::WalConfigBuilder};
     ///
     /// let config = GallifreyDBConfig::builder()
-    ///     .wal(WalSystemConfigBuilder::new()
-    ///         .num_stripes(32)
+    ///     .wal(WalConfigBuilder::new()
+    ///         .num_stripes(32).unwrap()
     ///         .build())
     ///     .build();
     ///
     /// let db = GallifreyDB::with_unified_config(config);
     /// ```
-    pub fn with_unified_config(config: GallifreyDBConfig, wal_config: WalConfig) -> Self {
-        Self::with_full_config_internal(AnchorConfig::default(), wal_config, Some(config.wal))
+    pub fn with_unified_config(config: GallifreyDBConfig) -> Self {
+        let durability_mode = config.wal.durability_mode;
+
+        // Create ConcurrentWalSystem config from unified WalConfig
+        let wal_system_config = ConcurrentWalSystemConfig {
+            wal_dir: config.wal.wal_dir,
+            num_stripes: config.wal.num_stripes,
+            stripe_capacity: config.wal.stripe_capacity,
+            segment_size: config.wal.segment_size,
+            segments_to_retain: config.wal.segments_to_retain,
+            flush_interval_ms: match durability_mode {
+                DurabilityMode::Async { flush_interval_ms } => flush_interval_ms,
+                DurabilityMode::GroupCommit { max_delay_ms, .. } => max_delay_ms,
+                DurabilityMode::AsyncBatched { max_delay_ms, .. } => max_delay_ms,
+                _ => config.wal.flush_interval_ms, // Use config default
+            },
+            durability_mode,
+            write_buffer_size: config.wal.write_buffer_size,
+        };
+
+        let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");
+        let wal = Arc::new(wal);
+
+        // TODO: Use config.historical for HistoricalStorage::with_config
+        // TODO: Use config.vector for vector index limits
+
+        GallifreyDB {
+            current: Arc::new(CurrentStorage::new()),
+            historical: Arc::new(RwLock::new(HistoricalStorage::with_config(
+                AnchorConfig::default(),
+            ))),
+            temporal_indexes: Arc::new(TemporalIndexes::new()),
+            wal,
+            current_timestamp: Arc::new(Mutex::new(time::now())),
+            tx_id_gen: Arc::new(TxIdGenerator::new()),
+            visibility_manager: Arc::new(TxVisibilityManager::new()),
+            node_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
+            edge_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
+            version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
+            default_durability: durability_mode,
+            stats: Arc::new(Statistics::new()),
+        }
     }
 
     /// Create a new database with both anchor and WAL configuration.
@@ -131,41 +171,27 @@ impl GallifreyDB {
     /// This maintains backward compatibility with the old API.
     /// For new code, prefer using [`with_unified_config`](Self::with_unified_config).
     pub fn with_full_config(anchor_config: AnchorConfig, wal_config: WalConfig) -> Self {
-        Self::with_full_config_internal(anchor_config, wal_config, None)
-    }
-
-    /// Internal implementation for database creation with optional unified config.
-    fn with_full_config_internal(
-        anchor_config: AnchorConfig,
-        wal_config: WalConfig,
-        wal_system_config: Option<WalSystemConfig>,
-    ) -> Self {
         let durability_mode = wal_config.durability_mode;
 
-        // Use unified config if provided, otherwise use defaults
-        let wal_sys_cfg = wal_system_config.unwrap_or_default();
-
-        // Create ConcurrentWalSystem config from WalConfig and WalSystemConfig
+        // Create ConcurrentWalSystem config from old WalConfig
         let wal_system_config = ConcurrentWalSystemConfig {
             wal_dir: wal_config.wal_dir,
-            num_stripes: wal_sys_cfg.num_stripes,
-            stripe_capacity: wal_sys_cfg.stripe_capacity,
+            num_stripes: 16,       // Default
+            stripe_capacity: 1024, // Default
             segment_size: wal_config.segment_size,
             segments_to_retain: wal_config.segments_to_retain,
             flush_interval_ms: match durability_mode {
                 DurabilityMode::Async { flush_interval_ms } => flush_interval_ms,
                 DurabilityMode::GroupCommit { max_delay_ms, .. } => max_delay_ms,
                 DurabilityMode::AsyncBatched { max_delay_ms, .. } => max_delay_ms,
-                _ => wal_sys_cfg.flush_interval_ms, // Use config default
+                _ => 10, // Default
             },
             durability_mode,
-            write_buffer_size: wal_sys_cfg.write_buffer_size,
+            write_buffer_size: 64 * 1024, // Default 64KB
         };
 
         let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");
         let wal = Arc::new(wal);
-
-        // Note: ConcurrentWalSystem handles background threads internally based on durability mode
 
         GallifreyDB {
             current: Arc::new(CurrentStorage::new()),

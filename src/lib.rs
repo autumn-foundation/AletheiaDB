@@ -67,8 +67,8 @@ pub mod observability;
 // Re-export commonly used types at the crate root
 pub use config::{
     ConfigError, GallifreyDBConfig, GallifreyDBConfigBuilder, HistoricalConfig,
-    HistoricalConfigBuilder, VectorIndexConfig, VectorIndexConfigBuilder, WalSystemConfig,
-    WalSystemConfigBuilder,
+    HistoricalConfigBuilder, VectorIndexConfig, VectorIndexConfigBuilder, WalConfig,
+    WalConfigBuilder,
 };
 pub use core::{
     BiTemporalInterval, Edge, EdgeId, EntityId, GLOBAL_INTERNER, InternedString, Node, NodeId,

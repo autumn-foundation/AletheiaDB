@@ -10,16 +10,16 @@
 //!
 //! let config = GallifreyDBConfig::builder()
 //!     .wal(WalConfigBuilder::new()
-//!         .num_stripes(32)
-//!         .stripe_capacity(2048)
+//!         .num_stripes(32).unwrap()
+//!         .stripe_capacity(2048).unwrap()
 //!         .build())
 //!     .historical(HistoricalConfigBuilder::new()
-//!         .max_versions_per_entity(5000)
-//!         .max_reconstruction_depth(200)
+//!         .max_versions_per_entity(5000).unwrap()
+//!         .max_reconstruction_depth(200).unwrap()
 //!         .build())
 //!     .build();
 //!
-//! let db = GallifreyDB::with_config(config);
+//! let db = GallifreyDB::with_unified_config(config);
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -28,10 +28,12 @@ use std::path::Path;
 
 /// Configuration for WAL (Write-Ahead Log) system.
 ///
-/// Controls buffer sizes, stripe configuration, and flush behavior.
+/// Controls buffer sizes, stripe configuration, flush behavior, and durability settings.
+/// This consolidates all WAL-related configuration in one place.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct WalSystemConfig {
+#[non_exhaustive]
+pub struct WalConfig {
     /// Number of stripes for concurrent appends (must be power of 2).
     /// Higher values improve concurrency but use more memory.
     /// Default: 16
@@ -55,9 +57,22 @@ pub struct WalSystemConfig {
     /// Lower values reduce latency but increase I/O overhead.
     /// Default: 10ms
     pub flush_interval_ms: u64,
+
+    /// Directory where WAL files are stored.
+    /// Default: "gallifreydb/wal"
+    pub wal_dir: std::path::PathBuf,
+
+    /// Number of WAL segments to keep for recovery.
+    /// Default: 10
+    pub segments_to_retain: usize,
+
+    /// Durability mode controlling when data is synced to disk.
+    /// This determines the tradeoff between durability guarantees and performance.
+    /// Default: GroupCommit (10ms delay, 200 batch size)
+    pub durability_mode: crate::storage::wal::DurabilityMode,
 }
 
-impl Default for WalSystemConfig {
+impl Default for WalConfig {
     fn default() -> Self {
         Self {
             num_stripes: 16,
@@ -65,45 +80,102 @@ impl Default for WalSystemConfig {
             write_buffer_size: 64 * 1024,   // 64KB
             segment_size: 64 * 1024 * 1024, // 64MB
             flush_interval_ms: 10,
+            wal_dir: std::path::PathBuf::from("gallifreydb/wal"),
+            segments_to_retain: 10,
+            durability_mode: crate::storage::wal::DurabilityMode::group_commit_default(),
         }
     }
 }
 
-/// Builder for WAL system configuration.
-pub struct WalSystemConfigBuilder {
-    config: WalSystemConfig,
+/// Builder for WAL configuration.
+///
+/// Provides a fluent API for constructing WAL configuration with validation.
+#[must_use = "builders do nothing unless you call build()"]
+#[derive(Debug)]
+pub struct WalConfigBuilder {
+    config: WalConfig,
 }
 
-impl WalSystemConfigBuilder {
+impl WalConfigBuilder {
     /// Create a new builder with default values.
     pub fn new() -> Self {
         Self {
-            config: WalSystemConfig::default(),
+            config: WalConfig::default(),
         }
     }
 
     /// Set the number of stripes (will be rounded to next power of 2).
-    pub fn num_stripes(mut self, num_stripes: usize) -> Self {
-        self.config.num_stripes = num_stripes.next_power_of_two();
-        self
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `num_stripes` is 0.
+    pub fn num_stripes(mut self, num_stripes: usize) -> Result<Self, ConfigError> {
+        if num_stripes == 0 {
+            return Err(ConfigError::InvalidValue(
+                "num_stripes must be greater than 0".into(),
+            ));
+        }
+        let rounded = num_stripes.next_power_of_two();
+        if rounded != num_stripes && cfg!(debug_assertions) {
+            eprintln!(
+                "Warning: num_stripes rounded from {} to {}",
+                num_stripes, rounded
+            );
+        }
+        self.config.num_stripes = rounded;
+        Ok(self)
     }
 
     /// Set the stripe capacity.
-    pub fn stripe_capacity(mut self, capacity: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `capacity` is 0.
+    pub fn stripe_capacity(mut self, capacity: usize) -> Result<Self, ConfigError> {
+        if capacity == 0 {
+            return Err(ConfigError::InvalidValue(
+                "stripe_capacity must be greater than 0".into(),
+            ));
+        }
         self.config.stripe_capacity = capacity;
-        self
+        Ok(self)
     }
 
     /// Set the write buffer size in bytes.
-    pub fn write_buffer_size(mut self, size: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `size` is 0.
+    pub fn write_buffer_size(mut self, size: usize) -> Result<Self, ConfigError> {
+        if size == 0 {
+            return Err(ConfigError::InvalidValue(
+                "write_buffer_size must be greater than 0".into(),
+            ));
+        }
         self.config.write_buffer_size = size;
-        self
+        Ok(self)
     }
 
     /// Set the segment size in bytes.
-    pub fn segment_size(mut self, size: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `size` is 0 or less than 1MB.
+    pub fn segment_size(mut self, size: usize) -> Result<Self, ConfigError> {
+        const MIN_SEGMENT_SIZE: usize = 1024 * 1024; // 1MB
+        if size == 0 {
+            return Err(ConfigError::InvalidValue(
+                "segment_size must be greater than 0".into(),
+            ));
+        }
+        if size < MIN_SEGMENT_SIZE {
+            return Err(ConfigError::InvalidValue(format!(
+                "segment_size must be at least {} bytes (1MB), got {}",
+                MIN_SEGMENT_SIZE, size
+            )));
+        }
         self.config.segment_size = size;
-        self
+        Ok(self)
     }
 
     /// Set the flush interval in milliseconds.
@@ -112,13 +184,40 @@ impl WalSystemConfigBuilder {
         self
     }
 
+    /// Set the WAL directory path.
+    pub fn wal_dir(mut self, path: std::path::PathBuf) -> Self {
+        self.config.wal_dir = path;
+        self
+    }
+
+    /// Set the number of WAL segments to retain.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `segments_to_retain` is 0.
+    pub fn segments_to_retain(mut self, segments: usize) -> Result<Self, ConfigError> {
+        if segments == 0 {
+            return Err(ConfigError::InvalidValue(
+                "segments_to_retain must be greater than 0".into(),
+            ));
+        }
+        self.config.segments_to_retain = segments;
+        Ok(self)
+    }
+
+    /// Set the durability mode.
+    pub fn durability_mode(mut self, mode: crate::storage::wal::DurabilityMode) -> Self {
+        self.config.durability_mode = mode;
+        self
+    }
+
     /// Build the configuration.
-    pub fn build(self) -> WalSystemConfig {
+    pub fn build(self) -> WalConfig {
         self.config
     }
 }
 
-impl Default for WalSystemConfigBuilder {
+impl Default for WalConfigBuilder {
     fn default() -> Self {
         Self::new()
     }
@@ -129,6 +228,7 @@ impl Default for WalSystemConfigBuilder {
 /// Controls versioning, reconstruction limits, and caching behavior.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct HistoricalConfig {
     /// Maximum versions to retain per entity before pruning.
     /// Higher values preserve more history but use more memory.
@@ -157,6 +257,10 @@ impl Default for HistoricalConfig {
 }
 
 /// Builder for historical storage configuration.
+///
+/// Provides a fluent API for constructing historical storage configuration with validation.
+#[must_use = "builders do nothing unless you call build()"]
+#[derive(Debug)]
 pub struct HistoricalConfigBuilder {
     config: HistoricalConfig,
 }
@@ -170,21 +274,53 @@ impl HistoricalConfigBuilder {
     }
 
     /// Set the maximum versions per entity.
-    pub fn max_versions_per_entity(mut self, max: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `max` is 0.
+    pub fn max_versions_per_entity(mut self, max: usize) -> Result<Self, ConfigError> {
+        if max == 0 {
+            return Err(ConfigError::InvalidValue(
+                "max_versions_per_entity must be greater than 0".into(),
+            ));
+        }
         self.config.max_versions_per_entity = max;
-        self
+        Ok(self)
     }
 
     /// Set the maximum reconstruction depth.
-    pub fn max_reconstruction_depth(mut self, depth: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `depth` is 0 or greater than 1000.
+    pub fn max_reconstruction_depth(mut self, depth: usize) -> Result<Self, ConfigError> {
+        if depth == 0 {
+            return Err(ConfigError::InvalidValue(
+                "max_reconstruction_depth must be greater than 0".into(),
+            ));
+        }
+        if depth > 1000 {
+            return Err(ConfigError::InvalidValue(
+                "max_reconstruction_depth cannot exceed 1000 (risk of stack overflow)".into(),
+            ));
+        }
         self.config.max_reconstruction_depth = depth;
-        self
+        Ok(self)
     }
 
     /// Set the reconstruction cache size.
-    pub fn reconstruction_cache_size(mut self, size: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `size` is 0.
+    pub fn reconstruction_cache_size(mut self, size: usize) -> Result<Self, ConfigError> {
+        if size == 0 {
+            return Err(ConfigError::InvalidValue(
+                "reconstruction_cache_size must be greater than 0".into(),
+            ));
+        }
         self.config.reconstruction_cache_size = size;
-        self
+        Ok(self)
     }
 
     /// Build the configuration.
@@ -204,6 +340,7 @@ impl Default for HistoricalConfigBuilder {
 /// Controls limits for k-NN queries and HNSW index structure.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct VectorIndexConfig {
     /// Maximum value of k for k-NN queries.
     /// Prevents excessive memory usage from large result sets.
@@ -226,6 +363,10 @@ impl Default for VectorIndexConfig {
 }
 
 /// Builder for vector index configuration.
+///
+/// Provides a fluent API for constructing vector index configuration with validation.
+#[must_use = "builders do nothing unless you call build()"]
+#[derive(Debug)]
 pub struct VectorIndexConfigBuilder {
     config: VectorIndexConfig,
 }
@@ -239,15 +380,43 @@ impl VectorIndexConfigBuilder {
     }
 
     /// Set the maximum k for k-NN queries.
-    pub fn max_k(mut self, k: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `k` is 0 or greater than 100,000.
+    pub fn max_k(mut self, k: usize) -> Result<Self, ConfigError> {
+        if k == 0 {
+            return Err(ConfigError::InvalidValue(
+                "max_k must be greater than 0".into(),
+            ));
+        }
+        if k > 100_000 {
+            return Err(ConfigError::InvalidValue(
+                "max_k cannot exceed 100,000 (DoS protection)".into(),
+            ));
+        }
         self.config.max_k = k;
-        self
+        Ok(self)
     }
 
     /// Set the maximum layer depth.
-    pub fn max_layer(mut self, layer: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `layer` is 0 or greater than 32.
+    pub fn max_layer(mut self, layer: usize) -> Result<Self, ConfigError> {
+        if layer == 0 {
+            return Err(ConfigError::InvalidValue(
+                "max_layer must be greater than 0".into(),
+            ));
+        }
+        if layer > 32 {
+            return Err(ConfigError::InvalidValue(
+                "max_layer cannot exceed 32 (HNSW limitation)".into(),
+            ));
+        }
         self.config.max_layer = layer;
-        self
+        Ok(self)
     }
 
     /// Build the configuration.
@@ -268,9 +437,10 @@ impl Default for VectorIndexConfigBuilder {
 /// making it easy to tune for different deployment scenarios.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct GallifreyDBConfig {
-    /// WAL system configuration
-    pub wal: WalSystemConfig,
+    /// WAL configuration
+    pub wal: WalConfig,
     /// Historical storage configuration
     pub historical: HistoricalConfig,
     /// Vector index configuration
@@ -278,6 +448,10 @@ pub struct GallifreyDBConfig {
 }
 
 /// Builder for unified database configuration.
+///
+/// Provides a fluent API for constructing complete database configuration.
+#[must_use = "builders do nothing unless you call build()"]
+#[derive(Debug)]
 pub struct GallifreyDBConfigBuilder {
     config: GallifreyDBConfig,
 }
@@ -291,7 +465,7 @@ impl GallifreyDBConfigBuilder {
     }
 
     /// Set WAL configuration.
-    pub fn wal(mut self, wal_config: WalSystemConfig) -> Self {
+    pub fn wal(mut self, wal_config: WalConfig) -> Self {
         self.config.wal = wal_config;
         self
     }
@@ -391,6 +565,8 @@ pub enum ConfigError {
     ParseError(String),
     /// Error serializing to TOML.
     SerializeError(String),
+    /// Invalid configuration value.
+    InvalidValue(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -399,6 +575,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::IoError(msg) => write!(f, "I/O error: {}", msg),
             ConfigError::ParseError(msg) => write!(f, "Parse error: {}", msg),
             ConfigError::SerializeError(msg) => write!(f, "Serialize error: {}", msg),
+            ConfigError::InvalidValue(msg) => write!(f, "Invalid value: {}", msg),
         }
     }
 }
@@ -411,7 +588,7 @@ mod tests {
 
     #[test]
     fn test_wal_config_defaults() {
-        let config = WalSystemConfig::default();
+        let config = WalConfig::default();
         assert_eq!(config.num_stripes, 16);
         assert_eq!(config.stripe_capacity, 1024);
         assert_eq!(config.write_buffer_size, 64 * 1024);
@@ -421,11 +598,15 @@ mod tests {
 
     #[test]
     fn test_wal_config_builder() {
-        let config = WalSystemConfigBuilder::new()
+        let config = WalConfigBuilder::new()
             .num_stripes(32)
+            .unwrap()
             .stripe_capacity(2048)
+            .unwrap()
             .write_buffer_size(128 * 1024)
+            .unwrap()
             .segment_size(128 * 1024 * 1024)
+            .unwrap()
             .flush_interval_ms(20)
             .build();
 
@@ -438,8 +619,9 @@ mod tests {
 
     #[test]
     fn test_wal_config_builder_rounds_stripes_to_power_of_two() {
-        let config = WalSystemConfigBuilder::new()
-            .num_stripes(30) // Not a power of 2
+        let config = WalConfigBuilder::new()
+            .num_stripes(30)
+            .unwrap() // Not a power of 2
             .build();
 
         assert_eq!(config.num_stripes, 32); // Rounded up to next power of 2
@@ -457,8 +639,11 @@ mod tests {
     fn test_historical_config_builder() {
         let config = HistoricalConfigBuilder::new()
             .max_versions_per_entity(5000)
+            .unwrap()
             .max_reconstruction_depth(200)
+            .unwrap()
             .reconstruction_cache_size(20000)
+            .unwrap()
             .build();
 
         assert_eq!(config.max_versions_per_entity, 5000);
@@ -477,7 +662,9 @@ mod tests {
     fn test_vector_config_builder() {
         let config = VectorIndexConfigBuilder::new()
             .max_k(20000)
+            .unwrap()
             .max_layer(32)
+            .unwrap()
             .build();
 
         assert_eq!(config.max_k, 20000);
@@ -487,7 +674,7 @@ mod tests {
     #[test]
     fn test_unified_config_defaults() {
         let config = GallifreyDBConfig::default();
-        assert_eq!(config.wal, WalSystemConfig::default());
+        assert_eq!(config.wal, WalConfig::default());
         assert_eq!(config.historical, HistoricalConfig::default());
         assert_eq!(config.vector, VectorIndexConfig::default());
     }
@@ -495,13 +682,19 @@ mod tests {
     #[test]
     fn test_unified_config_builder() {
         let config = GallifreyDBConfig::builder()
-            .wal(WalSystemConfigBuilder::new().num_stripes(32).build())
+            .wal(WalConfigBuilder::new().num_stripes(32).unwrap().build())
             .historical(
                 HistoricalConfigBuilder::new()
                     .max_versions_per_entity(5000)
+                    .unwrap()
                     .build(),
             )
-            .vector(VectorIndexConfigBuilder::new().max_k(20000).build())
+            .vector(
+                VectorIndexConfigBuilder::new()
+                    .max_k(20000)
+                    .unwrap()
+                    .build(),
+            )
             .build();
 
         assert_eq!(config.wal.num_stripes, 32);
@@ -512,9 +705,11 @@ mod tests {
     #[test]
     fn test_wal_config_fluent_api() {
         // Test that builder methods return self for chaining
-        let config = WalSystemConfigBuilder::new()
+        let config = WalConfigBuilder::new()
             .num_stripes(8)
+            .unwrap()
             .stripe_capacity(512)
+            .unwrap()
             .build();
 
         assert_eq!(config.num_stripes, 8);
@@ -526,17 +721,23 @@ mod tests {
         // Embedded systems need smaller buffers
         let config = GallifreyDBConfig::builder()
             .wal(
-                WalSystemConfigBuilder::new()
+                WalConfigBuilder::new()
                     .num_stripes(4)
+                    .unwrap()
                     .stripe_capacity(256)
+                    .unwrap()
                     .write_buffer_size(16 * 1024)
+                    .unwrap()
                     .segment_size(16 * 1024 * 1024)
+                    .unwrap()
                     .build(),
             )
             .historical(
                 HistoricalConfigBuilder::new()
                     .max_versions_per_entity(100)
+                    .unwrap()
                     .reconstruction_cache_size(1000)
+                    .unwrap()
                     .build(),
             )
             .build();
@@ -551,17 +752,23 @@ mod tests {
         // Cloud deployments can afford larger capacities
         let config = GallifreyDBConfig::builder()
             .wal(
-                WalSystemConfigBuilder::new()
+                WalConfigBuilder::new()
                     .num_stripes(64)
+                    .unwrap()
                     .stripe_capacity(4096)
+                    .unwrap()
                     .write_buffer_size(256 * 1024)
+                    .unwrap()
                     .segment_size(256 * 1024 * 1024)
+                    .unwrap()
                     .build(),
             )
             .historical(
                 HistoricalConfigBuilder::new()
                     .max_versions_per_entity(10000)
+                    .unwrap()
                     .reconstruction_cache_size(100000)
+                    .unwrap()
                     .build(),
             )
             .build();
@@ -576,7 +783,7 @@ mod tests {
         // Batch processing needs different flush intervals
         let config = GallifreyDBConfig::builder()
             .wal(
-                WalSystemConfigBuilder::new()
+                WalConfigBuilder::new()
                     .flush_interval_ms(100) // Longer interval for batching
                     .build(),
             )
@@ -673,17 +880,25 @@ max_layer = 32
         // Create config with custom values
         let original = GallifreyDBConfig::builder()
             .wal(
-                WalSystemConfigBuilder::new()
+                WalConfigBuilder::new()
                     .num_stripes(32)
+                    .unwrap()
                     .stripe_capacity(2048)
+                    .unwrap()
                     .build(),
             )
             .historical(
                 HistoricalConfigBuilder::new()
                     .max_versions_per_entity(5000)
+                    .unwrap()
                     .build(),
             )
-            .vector(VectorIndexConfigBuilder::new().max_k(20000).build())
+            .vector(
+                VectorIndexConfigBuilder::new()
+                    .max_k(20000)
+                    .unwrap()
+                    .build(),
+            )
             .build();
 
         // Serialize to TOML
@@ -701,7 +916,7 @@ max_layer = 32
         use tempfile::NamedTempFile;
 
         let config = GallifreyDBConfig::builder()
-            .wal(WalSystemConfigBuilder::new().num_stripes(64).build())
+            .wal(WalConfigBuilder::new().num_stripes(64).unwrap().build())
             .build();
 
         // Create a temporary file
@@ -780,5 +995,105 @@ max_layer = 24
         let result = GallifreyDBConfig::from_toml_str(invalid_toml);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::ParseError(_)));
+    }
+
+    // Validation error tests
+
+    #[test]
+    fn test_wal_config_zero_num_stripes() {
+        let result = WalConfigBuilder::new().num_stripes(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_wal_config_zero_stripe_capacity() {
+        let result = WalConfigBuilder::new().stripe_capacity(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_wal_config_zero_write_buffer_size() {
+        let result = WalConfigBuilder::new().write_buffer_size(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_wal_config_zero_segment_size() {
+        let result = WalConfigBuilder::new().segment_size(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_wal_config_segment_size_too_small() {
+        let result = WalConfigBuilder::new().segment_size(1024); // Less than 1MB
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_wal_config_zero_segments_to_retain() {
+        let result = WalConfigBuilder::new().segments_to_retain(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_historical_config_zero_max_versions() {
+        let result = HistoricalConfigBuilder::new().max_versions_per_entity(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_historical_config_zero_max_reconstruction_depth() {
+        let result = HistoricalConfigBuilder::new().max_reconstruction_depth(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_historical_config_max_reconstruction_depth_too_large() {
+        let result = HistoricalConfigBuilder::new().max_reconstruction_depth(2000);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_historical_config_zero_cache_size() {
+        let result = HistoricalConfigBuilder::new().reconstruction_cache_size(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_vector_config_zero_max_k() {
+        let result = VectorIndexConfigBuilder::new().max_k(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_vector_config_max_k_too_large() {
+        let result = VectorIndexConfigBuilder::new().max_k(200_000);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_vector_config_zero_max_layer() {
+        let result = VectorIndexConfigBuilder::new().max_layer(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_vector_config_max_layer_too_large() {
+        let result = VectorIndexConfigBuilder::new().max_layer(64);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
     }
 }
