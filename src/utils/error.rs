@@ -558,6 +558,22 @@ pub enum TransactionError {
         /// Why rollback failed
         reason: String,
     },
+    /// Clock skew exceeds acceptable bounds.
+    ///
+    /// This occurs when the system clock jumps forward or backward by more than
+    /// the configured thresholds (MAX_BACKWARD_DRIFT_US or MAX_FORWARD_JUMP_US).
+    /// Such large jumps would break temporal query semantics by creating timestamps
+    /// that are far in the future or violate causality.
+    ClockSkew {
+        /// Current wallclock timestamp
+        wallclock: i64,
+        /// Previous commit timestamp
+        previous: i64,
+        /// Drift in microseconds (negative = backward, positive = forward)
+        drift_us: i64,
+        /// Maximum allowed drift for this direction
+        max_allowed: i64,
+    },
 }
 
 impl fmt::Display for TransactionError {
@@ -590,6 +606,24 @@ impl fmt::Display for TransactionError {
             }
             TransactionError::RollbackFailed { reason } => {
                 write!(f, "Transaction rollback failed: {}", reason)
+            }
+            TransactionError::ClockSkew {
+                wallclock,
+                previous,
+                drift_us,
+                max_allowed,
+            } => {
+                let direction = if *drift_us < 0 { "backward" } else { "forward" };
+                write!(
+                    f,
+                    "Clock skew too large: system clock jumped {} by {} µs (max allowed: {} µs). \
+                     Wallclock: {}, Previous: {}. This may indicate NTP adjustment or manual clock change.",
+                    direction,
+                    drift_us.abs(),
+                    max_allowed.abs(),
+                    wallclock,
+                    previous
+                )
             }
         }
     }

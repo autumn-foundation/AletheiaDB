@@ -639,7 +639,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = ConcurrentWalSystemConfig::new(dir.path()).with_durability_mode(
             DurabilityMode::Async {
-                flush_interval_ms: 100,
+                // Use a long flush interval (10 seconds) to prevent background
+                // flush thread from racing with the explicit flush() call.
+                // In CI under heavy load, the test setup + appends could take
+                // >100ms, causing the background thread to drain entries before
+                // the explicit flush, making entries_flushed == 0 and failing
+                // the test. A 10s interval makes this race extremely unlikely.
+                flush_interval_ms: 10_000,
             },
         );
         let mut wal = ConcurrentWalSystem::new(config).unwrap();
@@ -652,7 +658,8 @@ mod tests {
 
         assert_eq!(wal.total_appends(), 10);
 
-        // Explicit flush
+        // Explicit flush - should flush all 10 entries since background thread
+        // won't have woken up yet (10s interval)
         let stats = wal.flush().unwrap();
         assert!(stats.entries_flushed >= 1);
 

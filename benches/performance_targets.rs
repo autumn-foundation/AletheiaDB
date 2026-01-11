@@ -1,6 +1,6 @@
 //! Performance Targets Verification Benchmark
 //!
-//! This lightweight benchmark suite validates the *current-state* performance targets
+//! This lightweight benchmark suite validates the performance targets
 //! defined in benchmarks/performance-targets.json. It's designed to run quickly
 //! in CI (<30 seconds) to catch regressions without the overhead of the full suite.
 //!
@@ -8,9 +8,11 @@
 //! - Current-state single-hop traversal (<1µs)
 //! - Current-state 3-hop traversal (<100µs)
 //! - Batch insertion throughput (>100k edges/sec)
+//! - Time-travel at anchor (<100µs)
+//! - Time-travel with deltas (avg 5) (<1ms)
+//! - Time-travel worst case (9 deltas) (<5ms)
 //!
 //! **Targets NOT Validated** (require complex temporal setup):
-//! - Time-travel queries → use benches/temporal_query.rs
 //! - Storage overhead → use full benchmark suite
 //!
 //! Run in CI:
@@ -18,7 +20,8 @@
 //!   - On scheduled runs: Full validation with comprehensive suite
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::{CurrentStorage, PropertyMapBuilder};
+use gallifreydb::api::transaction::WriteOps;
+use gallifreydb::{CurrentStorage, GallifreyDB, PropertyMapBuilder};
 
 /// Target: Current-state single-hop traversal <1µs
 fn bench_single_hop_target(c: &mut Criterion) {
@@ -136,11 +139,193 @@ fn bench_batch_insertion_target(c: &mut Criterion) {
     group.finish();
 }
 
+/// Target: Time-travel at anchor <100µs
+/// This tests the best-case scenario where we reconstruct directly from an anchor
+///
+/// Version/Timestamp Semantics:
+/// - Uses actual wallclock microsecond timestamps for tx_time and valid_time
+/// - Captures the commit timestamp from the 10th update (which should be an anchor)
+/// - Anchor interval is 10, so anchors are created every 10 updates
+/// - Query uses the exact commit timestamp to retrieve the anchor directly
+fn bench_time_travel_at_anchor(c: &mut Criterion) {
+    let mut group = c.benchmark_group("target_time_travel");
+
+    // Setup: Create database with anchored versions
+    let db = GallifreyDB::new();
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("Benchmark setup: create_node should succeed with valid input");
+
+    // Create 10 updates and capture the commit timestamp at update 10 (anchor)
+    let mut timestamp_at_10 = 0i64;
+    for i in 1..=10 {
+        let commit_ts = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("version", i)
+                        .build(),
+                )?;
+                Ok(())
+            })
+            .expect("Benchmark setup: update_node should succeed with valid input")
+            .1; // Extract commit timestamp
+
+        // Capture commit timestamp at 10th update (anchor point)
+        if i == 10 {
+            timestamp_at_10 = commit_ts;
+        }
+    }
+
+    group.bench_function("at_anchor", |b| {
+        b.iter(|| {
+            // Query at anchor point using actual timestamp
+            // This should hit the anchor directly with no delta reconstruction
+            let result = db.get_node_at_time(
+                black_box(node_id),
+                black_box(timestamp_at_10),
+                black_box(timestamp_at_10),
+            );
+            black_box(result)
+        })
+    });
+
+    group.finish();
+}
+
+/// Target: Time-travel with deltas (avg 5) <1ms
+/// This tests mid-range reconstruction requiring delta application
+///
+/// Version/Timestamp Semantics:
+/// - Uses actual wallclock microsecond timestamps
+/// - Captures the commit timestamp from the 5th update (delta, not anchor)
+/// - Query requires finding nearest anchor (after update 1) and applying ~4 deltas
+fn bench_time_travel_with_deltas(c: &mut Criterion) {
+    let mut group = c.benchmark_group("target_time_travel");
+
+    // Setup: Create database with 15 updates
+    // Anchors at updates 1, 11 (default anchor_interval = 10)
+    let db = GallifreyDB::new();
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("Benchmark setup: create_node should succeed with valid input");
+
+    // Create 15 updates and capture commit timestamp at update 5 (delta)
+    let mut timestamp_at_5 = 0i64;
+    for i in 1..=15 {
+        let commit_ts = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("version", i)
+                        .build(),
+                )?;
+                Ok(())
+            })
+            .expect("Benchmark setup: update_node should succeed with valid input")
+            .1; // Extract commit timestamp
+
+        // Capture commit timestamp at 5th update (delta point)
+        if i == 5 {
+            timestamp_at_5 = commit_ts;
+        }
+    }
+
+    group.bench_function("with_5_deltas", |b| {
+        b.iter(|| {
+            // Query at delta point using actual timestamp
+            // This requires: anchor@update_1 + deltas (updates 2-5)
+            let result = db.get_node_at_time(
+                black_box(node_id),
+                black_box(timestamp_at_5),
+                black_box(timestamp_at_5),
+            );
+            black_box(result)
+        })
+    });
+
+    group.finish();
+}
+
+/// Target: Time-travel worst case (9 deltas) <5ms
+/// This tests worst-case reconstruction just before next anchor
+///
+/// Version/Timestamp Semantics:
+/// - Uses actual wallclock microsecond timestamps
+/// - Captures the commit timestamp from the 9th update (just before anchor at update 11)
+/// - Query requires finding nearest anchor (after update 1) and applying 8 deltas (updates 2-9)
+///
+/// This is the worst case for anchor_interval=10 (9 versions between anchors)
+fn bench_time_travel_worst_case(c: &mut Criterion) {
+    let mut group = c.benchmark_group("target_time_travel");
+
+    // Setup: Create database with 19 updates
+    // Anchors at updates 1, 11 (default anchor_interval = 10)
+    let db = GallifreyDB::new();
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("Benchmark setup: create_node should succeed with valid input");
+
+    // Create 19 updates and capture commit timestamp at update 9 (worst case delta)
+    let mut timestamp_at_9 = 0i64;
+    for i in 1..=19 {
+        let commit_ts = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("version", i)
+                        .build(),
+                )?;
+                Ok(())
+            })
+            .expect("Benchmark setup: update_node should succeed with valid input")
+            .1; // Extract commit timestamp
+
+        // Capture commit timestamp at 9th update (worst case - just before anchor@11)
+        if i == 9 {
+            timestamp_at_9 = commit_ts;
+        }
+    }
+
+    group.bench_function("worst_case_9_deltas", |b| {
+        b.iter(|| {
+            // Query at worst case point using actual timestamp
+            // Worst case: anchor@update_1 + deltas (updates 2-9), just before next anchor@11
+            let result = db.get_node_at_time(
+                black_box(node_id),
+                black_box(timestamp_at_9),
+                black_box(timestamp_at_9),
+            );
+            black_box(result)
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_single_hop_target,
     bench_3_hop_target,
     bench_batch_insertion_target,
+    bench_time_travel_at_anchor,
+    bench_time_travel_with_deltas,
+    bench_time_travel_worst_case,
 );
 
 criterion_main!(benches);

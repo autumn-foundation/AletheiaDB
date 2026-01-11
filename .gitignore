@@ -54,3 +54,6 @@ __pycache__/
 # Benchmark output
 /benchmark-results/
 /benchmark-data.json
+pr-comment.md
+test-pr-comment*.md
+benchmark-summary.md

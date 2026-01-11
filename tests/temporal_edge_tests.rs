@@ -17,6 +17,9 @@ fn test_temporal_edge_lookup_basic() {
         max_delta_chain: 10,
     });
 
+    // Small delay to ensure background flush thread has started (fixes CI race condition)
+    thread::sleep(Duration::from_millis(10));
+
     // Create nodes
     let alice = db
         .create_node(
@@ -152,6 +155,9 @@ fn test_temporal_edge_multiple_updates() {
         max_delta_chain: 10,
     });
 
+    // Small delay to ensure background flush thread has started (fixes CI race condition)
+    thread::sleep(Duration::from_millis(10));
+
     // Create nodes
     let alice = db
         .create_node(
@@ -251,6 +257,9 @@ fn test_temporal_edge_interval_closing() {
         anchor_interval: 2,
         max_delta_chain: 10,
     });
+
+    // Small delay to ensure background flush thread has started (fixes CI race condition)
+    thread::sleep(Duration::from_millis(10));
 
     // Create nodes
     let alice = db
@@ -452,6 +461,9 @@ fn test_temporal_edge_anchor_delta_pattern() {
         anchor_interval: 3, // Create anchor every 3 versions
         max_delta_chain: 10,
     });
+
+    // Small delay to ensure background flush thread has started (fixes CI race condition)
+    thread::sleep(Duration::from_millis(10));
 
     // Create nodes
     let alice = db

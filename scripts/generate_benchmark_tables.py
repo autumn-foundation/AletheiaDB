@@ -105,6 +105,11 @@ def collect_benchmark_results(criterion_dir: Path) -> dict[str, list[BenchmarkRe
     # Walk through criterion directory structure
     for root, dirs, files in os.walk(criterion_dir):
         if 'estimates.json' in files:
+            # Skip Criterion's base/ directories (used for internal comparison)
+            # We only want the latest results (in new/ or root)
+            if 'base' in Path(root).parts:
+                continue
+
             estimates_path = Path(root) / 'estimates.json'
             result = parse_criterion_estimates(estimates_path, criterion_dir)
 
@@ -522,74 +527,84 @@ def parse_history_data(history_path: Path) -> dict[str, float]:
 
 
 def generate_pr_comment(all_results: dict[str, list[BenchmarkResult]], output_path: Path, history: dict[str, float]) -> None:
-    """Generate a markdown summary for PR comments."""
-    
-    regressions = []
-    improvements = []
-    
+    """Generate a markdown summary for PR comments comparing current PR vs trunk (from history)."""
+
     # Flatten results
     current_results = []
     for suite_name, results in all_results.items():
         current_results.extend(results)
-    
-    # Compare with history
-    threshold = 0.10 # 10%
-    
-    for bench in current_results:
-        if bench.name in history:
-            old_val_ns = history[bench.name]
-            new_val_ns = bench.mean_ns
-            
-            if old_val_ns > 0:
-                diff_percent = (new_val_ns - old_val_ns) / old_val_ns
-                
-                # Slower = Regression (positive diff)
-                if diff_percent > threshold:
-                    regressions.append((bench, diff_percent))
-                # Faster = Improvement (negative diff)
-                elif diff_percent < -threshold:
-                    improvements.append((bench, diff_percent))
+
+    # Sort by name for consistent ordering
+    current_results.sort(key=lambda r: r.name)
 
     md = """## 🚀 Benchmark Results
-    
+
 Benchmarks have been run for this PR.
-"""
 
-    if regressions:
-        md += "\n### ⚠️ Regressions (>10% Slower)\n\n"
-        md += "| Benchmark | Current | Previous | Change |\n"
-        md += "|-----------|---------|----------|--------|\n"
-        for bench, diff in regressions:
-            old_val_fmt, _ = format_time(history[bench.name])
-            md += f"| {bench.name} | {bench.mean:.2f} {bench.unit} | {old_val_fmt:.2f} {bench.unit} | 🔴 +{diff:.1%} |\n"
-            
-    if improvements:
-        md += "\n### ✅ Improvements (>10% Faster)\n\n"
-        md += "| Benchmark | Current | Previous | Change |\n"
-        md += "|-----------|---------|----------|--------|\n"
-        for bench, diff in improvements:
-            old_val_fmt, _ = format_time(history[bench.name])
-            md += f"| {bench.name} | {bench.mean:.2f} {bench.unit} | {old_val_fmt:.2f} {bench.unit} | 🟢 {diff:.1%} |\n"
-
-    # Get top benchmarks from each suite
-    top_benchmarks = []
-    for suite_name, results in all_results.items():
-        # Sort by mean time and take top 3
-        sorted_results = sorted(results, key=lambda r: r.mean)[:3]
-        top_benchmarks.extend(sorted_results)
-
-    # Sort all top benchmarks and take top 10 overall
-    top_benchmarks = sorted(top_benchmarks, key=lambda r: r.mean)[:10]
-
-    md += """
 ### 📊 Performance Summary (Top 10)
 
-| Benchmark | Mean | Std Dev |
-|-----------|------|---------|
+| Benchmark | Base (trunk) | New (PR) | Change % | Std Dev |
+|-----------|--------------|----------|----------|---------|
 """
 
-    for bench in top_benchmarks:
-        md += f"| {bench.name} | {bench.mean:.2f} {bench.unit} | ± {bench.std_dev:.2f} {bench.unit} |\n"
+    # Compare with history
+    threshold = 0.10  # 10%
+    regressions = []
+    improvements = []
+
+    count = 0
+    for bench in current_results:
+        if count >= 10:
+            break
+
+        # Get historical baseline (trunk)
+        base_val_ns = history.get(bench.name)
+        new_val_ns = bench.mean_ns
+
+        # Format base value
+        if base_val_ns:
+            base_mean, base_unit = format_time(base_val_ns)
+            base_str = f"{base_mean:.2f} {base_unit}"
+
+            # Calculate change percentage
+            if base_val_ns > 0:
+                diff_percent = ((new_val_ns - base_val_ns) / base_val_ns) * 100
+
+                # Determine status emoji
+                if abs(diff_percent) < threshold * 100:
+                    # Within threshold - no significant change
+                    change_str = f"~{diff_percent:+.1f}%"
+                elif diff_percent > 0:
+                    # Slower = regression
+                    change_str = f"🔴 {diff_percent:+.1f}%"
+                    regressions.append((bench, diff_percent))
+                else:
+                    # Faster = improvement
+                    change_str = f"🟢 {diff_percent:+.1f}%"
+                    improvements.append((bench, abs(diff_percent)))
+            else:
+                change_str = "N/A"
+        else:
+            base_str = "N/A"
+            change_str = "New"
+
+        # Format new value and std dev
+        new_str = f"{bench.mean:.2f} {bench.unit}"
+        std_dev_str = f"± {bench.std_dev:.2f} {bench.unit}"
+
+        md += f"| {bench.name} | {base_str} | {new_str} | {change_str} | {std_dev_str} |\n"
+        count += 1
+
+    # Add regression/improvement summaries if any
+    if regressions:
+        md += "\n### ⚠️ Performance Regressions (>10% Slower)\n\n"
+        for bench, diff in regressions:
+            md += f"- **{bench.name}**: {diff:+.1f}% slower\n"
+
+    if improvements:
+        md += "\n### ✅ Performance Improvements (>10% Faster)\n\n"
+        for bench, diff in improvements:
+            md += f"- **{bench.name}**: {diff:.1f}% faster\n"
 
     md += """
 ---
@@ -602,9 +617,6 @@ Benchmarks have been run for this PR.
     # Only include if we have historical data
     if history:
         md += "📈 [Historical trends](https://madmax983.github.io/GallifreyDB/dev/bench/index.html)\n"
-
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(md)
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(md)

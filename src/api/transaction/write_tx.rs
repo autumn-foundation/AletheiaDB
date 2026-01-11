@@ -29,6 +29,20 @@ use crate::utils::lock::{MutexExt, RwLockExt};
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
+/// Maximum allowed backward clock drift in microseconds (5 minutes).
+///
+/// If wallclock time goes backward by more than this (e.g., severe NTP adjustment),
+/// we reject the transaction to avoid timestamps jumping far into the future.
+/// 5 minutes allows for typical NTP corrections while preventing pathological cases.
+const MAX_BACKWARD_DRIFT_US: i64 = 5 * 60 * 1_000_000; // 5 minutes
+
+/// Maximum allowed forward clock jump in microseconds (1 hour).
+///
+/// If wallclock time jumps forward by more than this (e.g., system clock set manually),
+/// we reject the transaction to avoid creating timestamps in the far future that would
+/// break temporal query semantics.
+const MAX_FORWARD_JUMP_US: i64 = 60 * 60 * 1_000_000; // 1 hour
+
 /// Write transaction with full ACID guarantees.
 ///
 /// Write transactions buffer all operations in memory and apply them
@@ -164,7 +178,33 @@ impl WriteTransaction {
     /// - **Async**: Returns after flush to OS cache (background thread syncs)
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
-    pub fn commit(mut self) -> Result<()> {
+    pub fn commit(self) -> Result<()> {
+        self.commit_with_timestamp().map(|_| ())
+    }
+
+    /// Commit the transaction and return the commit timestamp.
+    ///
+    /// This is useful for benchmarks and tests that need to query the database
+    /// at the exact commit timestamp to verify temporal semantics.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut tx = db.write_transaction()?;
+    /// let node_id = tx.create_node("Person", properties)?;
+    /// let commit_ts = tx.commit_with_timestamp()?;
+    ///
+    /// // Query at exact commit timestamp
+    /// let node = db.get_node_at_time(node_id, commit_ts, commit_ts)?;
+    /// ```
+    ///
+    /// # Durability Modes
+    ///
+    /// - **Synchronous**: WAL fsynced to disk before returning (ACID, ~1.5ms)
+    /// - **Async**: Returns after flush to OS cache (background thread syncs)
+    /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
+    /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
+    pub fn commit_with_timestamp(mut self) -> Result<Timestamp> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!(
             "transaction_commit",
@@ -198,15 +238,16 @@ impl WriteTransaction {
         // CRITICAL: We must hold the timestamp lock until WAL logging is complete
         // to prevent a race condition where transactions commit out-of-order.
         //
-        // Timestamp management for Snapshot Isolation:
+        // Timestamp management for Bi-Temporal Database:
         //
-        // 1. Increment BEFORE using: ensures commit_ts > snapshot_ts for any
-        //    transaction that started before this commit. This enables write-write
-        //    conflict detection via the check (commit_ts > snapshot_ts).
+        // For temporal queries to work correctly, we MUST use wallclock timestamps
+        // for transaction_time, not a logical clock. This allows querying historical
+        // state at specific points in time (e.g., "what was the state at 2PM yesterday?").
         //
-        // 2. Increment AFTER using: ensures future snapshots will have a timestamp
-        //    greater than this commit, so visibility check (commit_ts < snapshot_ts)
-        //    will correctly include this commit in future reads.
+        // Monotonicity: Wallclock time is monotonically increasing (assuming NTP is working),
+        // which satisfies the ordering requirements for Snapshot Isolation:
+        // - commit_ts > snapshot_ts for transactions that started before this commit
+        // - future snapshots will have timestamp >= this commit
         //
         // DURABILITY MODES (handled by ConcurrentWalSystem):
         // - Synchronous: Appends drain and flush immediately with fsync
@@ -224,9 +265,61 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
 
-            *ts += 1; // Pre-increment for conflict detection
-            let commit = *ts;
-            *ts += 1; // Post-increment for visibility of this commit
+            // Use wallclock time for transaction_time (required for temporal queries)
+            let wallclock = crate::core::temporal::time::now();
+
+            // Check for pathological clock skew that would break temporal semantics
+            let drift = wallclock - *ts;
+
+            // Backward drift check: prevent timestamps jumping far into future
+            if drift < -MAX_BACKWARD_DRIFT_US {
+                return Err(TransactionError::ClockSkew {
+                    wallclock,
+                    previous: *ts,
+                    drift_us: drift,
+                    max_allowed: -MAX_BACKWARD_DRIFT_US,
+                }
+                .into());
+            }
+
+            // Forward jump check: prevent timestamps in far future
+            if drift > MAX_FORWARD_JUMP_US {
+                return Err(TransactionError::ClockSkew {
+                    wallclock,
+                    previous: *ts,
+                    drift_us: drift,
+                    max_allowed: MAX_FORWARD_JUMP_US,
+                }
+                .into());
+            }
+
+            // Ensure monotonicity: if wallclock went backwards (small NTP adjustment),
+            // use previous timestamp + 1
+            let commit = std::cmp::max(wallclock, *ts + 1);
+
+            // Observability: Warn about clock skew issues
+            #[cfg(feature = "observability")]
+            {
+                if commit == *ts + 1 && wallclock < *ts {
+                    tracing::warn!(
+                        wallclock_ts = wallclock,
+                        prev_ts = *ts,
+                        skew_us = *ts - wallclock,
+                        "Clock skew detected: wallclock went backwards (NTP adjustment?)"
+                    );
+                } else if commit > *ts + 60_000_000 {
+                    // Large forward jump (>60 seconds)
+                    tracing::warn!(
+                        wallclock_ts = wallclock,
+                        prev_ts = *ts,
+                        jump_us = commit - *ts,
+                        "Large clock jump detected: timestamps will be lumpy"
+                    );
+                }
+            }
+
+            // Update current_timestamp for next transaction's snapshot
+            *ts = commit;
 
             #[cfg(feature = "observability")]
             let wal_start = std::time::Instant::now();
@@ -314,7 +407,7 @@ impl WriteTransaction {
             );
         }
 
-        Ok(())
+        Ok(commit_timestamp)
     }
 
     /// Rollback the transaction.
@@ -661,6 +754,35 @@ impl WriteTransaction {
             self.current.insert_node_direct(node, commit_timestamp)?;
         } else {
             self.current.update_node_direct(node, commit_timestamp)?;
+
+            // For updates, explicitly close the current version's transaction_time in historical storage.
+            //
+            // WHY THIS IS NEEDED:
+            // When multiple updates to the same node occur in a SINGLE transaction, they all share
+            // the same commit_timestamp. The auto-closing logic in add_node_version() checks:
+            //   if new_tx_time > prev_tx_time { close prev_version }
+            // But when new_tx_time == prev_tx_time (same transaction), this check fails.
+            //
+            // EXAMPLE SCENARIO:
+            //   db.write(|tx| {
+            //       tx.update_node(node_id, props1)?;  // First update
+            //       tx.update_node(node_id, props2)?;  // Second update - SAME commit_timestamp!
+            //       Ok(())
+            //   })?;
+            //
+            // Without explicit closing, the version chain would be corrupt:
+            // - Version 1: tx_time [T1, ∞)  <- Should be [T1, T2)
+            // - Version 2: tx_time [T2, ∞)  <- Never created because T2 == T2
+            //
+            // With explicit closing:
+            // - Version 1: tx_time [T1, T2)  <- Explicitly closed before adding Version 2
+            // - Version 2: tx_time [T2, ∞)  <- Correctly added with same T2
+            //
+            // See test: test_multiple_updates_same_transaction in tests/benchmark_validation.rs
+            if let Some(current_version_id) = historical.get_current_node_version(node_id) {
+                historical
+                    .close_node_version_transaction_time(current_version_id, commit_timestamp)?;
+            }
         }
 
         // Store in historical storage (consume properties, avoiding second clone)
@@ -718,6 +840,35 @@ impl WriteTransaction {
             self.current.insert_edge_direct(edge)?;
         } else {
             self.current.update_edge_direct(edge)?;
+
+            // For updates, explicitly close the current version's transaction_time in historical storage.
+            //
+            // WHY THIS IS NEEDED:
+            // When multiple updates to the same edge occur in a SINGLE transaction, they all share
+            // the same commit_timestamp. The auto-closing logic in add_edge_version() checks:
+            //   if new_tx_time > prev_tx_time { close prev_version }
+            // But when new_tx_time == prev_tx_time (same transaction), this check fails.
+            //
+            // EXAMPLE SCENARIO:
+            //   db.write(|tx| {
+            //       tx.update_edge(edge_id, props1)?;  // First update
+            //       tx.update_edge(edge_id, props2)?;  // Second update - SAME commit_timestamp!
+            //       Ok(())
+            //   })?;
+            //
+            // Without explicit closing, the version chain would be corrupt:
+            // - Version 1: tx_time [T1, ∞)  <- Should be [T1, T2)
+            // - Version 2: tx_time [T2, ∞)  <- Never created because T2 == T2
+            //
+            // With explicit closing:
+            // - Version 1: tx_time [T1, T2)  <- Explicitly closed before adding Version 2
+            // - Version 2: tx_time [T2, ∞)  <- Correctly added with same T2
+            //
+            // See test: test_multiple_updates_same_transaction in tests/benchmark_validation.rs
+            if let Some(current_version_id) = historical.get_current_edge_version(edge_id) {
+                historical
+                    .close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
+            }
         }
 
         // Store in historical storage (consume properties, avoiding second clone)
@@ -837,6 +988,12 @@ impl WriteTransaction {
     }
 
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
+        // Create temporal interval for all operations in this transaction.
+        // All operations in a transaction share the same commit_timestamp, which is
+        // semantically correct for transaction_time (when data was recorded).
+        // However, this means the auto-closing logic in add_node_version won't work
+        // for multiple updates in the same transaction (since new_tx_time == prev_tx_time).
+        // Therefore, we explicitly close previous versions before adding new ones.
         let temporal = BiTemporalInterval::current(commit_timestamp);
 
         // Acquire lock on historical storage once before processing all operations.
