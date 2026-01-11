@@ -633,6 +633,32 @@ let config = GallifreyDBConfig::from_toml_file("config/production.toml")?;
 let db = GallifreyDB::with_unified_config(config);
 ```
 
+**Configuring Durability Mode in TOML:**
+
+```toml
+# Synchronous mode (maximum durability, ~1-5ms latency)
+[wal]
+[wal.durability_mode]
+Synchronous = {}
+
+# Group commit mode (high throughput ACID, ~2-10ms latency)
+[wal]
+[wal.durability_mode.GroupCommit]
+max_delay_ms = 10
+max_batch_size = 200
+
+# Async mode (highest throughput, eventual durability)
+[wal]
+[wal.durability_mode.Async]
+flush_interval_ms = 100
+
+# Async batched mode (combines benefits of both)
+[wal]
+[wal.durability_mode.AsyncBatched]
+max_delay_ms = 50
+max_batch_size = 1000
+```
+
 #### Configuration Presets
 
 **Embedded Systems** (minimal memory):

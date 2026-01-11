@@ -147,6 +147,8 @@ pub struct HistoricalStorage {
     config: AnchorConfig,
     /// Retention policy for version pruning (DoS protection)
     retention_policy: RetentionPolicy,
+    /// Maximum depth for version reconstruction (DoS protection)
+    max_reconstruction_depth: usize,
     /// All node versions, indexed by version ID
     node_versions: HashMap<VersionId, NodeVersion>,
     /// All edge versions, indexed by version ID
@@ -234,6 +236,42 @@ impl HistoricalStorage {
         )
     }
 
+    /// Create a new historical storage from unified configuration.
+    ///
+    /// This constructor accepts `crate::config::HistoricalConfig` which consolidates
+    /// all historical storage settings (max_versions, max_reconstruction_depth, cache_size).
+    ///
+    /// # Example
+    /// ```ignore
+    /// use gallifreydb::config::{HistoricalConfig, HistoricalConfigBuilder};
+    /// use gallifreydb::storage::historical::HistoricalStorage;
+    ///
+    /// let config = HistoricalConfigBuilder::new()
+    ///     .max_versions_per_entity(5000).unwrap()
+    ///     .max_reconstruction_depth(200).unwrap()
+    ///     .reconstruction_cache_size(20000).unwrap()
+    ///     .build();
+    ///
+    /// let storage = HistoricalStorage::from_unified_config(config);
+    /// ```
+    pub fn from_unified_config(config: crate::config::HistoricalConfig) -> Self {
+        let retention_policy = RetentionPolicy::new(
+            config.max_versions_per_entity,
+            DEFAULT_MAX_VERSION_AGE_MS, // Keep existing default for age
+        );
+
+        let mut storage = Self::with_config_retention_and_cache_size(
+            AnchorConfig::default(),
+            retention_policy,
+            config.reconstruction_cache_size,
+        );
+
+        // Override max_reconstruction_depth from config
+        storage.max_reconstruction_depth = config.max_reconstruction_depth;
+
+        storage
+    }
+
     /// Create a new historical storage with full customization including cache size.
     ///
     /// # Arguments
@@ -258,6 +296,7 @@ impl HistoricalStorage {
         HistoricalStorage {
             config,
             retention_policy,
+            max_reconstruction_depth: MAX_RECONSTRUCTION_DEPTH,
             node_versions: HashMap::new(),
             edge_versions: HashMap::new(),
             node_version_heads: HashMap::new(),
@@ -778,7 +817,7 @@ impl HistoricalStorage {
         // Check depth limit first (DoS protection)
         // Using >= for clarity: depth is 0-indexed, so this limits to exactly
         // MAX_RECONSTRUCTION_DEPTH recursive calls (depths 0..99 = 100 calls)
-        if depth >= MAX_RECONSTRUCTION_DEPTH {
+        if depth >= self.max_reconstruction_depth {
             // Get the node ID for error reporting
             let entity_id = self
                 .node_versions
@@ -879,7 +918,7 @@ impl HistoricalStorage {
         // Check depth limit first (DoS protection)
         // Using >= for clarity: depth is 0-indexed, so this limits to exactly
         // MAX_RECONSTRUCTION_DEPTH recursive calls (depths 0..99 = 100 calls)
-        if depth >= MAX_RECONSTRUCTION_DEPTH {
+        if depth >= self.max_reconstruction_depth {
             // Get the edge ID for error reporting
             let entity_id = self
                 .edge_versions

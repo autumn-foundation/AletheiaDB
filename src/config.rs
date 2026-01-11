@@ -118,9 +118,9 @@ impl WalConfigBuilder {
             ));
         }
         let rounded = num_stripes.next_power_of_two();
-        if rounded != num_stripes && cfg!(debug_assertions) {
+        if rounded != num_stripes {
             eprintln!(
-                "Warning: num_stripes rounded from {} to {}",
+                "Warning: num_stripes {} rounded to next power of 2: {}",
                 num_stripes, rounded
             );
         }
@@ -1012,6 +1012,60 @@ max_layer = 24
         let result = GallifreyDBConfig::from_toml_str(invalid_toml);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::ParseError(_)));
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn test_toml_durability_mode_group_commit() {
+        let toml_str = r#"
+[wal]
+num_stripes = 32
+
+[wal.durability_mode.GroupCommit]
+max_delay_ms = 10
+max_batch_size = 200
+        "#;
+        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        assert_eq!(config.wal.num_stripes, 32);
+        match config.wal.durability_mode {
+            crate::storage::wal::DurabilityMode::GroupCommit {
+                max_delay_ms,
+                max_batch_size,
+            } => {
+                assert_eq!(max_delay_ms, 10);
+                assert_eq!(max_batch_size, 200);
+            }
+            _ => panic!("Expected GroupCommit durability mode"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn test_toml_durability_mode_async() {
+        let toml_str = r#"
+[wal]
+[wal.durability_mode.Async]
+flush_interval_ms = 100
+        "#;
+        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        match config.wal.durability_mode {
+            crate::storage::wal::DurabilityMode::Async { flush_interval_ms } => {
+                assert_eq!(flush_interval_ms, 100);
+            }
+            _ => panic!("Expected Async durability mode"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn test_toml_wal_dir() {
+        use std::path::PathBuf;
+        let toml_str = r#"
+[wal]
+wal_dir = "/custom/path/to/wal"
+        "#;
+        let config = GallifreyDBConfig::from_toml_str(toml_str).unwrap();
+        assert_eq!(config.wal.wal_dir, PathBuf::from("/custom/path/to/wal"));
     }
 
     // Validation error tests

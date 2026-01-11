@@ -436,6 +436,7 @@ impl HnswIndexBuilder {
             m: self.m,
             ef_construction: self.ef_construction,
             ef_search: Arc::new(RwLock::new(self.ef_search)),
+            max_k: MAX_K, // Default from constant, can be overridden via set_max_k()
             next_data_id: Arc::new(RwLock::new(0)),
             id_mapping: Arc::new(DashMap::new()),
             reverse_id_mapping: Arc::new(DashMap::new()),
@@ -476,6 +477,8 @@ pub struct HnswIndex {
     ef_construction: usize,
     /// Query-time expansion factor (mutable for set_ef_search)
     ef_search: Arc<RwLock<usize>>,
+    /// Maximum k for k-NN queries (DoS protection, from VectorIndexConfig)
+    max_k: usize,
     /// Next available data ID (hnsw_rs uses usize as DataId)
     next_data_id: Arc<RwLock<usize>>,
     /// Mapping from NodeId to DataId
@@ -560,7 +563,7 @@ impl VectorIndex for HnswIndex {
         }
 
         // Cap k to prevent DoS
-        let k_capped = k.min(MAX_K);
+        let k_capped = k.min(self.max_k);
 
         // For very small graphs, use exact brute-force search for 100% recall
         // HNSW's probabilistic structure is unreliable with <100 nodes

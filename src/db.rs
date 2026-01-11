@@ -145,13 +145,10 @@ impl GallifreyDB {
         let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");
         let wal = Arc::new(wal);
 
-        // TODO: Use config.historical for HistoricalStorage::with_config
-        // TODO: Use config.vector for vector index limits
-
         GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
-            historical: Arc::new(RwLock::new(HistoricalStorage::with_config(
-                AnchorConfig::default(),
+            historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
+                config.historical,
             ))),
             temporal_indexes: Arc::new(TemporalIndexes::new()),
             wal,
