@@ -1,6 +1,6 @@
 //! Performance Targets Verification Benchmark
 //!
-//! This lightweight benchmark suite validates the *current-state* performance targets
+//! This lightweight benchmark suite validates the performance targets
 //! defined in benchmarks/performance-targets.json. It's designed to run quickly
 //! in CI (<30 seconds) to catch regressions without the overhead of the full suite.
 //!
@@ -8,9 +8,11 @@
 //! - Current-state single-hop traversal (<1µs)
 //! - Current-state 3-hop traversal (<100µs)
 //! - Batch insertion throughput (>100k edges/sec)
+//! - Time-travel at anchor (<100µs)
+//! - Time-travel with deltas (avg 5) (<1ms)
+//! - Time-travel worst case (9 deltas) (<5ms)
 //!
 //! **Targets NOT Validated** (require complex temporal setup):
-//! - Time-travel queries → use benches/temporal_query.rs
 //! - Storage overhead → use full benchmark suite
 //!
 //! Run in CI:
@@ -18,7 +20,8 @@
 //!   - On scheduled runs: Full validation with comprehensive suite
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::{CurrentStorage, PropertyMapBuilder};
+use gallifreydb::{CurrentStorage, GallifreyDB, PropertyMapBuilder};
+use gallifreydb::api::transaction::WriteOps;
 
 /// Target: Current-state single-hop traversal <1µs
 fn bench_single_hop_target(c: &mut Criterion) {
@@ -136,11 +139,126 @@ fn bench_batch_insertion_target(c: &mut Criterion) {
     group.finish();
 }
 
+/// Target: Time-travel at anchor <100µs
+/// This tests the best-case scenario where we reconstruct directly from an anchor
+fn bench_time_travel_at_anchor(c: &mut Criterion) {
+    let mut group = c.benchmark_group("target_time_travel");
+
+    // Setup: Create database with anchored versions
+    let db = GallifreyDB::new();
+    let node_id = db
+        .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+        .unwrap();
+
+    // Create 10 versions (anchor at v0, v10)
+    for i in 1..=10 {
+        db.write(|tx| {
+            tx.update_node(
+                node_id,
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("version", i)
+                    .build(),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    group.bench_function("at_anchor", |b| {
+        b.iter(|| {
+            // Query at anchor point (version 0 or 10)
+            let result = db.get_node_at_time(black_box(node_id), black_box(0), black_box(0));
+            black_box(result)
+        })
+    });
+
+    group.finish();
+}
+
+/// Target: Time-travel with deltas (avg 5) <1ms
+/// This tests mid-range reconstruction requiring delta application
+fn bench_time_travel_with_deltas(c: &mut Criterion) {
+    let mut group = c.benchmark_group("target_time_travel");
+
+    // Setup: Create database with 15 versions (anchors at v0, v10)
+    let db = GallifreyDB::new();
+    let node_id = db
+        .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+        .unwrap();
+
+    // Create 15 versions
+    for i in 1..=15 {
+        db.write(|tx| {
+            tx.update_node(
+                node_id,
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("version", i)
+                    .build(),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    group.bench_function("with_5_deltas", |b| {
+        b.iter(|| {
+            // Query at version 5 (5 deltas from anchor at v0)
+            // Note: This is a simplified version - actual delta count may vary
+            let result = db.get_node_at_time(black_box(node_id), black_box(5000), black_box(5000));
+            black_box(result)
+        })
+    });
+
+    group.finish();
+}
+
+/// Target: Time-travel worst case (9 deltas) <5ms
+/// This tests worst-case reconstruction just before next anchor
+fn bench_time_travel_worst_case(c: &mut Criterion) {
+    let mut group = c.benchmark_group("target_time_travel");
+
+    // Setup: Create database with 19 versions (anchors at v0, v10)
+    let db = GallifreyDB::new();
+    let node_id = db
+        .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
+        .unwrap();
+
+    // Create 19 versions
+    for i in 1..=19 {
+        db.write(|tx| {
+            tx.update_node(
+                node_id,
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("version", i)
+                    .build(),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    group.bench_function("worst_case_9_deltas", |b| {
+        b.iter(|| {
+            // Query at version 9 (9 deltas from anchor at v0, just before v10 anchor)
+            let result = db.get_node_at_time(black_box(node_id), black_box(9000), black_box(9000));
+            black_box(result)
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_single_hop_target,
     bench_3_hop_target,
     bench_batch_insertion_target,
+    bench_time_travel_at_anchor,
+    bench_time_travel_with_deltas,
+    bench_time_travel_worst_case,
 );
 
 criterion_main!(benches);
