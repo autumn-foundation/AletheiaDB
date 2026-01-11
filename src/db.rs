@@ -21,7 +21,7 @@ use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
 use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
-use crate::storage::wal::{DurabilityMode, WalConfig, WriteOptions};
+use crate::storage::wal::{DurabilityMode, WriteOptions};
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::{MutexExt, RwLockExt};
 use parking_lot::RwLock;
@@ -76,7 +76,7 @@ impl GallifreyDB {
 
     /// Create a new database with custom anchor configuration.
     pub fn with_config(config: AnchorConfig) -> Self {
-        Self::with_full_config(config, WalConfig::default())
+        Self::with_full_config(config, crate::config::WalConfig::default())
     }
 
     /// Create a new database with custom WAL configuration.
@@ -86,21 +86,21 @@ impl GallifreyDB {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, WalConfig, DurabilityMode};
+    /// use gallifreydb::{GallifreyDB, WalConfigBuilder, DurabilityMode};
     ///
     /// // High-throughput ACID mode with group commit
-    /// let db = GallifreyDB::with_wal_config(
-    ///     WalConfig::default()
-    ///         .with_durability_mode(DurabilityMode::group_commit(10, 200))
-    /// );
+    /// let wal_config = WalConfigBuilder::new()
+    ///     .durability_mode(DurabilityMode::group_commit(10, 200))
+    ///     .build();
+    /// let db = GallifreyDB::with_wal_config(wal_config);
     ///
     /// // Bulk loading mode with async durability
-    /// let db = GallifreyDB::with_wal_config(
-    ///     WalConfig::default()
-    ///         .with_durability_mode(DurabilityMode::async_mode(100))
-    /// );
+    /// let wal_config = WalConfigBuilder::new()
+    ///     .durability_mode(DurabilityMode::async_mode(100))
+    ///     .build();
+    /// let db = GallifreyDB::with_wal_config(wal_config);
     /// ```
-    pub fn with_wal_config(wal_config: WalConfig) -> Self {
+    pub fn with_wal_config(wal_config: crate::config::WalConfig) -> Self {
         Self::with_full_config(AnchorConfig::default(), wal_config)
     }
 
@@ -167,24 +167,27 @@ impl GallifreyDB {
     ///
     /// This maintains backward compatibility with the old API.
     /// For new code, prefer using [`with_unified_config`](Self::with_unified_config).
-    pub fn with_full_config(anchor_config: AnchorConfig, wal_config: WalConfig) -> Self {
+    pub fn with_full_config(
+        anchor_config: AnchorConfig,
+        wal_config: crate::config::WalConfig,
+    ) -> Self {
         let durability_mode = wal_config.durability_mode;
 
-        // Create ConcurrentWalSystem config from old WalConfig
+        // Create ConcurrentWalSystem config from unified WalConfig
         let wal_system_config = ConcurrentWalSystemConfig {
             wal_dir: wal_config.wal_dir,
-            num_stripes: 16,       // Default
-            stripe_capacity: 1024, // Default
+            num_stripes: wal_config.num_stripes,
+            stripe_capacity: wal_config.stripe_capacity,
             segment_size: wal_config.segment_size,
             segments_to_retain: wal_config.segments_to_retain,
             flush_interval_ms: match durability_mode {
                 DurabilityMode::Async { flush_interval_ms } => flush_interval_ms,
                 DurabilityMode::GroupCommit { max_delay_ms, .. } => max_delay_ms,
                 DurabilityMode::AsyncBatched { max_delay_ms, .. } => max_delay_ms,
-                _ => 10, // Default
+                _ => wal_config.flush_interval_ms,
             },
             durability_mode,
-            write_buffer_size: 64 * 1024, // Default 64KB
+            write_buffer_size: wal_config.write_buffer_size,
         };
 
         let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");

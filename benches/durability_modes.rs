@@ -17,13 +17,13 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use gallifreydb::{
-    GallifreyDB, WriteOps, WriteOptions,
+    GallifreyDB, WalConfigBuilder, WriteOps, WriteOptions,
     core::{
         PropertyMapBuilder,
         temporal::{BiTemporalInterval, time},
     },
     storage::wal::{
-        DurabilityMode, WalConfig, WalOperation,
+        DurabilityMode, WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
     },
 };
@@ -39,12 +39,14 @@ use tempfile::TempDir;
 /// is automatically cleaned up.
 fn create_db_with_mode(mode: DurabilityMode) -> (GallifreyDB, TempDir) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
-    let config = WalConfig {
-        wal_dir: temp_dir.path().to_path_buf(),
-        segment_size: 10 * 1024 * 1024,
-        segments_to_retain: 3,
-        durability_mode: mode,
-    };
+    let config = WalConfigBuilder::new()
+        .wal_dir(temp_dir.path().to_path_buf())
+        .segment_size(10 * 1024 * 1024)
+        .unwrap()
+        .segments_to_retain(3)
+        .unwrap()
+        .durability_mode(mode)
+        .build();
     let db = GallifreyDB::with_wal_config(config);
     (db, temp_dir)
 }

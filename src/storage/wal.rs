@@ -90,7 +90,6 @@ use crate::core::{
     property::PropertyMap,
     temporal::{BiTemporalInterval, Timestamp, time},
 };
-use std::path::PathBuf;
 
 /// Log Sequence Number - monotonically increasing identifier for WAL entries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -232,67 +231,6 @@ impl WalEntry {
         let computed = hasher.finalize();
 
         stored_checksum == computed
-    }
-}
-
-/// Configuration for WAL behavior
-#[derive(Debug, Clone)]
-pub struct WalConfig {
-    /// Directory where WAL files are stored
-    pub wal_dir: PathBuf,
-    /// Maximum size of a WAL segment before rotation (in bytes)
-    pub segment_size: usize,
-    /// Number of WAL segments to keep for recovery
-    pub segments_to_retain: usize,
-    /// Durability mode controlling when data is synced to disk.
-    ///
-    /// This determines the tradeoff between durability guarantees and
-    /// performance. See [`DurabilityMode`] for details.
-    pub durability_mode: DurabilityMode,
-}
-
-impl Default for WalConfig {
-    fn default() -> Self {
-        WalConfig {
-            wal_dir: PathBuf::from("gallifreydb/wal"),
-            segment_size: 64 * 1024 * 1024, // 64MB
-            segments_to_retain: 10,
-            // GroupCommit by default: ACID-compliant with much better performance
-            // than Synchronous. Use Synchronous only for critical financial transactions
-            // that need minimum individual transaction latency.
-            durability_mode: DurabilityMode::group_commit_default(),
-        }
-    }
-}
-
-impl WalConfig {
-    /// Create a new WalConfig with default settings.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the durability mode.
-    pub fn with_durability_mode(mut self, mode: DurabilityMode) -> Self {
-        self.durability_mode = mode;
-        self
-    }
-
-    /// Set the WAL directory.
-    pub fn with_wal_dir(mut self, dir: PathBuf) -> Self {
-        self.wal_dir = dir;
-        self
-    }
-
-    /// Set the segment size.
-    pub fn with_segment_size(mut self, size: usize) -> Self {
-        self.segment_size = size;
-        self
-    }
-
-    /// Set the number of segments to retain.
-    pub fn with_segments_to_retain(mut self, count: usize) -> Self {
-        self.segments_to_retain = count;
-        self
     }
 }
 

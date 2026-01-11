@@ -12,18 +12,17 @@ mod common;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::{
-    GallifreyDB, NodeId, PropertyMapBuilder, WriteOps,
-    storage::wal::{DurabilityMode, WalConfig},
+    GallifreyDB, NodeId, PropertyMapBuilder, WalConfigBuilder, WriteOps,
+    storage::wal::DurabilityMode,
 };
 
 /// Create a test database configured for benchmarking (Async mode, no waiting).
 fn create_benchmark_db() -> GallifreyDB {
-    let wal_config = WalConfig {
-        durability_mode: DurabilityMode::Async {
+    let wal_config = WalConfigBuilder::new()
+        .durability_mode(DurabilityMode::Async {
             flush_interval_ms: 100,
-        }, // Async mode for benchmarks
-        ..Default::default()
-    };
+        })
+        .build();
     GallifreyDB::with_wal_config(wal_config)
 }
 

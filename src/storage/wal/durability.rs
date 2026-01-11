@@ -25,15 +25,17 @@ use std::time::Duration;
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::storage::wal::{WalConfig, DurabilityMode};
+/// use gallifreydb::{WalConfigBuilder, DurabilityMode};
 ///
 /// // High-throughput ACID mode with 10ms batching
-/// let config = WalConfig::default()
-///     .with_durability_mode(DurabilityMode::group_commit(10, 200));
+/// let config = WalConfigBuilder::new()
+///     .durability_mode(DurabilityMode::group_commit(10, 200))
+///     .build();
 ///
 /// // Bulk loading mode - fast but not immediately durable
-/// let config = WalConfig::default()
-///     .with_durability_mode(DurabilityMode::async_mode(100));
+/// let config = WalConfigBuilder::new()
+///     .durability_mode(DurabilityMode::async_mode(100))
+///     .build();
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
@@ -359,12 +361,11 @@ impl DurabilityMode {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, WalConfig, DurabilityMode};
+    /// use gallifreydb::{GallifreyDB, WalConfigBuilder, DurabilityMode};
     ///
-    /// let config = WalConfig {
-    ///     durability_mode: DurabilityMode::async_batched_default(),
-    ///     ..Default::default()
-    /// };
+    /// let config = WalConfigBuilder::new()
+    ///     .durability_mode(DurabilityMode::async_batched_default())
+    ///     .build();
     /// let db = GallifreyDB::with_wal_config(config);
     /// ```
     pub const fn async_batched_default() -> Self {
@@ -387,12 +388,11 @@ impl DurabilityMode {
     /// # Example
     ///
     /// ```ignore
-    /// use gallifreydb::{GallifreyDB, WalConfig, DurabilityMode};
+    /// use gallifreydb::{GallifreyDB, WalConfigBuilder, DurabilityMode};
     ///
-    /// let wal_config = WalConfig {
-    ///     durability_mode: DurabilityMode::fast(),
-    ///     ..Default::default()
-    /// };
+    /// let wal_config = WalConfigBuilder::new()
+    ///     .durability_mode(DurabilityMode::fast())
+    ///     .build();
     /// let db = GallifreyDB::with_wal_config(wal_config);
     /// ```
     pub const fn fast() -> Self {
