@@ -23,5 +23,5 @@ pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
 pub use version::{
     AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData, VersionMetadata,
 };
-pub use wal::{LSN, WalConfig, WalEntry, WalOperation, WriteAheadLog};
+pub use wal::{LSN, WalConfig, WalEntry, WalOperation};
 pub use wal_reader::read_wal_entries;

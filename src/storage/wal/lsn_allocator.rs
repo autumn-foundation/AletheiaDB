@@ -50,6 +50,23 @@ impl LsnAllocator {
     ///
     /// This is a lock-free operation using `fetch_add`.
     ///
+    /// # Memory Ordering
+    ///
+    /// Uses `Ordering::Relaxed` because:
+    ///
+    /// 1. **LSN uniqueness is guaranteed by the atomic counter itself**, not by
+    ///    memory visibility. Each `fetch_add` returns a unique value.
+    ///
+    /// 2. **Happens-before relationships are established elsewhere**:
+    ///    - The caller serializes data to a buffer (local operation)
+    ///    - The caller writes to the ring buffer with `Release` ordering
+    ///    - The flush coordinator reads with `Acquire` ordering
+    ///    - This Release/Acquire pair provides the necessary synchronization
+    ///
+    /// 3. **The LSN is used for ordering, not synchronization**. The sort in
+    ///    the flush coordinator uses the LSN values, which are correct
+    ///    regardless of when they become visible to other threads.
+    ///
     /// # Returns
     ///
     /// The allocated LSN. Each call returns a unique, monotonically

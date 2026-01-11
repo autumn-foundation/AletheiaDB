@@ -44,7 +44,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -166,6 +166,9 @@ impl FlushNotifier {
     }
 }
 
+/// Threshold for consecutive flush errors before logging a critical warning.
+const FLUSH_ERROR_WARNING_THRESHOLD: u64 = 3;
+
 /// Unified concurrent WAL system.
 ///
 /// This combines the striped concurrent WAL with the flush coordinator
@@ -185,6 +188,8 @@ pub struct ConcurrentWalSystem {
     durability_mode: DurabilityMode,
     /// Group commit coordinator for epoch-based waiting (GroupCommit mode only).
     group_commit: Option<Arc<GroupCommitCoordinator>>,
+    /// Counter for consecutive flush errors (for health monitoring).
+    consecutive_flush_errors: Arc<AtomicU64>,
 }
 
 impl ConcurrentWalSystem {
@@ -239,6 +244,9 @@ impl ConcurrentWalSystem {
         // Create flush notifier for batch-size-triggered flushes
         let flush_notifier = Arc::new(FlushNotifier::new());
 
+        // Create error counter for health monitoring
+        let consecutive_flush_errors = Arc::new(AtomicU64::new(0));
+
         // Start background flush thread for async/group-commit modes
         let flush_thread = if matches!(
             config.durability_mode,
@@ -251,6 +259,7 @@ impl ConcurrentWalSystem {
             let shutdown_clone = Arc::clone(&shutdown_signal);
             let flush_notifier_clone = Arc::clone(&flush_notifier);
             let group_commit_clone = group_commit.clone();
+            let error_counter_clone = Arc::clone(&consecutive_flush_errors);
             let flush_interval = Duration::from_millis(config.flush_interval_ms);
             let sync_on_flush =
                 matches!(config.durability_mode, DurabilityMode::GroupCommit { .. });
@@ -262,6 +271,7 @@ impl ConcurrentWalSystem {
                     shutdown_clone,
                     flush_notifier_clone,
                     group_commit_clone,
+                    error_counter_clone,
                     flush_interval,
                     sync_on_flush,
                 );
@@ -278,6 +288,7 @@ impl ConcurrentWalSystem {
             flush_notifier,
             durability_mode: config.durability_mode,
             group_commit,
+            consecutive_flush_errors,
         })
     }
 
@@ -287,12 +298,14 @@ impl ConcurrentWalSystem {
     /// - The flush interval expires (normal periodic flush)
     /// - The flush_notifier is signaled (batch size reached)
     /// - Shutdown is requested
+    #[allow(clippy::too_many_arguments)]
     fn flush_loop(
         wal: Arc<ConcurrentWal>,
         coordinator: Arc<FlushCoordinator>,
         shutdown: Arc<AtomicBool>,
         flush_notifier: Arc<FlushNotifier>,
         group_commit: Option<Arc<GroupCommitCoordinator>>,
+        error_counter: Arc<AtomicU64>,
         interval: Duration,
         sync_on_flush: bool,
     ) {
@@ -316,17 +329,30 @@ impl ConcurrentWalSystem {
                 // Notify group commit waiters and handle errors
                 match result {
                     Ok(_) => {
+                        // Reset error counter on success
+                        error_counter.store(0, Ordering::Relaxed);
                         if let Some(ref gc) = group_commit {
                             gc.mark_flushed(Ok(()));
                         }
                     }
                     Err(e) => {
+                        // Track consecutive errors for health monitoring
+                        let errors = error_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                        if errors == FLUSH_ERROR_WARNING_THRESHOLD {
+                            eprintln!(
+                                "CRITICAL: WAL flush failed {} consecutive times. \
+                                 Data durability may be compromised. Last error: {}",
+                                errors, e
+                            );
+                        } else {
+                            eprintln!("WAL flush error: {}", e);
+                        }
+
                         if let Some(ref gc) = group_commit {
                             // Create a new error from the string representation
                             // (Error doesn't implement Clone, but mark_flushed only stores the string)
                             gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())));
                         }
-                        eprintln!("WAL flush error: {}", e);
                     }
                 }
             } else if should_mark_flushed {
@@ -350,11 +376,13 @@ impl ConcurrentWalSystem {
 
             match result {
                 Ok(_) => {
+                    error_counter.store(0, Ordering::Relaxed);
                     if let Some(ref gc) = group_commit {
                         gc.mark_flushed(Ok(()));
                     }
                 }
                 Err(e) => {
+                    error_counter.fetch_add(1, Ordering::Relaxed);
                     if let Some(ref gc) = group_commit {
                         gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())));
                     }
@@ -411,12 +439,39 @@ impl ConcurrentWalSystem {
 
     /// Commit with the configured durability mode.
     ///
+    /// # Usage
+    ///
+    /// **Important**: All `append_async()` calls for a transaction MUST complete
+    /// before calling `commit()`. The typical pattern is:
+    ///
+    /// ```ignore
+    /// wal.append_async(op1)?;
+    /// wal.append_async(op2)?;
+    /// let epoch = wal.commit()?;  // Register for durability
+    /// if let Some(epoch) = epoch {
+    ///     wal.group_commit_coordinator().unwrap().wait_for_flush(epoch)?;
+    /// }
+    /// ```
+    ///
+    /// # Returns
+    ///
     /// Returns an epoch number for GroupCommit/AsyncBatched modes that the
     /// caller should wait on using `group_commit_coordinator().wait_for_flush(epoch)`.
     ///
     /// For other modes, returns `None`:
     /// - Synchronous: Data is already durable when this returns
     /// - Async: No waiting needed (fire-and-forget)
+    ///
+    /// # Race Condition Handling
+    ///
+    /// In GroupCommit mode, there's an intentional race between:
+    /// 1. The flush thread draining entries
+    /// 2. Transactions calling `register_transaction()`
+    ///
+    /// This is handled safely: if entries are drained before registration,
+    /// the epoch will still advance (with no entries), ensuring waiters
+    /// are notified. The data durability is guaranteed because entries
+    /// must be in the ring buffer before this method is called.
     pub fn commit(&self) -> Result<Option<u64>> {
         match self.durability_mode {
             DurabilityMode::Synchronous => {
@@ -480,6 +535,26 @@ impl ConcurrentWalSystem {
     pub fn durability_mode(&self) -> DurabilityMode {
         self.durability_mode
     }
+
+    /// Get the number of consecutive flush errors.
+    ///
+    /// This can be used for health monitoring. A value > 0 indicates
+    /// that the last flush(es) failed. A value >= 3 indicates a critical
+    /// condition where data durability may be compromised.
+    ///
+    /// The counter resets to 0 after a successful flush.
+    pub fn consecutive_flush_errors(&self) -> u64 {
+        self.consecutive_flush_errors.load(Ordering::Relaxed)
+    }
+
+    /// Check if the WAL is healthy (no consecutive flush errors).
+    ///
+    /// Returns `true` if the last flush succeeded, `false` if there are
+    /// outstanding errors that haven't been cleared by a successful flush.
+    pub fn is_healthy(&self) -> bool {
+        self.consecutive_flush_errors() == 0
+    }
+
     /// Get the WAL directory path.
     pub fn wal_dir(&self) -> &std::path::Path {
         self.coordinator.wal_dir()

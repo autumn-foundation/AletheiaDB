@@ -17,7 +17,7 @@ use crate::index::vector::HnswConfig;
 use crate::storage::{
     current::CurrentStorage,
     historical::HistoricalStorage,
-    wal::{LSN, WalOperation, WriteAheadLog, concurrent_system::ConcurrentWalSystem},
+    wal::{LSN, concurrent_system::ConcurrentWalSystem},
 };
 use crate::utils::error::{Result, StorageError};
 use std::fs::File;
@@ -395,48 +395,6 @@ impl PersistenceManager {
         false
     }
 
-    /// Create a checkpoint
-    pub fn create_checkpoint(
-        &mut self,
-        lsn: LSN,
-        current: &CurrentStorage,
-        historical: &HistoricalStorage,
-        wal: &mut WriteAheadLog,
-    ) -> Result<()> {
-        let checkpoint = Checkpoint::new(lsn, current, historical);
-
-        // Generate checkpoint filename based on LSN
-        let checkpoint_path = self.checkpoint_path(lsn);
-
-        // Save checkpoint
-        checkpoint.save(&checkpoint_path)?;
-
-        // Log checkpoint in WAL
-        wal.append(WalOperation::Checkpoint {
-            lsn,
-            timestamp: time::now(),
-        })?;
-
-        // Flush WAL
-        wal.flush()?;
-
-        // Update tracking
-        self.last_checkpoint_time = SystemTime::now();
-        self.last_checkpoint_lsn = lsn;
-
-        // Clean up old checkpoints
-        self.cleanup_old_checkpoints()?;
-
-        Ok(())
-    }
-
-    /// Get the path for a checkpoint file
-    fn checkpoint_path(&self, lsn: LSN) -> PathBuf {
-        self.config
-            .checkpoint_dir
-            .join(format!("checkpoint_{:016}.dat", lsn.0))
-    }
-
     /// Find the most recent checkpoint
     pub fn find_latest_checkpoint(&self) -> Result<Option<Checkpoint>> {
         let mut checkpoints = Vec::new();
@@ -514,37 +472,6 @@ impl PersistenceManager {
         let final_lsn = wal.current_lsn();
 
         Ok((current, historical, final_lsn))
-    }
-
-    /// Remove old checkpoints beyond retention policy
-    fn cleanup_old_checkpoints(&self) -> Result<()> {
-        let mut checkpoints = Vec::new();
-
-        if let Ok(entries) = std::fs::read_dir(&self.config.checkpoint_dir) {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str()
-                    && name.starts_with("checkpoint_")
-                    && name.ends_with(".dat")
-                {
-                    checkpoints.push(entry.path());
-                }
-            }
-        }
-
-        if checkpoints.len() <= self.config.checkpoints_to_retain {
-            return Ok(());
-        }
-
-        // Sort by filename
-        checkpoints.sort();
-
-        // Remove oldest checkpoints
-        let to_remove = checkpoints.len() - self.config.checkpoints_to_retain;
-        for checkpoint in checkpoints.iter().take(to_remove) {
-            let _ = std::fs::remove_file(checkpoint);
-        }
-
-        Ok(())
     }
 }
 
@@ -955,56 +882,6 @@ mod tests {
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(err_str.contains("UTF-8") || err_str.contains("corrupt"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_checkpoint_cleanup_enforces_retention_policy() -> Result<()> {
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create 10 checkpoints
-        for i in 0..10 {
-            let checkpoint_path = temp_dir.path().join(format!("checkpoint_{:06}.dat", i));
-            let current = CurrentStorage::new();
-            let historical = HistoricalStorage::new();
-            let checkpoint = Checkpoint::new(LSN(i as u64), &current, &historical);
-            checkpoint.save(&checkpoint_path)?;
-
-            // Sleep briefly to ensure different timestamps
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        // Create persistence manager with retention policy
-        let config = CheckpointConfig {
-            checkpoint_dir: temp_dir.path().to_path_buf(),
-            checkpoints_to_retain: 3,
-            ..Default::default()
-        };
-
-        let manager = PersistenceManager::new(config)?;
-
-        // Trigger cleanup
-        manager.cleanup_old_checkpoints()?;
-
-        // Count remaining checkpoints
-        let checkpoint_count = std::fs::read_dir(temp_dir.path())?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s == "dat")
-                    .unwrap_or(false)
-            })
-            .count();
-
-        // Should have at most 3 checkpoints
-        assert!(
-            checkpoint_count <= 3,
-            "Expected ≤3 checkpoints, found {}",
-            checkpoint_count
-        );
 
         Ok(())
     }

@@ -606,6 +606,11 @@ impl WalRingBuffer {
 
         loop {
             let pos = self.read_pos.load(Ordering::Relaxed);
+            // SAFETY: idx is always < capacity because:
+            // - self.mask = capacity - 1 (set in new())
+            // - capacity is a power of 2
+            // - (pos & mask) is equivalent to (pos % capacity)
+            // - Therefore idx is in bounds [0, capacity)
             let idx = (pos as usize) & self.mask;
             let slot = &self.slots[idx];
 
@@ -623,8 +628,25 @@ impl WalRingBuffer {
                 ) {
                     Ok(_) => {
                         // Successfully claimed - read the entry
-                        // SAFETY: We have exclusive access after successful CAS.
-                        // The producer won't write until we update the sequence.
+                        //
+                        // SAFETY: Memory ordering guarantees exclusive access:
+                        //
+                        // 1. The CAS uses AcqRel ordering:
+                        //    - Acquire: synchronizes with all prior Release stores,
+                        //      including the producer's sequence.store(pos+1, Release)
+                        //    - Release: prevents reordering of the entry read before CAS
+                        //
+                        // 2. The producer cannot write to this slot because:
+                        //    - Producer checks: sequence.load(Acquire) == write_pos
+                        //    - Current sequence is (pos + 1), not (pos + capacity)
+                        //    - We only set sequence to (pos + capacity) AFTER reading
+                        //
+                        // 3. No other consumer can read because:
+                        //    - This is single-consumer (flush coordinator only)
+                        //    - We own read_pos after successful CAS
+                        //
+                        // 4. The Acquire in the CAS establishes happens-before with
+                        //    the producer's Release store of the entry data.
                         let entry = unsafe { (*slot.entry.get()).take() };
 
                         // Mark slot as available for writing again
