@@ -88,6 +88,14 @@ pub enum QueryOp {
         label_filter: Option<String>,
     },
 
+    /// Rank current results by similarity to a target embedding
+    RankBySimilarity {
+        /// Target embedding for similarity comparison
+        embedding: Arc<[f32]>,
+        /// Optional limit on results (if None, ranks all)
+        top_k: Option<usize>,
+    },
+
     // === Temporal Operations ===
     /// Query at a specific point in time (bi-temporal)
     AsOf {

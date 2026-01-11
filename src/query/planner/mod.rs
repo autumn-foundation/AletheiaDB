@@ -205,12 +205,19 @@ impl QueryPlanner {
                 // and performs k-NN search - all handled by the executor
                 Ok(LogicalOp::Scan(ScanOp::SimilarToNode {
                     source_node: *source_node,
-                    property_key: property_key
-                        .clone()
-                        .unwrap_or_else(|| "embedding".to_string()),
+                    property_key: property_key.as_deref().unwrap_or("embedding").to_string(),
                     k: *k,
                     label_filter: label_filter.clone(),
                 }))
+            }
+
+            QueryOp::Filter(predicate) => {
+                let input = current.ok_or_else(|| {
+                    Error::Query(QueryError::SyntaxError {
+                        message: "Filter requires a source".to_string(),
+                    })
+                })?;
+                Ok(LogicalOp::unary(UnaryOp::Filter(predicate.clone()), input))
             }
 
             QueryOp::FilterLabel(label) => {

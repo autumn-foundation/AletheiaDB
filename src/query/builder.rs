@@ -19,6 +19,21 @@
 //!     .as_of(valid_time, tx_time)
 //!     .start(node_id)
 //!     .build();
+//!
+//! // Build a vector similarity query (simple)
+//! let query = QueryBuilder::new()
+//!     .start(alice_id)
+//!     .similar_to(bob_id, 10)
+//!     .build();
+//!
+//! // Build a vector similarity query (advanced with builder)
+//! let query = QueryBuilder::new()
+//!     .start(alice_id)
+//!     .similar_to_builder(bob_id, 10)
+//!         .property("custom_embedding")
+//!         .label_filter("Person")
+//!         .finish()
+//!     .build();
 //! ```
 
 use std::marker::PhantomData;
@@ -239,13 +254,50 @@ impl QueryBuilder<state::HasNodes> {
         })
     }
 
-    /// Find nodes similar to a specific node
+    /// Find nodes similar to a source node's embedding (simple version).
+    ///
+    /// This is a convenience method that uses:
+    /// - Default property key: "embedding"
+    /// - No label filter
+    ///
+    /// For advanced options (custom property, label filtering), use
+    /// [`similar_to_builder()`](Self::similar_to_builder).
+    ///
+    /// # Arguments
+    /// * `source_node` - Node whose embedding to use for similarity search
+    /// * `k` - Number of similar nodes to return (must be > 0)
+    ///
+    /// # Errors
+    /// Returns `QueryError::ExecutionError` if:
+    /// - Source node doesn't exist
+    /// - Source node doesn't have an "embedding" property
+    /// - The "embedding" property is not a vector type
+    /// - No vector index is enabled for "embedding"
+    ///
+    /// # Performance
+    /// Cost = O(1) node lookup + O(log N) HNSW search where N = indexed vectors
+    ///
+    /// # Panics
+    /// Panics in debug mode if k = 0
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let results = db.query()
+    ///     .start(node_id)
+    ///     .similar_to(bob_id, 10)
+    ///     .execute()?;
+    /// ```
+    ///
+    /// # See Also
+    /// - [`similar_to_builder()`](Self::similar_to_builder) - Advanced configuration
     #[must_use]
     pub fn similar_to(
         self,
         source_node: NodeId,
         k: usize,
     ) -> QueryBuilder<state::HasVectorResults> {
+        assert!(k > 0, "k must be greater than 0");
         self.add_op(QueryOp::SimilarTo {
             source_node,
             k,
@@ -254,53 +306,46 @@ impl QueryBuilder<state::HasNodes> {
         })
     }
 
-    /// Find nodes similar to a source node with custom property key
-    #[must_use]
-    pub fn similar_to_with_property(
+    /// Create a builder for advanced SimilarTo configuration.
+    ///
+    /// Use this when you need to:
+    /// - Specify a custom embedding property key
+    /// - Filter results by label
+    /// - (Future) Configure distance metric, exclusions, etc.
+    ///
+    /// For simple cases, use [`similar_to()`](Self::similar_to) instead.
+    ///
+    /// # Arguments
+    /// * `source_node` - Node whose embedding to use for similarity search
+    /// * `k` - Number of similar nodes to return (must be > 0)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find similar documents using custom embedding
+    /// let results = db.query()
+    ///     .start(alice_id)
+    ///     .similar_to_builder(bob_id, 10)
+    ///         .property("custom_embedding")
+    ///         .label_filter("Document")
+    ///         .finish()
+    ///     .execute()?;
+    /// ```
+    ///
+    /// # Panics
+    /// Panics in debug mode if k = 0
+    pub fn similar_to_builder(
         self,
         source_node: NodeId,
         k: usize,
-        property_key: impl Into<String>,
-    ) -> QueryBuilder<state::HasVectorResults> {
-        self.add_op(QueryOp::SimilarTo {
-            source_node,
-            k,
-            property_key: Some(property_key.into()),
-            label_filter: None,
-        })
+    ) -> SimilarToBuilder<state::HasNodes> {
+        SimilarToBuilder::new(source_node, k, self)
     }
 
-    /// Find nodes similar to a source node with label filter
+    /// Filter results by predicate
     #[must_use]
-    pub fn similar_to_with_label(
-        self,
-        source_node: NodeId,
-        k: usize,
-        label_filter: impl Into<String>,
-    ) -> QueryBuilder<state::HasVectorResults> {
-        self.add_op(QueryOp::SimilarTo {
-            source_node,
-            k,
-            property_key: None,
-            label_filter: Some(label_filter.into()),
-        })
-    }
-
-    /// Find nodes similar to a source node with custom property key and label filter
-    #[must_use]
-    pub fn similar_to_with_property_and_label(
-        self,
-        source_node: NodeId,
-        k: usize,
-        property_key: impl Into<String>,
-        label_filter: impl Into<String>,
-    ) -> QueryBuilder<state::HasVectorResults> {
-        self.add_op(QueryOp::SimilarTo {
-            source_node,
-            k,
-            property_key: Some(property_key.into()),
-            label_filter: Some(label_filter.into()),
-        })
+    pub fn filter(self, predicate: Predicate) -> QueryBuilder<state::HasNodes> {
+        self.add_op_same(QueryOp::Filter(predicate))
     }
 
     /// Filter by label
@@ -438,6 +483,83 @@ impl<S: QueryState> QueryBuilder<S> {
     fn add_op_same(mut self, op: QueryOp) -> Self {
         self.ops.push(op);
         self
+    }
+}
+
+/// Builder for configuring SimilarTo operations with optional parameters.
+///
+/// Created by calling [`QueryBuilder::similar_to_builder()`].
+///
+/// # Example
+///
+/// ```ignore
+/// let query = QueryBuilder::new()
+///     .start(alice_id)
+///     .similar_to_builder(bob_id, 10)
+///         .property("custom_embedding")
+///         .label_filter("Person")
+///         .finish()
+///     .build();
+/// ```
+#[must_use = "builders do nothing unless you call finish()"]
+pub struct SimilarToBuilder<S: QueryState> {
+    source_node: NodeId,
+    k: usize,
+    property_key: Option<String>,
+    label_filter: Option<String>,
+    query_builder: QueryBuilder<S>,
+}
+
+impl<S: QueryState> SimilarToBuilder<S> {
+    fn new(source_node: NodeId, k: usize, query_builder: QueryBuilder<S>) -> Self {
+        assert!(k > 0, "k must be greater than 0");
+        SimilarToBuilder {
+            source_node,
+            k,
+            property_key: None,
+            label_filter: None,
+            query_builder,
+        }
+    }
+
+    /// Specify which vector property to use for similarity.
+    ///
+    /// Default: "embedding"
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// .similar_to_builder(node_id, 10)
+    ///     .property("custom_embedding")
+    ///     .finish()
+    /// ```
+    pub fn property(mut self, key: impl Into<String>) -> Self {
+        self.property_key = Some(key.into());
+        self
+    }
+
+    /// Filter results to only include nodes with this label.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// .similar_to_builder(node_id, 10)
+    ///     .label_filter("Document")
+    ///     .finish()
+    /// ```
+    pub fn label_filter(mut self, label: impl Into<String>) -> Self {
+        self.label_filter = Some(label.into());
+        self
+    }
+
+    /// Finish building and add the SimilarTo operation to the query.
+    pub fn finish(self) -> QueryBuilder<state::HasVectorResults> {
+        self.query_builder.add_op(QueryOp::SimilarTo {
+            source_node: self.source_node,
+            k: self.k,
+            property_key: self.property_key,
+            label_filter: self.label_filter,
+        })
     }
 }
 
@@ -591,5 +713,127 @@ mod tests {
             .build();
 
         assert_eq!(query.operation_count(), 4);
+    }
+
+    #[test]
+    fn test_similar_to_simple() {
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .similar_to(test_node_id(), 10)
+            .build();
+
+        assert_eq!(query.operation_count(), 2);
+        match &query.ops[1] {
+            QueryOp::SimilarTo {
+                source_node: _,
+                k,
+                property_key,
+                label_filter,
+            } => {
+                assert_eq!(*k, 10);
+                assert!(property_key.is_none(), "Should use default property");
+                assert!(label_filter.is_none(), "Should have no label filter");
+            }
+            _ => panic!("Expected SimilarTo operation"),
+        }
+    }
+
+    #[test]
+    fn test_similar_to_builder_with_property() {
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .similar_to_builder(test_node_id(), 10)
+            .property("custom_embedding")
+            .finish()
+            .build();
+
+        match &query.ops[1] {
+            QueryOp::SimilarTo {
+                property_key,
+                label_filter,
+                ..
+            } => {
+                assert_eq!(property_key.as_deref(), Some("custom_embedding"));
+                assert!(label_filter.is_none());
+            }
+            _ => panic!("Expected SimilarTo operation"),
+        }
+    }
+
+    #[test]
+    fn test_similar_to_builder_with_label() {
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .similar_to_builder(test_node_id(), 10)
+            .label_filter("Document")
+            .finish()
+            .build();
+
+        match &query.ops[1] {
+            QueryOp::SimilarTo {
+                property_key,
+                label_filter,
+                ..
+            } => {
+                assert!(property_key.is_none());
+                assert_eq!(label_filter.as_deref(), Some("Document"));
+            }
+            _ => panic!("Expected SimilarTo operation"),
+        }
+    }
+
+    #[test]
+    fn test_similar_to_builder_with_all_options() {
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .similar_to_builder(test_node_id(), 10)
+            .property("custom_embedding")
+            .label_filter("Person")
+            .finish()
+            .build();
+
+        match &query.ops[1] {
+            QueryOp::SimilarTo {
+                property_key,
+                label_filter,
+                ..
+            } => {
+                assert_eq!(property_key.as_deref(), Some("custom_embedding"));
+                assert_eq!(label_filter.as_deref(), Some("Person"));
+            }
+            _ => panic!("Expected SimilarTo operation"),
+        }
+    }
+
+    #[test]
+    fn test_similar_to_builder_fluent_chaining() {
+        // Verify builder can be chained with other query operations
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .similar_to_builder(test_node_id(), 10)
+            .property("embedding")
+            .label_filter("Person")
+            .finish()
+            .filter(Predicate::gt("score", 0.8))
+            .limit(5)
+            .build();
+
+        assert_eq!(query.operation_count(), 4); // start + similar_to + filter + limit
+    }
+
+    #[test]
+    #[should_panic(expected = "k must be greater than 0")]
+    fn test_similar_to_validates_k() {
+        let _ = QueryBuilder::new()
+            .start(test_node_id())
+            .similar_to(test_node_id(), 0); // Should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "k must be greater than 0")]
+    fn test_similar_to_builder_validates_k() {
+        let _ = QueryBuilder::new()
+            .start(test_node_id())
+            .similar_to_builder(test_node_id(), 0); // Should panic
     }
 }
