@@ -153,29 +153,62 @@ just check-all         # Full quality check (tests, coverage, lint)
 4. Batch insertion throughput (>100k edges/sec)
 5. Storage overhead (<2X vs non-temporal)
 
-## WAL Format and Migration
+## Write-Ahead Log (WAL)
 
 **See [docs/WAL.md](docs/WAL.md) for comprehensive WAL documentation.**
 
-### Quick Reference
+### Concurrent WAL Architecture
 
-**Current Version**: 2 (binary format with "GWAL" magic bytes)
+GallifreyDB uses a **Striped Lock-Free Ring Buffers** architecture for high-throughput concurrent writes:
 
-**Key Features**:
-- Version-aware format with automatic detection
-- Full property and temporal interval serialization
-- Checksum verification for data integrity
-- Backward compatible with V1 (with data loss warnings)
-
-**Migration**:
-```rust
-use gallifreydb::storage::wal::migrate_wal_directory;
-
-// Migrate all segments (creates .bak backups)
-let results = migrate_wal_directory(Path::new("data/wal/"))?;
+```
+                    ┌─────────────────────┐
+                    │    LSN Allocator    │
+                    │  AtomicU64::fetch_add
+                    └──────────┬──────────┘
+                               │
+       ┌───────────────────────┼───────────────────────┐
+       ▼                       ▼                       ▼
+┌─────────────┐         ┌─────────────┐         ┌─────────────┐
+│   Stripe 0  │         │   Stripe 1  │         │  Stripe N   │
+│ Ring Buffer │         │ Ring Buffer │         │ Ring Buffer │
+│ (Lock-free) │         │ (Lock-free) │         │ (Lock-free) │
+└──────┬──────┘         └──────┬──────┘         └──────┬──────┘
+       └───────────────────────┼───────────────────────┘
+                               ▼
+                    ┌─────────────────────┐
+                    │  Flush Coordinator  │
+                    │  - Sorts by LSN     │
+                    │  - Writes segment   │
+                    └─────────────────────┘
 ```
 
-**Adding New Versions**: See [docs/WAL.md](docs/WAL.md#adding-new-wal-versions) for the 5-step process.
+**Key Design Principles:**
+- **Lock-free append**: Multiple threads append without mutex contention
+- **Global LSN ordering**: Single atomic counter ensures total ordering
+- **Sorted flush**: Entries sorted by LSN before writing to disk
+- **ACID preserved**: Synchronous and GroupCommit modes remain fully ACID
+
+### Performance
+
+| Mode | Latency | Throughput | ACID |
+|------|---------|------------|------|
+| Synchronous | ~1.5ms | ~600/sec | ✅ Full |
+| GroupCommit | ~10-50ms | ~100K+/sec | ✅ Full |
+| Async | <100ns | ~500K+/sec | ❌ Eventual |
+
+### Quick Reference
+
+**Format**: Binary with "GWAL" magic bytes, version 1
+
+**Key Features**:
+- Lock-free concurrent append path
+- Full property and temporal interval serialization
+- CRC32 checksum verification
+
+**Documentation:**
+- [ADR-0020: Concurrent WAL Architecture](docs/adr/0020-concurrent-wal-architecture.md)
+- [Durability Modes](docs/architecture/durability-modes.md)
 
 ## Vector Storage & Indexing
 

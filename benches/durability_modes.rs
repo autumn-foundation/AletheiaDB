@@ -22,7 +22,10 @@ use gallifreydb::{
         PropertyMapBuilder,
         temporal::{BiTemporalInterval, time},
     },
-    storage::wal::{DurabilityMode, WalConfig, WalOperation, WriteAheadLog},
+    storage::wal::{
+        DurabilityMode, WalConfig, WalOperation,
+        concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
+    },
 };
 use std::sync::Arc;
 use std::thread;
@@ -638,11 +641,8 @@ fn bench_wal_append(c: &mut Criterion) {
     for op_type in &["create_node", "create_edge", "update_node"] {
         group.bench_function(BenchmarkId::from_parameter(op_type), |b| {
             let temp_dir = TempDir::new().unwrap();
-            let config = WalConfig {
-                wal_dir: temp_dir.path().to_path_buf(),
-                ..Default::default()
-            };
-            let mut wal = WriteAheadLog::new(config).unwrap();
+            let config = ConcurrentWalSystemConfig::new(temp_dir.path().to_path_buf());
+            let wal = ConcurrentWalSystem::new(config).unwrap();
 
             b.iter(|| {
                 let operation = match *op_type {
@@ -668,7 +668,7 @@ fn bench_wal_append(c: &mut Criterion) {
                         temporal: BiTemporalInterval::current(time::now()),
                     },
                 };
-                wal.append(operation).unwrap();
+                wal.append_async(operation).unwrap();
             });
         });
     }
@@ -687,14 +687,11 @@ fn bench_wal_throughput(c: &mut Criterion) {
             || {
                 // SETUP (not measured)
                 let temp_dir = TempDir::new().unwrap();
-                let config = WalConfig {
-                    wal_dir: temp_dir.path().to_path_buf(),
-                    ..Default::default()
-                };
-                let wal = WriteAheadLog::new(config).unwrap();
+                let config = ConcurrentWalSystemConfig::new(temp_dir.path().to_path_buf());
+                let wal = ConcurrentWalSystem::new(config).unwrap();
                 (temp_dir, wal) // Keep temp_dir alive
             },
-            |(temp_dir, mut wal)| {
+            |(temp_dir, wal): (TempDir, ConcurrentWalSystem)| {
                 // MEASUREMENT (only this is timed)
                 let start_lsn = wal.current_lsn();
                 for i in 0..1000 {
@@ -704,7 +701,7 @@ fn bench_wal_throughput(c: &mut Criterion) {
                         properties: PropertyMapBuilder::new().build(),
                         temporal: BiTemporalInterval::current(time::now()),
                     };
-                    black_box(wal.append(operation).unwrap());
+                    black_box(wal.append_async(operation).unwrap());
                 }
                 // Verify we actually appended 1000 operations
                 let end_lsn = wal.current_lsn();
@@ -739,20 +736,9 @@ fn bench_wal_with_sync(c: &mut Criterion) {
     ] {
         group.bench_function(BenchmarkId::from_parameter(name), |b| {
             let temp_dir = TempDir::new().unwrap();
-            let config = WalConfig {
-                wal_dir: temp_dir.path().to_path_buf(),
-                ..Default::default()
-            }
-            .with_durability_mode(*mode);
-
-            // Verify config is using the correct durability mode
-            assert_eq!(
-                config.durability_mode, *mode,
-                "Config durability mode mismatch for {} benchmark",
-                name
-            );
-
-            let mut wal = WriteAheadLog::new(config).unwrap();
+            let config = ConcurrentWalSystemConfig::new(temp_dir.path().to_path_buf())
+                .with_durability_mode(*mode);
+            let wal = ConcurrentWalSystem::new(config).unwrap();
 
             b.iter(|| {
                 let operation = WalOperation::CreateNode {
@@ -761,8 +747,8 @@ fn bench_wal_with_sync(c: &mut Criterion) {
                     properties: PropertyMapBuilder::new().build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
-                wal.append(operation).unwrap();
-                wal.commit_with_mode(*mode).unwrap(); // ✅ Actually test durability!
+                wal.append_async(operation).unwrap();
+                wal.commit().unwrap(); // ✅ Commit with configured durability mode
             });
         });
     }

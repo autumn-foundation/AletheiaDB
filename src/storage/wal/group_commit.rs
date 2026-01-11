@@ -132,11 +132,11 @@ impl GroupCommitCoordinator {
     /// The timeout is a **deadlock detection mechanism**, not a performance target.
     /// It's designed to catch stuck flush threads, not to enforce timing.
     ///
-    /// Formula: `(max_delay_ms * 10) + 200ms` with bounds [500ms, 5s]
-    /// - 10x multiplier: Allows for thread scheduling overhead
-    /// - +200ms: Fixed overhead for thread startup, especially in CI
+    /// Formula: `max(max_delay_ms * 2 + 500ms, 500ms)` with cap at 30s
+    /// - 2x multiplier: Allows for one full flush cycle plus margin
+    /// - +500ms: Fixed overhead for fsync and thread scheduling
     /// - Minimum 500ms: Handles very fast configs (e.g., 1ms) in slow CI
-    /// - Maximum 5s: Prevents indefinite waiting on stuck threads
+    /// - Maximum 30s: Prevents indefinite waiting on stuck threads
     ///
     /// # Errors
     ///
@@ -147,12 +147,12 @@ impl GroupCommitCoordinator {
         let mut state = self.state.lock_or_err()?;
 
         // Deadlock detection timeout (NOT a performance SLA)
-        // See method docs for rationale
+        // Must be longer than max_delay_ms to allow at least one flush cycle
         let base_timeout =
-            Duration::from_millis(self.config.max_delay_ms * 10) + Duration::from_millis(200);
+            Duration::from_millis(self.config.max_delay_ms * 2) + Duration::from_millis(500);
         let timeout = base_timeout
             .max(Duration::from_millis(500))
-            .min(Duration::from_secs(5));
+            .min(Duration::from_secs(30));
 
         // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
         // and this wait (rare but possible on fast systems), this loop exits immediately since

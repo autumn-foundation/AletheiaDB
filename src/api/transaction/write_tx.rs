@@ -22,7 +22,8 @@ use crate::index::temporal::TemporalIndexes;
 use crate::storage::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::storage::wal::{DurabilityMode, WalOperation, WriteAheadLog};
+use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
+use crate::storage::wal::{DurabilityMode, WalOperation};
 use crate::utils::error::{Result, StorageError, TransactionError};
 use crate::utils::lock::{MutexExt, RwLockExt};
 use parking_lot::RwLock;
@@ -56,7 +57,7 @@ pub struct WriteTransaction {
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
     temporal_indexes: Arc<TemporalIndexes>,
-    wal: Arc<Mutex<WriteAheadLog>>,
+    wal: Arc<ConcurrentWalSystem>,
     current_timestamp: Arc<Mutex<Timestamp>>,
     visibility_manager: Arc<TxVisibilityManager>,
 
@@ -78,7 +79,7 @@ impl WriteTransaction {
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
-        wal: Arc<Mutex<WriteAheadLog>>,
+        wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<Mutex<IdGenerator>>,
@@ -109,7 +110,7 @@ impl WriteTransaction {
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
-        wal: Arc<Mutex<WriteAheadLog>>,
+        wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<Mutex<IdGenerator>>,
@@ -207,14 +208,11 @@ impl WriteTransaction {
         //    greater than this commit, so visibility check (commit_ts < snapshot_ts)
         //    will correctly include this commit in future reads.
         //
-        //    greater than this commit, so visibility check (commit_ts < snapshot_ts)
-        //    will correctly include this commit in future reads.
-        //
-        // DURABILITY MODES:
-        // - Synchronous: Hold locks through fsync (current behavior, safe but slow)
-        // - Async: Release locks after flush to OS cache (fast, background syncs)
-        // - GroupCommit: Release locks after flush, wait for epoch (ACID + fast)
-        let (commit_timestamp, wait_epoch, coordinator) = {
+        // DURABILITY MODES (handled by ConcurrentWalSystem):
+        // - Synchronous: Appends drain and flush immediately with fsync
+        // - Async: Appends go to ring buffers, background thread syncs
+        // - GroupCommit: Appends go to ring buffers, wait for epoch completion
+        let commit_timestamp = {
             #[cfg(feature = "observability")]
             let ts_lock_start = std::time::Instant::now();
 
@@ -231,49 +229,42 @@ impl WriteTransaction {
             *ts += 1; // Post-increment for visibility of this commit
 
             #[cfg(feature = "observability")]
-            let wal_lock_start = std::time::Instant::now();
+            let wal_start = std::time::Instant::now();
 
-            // Acquire WAL lock once and hold through logging.
-            // CRITICAL: We release this lock BEFORE waiting for GroupCommit epoch flush
-            // to prevent deadlock (flush thread needs WAL lock to mark epochs complete).
-            let mut wal = self
-                .wal
-                .lock()
-                .expect("WAL lock poisoned - unrecoverable state");
-
-            #[cfg(feature = "observability")]
-            let wal_lock_acquired = std::time::Instant::now();
-
-            // Log operations to WAL while holding both locks.
+            // Log operations to WAL (lock-free striped append!)
             // This must happen BEFORE applying changes for durability.
-            self.log_operations_to_wal(&mut wal, commit)?;
+            self.log_operations_to_wal(commit)?;
 
             #[cfg(feature = "observability")]
             let wal_logged = std::time::Instant::now();
 
-            // Mode-aware commit: returns epoch to wait for (GroupCommit) or None
-            let epoch = wal.commit_with_mode(self.durability_mode)?;
+            // Commit with configured durability mode
+            // For Sync: drains and flushes immediately
+            // For Async: returns immediately
+            // For GroupCommit: registers and returns epoch
+            let wait_epoch = self.wal.commit()?;
 
             #[cfg(feature = "observability")]
             let wal_commit_completed = std::time::Instant::now();
 
-            // RACE CONDITION FIX: Clone the coordinator reference BEFORE releasing WAL lock.
-            // This ensures we wait on the same coordinator we registered with, even if
-            // the WAL's coordinator field is cleared between now and the wait (e.g., during
-            // shutdown or future dynamic reconfiguration). Prevents silent durability violation.
-            let gc = wal.group_commit_coordinator().cloned();
+            // For GroupCommit mode, wait for the epoch to be flushed.
+            // AsyncBatched mode returns an epoch but does NOT wait.
+            if let Some(epoch) = wait_epoch
+                && let Some(gc) = self.wal.group_commit_coordinator()
+                && self.durability_mode.waits_for_durability()
+            {
+                gc.wait_for_flush(epoch)?;
+            }
 
             #[cfg(feature = "observability")]
             {
                 // Record detailed breakdown for Honeycomb
                 let ts_lock_wait_us =
                     ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
-                let wal_lock_wait_us =
-                    wal_lock_acquired.duration_since(wal_lock_start).as_micros() as u64;
-                let wal_log_us = wal_logged.duration_since(wal_lock_acquired).as_micros() as u64;
+                let wal_log_us = wal_logged.duration_since(wal_start).as_micros() as u64;
                 let wal_commit_us =
                     wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
-                let total_locked_us = wal_commit_completed
+                let total_us = wal_commit_completed
                     .duration_since(ts_lock_start)
                     .as_micros() as u64;
 
@@ -283,50 +274,19 @@ impl WriteTransaction {
 
                 tracing::info!(
                     ts_lock_wait_us,
-                    wal_lock_wait_us,
                     wal_log_us,
                     wal_commit_us,
-                    total_locked_us,
+                    total_us,
                     total_commit_us,
                     operations_count,
                     commit_ts = %commit,
                     durability_mode = ?self.durability_mode,
-                    "Transaction commit breakdown"
+                    "Transaction commit breakdown (concurrent WAL)"
                 );
-
-                // Warn if commit serialization exceeds threshold (known bottleneck)
-                if total_locked_us > 10000 {
-                    tracing::warn!(
-                        total_locked_us,
-                        wal_commit_us,
-                        tx_id = %self.tx_id,
-                        durability_mode = ?self.durability_mode,
-                        "Slow commit detected - serialization bottleneck"
-                    );
-                }
             }
 
-            (commit, epoch, gc)
-            // Both locks released here - MUST release before waiting for epoch!
+            commit
         };
-
-        // For GroupCommit mode, wait for the epoch to be flushed.
-        // CRITICAL DEADLOCK PREVENTION: WAL lock MUST be released before this wait!
-        // The flush thread needs the WAL lock to call mark_flushed(), so holding it
-        // here would cause a deadlock where we wait for flush thread, but flush thread
-        // waits for the WAL lock we're holding.
-        //
-        // RACE CONDITION SAFETY: We cloned the coordinator reference above while holding
-        // the WAL lock, guaranteeing we wait on the same coordinator we registered with.
-        //
-        // AsyncBatched mode returns an epoch for tracking but does NOT wait - that's the
-        // key difference from GroupCommit. It returns immediately for low latency.
-        if let Some(epoch) = wait_epoch
-            && let Some(gc) = coordinator
-            && self.durability_mode.waits_for_durability()
-        {
-            gc.wait_for_flush(epoch)?;
-        }
 
         // Apply all changes atomically
         self.apply_changes(commit_timestamp)?;
@@ -538,12 +498,8 @@ impl WriteTransaction {
     /// Log all buffered operations to WAL.
     ///
     /// This ensures durability - operations are logged before being applied.
-    /// The caller must hold the WAL lock and pass it as a mutable reference.
-    fn log_operations_to_wal(
-        &self,
-        wal: &mut WriteAheadLog,
-        commit_timestamp: Timestamp,
-    ) -> Result<()> {
+    /// Uses lock-free appends to the concurrent WAL system.
+    fn log_operations_to_wal(&self, commit_timestamp: Timestamp) -> Result<()> {
         let temporal = BiTemporalInterval::current(commit_timestamp);
 
         for write in self.buffer.operations() {
@@ -634,8 +590,8 @@ impl WriteTransaction {
                 },
             };
 
-            // Append to WAL
-            wal.append(operation)?;
+            // Append to WAL (lock-free!)
+            self.wal.append_async(operation)?;
         }
 
         Ok(())
@@ -1338,7 +1294,7 @@ mod tests {
     use super::*;
     use crate::api::transaction::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
-    use crate::storage::wal::{WalConfig, WriteAheadLog};
+    use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
     use tempfile::TempDir;
 
     fn create_test_write_tx() -> (WriteTransaction, TempDir) {
@@ -1348,11 +1304,8 @@ mod tests {
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
-        let wal_config = WalConfig {
-            wal_dir: temp_dir.path().to_path_buf(),
-            ..Default::default()
-        };
-        let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
         let current_timestamp = Arc::new(Mutex::new(time::now()));
         let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
@@ -1846,11 +1799,8 @@ mod tests {
 
         // Create WAL with temp directory for tests
         let temp_dir = TempDir::new().unwrap();
-        let wal_config = WalConfig {
-            wal_dir: temp_dir.path().to_path_buf(),
-            ..Default::default()
-        };
-        let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
         let current_timestamp = Arc::new(Mutex::new(time::now()));
         let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
@@ -2067,7 +2017,7 @@ mod conflict_detection_tests {
     use super::*;
     use crate::api::transaction::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
-    use crate::storage::wal::{WalConfig, WriteAheadLog};
+    use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
     use tempfile::TempDir;
 
     /// Test harness for conflict detection tests.
@@ -2078,7 +2028,7 @@ mod conflict_detection_tests {
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
-        wal: Arc<Mutex<WriteAheadLog>>,
+        wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<Mutex<IdGenerator>>,
@@ -2096,11 +2046,8 @@ mod conflict_detection_tests {
             let temporal_indexes = Arc::new(TemporalIndexes::new());
 
             let temp_dir = TempDir::new().unwrap();
-            let wal_config = WalConfig {
-                wal_dir: temp_dir.path().to_path_buf(),
-                ..Default::default()
-            };
-            let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
+            let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+            let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
             let current_timestamp = Arc::new(Mutex::new(time::now()));
             let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
@@ -2511,7 +2458,7 @@ mod timestamp_ordering_tests {
     use super::*;
     use crate::api::transaction::TxIdGenerator;
     use crate::core::property::PropertyMapBuilder;
-    use crate::storage::wal::{WalConfig, WriteAheadLog};
+    use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
     use std::thread;
     use tempfile::TempDir;
 
@@ -2520,7 +2467,7 @@ mod timestamp_ordering_tests {
         current: Arc<CurrentStorage>,
         historical: Arc<RwLock<HistoricalStorage>>,
         temporal_indexes: Arc<TemporalIndexes>,
-        wal: Arc<Mutex<WriteAheadLog>>,
+        wal: Arc<ConcurrentWalSystem>,
         current_timestamp: Arc<Mutex<Timestamp>>,
         visibility_manager: Arc<TxVisibilityManager>,
         node_id_gen: Arc<Mutex<IdGenerator>>,
@@ -2537,11 +2484,8 @@ mod timestamp_ordering_tests {
             let temporal_indexes = Arc::new(TemporalIndexes::new());
 
             let temp_dir = TempDir::new().unwrap();
-            let wal_config = WalConfig {
-                wal_dir: temp_dir.path().to_path_buf(),
-                ..Default::default()
-            };
-            let wal = Arc::new(Mutex::new(WriteAheadLog::new(wal_config).unwrap()));
+            let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+            let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
             let current_timestamp = Arc::new(Mutex::new(time::now()));
             let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));

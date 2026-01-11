@@ -19,7 +19,8 @@ use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResult
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::AnchorConfig;
-use crate::storage::wal::{DurabilityMode, WalConfig, WriteAheadLog, WriteOptions};
+use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
+use crate::storage::wal::{DurabilityMode, WalConfig, WriteOptions};
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::{MutexExt, RwLockExt};
 use parking_lot::RwLock;
@@ -48,8 +49,8 @@ pub struct GallifreyDB {
     historical: Arc<RwLock<HistoricalStorage>>,
     /// Temporal indexes for efficient time-based queries - Uses DashMap internally for fine-grained locking
     temporal_indexes: Arc<TemporalIndexes>,
-    /// Write-Ahead Log for durability - Mutex-protected for write safety
-    wal: Arc<Mutex<WriteAheadLog>>,
+    /// Concurrent Write-Ahead Log for durability - lock-free striped architecture
+    wal: Arc<ConcurrentWalSystem>,
     /// Current logical timestamp for transaction time - Mutex-protected for thread-safe increment
     current_timestamp: Arc<Mutex<Timestamp>>,
     /// Transaction ID generator for MVCC
@@ -105,15 +106,28 @@ impl GallifreyDB {
     /// Create a new database with both anchor and WAL configuration.
     pub fn with_full_config(anchor_config: AnchorConfig, wal_config: WalConfig) -> Self {
         let durability_mode = wal_config.durability_mode;
-        let wal = WriteAheadLog::new(wal_config).expect("Failed to create WAL");
-        let wal = Arc::new(Mutex::new(wal));
 
-        // Start the background flush thread only for modes that need it
-        // (Async, GroupCommit, AsyncBatched). Skip for Synchronous mode
-        // to avoid unnecessary lock contention and overhead.
-        if durability_mode.needs_background_thread() {
-            WriteAheadLog::start_flush_thread(Arc::clone(&wal));
-        }
+        // Create ConcurrentWalSystem config from WalConfig
+        let wal_system_config = ConcurrentWalSystemConfig {
+            wal_dir: wal_config.wal_dir,
+            num_stripes: 16, // Default stripe count for good concurrency
+            stripe_capacity: 1024,
+            segment_size: wal_config.segment_size,
+            segments_to_retain: wal_config.segments_to_retain,
+            flush_interval_ms: match durability_mode {
+                DurabilityMode::Async { flush_interval_ms } => flush_interval_ms,
+                DurabilityMode::GroupCommit { max_delay_ms, .. } => max_delay_ms,
+                DurabilityMode::AsyncBatched { max_delay_ms, .. } => max_delay_ms,
+                _ => 10, // Default for Synchronous
+            },
+            durability_mode,
+            write_buffer_size: 64 * 1024, // 64KB default write buffer
+        };
+
+        let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");
+        let wal = Arc::new(wal);
+
+        // Note: ConcurrentWalSystem handles background threads internally based on durability mode
 
         GallifreyDB {
             current: Arc::new(CurrentStorage::new()),

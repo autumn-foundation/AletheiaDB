@@ -12,20 +12,18 @@ use gallifreydb::{
         id::{EdgeId, NodeId, VersionId},
         temporal::{BiTemporalInterval, time},
     },
-    storage::wal::{WalConfig, WalOperation, WriteAheadLog},
+    storage::wal::{
+        WalOperation,
+        concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
+    },
 };
 use tempfile::TempDir;
 
 /// Helper to create a WAL instance for benchmarking
-fn create_wal() -> (WriteAheadLog, TempDir) {
+fn create_wal() -> (ConcurrentWalSystem, TempDir) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
-    let config = WalConfig {
-        wal_dir: temp_dir.path().to_path_buf(),
-        segment_size: 10 * 1024 * 1024,
-        segments_to_retain: 3,
-        ..Default::default()
-    };
-    let wal = WriteAheadLog::new(config).expect("failed to create WAL");
+    let config = ConcurrentWalSystemConfig::new(temp_dir.path().to_path_buf());
+    let wal = ConcurrentWalSystem::new(config).expect("failed to create WAL");
     (wal, temp_dir)
 }
 
@@ -36,7 +34,7 @@ fn bench_serialize_create_node(c: &mut Criterion) {
     // Benchmark with different property sizes to measure allocation overhead
     for prop_count in &[0, 5, 10, 50] {
         group.bench_function(BenchmarkId::from_parameter(prop_count), |b| {
-            let (mut wal, _guard) = create_wal();
+            let (wal, _guard) = create_wal();
 
             b.iter(|| {
                 // Create operation with varying property counts
@@ -54,7 +52,7 @@ fn bench_serialize_create_node(c: &mut Criterion) {
                 };
 
                 // This will call serialize_entry internally
-                black_box(wal.append(operation).unwrap());
+                black_box(wal.append_async(operation).unwrap());
             });
         });
     }
@@ -68,7 +66,7 @@ fn bench_serialize_create_edge(c: &mut Criterion) {
 
     for prop_count in &[0, 5, 10, 50] {
         group.bench_function(BenchmarkId::from_parameter(prop_count), |b| {
-            let (mut wal, _guard) = create_wal();
+            let (wal, _guard) = create_wal();
 
             b.iter(|| {
                 let mut props = PropertyMapBuilder::new();
@@ -86,7 +84,7 @@ fn bench_serialize_create_edge(c: &mut Criterion) {
                     temporal: BiTemporalInterval::current(time::now()),
                 };
 
-                black_box(wal.append(operation).unwrap());
+                black_box(wal.append_async(operation).unwrap());
             });
         });
     }
@@ -100,7 +98,7 @@ fn bench_serialize_update_node(c: &mut Criterion) {
 
     for prop_count in &[0, 5, 10, 50] {
         group.bench_function(BenchmarkId::from_parameter(prop_count), |b| {
-            let (mut wal, _guard) = create_wal();
+            let (wal, _guard) = create_wal();
 
             b.iter(|| {
                 let mut props = PropertyMapBuilder::new();
@@ -117,7 +115,7 @@ fn bench_serialize_update_node(c: &mut Criterion) {
                     temporal: BiTemporalInterval::current(time::now()),
                 };
 
-                black_box(wal.append(operation).unwrap());
+                black_box(wal.append_async(operation).unwrap());
             });
         });
     }
@@ -131,7 +129,7 @@ fn bench_serialize_batch(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1000));
 
     group.bench_function("batch_1000_create_node", |b| {
-        let (mut wal, _guard) = create_wal();
+        let (wal, _guard) = create_wal();
 
         b.iter(|| {
             for i in 0..1000 {
@@ -141,7 +139,7 @@ fn bench_serialize_batch(c: &mut Criterion) {
                     properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
-                black_box(wal.append(operation).unwrap());
+                black_box(wal.append_async(operation).unwrap());
             }
         });
     });
@@ -155,7 +153,7 @@ fn bench_serialize_high_frequency(c: &mut Criterion) {
     group.throughput(Throughput::Elements(10000));
 
     group.bench_function("sequential_10k_operations", |b| {
-        let (mut wal, _guard) = create_wal();
+        let (wal, _guard) = create_wal();
 
         b.iter(|| {
             for i in 0..10000 {
@@ -165,7 +163,7 @@ fn bench_serialize_high_frequency(c: &mut Criterion) {
                     properties: PropertyMapBuilder::new().build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
-                black_box(wal.append(operation).unwrap());
+                black_box(wal.append_async(operation).unwrap());
             }
         });
     });
