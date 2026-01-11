@@ -20,8 +20,8 @@
 //!   - On scheduled runs: Full validation with comprehensive suite
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::{CurrentStorage, GallifreyDB, PropertyMapBuilder};
 use gallifreydb::api::transaction::WriteOps;
+use gallifreydb::{CurrentStorage, GallifreyDB, PropertyMapBuilder};
 
 /// Target: Current-state single-hop traversal <1µs
 fn bench_single_hop_target(c: &mut Criterion) {
@@ -141,18 +141,29 @@ fn bench_batch_insertion_target(c: &mut Criterion) {
 
 /// Target: Time-travel at anchor <100µs
 /// This tests the best-case scenario where we reconstruct directly from an anchor
+///
+/// Version/Timestamp Semantics:
+/// - create_node happens at tx_time=0 (creates current state only, no historical version)
+/// - First update creates v1 at tx_time=1 (first historical version, anchor)
+/// - Second update creates v2 at tx_time=2 (delta)
+/// - ...
+/// - 10th update creates v10 at tx_time=10 (anchor)
+/// - Anchor interval is 10, so anchors are created at tx_time 1, 11, 21, etc.
+/// - In this benchmark, anchors are at tx_time 1 and 10 (after 10 updates)
 fn bench_time_travel_at_anchor(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
     // Setup: Create database with anchored versions
-    // Anchor interval is 10, so anchors are at v0, v10, v20, etc.
     let db = GallifreyDB::new();
     let node_id = db
-        .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
-        .unwrap();
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("Benchmark setup: create_node should succeed with valid input");
 
     // Create 10 additional versions (v1-v10)
-    // This creates anchors at v0 (initial create) and v10
+    // This creates anchors at tx_time=0 (initial create) and tx_time=10
     for i in 1..=10 {
         db.write(|tx| {
             tx.update_node(
@@ -164,12 +175,12 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
             )?;
             Ok(())
         })
-        .unwrap();
+        .expect("Benchmark setup: update_node should succeed with valid input");
     }
 
     group.bench_function("at_anchor", |b| {
         b.iter(|| {
-            // Query at anchor point v10 (transaction time 10)
+            // Query at anchor point (tx_time=10, valid_time=10)
             // This should hit the anchor directly with no delta reconstruction
             let result = db.get_node_at_time(black_box(node_id), black_box(10), black_box(10));
             black_box(result)
@@ -181,17 +192,25 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
 
 /// Target: Time-travel with deltas (avg 5) <1ms
 /// This tests mid-range reconstruction requiring delta application
+///
+/// Query at tx_time=5 requires:
+/// 1. Find nearest anchor ≤ 5 → anchor@tx_time=1
+/// 2. Apply deltas for tx_time 2, 3, 4, 5
+/// 3. Reconstruct state at tx_time=5 (4 deltas applied)
 fn bench_time_travel_with_deltas(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
     // Setup: Create database with 15 versions
-    // Anchors at v0, v10, v20 (default anchor_interval = 10)
+    // Anchors at tx_time 1, 11 (default anchor_interval = 10, after 15 updates)
     let db = GallifreyDB::new();
     let node_id = db
-        .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
-        .unwrap();
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("Benchmark setup: create_node should succeed with valid input");
 
-    // Create 15 additional versions (v1-v15)
+    // Create 15 additional versions (tx_time 1-15)
     for i in 1..=15 {
         db.write(|tx| {
             tx.update_node(
@@ -203,13 +222,13 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
             )?;
             Ok(())
         })
-        .unwrap();
+        .expect("Benchmark setup: update_node should succeed with valid input");
     }
 
     group.bench_function("with_5_deltas", |b| {
         b.iter(|| {
-            // Query at v5 (transaction time 5)
-            // This requires: anchor@v0 + 5 deltas (v1, v2, v3, v4, v5)
+            // Query at tx_time=5, valid_time=5
+            // This requires: anchor@tx_time=0 + 5 deltas (tx_time 1-5)
             let result = db.get_node_at_time(black_box(node_id), black_box(5), black_box(5));
             black_box(result)
         })
@@ -220,17 +239,27 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
 
 /// Target: Time-travel worst case (9 deltas) <5ms
 /// This tests worst-case reconstruction just before next anchor
+///
+/// Query at tx_time=9 (just before anchor@10) requires:
+/// 1. Find nearest anchor ≤ 9 → anchor@tx_time=1
+/// 2. Apply maximum delta chain: tx_time 2, 3, 4, 5, 6, 7, 8, 9
+/// 3. Reconstruct state at tx_time=9 (8 deltas applied)
+///
+/// This is the worst case for anchor_interval=10 (9 versions between anchors)
 fn bench_time_travel_worst_case(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
     // Setup: Create database with 19 versions
-    // Anchors at v0, v10, v20 (default anchor_interval = 10)
+    // Anchors at tx_time 1, 11 (default anchor_interval = 10, after 19 updates)
     let db = GallifreyDB::new();
     let node_id = db
-        .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
-        .unwrap();
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("Benchmark setup: create_node should succeed with valid input");
 
-    // Create 19 additional versions (v1-v19)
+    // Create 19 additional versions (tx_time 1-19)
     for i in 1..=19 {
         db.write(|tx| {
             tx.update_node(
@@ -242,13 +271,13 @@ fn bench_time_travel_worst_case(c: &mut Criterion) {
             )?;
             Ok(())
         })
-        .unwrap();
+        .expect("Benchmark setup: update_node should succeed with valid input");
     }
 
     group.bench_function("worst_case_9_deltas", |b| {
         b.iter(|| {
-            // Query at v9 (transaction time 9)
-            // This is worst case: anchor@v0 + 9 deltas (v1-v9), just before next anchor@v10
+            // Query at tx_time=9, valid_time=9
+            // Worst case: anchor@tx_time=0 + 9 deltas (tx_time 1-9), just before next anchor@10
             let result = db.get_node_at_time(black_box(node_id), black_box(9), black_box(9));
             black_box(result)
         })
