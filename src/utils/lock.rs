@@ -31,6 +31,24 @@ use parking_lot::{
     RwLockWriteGuard as ParkingLotRwLockWriteGuard,
 };
 
+/// Macro to track lock acquisitions for debugging and observability.
+///
+/// This macro is used to reduce code duplication across different lock
+/// implementations while maintaining debug-only tracking.
+macro_rules! track_lock_acquisition {
+    ($counter:ident, $lock_name:expr) => {
+        #[cfg(all(debug_assertions, feature = "observability"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static $counter: AtomicU64 = AtomicU64::new(0);
+            let count = $counter.fetch_add(1, Ordering::Relaxed);
+            if count.is_multiple_of(10000) {
+                tracing::debug!(count, concat!($lock_name, " acquisition count"));
+            }
+        }
+    };
+}
+
 /// Extension trait for `Mutex` providing graceful error handling.
 pub trait MutexExt<T> {
     /// Acquire the lock, returning an error if the lock is poisoned.
@@ -152,16 +170,7 @@ impl<T> RwLockExt<T> for RwLock<T> {
         T: 'a;
 
     fn read_or_err(&self) -> Result<RwLockReadGuard<'_, T>, Error> {
-        // Debug-only: Track read lock acquisitions
-        #[cfg(all(debug_assertions, feature = "observability"))]
-        {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static READ_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
-            let count = READ_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count.is_multiple_of(10000) {
-                tracing::debug!(count, "RwLock read acquisition count");
-            }
-        }
+        track_lock_acquisition!(READ_LOCK_COUNT, "std::sync::RwLock read");
 
         self.read().map_err(|_| {
             #[cfg(feature = "observability")]
@@ -183,16 +192,7 @@ impl<T> RwLockExt<T> for RwLock<T> {
     }
 
     fn write_or_err(&self) -> Result<RwLockWriteGuard<'_, T>, Error> {
-        // Debug-only: Track write lock acquisitions
-        #[cfg(all(debug_assertions, feature = "observability"))]
-        {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static WRITE_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
-            let count = WRITE_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count.is_multiple_of(10000) {
-                tracing::debug!(count, "RwLock write acquisition count");
-            }
-        }
+        track_lock_acquisition!(WRITE_LOCK_COUNT, "std::sync::RwLock write");
 
         self.write().map_err(|_| {
             #[cfg(feature = "observability")]
@@ -239,32 +239,14 @@ impl<T> RwLockExt<T> for ParkingLotRwLock<T> {
         T: 'a;
 
     fn read_or_err(&self) -> Result<ParkingLotRwLockReadGuard<'_, T>, Error> {
-        // Debug-only: Track read lock acquisitions
-        #[cfg(all(debug_assertions, feature = "observability"))]
-        {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static READ_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
-            let count = READ_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count.is_multiple_of(10000) {
-                tracing::debug!(count, "parking_lot::RwLock read acquisition count");
-            }
-        }
+        track_lock_acquisition!(PARKING_LOT_READ_LOCK_COUNT, "parking_lot::RwLock read");
 
         // parking_lot::RwLock doesn't have poisoning, so we just acquire the lock
         Ok(self.read())
     }
 
     fn write_or_err(&self) -> Result<ParkingLotRwLockWriteGuard<'_, T>, Error> {
-        // Debug-only: Track write lock acquisitions
-        #[cfg(all(debug_assertions, feature = "observability"))]
-        {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static WRITE_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
-            let count = WRITE_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
-            if count.is_multiple_of(10000) {
-                tracing::debug!(count, "parking_lot::RwLock write acquisition count");
-            }
-        }
+        track_lock_acquisition!(PARKING_LOT_WRITE_LOCK_COUNT, "parking_lot::RwLock write");
 
         // parking_lot::RwLock doesn't have poisoning, so we just acquire the lock
         Ok(self.write())
