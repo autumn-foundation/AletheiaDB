@@ -175,16 +175,22 @@ pub struct HistoricalStorage {
     /// This separate cache ensures anchors are never evicted by delta cache pressure,
     /// providing guaranteed O(1) access to anchors even under heavy load.
     edge_anchor_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
-    /// Improvement #3: Cache hit counter for adaptive sizing.
+    /// Improvement #3: Primary cache hit counter for adaptive sizing.
     ///
-    /// Tracks the number of successful cache lookups. Combined with miss counter,
-    /// this enables calculating cache hit rate for monitoring and capacity planning.
-    cache_hits: Arc<AtomicU64>,
-    /// Improvement #3: Cache miss counter for adaptive sizing.
+    /// Tracks successful lookups in the primary property cache (fast path).
+    /// This is the most common case for recently accessed properties.
+    primary_cache_hits: Arc<AtomicU64>,
+    /// Improvement #3: Anchor cache hit counter for adaptive sizing.
     ///
-    /// Tracks the number of cache misses requiring full reconstruction. Used with
-    /// hit counter to calculate hit rate and determine if cache should be resized.
-    cache_misses: Arc<AtomicU64>,
+    /// Tracks successful lookups in the dedicated anchor cache (fallback path).
+    /// High values indicate anchors are being evicted from primary cache under
+    /// delta pressure, suggesting the primary cache may need to be larger.
+    anchor_cache_hits: Arc<AtomicU64>,
+    /// Improvement #3: Full reconstruction counter for adaptive sizing.
+    ///
+    /// Tracks cache misses requiring full property reconstruction from deltas.
+    /// High values indicate insufficient cache capacity overall.
+    full_reconstructions: Arc<AtomicU64>,
     /// Observers subscribed to storage events
     ///
     /// Multiple components can observe storage events (anchors, deletes, etc.)
@@ -262,8 +268,9 @@ impl HistoricalStorage {
             edge_property_cache: Arc::new(Cache::new(cache_size)),
             node_anchor_cache: Arc::new(Cache::new(anchor_cache_size)),
             edge_anchor_cache: Arc::new(Cache::new(anchor_cache_size)),
-            cache_hits: Arc::new(AtomicU64::new(0)),
-            cache_misses: Arc::new(AtomicU64::new(0)),
+            primary_cache_hits: Arc::new(AtomicU64::new(0)),
+            anchor_cache_hits: Arc::new(AtomicU64::new(0)),
+            full_reconstructions: Arc::new(AtomicU64::new(0)),
             observers: Vec::new(),
             pre_node_anchor_hook: None,
             pre_edge_anchor_hook: None,
@@ -525,6 +532,12 @@ impl HistoricalStorage {
         // If this is an anchor, immediately cache its properties in the dedicated anchor cache
         // for zero reconstruction overhead. The dedicated cache ensures anchors are never evicted
         // by delta cache pressure, providing guaranteed O(1) access even under heavy load.
+        //
+        // THREAD SAFETY: Sequential insertion into both caches is safe because:
+        // 1. add_node_version requires &mut self, ensuring exclusive access during insertion
+        // 2. Both caches hold immutable Arc<PropertyMap>, so concurrent reads are safe
+        // 3. Any race between insertion and reconstruction affects only performance (redundant
+        //    cache population), not correctness - both operations work with the same Arc data
         if is_anchor {
             let props_arc = Arc::new(properties_for_hook);
             // Add to dedicated anchor cache (Improvement #1: guaranteed isolation)
@@ -696,6 +709,12 @@ impl HistoricalStorage {
         // If this is an anchor, immediately cache its properties in the dedicated anchor cache
         // for zero reconstruction overhead. The dedicated cache ensures anchors are never evicted
         // by delta cache pressure, providing guaranteed O(1) access even under heavy load.
+        //
+        // THREAD SAFETY: Sequential insertion into both caches is safe because:
+        // 1. add_edge_version requires &mut self, ensuring exclusive access during insertion
+        // 2. Both caches hold immutable Arc<PropertyMap>, so concurrent reads are safe
+        // 3. Any race between insertion and reconstruction affects only performance (redundant
+        //    cache population), not correctness - both operations work with the same Arc data
         if is_anchor {
             let props_arc = Arc::new(properties_for_hook);
             // Add to dedicated anchor cache (Improvement #1: guaranteed isolation)
@@ -785,13 +804,13 @@ impl HistoricalStorage {
         // This fallback only triggers after regular cache eviction, providing
         // guaranteed O(1) anchor access even under heavy cache pressure.
         if let Some(cached) = self.node_property_cache.get(&version_id) {
-            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(cached.as_ref().clone());
         }
 
         // Fallback to dedicated anchor cache (survives delta cache pressure)
         if let Some(cached) = self.node_anchor_cache.get(&version_id) {
-            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
             // Re-populate main cache to make this anchor "hot" again
             // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
             self.node_property_cache.insert(version_id, cached.clone());
@@ -799,7 +818,7 @@ impl HistoricalStorage {
         }
 
         // Cache miss - reconstruct properties
-        self.cache_misses.fetch_add(1, Ordering::Relaxed);
+        self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
         let version = self
             .node_versions
             .get(&version_id)
@@ -886,13 +905,13 @@ impl HistoricalStorage {
         // This fallback only triggers after regular cache eviction, providing
         // guaranteed O(1) anchor access even under heavy cache pressure.
         if let Some(cached) = self.edge_property_cache.get(&version_id) {
-            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(cached.as_ref().clone());
         }
 
         // Fallback to dedicated anchor cache (survives delta cache pressure)
         if let Some(cached) = self.edge_anchor_cache.get(&version_id) {
-            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
             // Re-populate main cache to make this anchor "hot" again
             // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
             self.edge_property_cache.insert(version_id, cached.clone());
@@ -900,7 +919,7 @@ impl HistoricalStorage {
         }
 
         // Cache miss - reconstruct properties
-        self.cache_misses.fetch_add(1, Ordering::Relaxed);
+        self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
         let version = self
             .edge_versions
             .get(&version_id)
@@ -1185,33 +1204,46 @@ impl HistoricalStorage {
 
     /// Get cache performance metrics (Improvement #3: Adaptive Cache Sizing).
     ///
-    /// Returns the number of cache hits and misses since the storage was created.
-    /// This can be used to calculate cache hit rate and determine if the cache
-    /// should be resized for better performance.
+    /// Returns granular cache performance metrics that show:
+    /// - Primary cache hits (fast path)
+    /// - Anchor cache hits (fallback path)
+    /// - Full reconstructions (slow path)
     ///
-    /// # Returns
-    /// A tuple of (hits, misses)
+    /// This provides actionable insights for cache tuning:
+    /// - High anchor_cache_hits → increase primary cache size
+    /// - High full_reconstructions → increase overall cache capacity
     ///
     /// # Example
     /// ```no_run
     /// # use gallifreydb::storage::historical::HistoricalStorage;
     /// let storage = HistoricalStorage::new();
     /// // ... perform some operations ...
-    /// let (hits, misses) = storage.cache_metrics();
-    /// let total = hits + misses;
-    /// if total > 0 {
-    ///     let hit_rate = hits as f64 / total as f64;
-    ///     println!("Cache hit rate: {:.2}%", hit_rate * 100.0);
+    /// let metrics = storage.cache_metrics();
     ///
-    ///     if hit_rate < 0.8 {
-    ///         println!("Warning: Cache hit rate below 80%, consider increasing cache size");
+    /// if let Some(hit_rate) = metrics.hit_rate() {
+    ///     println!("Overall cache hit rate: {:.2}%", hit_rate * 100.0);
+    /// }
+    ///
+    /// if let Some(fallback_rate) = metrics.anchor_fallback_rate() {
+    ///     if fallback_rate > 0.2 {
+    ///         println!("Warning: High anchor cache fallback rate ({:.2}%), \
+    ///                   consider increasing primary cache size", fallback_rate * 100.0);
+    ///     }
+    /// }
+    ///
+    /// if let Some(recon_rate) = metrics.reconstruction_rate() {
+    ///     if recon_rate > 0.2 {
+    ///         println!("Warning: High reconstruction rate ({:.2}%), \
+    ///                   increase overall cache size", recon_rate * 100.0);
     ///     }
     /// }
     /// ```
-    pub fn cache_metrics(&self) -> (u64, u64) {
-        let hits = self.cache_hits.load(Ordering::Relaxed);
-        let misses = self.cache_misses.load(Ordering::Relaxed);
-        (hits, misses)
+    pub fn cache_metrics(&self) -> CacheMetrics {
+        CacheMetrics {
+            primary_cache_hits: self.primary_cache_hits.load(Ordering::Relaxed),
+            anchor_cache_hits: self.anchor_cache_hits.load(Ordering::Relaxed),
+            full_reconstructions: self.full_reconstructions.load(Ordering::Relaxed),
+        }
     }
 
     /// Calculate the cache hit rate as a percentage (Improvement #3).
@@ -1229,13 +1261,7 @@ impl HistoricalStorage {
     /// }
     /// ```
     pub fn cache_hit_rate(&self) -> Option<f64> {
-        let (hits, misses) = self.cache_metrics();
-        let total = hits + misses;
-        if total == 0 {
-            None
-        } else {
-            Some(hits as f64 / total as f64)
-        }
+        self.cache_metrics().hit_rate()
     }
 
     /// Check if the cache should be resized based on hit rate (Improvement #3).
@@ -1267,15 +1293,15 @@ impl HistoricalStorage {
     /// }
     /// ```
     pub fn should_resize_cache(&self, threshold: f64, min_operations: u64) -> Option<f64> {
-        let (hits, misses) = self.cache_metrics();
-        let total = hits + misses;
+        let metrics = self.cache_metrics();
+        let total = metrics.total_operations();
 
         // Need enough operations to make meaningful assessment
         if total < min_operations {
             return None;
         }
 
-        let hit_rate = hits as f64 / total as f64;
+        let hit_rate = metrics.hit_rate().unwrap_or(0.0);
 
         if hit_rate < threshold {
             Some(hit_rate)
@@ -1302,6 +1328,84 @@ impl HistoricalStorage {
 impl Default for HistoricalStorage {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Cache performance metrics (Issue #338: Improvement #3).
+///
+/// Provides granular insight into cache behavior:
+/// - `primary_cache_hits`: Fast path hits (most common)
+/// - `anchor_cache_hits`: Fallback hits (indicates primary cache pressure)
+/// - `full_reconstructions`: Slow path (indicates insufficient cache capacity)
+///
+/// # Interpretation
+/// - High `anchor_cache_hits` + low `primary_cache_hits` → increase primary cache size
+/// - High `full_reconstructions` → increase overall cache capacity
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheMetrics {
+    /// Number of successful lookups in primary property cache (fast path)
+    pub primary_cache_hits: u64,
+    /// Number of successful lookups in anchor cache fallback
+    pub anchor_cache_hits: u64,
+    /// Number of full property reconstructions from deltas
+    pub full_reconstructions: u64,
+}
+
+impl CacheMetrics {
+    /// Calculate total cache operations (hits + reconstructions).
+    pub fn total_operations(&self) -> u64 {
+        self.primary_cache_hits + self.anchor_cache_hits + self.full_reconstructions
+    }
+
+    /// Calculate overall cache hit rate (0.0 to 1.0).
+    ///
+    /// Returns None if no operations have been performed yet.
+    pub fn hit_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some((self.primary_cache_hits + self.anchor_cache_hits) as f64 / total as f64)
+        }
+    }
+
+    /// Calculate primary cache hit rate (0.0 to 1.0).
+    ///
+    /// This shows how often the primary cache is sufficient without fallback.
+    /// Returns None if no operations have been performed yet.
+    pub fn primary_hit_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some(self.primary_cache_hits as f64 / total as f64)
+        }
+    }
+
+    /// Calculate anchor cache fallback rate (0.0 to 1.0).
+    ///
+    /// This shows how often we need to fall back to the anchor cache.
+    /// High values indicate the primary cache is under pressure.
+    pub fn anchor_fallback_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some(self.anchor_cache_hits as f64 / total as f64)
+        }
+    }
+
+    /// Calculate reconstruction rate (0.0 to 1.0).
+    ///
+    /// This shows how often we need to perform full reconstruction.
+    /// High values indicate insufficient overall cache capacity.
+    pub fn reconstruction_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some(self.full_reconstructions as f64 / total as f64)
+        }
     }
 }
 
@@ -1345,6 +1449,48 @@ impl HistoricalStats {
         }
 
         total_anchors as f64 / total_versions as f64
+    }
+
+    /// Estimate total cache memory usage in bytes (Issue #338: Memory Accounting).
+    ///
+    /// Provides rough estimate of memory consumed by all caches. Actual memory
+    /// usage may vary based on property sizes, Arc overhead, and allocator behavior.
+    ///
+    /// # Formula
+    /// Per entry overhead:
+    /// - VersionId: 8 bytes
+    /// - Arc pointer: 8 bytes
+    /// - PropertyMap overhead: ~16 bytes
+    /// - Average property data: ~100 bytes (varies by use case)
+    /// - Total: ~132 bytes per entry (rounded to 150 for safety margin)
+    ///
+    /// # Returns
+    /// Estimated bytes used by all caches (primary + anchor)
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// let storage = HistoricalStorage::new();
+    /// // ... perform operations ...
+    /// let stats = storage.stats();
+    /// let bytes = stats.estimated_cache_memory_bytes();
+    /// println!("Cache using ~{:.2} MB", bytes as f64 / 1_048_576.0);
+    /// ```
+    pub fn estimated_cache_memory_bytes(&self) -> usize {
+        // Rough estimate per cache entry:
+        // - VersionId (u64): 8 bytes
+        // - Arc<PropertyMap> pointer: 8 bytes
+        // - PropertyMap struct overhead: ~16 bytes
+        // - Average property data: ~100 bytes (varies widely)
+        // Total: ~132 bytes, rounded to 150 for safety margin
+        const BYTES_PER_ENTRY: usize = 150;
+
+        let total_entries = self.node_cache_entries
+            + self.edge_cache_entries
+            + self.node_anchor_cache_entries
+            + self.edge_anchor_cache_entries;
+
+        total_entries * BYTES_PER_ENTRY
     }
 }
 
@@ -3754,8 +3900,11 @@ mod tests {
         }
 
         // Check cache metrics
-        let (hits, misses) = storage.cache_metrics();
-        assert!(hits > 0 || misses > 0, "Should have cache operations");
+        let metrics = storage.cache_metrics();
+        assert!(
+            metrics.total_operations() > 0,
+            "Should have cache operations"
+        );
 
         // Check if adaptive resizing recommends increasing cache size
         // With only 10 cache slots and 50 versions, hit rate should be low
@@ -3863,8 +4012,11 @@ mod tests {
         }
 
         // Verify cache metrics are being tracked
-        let (hits, misses) = storage.cache_metrics();
-        assert!(hits + misses > 0, "Should have cache operations");
+        let metrics = storage.cache_metrics();
+        assert!(
+            metrics.total_operations() > 0,
+            "Should have cache operations"
+        );
 
         // With good cache size (100) and sequential access, hit rate should be decent
         if let Some(hit_rate) = storage.cache_hit_rate() {
