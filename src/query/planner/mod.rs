@@ -196,7 +196,8 @@ impl QueryPlanner {
             }
 
             QueryOp::SimilarTo { source_node, k } => {
-                // TODO: SimilarTo requires multi-step planning:
+                // See issue #308: Implement SimilarTo operation
+                // SimilarTo requires multi-step planning:
                 // 1. Lookup source node to extract its embedding
                 // 2. Perform vector search with that embedding
                 // This requires runtime embedding extraction which isn't supported yet.
@@ -375,10 +376,10 @@ impl QueryPlanner {
     ///
     /// # Limitations
     ///
-    /// TODO: This function does not validate that required indexes exist (e.g., vector index
+    /// See issue #309: This function does not validate that required indexes exist (e.g., vector index
     /// for HnswSearch). Validation happens at execution time in the executor. For better
     /// error messages, the planner should receive a reference to CurrentStorage to check
-    /// index availability during planning. See issue for future improvement.
+    /// index availability during planning.
     fn scan_to_physical(
         &self,
         scan: &ScanOp,
