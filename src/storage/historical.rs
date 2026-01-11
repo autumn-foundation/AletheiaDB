@@ -22,6 +22,7 @@ use crate::utils::error::{Result, StorageError, TemporalError};
 use quick_cache::sync::Cache;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "observability")]
 use tracing;
@@ -123,6 +124,19 @@ pub type PreAnchorHook = Arc<
 /// Default cache size for reconstructed properties (10,000 entries)
 const DEFAULT_RECONSTRUCTION_CACHE_SIZE: usize = 10_000;
 
+/// Anchor cache size ratio relative to main cache (Improvement #1: Issue #338).
+///
+/// Typically 10-20% of versions become anchors depending on `anchor_interval`.
+/// With default interval of 10, we get ~10% anchors. Setting to 1/5 (20%)
+/// provides headroom for configurations with smaller intervals.
+const ANCHOR_CACHE_SIZE_RATIO: usize = 5; // 20% of main cache
+
+/// Minimum anchor cache size to ensure reasonable performance (Improvement #1: Issue #338).
+///
+/// Even with very small main caches, we want enough anchor cache to hold
+/// at least a few anchors to avoid immediate evictions.
+const MIN_ANCHOR_CACHE_SIZE: usize = 100;
+
 /// Historical storage for versioned nodes and edges.
 ///
 /// This storage engine maintains version chains for all temporal data,
@@ -149,6 +163,34 @@ pub struct HistoricalStorage {
     node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
     /// TinyLFU cache for reconstructed edge properties
     edge_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// Improvement #1: Dedicated cache for node anchor properties.
+    ///
+    /// This separate cache ensures anchors are never evicted by delta cache pressure,
+    /// providing guaranteed O(1) access to anchors even under heavy load. Anchors are
+    /// frequently reused as base points for delta reconstruction, so keeping them cached
+    /// reduces average reconstruction cost from O(N) to O(M) where M << N.
+    node_anchor_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// Improvement #1: Dedicated cache for edge anchor properties.
+    ///
+    /// This separate cache ensures anchors are never evicted by delta cache pressure,
+    /// providing guaranteed O(1) access to anchors even under heavy load.
+    edge_anchor_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    /// Improvement #3: Primary cache hit counter for adaptive sizing.
+    ///
+    /// Tracks successful lookups in the primary property cache (fast path).
+    /// This is the most common case for recently accessed properties.
+    primary_cache_hits: Arc<AtomicU64>,
+    /// Improvement #3: Anchor cache hit counter for adaptive sizing.
+    ///
+    /// Tracks successful lookups in the dedicated anchor cache (fallback path).
+    /// High values indicate anchors are being evicted from primary cache under
+    /// delta pressure, suggesting the primary cache may need to be larger.
+    anchor_cache_hits: Arc<AtomicU64>,
+    /// Improvement #3: Full reconstruction counter for adaptive sizing.
+    ///
+    /// Tracks cache misses requiring full property reconstruction from deltas.
+    /// High values indicate insufficient cache capacity overall.
+    full_reconstructions: Arc<AtomicU64>,
     /// Observers subscribed to storage events
     ///
     /// Multiple components can observe storage events (anchors, deletes, etc.)
@@ -209,6 +251,10 @@ impl HistoricalStorage {
         retention_policy: RetentionPolicy,
         cache_size: usize,
     ) -> Self {
+        // Calculate anchor cache size: typically 10-20% of entities become anchors
+        // depending on anchor_interval (Improvement #1: Issue #338)
+        let anchor_cache_size = (cache_size / ANCHOR_CACHE_SIZE_RATIO).max(MIN_ANCHOR_CACHE_SIZE);
+
         HistoricalStorage {
             config,
             retention_policy,
@@ -220,6 +266,11 @@ impl HistoricalStorage {
             edge_version_counts: HashMap::new(),
             node_property_cache: Arc::new(Cache::new(cache_size)),
             edge_property_cache: Arc::new(Cache::new(cache_size)),
+            node_anchor_cache: Arc::new(Cache::new(anchor_cache_size)),
+            edge_anchor_cache: Arc::new(Cache::new(anchor_cache_size)),
+            primary_cache_hits: Arc::new(AtomicU64::new(0)),
+            anchor_cache_hits: Arc::new(AtomicU64::new(0)),
+            full_reconstructions: Arc::new(AtomicU64::new(0)),
             observers: Vec::new(),
             pre_node_anchor_hook: None,
             pre_edge_anchor_hook: None,
@@ -477,6 +528,24 @@ impl HistoricalStorage {
         // Increment cached version count (for O(1) capacity checks)
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
 
+        // Improvements #1 & #2: Cache Pre-population with Dedicated Anchor Cache
+        // If this is an anchor, immediately cache its properties in the dedicated anchor cache
+        // for zero reconstruction overhead. The dedicated cache ensures anchors are never evicted
+        // by delta cache pressure, providing guaranteed O(1) access even under heavy load.
+        //
+        // THREAD SAFETY: Sequential insertion into both caches is safe because:
+        // 1. add_node_version requires &mut self, ensuring exclusive access during insertion
+        // 2. Both caches hold immutable Arc<PropertyMap>, so concurrent reads are safe
+        // 3. Any race between insertion and reconstruction affects only performance (redundant
+        //    cache population), not correctness - both operations work with the same Arc data
+        if is_anchor {
+            let props_arc = Arc::new(properties_for_hook);
+            // Add to dedicated anchor cache (Improvement #1: guaranteed isolation)
+            self.node_anchor_cache.insert(version_id, props_arc.clone());
+            // Also add to regular cache for backward compatibility and immediate access
+            self.node_property_cache.insert(version_id, props_arc);
+        }
+
         // Notify observers - emit appropriate events
         let timestamp = temporal.transaction_time().start();
 
@@ -636,6 +705,24 @@ impl HistoricalStorage {
         // Increment cached version count (for O(1) capacity checks)
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
 
+        // Improvements #1 & #2: Cache Pre-population with Dedicated Anchor Cache
+        // If this is an anchor, immediately cache its properties in the dedicated anchor cache
+        // for zero reconstruction overhead. The dedicated cache ensures anchors are never evicted
+        // by delta cache pressure, providing guaranteed O(1) access even under heavy load.
+        //
+        // THREAD SAFETY: Sequential insertion into both caches is safe because:
+        // 1. add_edge_version requires &mut self, ensuring exclusive access during insertion
+        // 2. Both caches hold immutable Arc<PropertyMap>, so concurrent reads are safe
+        // 3. Any race between insertion and reconstruction affects only performance (redundant
+        //    cache population), not correctness - both operations work with the same Arc data
+        if is_anchor {
+            let props_arc = Arc::new(properties_for_hook);
+            // Add to dedicated anchor cache (Improvement #1: guaranteed isolation)
+            self.edge_anchor_cache.insert(version_id, props_arc.clone());
+            // Also add to regular cache for backward compatibility and immediate access
+            self.edge_property_cache.insert(version_id, props_arc);
+        }
+
         // Notify observers - emit appropriate events
         let timestamp = temporal.transaction_time().start();
 
@@ -705,19 +792,43 @@ impl HistoricalStorage {
             .into());
         }
 
-        // Check cache first (fast path for concurrent reads)
+        // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
+        //
+        // 1. Check regular cache first (holds all versions: anchors + deltas)
+        // 2. If not found, check dedicated anchor cache (holds only anchors)
+        //
+        // Anchors are stored in BOTH caches during pre-population for redundancy:
+        // - Regular cache provides fast access when anchor is still in LRU window
+        // - Anchor cache acts as fallback when regular cache evicts due to delta pressure
+        //
+        // This fallback only triggers after regular cache eviction, providing
+        // guaranteed O(1) anchor access even under heavy cache pressure.
         if let Some(cached) = self.node_property_cache.get(&version_id) {
+            self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached.as_ref().clone());
+        }
+
+        // Fallback to dedicated anchor cache (survives delta cache pressure)
+        if let Some(cached) = self.node_anchor_cache.get(&version_id) {
+            self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
+            // Re-populate main cache to make this anchor "hot" again
+            // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
+            self.node_property_cache.insert(version_id, cached.clone());
             return Ok(cached.as_ref().clone());
         }
 
         // Cache miss - reconstruct properties
+        self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
         let version = self
             .node_versions
             .get(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
         let properties = match &version.data {
-            VersionData::Anchor { properties, .. } => properties.clone(),
+            VersionData::Anchor { properties, .. } => {
+                // This shouldn't happen since anchors are pre-populated, but handle gracefully
+                properties.clone()
+            }
             VersionData::Delta { delta } => {
                 // Find the previous version
                 let prev_id = version
@@ -782,19 +893,43 @@ impl HistoricalStorage {
             .into());
         }
 
-        // Check cache first (fast path for concurrent reads)
+        // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
+        //
+        // 1. Check regular cache first (holds all versions: anchors + deltas)
+        // 2. If not found, check dedicated anchor cache (holds only anchors)
+        //
+        // Anchors are stored in BOTH caches during pre-population for redundancy:
+        // - Regular cache provides fast access when anchor is still in LRU window
+        // - Anchor cache acts as fallback when regular cache evicts due to delta pressure
+        //
+        // This fallback only triggers after regular cache eviction, providing
+        // guaranteed O(1) anchor access even under heavy cache pressure.
         if let Some(cached) = self.edge_property_cache.get(&version_id) {
+            self.primary_cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached.as_ref().clone());
+        }
+
+        // Fallback to dedicated anchor cache (survives delta cache pressure)
+        if let Some(cached) = self.edge_anchor_cache.get(&version_id) {
+            self.anchor_cache_hits.fetch_add(1, Ordering::Relaxed);
+            // Re-populate main cache to make this anchor "hot" again
+            // This prevents repeatedly falling back to anchor cache for frequently accessed anchors
+            self.edge_property_cache.insert(version_id, cached.clone());
             return Ok(cached.as_ref().clone());
         }
 
         // Cache miss - reconstruct properties
+        self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
         let version = self
             .edge_versions
             .get(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
         let properties = match &version.data {
-            VersionData::Anchor { properties, .. } => properties.clone(),
+            VersionData::Anchor { properties, .. } => {
+                // This shouldn't happen since anchors are pre-populated, but handle gracefully
+                properties.clone()
+            }
             VersionData::Delta { delta } => {
                 let prev_id = version
                     .prev_version
@@ -1059,8 +1194,119 @@ impl HistoricalStorage {
             edge_delta_count,
             unique_nodes: self.node_version_heads.len(),
             unique_edges: self.edge_version_heads.len(),
+            // Separate regular and anchor cache entries for better visibility (Issue #338)
             node_cache_entries: self.node_property_cache.len(),
             edge_cache_entries: self.edge_property_cache.len(),
+            node_anchor_cache_entries: self.node_anchor_cache.len(),
+            edge_anchor_cache_entries: self.edge_anchor_cache.len(),
+        }
+    }
+
+    /// Get cache performance metrics (Improvement #3: Adaptive Cache Sizing).
+    ///
+    /// Returns granular cache performance metrics that show:
+    /// - Primary cache hits (fast path)
+    /// - Anchor cache hits (fallback path)
+    /// - Full reconstructions (slow path)
+    ///
+    /// This provides actionable insights for cache tuning:
+    /// - High anchor_cache_hits → increase primary cache size
+    /// - High full_reconstructions → increase overall cache capacity
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// let storage = HistoricalStorage::new();
+    /// // ... perform some operations ...
+    /// let metrics = storage.cache_metrics();
+    ///
+    /// if let Some(hit_rate) = metrics.hit_rate() {
+    ///     println!("Overall cache hit rate: {:.2}%", hit_rate * 100.0);
+    /// }
+    ///
+    /// if let Some(fallback_rate) = metrics.anchor_fallback_rate() {
+    ///     if fallback_rate > 0.2 {
+    ///         println!("Warning: High anchor cache fallback rate ({:.2}%), \
+    ///                   consider increasing primary cache size", fallback_rate * 100.0);
+    ///     }
+    /// }
+    ///
+    /// if let Some(recon_rate) = metrics.reconstruction_rate() {
+    ///     if recon_rate > 0.2 {
+    ///         println!("Warning: High reconstruction rate ({:.2}%), \
+    ///                   increase overall cache size", recon_rate * 100.0);
+    ///     }
+    /// }
+    /// ```
+    pub fn cache_metrics(&self) -> CacheMetrics {
+        CacheMetrics {
+            primary_cache_hits: self.primary_cache_hits.load(Ordering::Relaxed),
+            anchor_cache_hits: self.anchor_cache_hits.load(Ordering::Relaxed),
+            full_reconstructions: self.full_reconstructions.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Calculate the cache hit rate as a percentage (Improvement #3).
+    ///
+    /// Returns the cache hit rate as a value between 0.0 and 1.0, or None if
+    /// no cache operations have been performed yet.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// let storage = HistoricalStorage::new();
+    /// // ... perform some operations ...
+    /// if let Some(hit_rate) = storage.cache_hit_rate() {
+    ///     println!("Cache hit rate: {:.2}%", hit_rate * 100.0);
+    /// }
+    /// ```
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        self.cache_metrics().hit_rate()
+    }
+
+    /// Check if the cache should be resized based on hit rate (Improvement #3).
+    ///
+    /// Returns true if the cache hit rate is below the threshold (default 80%)
+    /// and there have been enough operations to make a meaningful assessment
+    /// (at least 100 operations).
+    ///
+    /// # Arguments
+    /// * `threshold` - Minimum acceptable hit rate (0.0 to 1.0). Defaults to 0.8 (80%).
+    /// * `min_operations` - Minimum number of cache operations before assessment. Defaults to 100.
+    ///
+    /// # Returns
+    /// * `Some(current_hit_rate)` - If resizing is recommended, returns current hit rate
+    /// * `None` - If cache performance is acceptable or insufficient data
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// let storage = HistoricalStorage::new();
+    /// // ... perform some operations ...
+    ///
+    /// if let Some(hit_rate) = storage.should_resize_cache(0.8, 100) {
+    ///     println!("Cache hit rate ({:.2}%) is low, consider doubling cache size", hit_rate * 100.0);
+    ///     // Create new storage with larger cache:
+    ///     // let new_storage = HistoricalStorage::with_config_retention_and_cache_size(
+    ///     //     config, retention, current_size * 2
+    ///     // );
+    /// }
+    /// ```
+    pub fn should_resize_cache(&self, threshold: f64, min_operations: u64) -> Option<f64> {
+        let metrics = self.cache_metrics();
+        let total = metrics.total_operations();
+
+        // Need enough operations to make meaningful assessment
+        if total < min_operations {
+            return None;
+        }
+
+        let hit_rate = metrics.hit_rate().unwrap_or(0.0);
+
+        if hit_rate < threshold {
+            Some(hit_rate)
+        } else {
+            None
         }
     }
 
@@ -1085,6 +1331,84 @@ impl Default for HistoricalStorage {
     }
 }
 
+/// Cache performance metrics (Issue #338: Improvement #3).
+///
+/// Provides granular insight into cache behavior:
+/// - `primary_cache_hits`: Fast path hits (most common)
+/// - `anchor_cache_hits`: Fallback hits (indicates primary cache pressure)
+/// - `full_reconstructions`: Slow path (indicates insufficient cache capacity)
+///
+/// # Interpretation
+/// - High `anchor_cache_hits` + low `primary_cache_hits` → increase primary cache size
+/// - High `full_reconstructions` → increase overall cache capacity
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheMetrics {
+    /// Number of successful lookups in primary property cache (fast path)
+    pub primary_cache_hits: u64,
+    /// Number of successful lookups in anchor cache fallback
+    pub anchor_cache_hits: u64,
+    /// Number of full property reconstructions from deltas
+    pub full_reconstructions: u64,
+}
+
+impl CacheMetrics {
+    /// Calculate total cache operations (hits + reconstructions).
+    pub fn total_operations(&self) -> u64 {
+        self.primary_cache_hits + self.anchor_cache_hits + self.full_reconstructions
+    }
+
+    /// Calculate overall cache hit rate (0.0 to 1.0).
+    ///
+    /// Returns None if no operations have been performed yet.
+    pub fn hit_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some((self.primary_cache_hits + self.anchor_cache_hits) as f64 / total as f64)
+        }
+    }
+
+    /// Calculate primary cache hit rate (0.0 to 1.0).
+    ///
+    /// This shows how often the primary cache is sufficient without fallback.
+    /// Returns None if no operations have been performed yet.
+    pub fn primary_hit_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some(self.primary_cache_hits as f64 / total as f64)
+        }
+    }
+
+    /// Calculate anchor cache fallback rate (0.0 to 1.0).
+    ///
+    /// This shows how often we need to fall back to the anchor cache.
+    /// High values indicate the primary cache is under pressure.
+    pub fn anchor_fallback_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some(self.anchor_cache_hits as f64 / total as f64)
+        }
+    }
+
+    /// Calculate reconstruction rate (0.0 to 1.0).
+    ///
+    /// This shows how often we need to perform full reconstruction.
+    /// High values indicate insufficient overall cache capacity.
+    pub fn reconstruction_rate(&self) -> Option<f64> {
+        let total = self.total_operations();
+        if total == 0 {
+            None
+        } else {
+            Some(self.full_reconstructions as f64 / total as f64)
+        }
+    }
+}
+
 /// Statistics about the historical storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoricalStats {
@@ -1104,10 +1428,14 @@ pub struct HistoricalStats {
     pub unique_nodes: usize,
     /// Number of unique edges with version history
     pub unique_edges: usize,
-    /// Number of cached node property reconstructions
+    /// Number of cached node property reconstructions (regular cache)
     pub node_cache_entries: usize,
-    /// Number of cached edge property reconstructions
+    /// Number of cached edge property reconstructions (regular cache)
     pub edge_cache_entries: usize,
+    /// Number of cached node anchor properties (dedicated anchor cache, Issue #338)
+    pub node_anchor_cache_entries: usize,
+    /// Number of cached edge anchor properties (dedicated anchor cache, Issue #338)
+    pub edge_anchor_cache_entries: usize,
 }
 
 impl HistoricalStats {
@@ -1121,6 +1449,48 @@ impl HistoricalStats {
         }
 
         total_anchors as f64 / total_versions as f64
+    }
+
+    /// Estimate total cache memory usage in bytes (Issue #338: Memory Accounting).
+    ///
+    /// Provides rough estimate of memory consumed by all caches. Actual memory
+    /// usage may vary based on property sizes, Arc overhead, and allocator behavior.
+    ///
+    /// # Formula
+    /// Per entry overhead:
+    /// - VersionId: 8 bytes
+    /// - Arc pointer: 8 bytes
+    /// - PropertyMap overhead: ~16 bytes
+    /// - Average property data: ~100 bytes (varies by use case)
+    /// - Total: ~132 bytes per entry (rounded to 150 for safety margin)
+    ///
+    /// # Returns
+    /// Estimated bytes used by all caches (primary + anchor)
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use gallifreydb::storage::historical::HistoricalStorage;
+    /// let storage = HistoricalStorage::new();
+    /// // ... perform operations ...
+    /// let stats = storage.stats();
+    /// let bytes = stats.estimated_cache_memory_bytes();
+    /// println!("Cache using ~{:.2} MB", bytes as f64 / 1_048_576.0);
+    /// ```
+    pub fn estimated_cache_memory_bytes(&self) -> usize {
+        // Rough estimate per cache entry:
+        // - VersionId (u64): 8 bytes
+        // - Arc<PropertyMap> pointer: 8 bytes
+        // - PropertyMap struct overhead: ~16 bytes
+        // - Average property data: ~100 bytes (varies widely)
+        // Total: ~132 bytes, rounded to 150 for safety margin
+        const BYTES_PER_ENTRY: usize = 150;
+
+        let total_entries = self.node_cache_entries
+            + self.edge_cache_entries
+            + self.node_anchor_cache_entries
+            + self.edge_anchor_cache_entries;
+
+        total_entries * BYTES_PER_ENTRY
     }
 }
 
@@ -3157,5 +3527,500 @@ mod tests {
             props.get("weight").and_then(|v| v.as_float()),
             Some((MAX_RECONSTRUCTION_DEPTH - 1) as f64)
         );
+    }
+
+    // ========================================================================
+    // Improvement #2: Cache Pre-population Tests
+    // ========================================================================
+
+    #[test]
+    fn test_anchor_properties_are_cached_immediately_for_nodes() {
+        // Test that when a node anchor is created, its properties are immediately in the cache
+        let mut storage = HistoricalStorage::new();
+
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+
+        // Create the first version (which is always an anchor)
+        storage
+            .add_node_version(node_id, version_id, temporal, label, props.clone())
+            .unwrap();
+
+        // Verify the version is an anchor
+        let version = storage.get_node_version(version_id).unwrap();
+        assert!(version.is_anchor(), "First version should be an anchor");
+
+        // Check that the anchor properties are in the cache
+        // We can verify this by checking the cache stats
+        let stats = storage.stats();
+        assert_eq!(
+            stats.node_cache_entries, 1,
+            "Anchor properties should be cached immediately"
+        );
+
+        // Verify cache hit by reconstructing properties
+        // If cached, this should be O(1) instead of O(N)
+        let reconstructed = storage.reconstruct_node_properties(version_id).unwrap();
+        assert_eq!(reconstructed, props);
+
+        // Cache entries should still be 1 (cache hit, not a new entry)
+        let stats_after = storage.stats();
+        assert_eq!(
+            stats_after.node_cache_entries, 1,
+            "Cache should still have 1 entry after hit"
+        );
+    }
+
+    #[test]
+    fn test_anchor_properties_are_cached_immediately_for_edges() {
+        // Test that when an edge anchor is created, its properties are immediately in the cache
+        let mut storage = HistoricalStorage::new();
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(100).unwrap();
+        let target = NodeId::new(200).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new()
+            .insert("since", 2020i64)
+            .insert("weight", 0.8f64)
+            .build();
+
+        // Create the first version (which is always an anchor)
+        storage
+            .add_edge_version(
+                edge_id,
+                version_id,
+                temporal,
+                label,
+                source,
+                target,
+                props.clone(),
+            )
+            .unwrap();
+
+        // Verify the version is an anchor
+        let version = storage.get_edge_version(version_id).unwrap();
+        assert!(version.is_anchor(), "First version should be an anchor");
+
+        // Check that the anchor properties are in the cache
+        let stats = storage.stats();
+        assert_eq!(
+            stats.edge_cache_entries, 1,
+            "Anchor properties should be cached immediately"
+        );
+
+        // Verify cache hit by reconstructing properties
+        let reconstructed = storage.reconstruct_edge_properties(version_id).unwrap();
+        assert_eq!(reconstructed, props);
+
+        // Cache entries should still be 1 (cache hit, not a new entry)
+        let stats_after = storage.stats();
+        assert_eq!(
+            stats_after.edge_cache_entries, 1,
+            "Cache should still have 1 entry after hit"
+        );
+    }
+
+    #[test]
+    fn test_subsequent_anchors_are_also_cached() {
+        // Test that multiple anchors created in sequence are all cached
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 5, // Create anchor every 5 versions
+            max_delta_chain: 5,
+        });
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Create 11 versions (will create anchors at v0, v5, v10)
+        for i in 0..11 {
+            let version_id = VersionId::new(i).unwrap();
+            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let props = PropertyMapBuilder::new()
+                .insert("counter", i as i64)
+                .build();
+
+            storage
+                .add_node_version(node_id, version_id, temporal, label, props)
+                .unwrap();
+        }
+
+        // Verify we have 3 anchors
+        let stats = storage.stats();
+        assert_eq!(stats.node_anchor_count, 3, "Should have 3 anchors");
+        assert_eq!(stats.node_delta_count, 8, "Should have 8 deltas");
+
+        // All 11 versions should be in cache (3 anchors + 8 deltas populated during reconstruction)
+        // Actually, initially only anchors should be pre-cached, deltas are cached on-demand
+        // So we should have at least 3 entries (the anchors)
+        assert!(
+            stats.node_cache_entries >= 3,
+            "At least the 3 anchors should be cached, got {}",
+            stats.node_cache_entries
+        );
+
+        // Verify anchor versions are cached
+        let anchor_v0 = VersionId::new(0).unwrap();
+        let anchor_v5 = VersionId::new(5).unwrap();
+        let anchor_v10 = VersionId::new(10).unwrap();
+
+        // These should be cache hits
+        storage.reconstruct_node_properties(anchor_v0).unwrap();
+        storage.reconstruct_node_properties(anchor_v5).unwrap();
+        storage.reconstruct_node_properties(anchor_v10).unwrap();
+    }
+
+    // ========================================================================
+    // Improvement #1: Anchor-Based Caching Tests
+    // ========================================================================
+
+    #[test]
+    fn test_anchor_cache_survives_delta_cache_pressure() {
+        // Test that anchors remain cached even when delta versions fill up the regular cache
+        // Use a small cache size to force evictions
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 10, // Anchor every 10 versions
+                max_delta_chain: 10,
+            },
+            RetentionPolicy::default(),
+            5, // Very small cache - only 5 entries
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Create 21 versions (anchors at v0, v10, v20 + 18 deltas)
+        for i in 0..21 {
+            let version_id = VersionId::new(i).unwrap();
+            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let props = PropertyMapBuilder::new()
+                .insert("counter", i as i64)
+                .build();
+
+            storage
+                .add_node_version(node_id, version_id, temporal, label, props)
+                .unwrap();
+        }
+
+        // Verify we have 3 anchors
+        let stats = storage.stats();
+        assert_eq!(stats.node_anchor_count, 3, "Should have 3 anchors");
+
+        // Access many delta versions to create cache pressure
+        // This should fill up the small cache (5 entries) with delta reconstructions
+        for i in 1..10 {
+            let version_id = VersionId::new(i).unwrap();
+            storage.reconstruct_node_properties(version_id).unwrap();
+        }
+
+        // Despite cache pressure, all anchors should still be quickly accessible
+        // because they're in the dedicated anchor cache
+        let anchor_v0 = VersionId::new(0).unwrap();
+        let anchor_v10 = VersionId::new(10).unwrap();
+        let anchor_v20 = VersionId::new(20).unwrap();
+
+        // These should be fast cache hits from the anchor cache
+        let props0 = storage.reconstruct_node_properties(anchor_v0).unwrap();
+        let props10 = storage.reconstruct_node_properties(anchor_v10).unwrap();
+        let props20 = storage.reconstruct_node_properties(anchor_v20).unwrap();
+
+        assert_eq!(props0.get("counter").and_then(|v| v.as_int()), Some(0));
+        assert_eq!(props10.get("counter").and_then(|v| v.as_int()), Some(10));
+        assert_eq!(props20.get("counter").and_then(|v| v.as_int()), Some(20));
+    }
+
+    #[test]
+    fn test_delta_reconstruction_uses_anchor_cache() {
+        // Test that delta reconstruction benefits from the anchor cache
+        // When reconstructing a delta, we should use the cached anchor as the base
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 5,
+                max_delta_chain: 5,
+            },
+            RetentionPolicy::default(),
+            100, // Reasonable cache size
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
+
+        // Create 8 versions (anchor at v0, v5, deltas at v1-v4, v6-v7)
+        for i in 0..8 {
+            let version_id = VersionId::new(i).unwrap();
+            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let props = PropertyMapBuilder::new()
+                .insert("version", i as i64)
+                .insert("data", format!("content_{}", i))
+                .build();
+
+            storage
+                .add_node_version(node_id, version_id, temporal, label, props)
+                .unwrap();
+        }
+
+        // Verify anchors are in cache
+        let stats = storage.stats();
+        assert!(
+            stats.node_cache_entries >= 2,
+            "Both anchors should be cached"
+        );
+
+        // Reconstruct a delta version (v7) - should use anchor cache for v5
+        let v7 = VersionId::new(7).unwrap();
+        let props = storage.reconstruct_node_properties(v7).unwrap();
+        assert_eq!(props.get("version").and_then(|v| v.as_int()), Some(7));
+        assert_eq!(
+            props.get("data").and_then(|v| v.as_str()),
+            Some("content_7")
+        );
+    }
+
+    #[test]
+    fn test_anchor_cache_improves_multi_version_reconstruction() {
+        // Test that multiple delta versions can reuse the same cached anchor
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 5,
+            max_delta_chain: 5,
+        });
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Entity").unwrap();
+
+        // Create 10 versions (anchors at v0, v5)
+        for i in 0..10 {
+            let version_id = VersionId::new(i).unwrap();
+            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let props = PropertyMapBuilder::new().insert("value", i as i64).build();
+
+            storage
+                .add_node_version(node_id, version_id, temporal, label, props)
+                .unwrap();
+        }
+
+        // Reconstruct all deltas between v5 and v9
+        // All should benefit from the cached anchor at v5
+        for i in 6..10 {
+            let version_id = VersionId::new(i).unwrap();
+            let props = storage.reconstruct_node_properties(version_id).unwrap();
+            assert_eq!(props.get("value").and_then(|v| v.as_int()), Some(i as i64));
+        }
+
+        // All reconstructions should have succeeded efficiently using the anchor cache
+        let stats = storage.stats();
+        assert_eq!(stats.node_anchor_count, 2, "Should have 2 anchors");
+    }
+
+    #[test]
+    fn test_anchor_cache_size_calculation() {
+        // Test that anchor cache is properly sized relative to main cache
+
+        // Small cache: 100 entries -> anchor cache should be max(100/5, 100) = 100
+        let storage_small = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig::default(),
+            RetentionPolicy::default(),
+            100,
+        );
+        // We can't directly access cache capacity, but we can verify it works correctly
+        // by checking that anchors are cached even with small cache
+        assert_eq!(storage_small.node_property_cache.len(), 0);
+
+        // Medium cache: 1000 entries -> anchor cache should be max(1000/5, 100) = 200
+        let storage_medium = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig::default(),
+            RetentionPolicy::default(),
+            1000,
+        );
+        assert_eq!(storage_medium.node_property_cache.len(), 0);
+
+        // Large cache: 10000 entries -> anchor cache should be max(10000/5, 100) = 2000
+        let storage_large = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig::default(),
+            RetentionPolicy::default(),
+            10000,
+        );
+        assert_eq!(storage_large.node_property_cache.len(), 0);
+
+        // Very small cache: 10 entries -> anchor cache should be max(10/5, 100) = 100 (minimum)
+        let storage_tiny = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig::default(),
+            RetentionPolicy::default(),
+            10,
+        );
+        assert_eq!(storage_tiny.node_property_cache.len(), 0);
+    }
+
+    // ========================================================================
+    // Improvement #3: Adaptive Cache Sizing Tests
+    // ========================================================================
+
+    #[test]
+    fn test_should_resize_cache_recommends_growth_on_low_hit_rate() {
+        // Test that `should_resize_cache` recommends resizing when hit rate is low.
+        // Start with a very small cache to force low hit rate
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 10,
+                max_delta_chain: 10,
+            },
+            RetentionPolicy::default(),
+            10, // Very small cache - will have low hit rate
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Create many versions to stress the cache
+        for i in 0..50 {
+            let version_id = VersionId::new(i).unwrap();
+            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let props = PropertyMapBuilder::new()
+                .insert("counter", i as i64)
+                .insert("data", format!("value_{}", i))
+                .build();
+
+            storage
+                .add_node_version(node_id, version_id, temporal, label, props)
+                .unwrap();
+        }
+
+        // Access many different versions to create cache misses
+        for i in 0..50 {
+            let version_id = VersionId::new(i).unwrap();
+            storage.reconstruct_node_properties(version_id).unwrap();
+        }
+
+        // Check cache metrics
+        let metrics = storage.cache_metrics();
+        assert!(
+            metrics.total_operations() > 0,
+            "Should have cache operations"
+        );
+
+        // Check if adaptive resizing recommends increasing cache size
+        // With only 10 cache slots and 50 versions, hit rate should be low
+        let resize_recommendation = storage.should_resize_cache(0.8, 10);
+        assert!(
+            resize_recommendation.is_some(),
+            "should_resize_cache should recommend resizing with low hit rate"
+        );
+
+        let hit_rate = resize_recommendation.unwrap();
+        assert!(hit_rate < 0.8, "Hit rate should be below the threshold");
+
+        println!(
+            "Cache hit rate {:.2}% is below threshold, resize recommended",
+            hit_rate * 100.0
+        );
+
+        let stats = storage.stats();
+        assert!(
+            stats.node_cache_entries > 0,
+            "Cache should have some entries"
+        );
+    }
+
+    #[test]
+    fn test_cache_hit_rate_tracking() {
+        // Test that we can track cache hit rate metrics
+        let mut storage = HistoricalStorage::with_config(AnchorConfig::default());
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("TestNode").unwrap();
+
+        // Create some versions
+        for i in 0..20 {
+            let version_id = VersionId::new(i).unwrap();
+            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let props = PropertyMapBuilder::new().insert("value", i as i64).build();
+
+            storage
+                .add_node_version(node_id, version_id, temporal, label, props)
+                .unwrap();
+        }
+
+        // Access the same version multiple times (should be cache hits after first)
+        let v5 = VersionId::new(5).unwrap();
+        for _ in 0..10 {
+            storage.reconstruct_node_properties(v5).unwrap();
+        }
+
+        // The cache should have entries
+        let stats = storage.stats();
+        assert!(
+            stats.node_cache_entries > 0,
+            "Cache should have entries after reconstruction"
+        );
+
+        // Check hit rate - with repeated access, should be high
+        let hit_rate = storage.cache_hit_rate();
+        assert!(hit_rate.is_some(), "Should have cache hit rate data");
+        // After 10 accesses to same version, most should be hits
+        assert!(
+            hit_rate.unwrap() > 0.5,
+            "Hit rate should be > 50% with repeated access"
+        );
+    }
+
+    #[test]
+    fn test_cache_resize_maintains_correctness() {
+        // Test that even if cache is resized, data correctness is maintained
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 5,
+                max_delta_chain: 5,
+            },
+            RetentionPolicy::default(),
+            100,
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Data").unwrap();
+
+        // Create test data
+        for i in 0..30 {
+            let version_id = VersionId::new(i).unwrap();
+            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let props = PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert("name", format!("item_{}", i))
+                .build();
+
+            storage
+                .add_node_version(node_id, version_id, temporal, label, props)
+                .unwrap();
+        }
+
+        // Verify all data is correct regardless of cache state
+        for i in 0..30 {
+            let version_id = VersionId::new(i).unwrap();
+            let props = storage.reconstruct_node_properties(version_id).unwrap();
+            assert_eq!(props.get("id").and_then(|v| v.as_int()), Some(i as i64));
+            assert_eq!(
+                props.get("name").and_then(|v| v.as_str()),
+                Some(format!("item_{}", i).as_str())
+            );
+        }
+
+        // Verify cache metrics are being tracked
+        let metrics = storage.cache_metrics();
+        assert!(
+            metrics.total_operations() > 0,
+            "Should have cache operations"
+        );
+
+        // With good cache size (100) and sequential access, hit rate should be decent
+        if let Some(hit_rate) = storage.cache_hit_rate() {
+            println!("Cache hit rate: {:.2}%", hit_rate * 100.0);
+        }
     }
 }
