@@ -38,6 +38,33 @@
 //! - **Append latency**: ~50-100ns (lock-free)
 //! - **Throughput**: 500K+ entries/sec with 16+ stripes
 //! - **Scalability**: Linear up to 64 concurrent writers
+//!
+//! # Buffer Exhaustion / Backpressure
+//!
+//! When all stripes fill up faster than the flush coordinator can drain them:
+//!
+//! 1. **Non-blocking append (`try_append`)**: Returns `Err(entry)` immediately
+//!    after exponential spin backoff. The caller can retry, drop, or queue the
+//!    entry externally.
+//!
+//! 2. **Blocking append (`append_blocking`)**: Spins briefly, then sleeps with
+//!    exponential backoff (1µs → 2µs → 4µs → ... → 1ms) until space is available.
+//!    This provides automatic backpressure but may block the calling thread.
+//!
+//! 3. **Async append (`append_async`)**: Uses `append_blocking` internally, so
+//!    it will block until space is available. This is intentional - async here
+//!    means "no durability wait", not "non-blocking".
+//!
+//! **Sizing guidance**: With default settings (16 stripes × 1024 capacity), the
+//! WAL can buffer 16,384 entries. At 500K entries/sec with 10ms flush interval,
+//! ~5,000 entries accumulate per interval. The default sizing provides ~3x
+//! headroom for burst traffic.
+//!
+//! **Monitoring**: Use `stripe_metrics()` to detect high buffer utilization.
+//! If `entries_pending` consistently exceeds 50% of capacity, consider:
+//! - Increasing `stripe_capacity`
+//! - Increasing `num_stripes`
+//! - Reducing flush interval
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};

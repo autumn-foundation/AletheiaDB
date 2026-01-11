@@ -14,6 +14,24 @@
 //!
 //! The allocator is `Send` and `Sync`. Multiple threads can allocate LSNs
 //! concurrently without any locking.
+//!
+//! # LSN Overflow (Theoretical Limitation)
+//!
+//! The allocator uses a `u64` counter with `fetch_add`, which will wrap around
+//! to 0 after 2^64 allocations. This is a theoretical limitation:
+//!
+//! - At 1 million LSNs/second: overflow in ~584,542 years
+//! - At 10 million LSNs/second: overflow in ~58,454 years
+//! - At 100 million LSNs/second: overflow in ~5,845 years
+//!
+//! **Consequences of overflow**: LSN wraparound would cause duplicate LSNs,
+//! breaking the uniqueness guarantee. Recovery would become ambiguous as
+//! entries with "older" LSNs might actually be newer.
+//!
+//! **Mitigation**: For systems requiring true infinite operation, a database
+//! restart with LSN reset (after full checkpoint) would be needed before
+//! overflow. Monitoring `current()` against a threshold (e.g., `u64::MAX / 2`)
+//! can provide early warning.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

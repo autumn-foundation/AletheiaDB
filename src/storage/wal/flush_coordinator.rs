@@ -108,6 +108,28 @@ pub struct FlushStats {
 ///
 /// This struct manages segment files and coordinates flushing entries
 /// from the concurrent WAL stripes to disk.
+///
+/// # Mutex Poisoning Recovery
+///
+/// The coordinator uses `unwrap_or_else(|e| e.into_inner())` when acquiring
+/// mutex locks on `writer` and `sync_handle`. This pattern recovers from
+/// poisoned mutexes because:
+///
+/// 1. **Single-threaded access**: The flush coordinator is accessed by only
+///    one flush thread at a time. Mutex poisoning would only occur if the
+///    flush thread itself panicked during a previous operation.
+///
+/// 2. **File handle recovery**: If a panic occurred while holding the writer
+///    or sync_handle lock, the underlying file handles are still valid. The
+///    OS will have either completed or rolled back any in-progress writes.
+///
+/// 3. **Idempotent operations**: Flush operations are designed to be safe
+///    to retry. Re-acquiring a poisoned lock and continuing is preferable
+///    to propagating a panic to the caller.
+///
+/// 4. **Crash consistency**: The WAL already handles crash recovery at the
+///    entry level via checksums. A panic during flush is treated the same
+///    as a crash - entries are either fully written or not.
 pub struct FlushCoordinator {
     /// Configuration.
     config: FlushCoordinatorConfig,
