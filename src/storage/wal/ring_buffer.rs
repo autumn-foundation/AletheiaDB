@@ -30,6 +30,27 @@
 //!
 //! When the buffer is full, writers spin briefly then yield. This provides
 //! natural backpressure without blocking the flush thread.
+//!
+//! # Position Counter Wraparound
+//!
+//! The ring buffer uses `u64` counters for `write_pos` and `read_pos`, which
+//! wrap around after 2^64 operations using `wrapping_add`. At 500K operations
+//! per second, overflow would occur after approximately 1.2 million years.
+//!
+//! **Theoretical limitation**: The sequence-based slot availability logic uses
+//! direct integer comparison (`==`, `<`, `>`). After position counter wraparound,
+//! these comparisons would produce incorrect results, causing the buffer to
+//! become unusable. This is a documented theoretical limitation rather than a
+//! practical concern.
+//!
+//! **Sequence number lifecycle**:
+//! 1. Initially: `sequence[i] = i` for each slot
+//! 2. After write: `sequence = pos + 1` (signals data ready)
+//! 3. After read: `sequence = pos + capacity` (signals slot available)
+//!
+//! The comparison `current_seq < expected_seq` at line 526 assumes monotonic
+//! growth, which breaks after u64 wraparound. For systems requiring true
+//! infinite operation, a restart-based reset mechanism would be needed.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -182,6 +203,26 @@ enum CompletionState {
 /// Writers that need durability guarantees create a `CompletionNotifier`
 /// and wait on it after appending their entry. The flush coordinator
 /// notifies all pending entries after fsync completes.
+///
+/// # Mutex Poisoning Recovery
+///
+/// This type uses `unwrap_or_else(|e| e.into_inner())` when acquiring mutex
+/// locks. This pattern intentionally recovers from poisoned mutexes because:
+///
+/// 1. **Single-threaded notification**: The flush coordinator is the only
+///    thread that notifies completion. If it panics, the mutex may be poisoned,
+///    but the notification data (`error` string) is still valid.
+///
+/// 2. **Wait semantics are unchanged**: A waiting thread should either receive
+///    the completion signal or an error. Mutex poisoning indicates the flush
+///    thread panicked, which is itself an error condition we can report.
+///
+/// 3. **No invariant protection**: These mutexes protect coordination state
+///    (error strings, condvar), not data invariants. Recovering the lock's
+///    contents is safe because the state transitions are well-defined.
+///
+/// 4. **Fail-safe default**: If we can't determine the error, we return
+///    "Unknown error" rather than propagating the panic.
 #[derive(Debug)]
 pub struct CompletionNotifier {
     /// Current state (Pending, Complete, or Error).
@@ -880,7 +921,10 @@ mod tests {
     }
 
     #[test]
-    fn test_ring_buffer_wrap_around() {
+    fn test_ring_buffer_slot_reuse() {
+        // Note: This tests SLOT reuse (cycling through buffer slots), NOT position
+        // counter wraparound (u64 overflow). See module docs for position overflow
+        // limitations.
         let buf = WalRingBuffer::new(4);
 
         // First cycle - fill and drain
@@ -901,6 +945,43 @@ mod tests {
 
         for (i, entry) in entries.iter().enumerate() {
             assert_eq!(entry.lsn, LSN((i + 4) as u64));
+        }
+    }
+
+    #[test]
+    fn test_ring_buffer_many_cycles() {
+        // Test extensive slot reuse to verify sequence number progression is correct
+        // over many cycles. This doesn't test u64 position overflow (which would
+        // require 2^64 operations), but validates the sequence logic works for
+        // realistic long-running scenarios.
+        let buf = WalRingBuffer::new(4);
+
+        // Run 1000 cycles (4000 operations total)
+        for cycle in 0..1000u64 {
+            for i in 0..4 {
+                let lsn = LSN(cycle * 4 + i);
+                let entry = PendingEntry::new_async(lsn, vec![(lsn.0 % 256) as u8]);
+                assert!(
+                    buf.try_append(entry).is_ok(),
+                    "Failed at cycle {}, entry {}",
+                    cycle,
+                    i
+                );
+            }
+
+            let entries = buf.drain();
+            assert_eq!(entries.len(), 4, "Drain failed at cycle {}", cycle);
+
+            // Verify LSNs are correct
+            for (i, entry) in entries.iter().enumerate() {
+                assert_eq!(
+                    entry.lsn,
+                    LSN(cycle * 4 + i as u64),
+                    "Wrong LSN at cycle {}, entry {}",
+                    cycle,
+                    i
+                );
+            }
         }
     }
 
