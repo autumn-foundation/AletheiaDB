@@ -89,16 +89,19 @@ pub enum PropertyValue {
 
 impl PropertyValue {
     /// Create a string property value from a &str.
+    #[inline]
     pub fn string<S: AsRef<str>>(s: S) -> Self {
         PropertyValue::String(Arc::from(s.as_ref()))
     }
 
     /// Create a bytes property value from a slice.
+    #[inline]
     pub fn bytes<B: AsRef<[u8]>>(b: B) -> Self {
         PropertyValue::Bytes(Arc::from(b.as_ref()))
     }
 
     /// Create an array property value from a Vec.
+    #[inline]
     pub fn array(values: Vec<PropertyValue>) -> Self {
         PropertyValue::Array(Arc::new(values))
     }
@@ -137,6 +140,7 @@ impl PropertyValue {
     /// - [`PropertyMapBuilder::insert_vector`] for a builder-pattern alternative
     /// - [`as_vector`](Self::as_vector) for retrieving the vector data
     /// - [`gallifreydb::core::vector`](crate::core::vector) for similarity functions
+    #[inline]
     pub fn vector<V: AsRef<[f32]>>(v: V) -> Self {
         PropertyValue::Vector(Arc::from(v.as_ref()))
     }
