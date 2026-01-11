@@ -428,6 +428,7 @@ impl CurrentStorage {
     /// Get all outgoing edges from a node.
     ///
     /// This is the critical "hot path" operation that must be fast.
+    #[inline]
     pub fn get_outgoing_edges(&self, source: NodeId) -> Vec<EdgeId> {
         self.indexes
             .get_outgoing(source)
@@ -437,6 +438,7 @@ impl CurrentStorage {
     }
 
     /// Get all incoming edges to a node.
+    #[inline]
     pub fn get_incoming_edges(&self, target: NodeId) -> Vec<EdgeId> {
         self.indexes
             .get_incoming(target)
@@ -446,6 +448,7 @@ impl CurrentStorage {
     }
 
     /// Get outgoing edges with a specific label.
+    #[inline]
     pub fn get_outgoing_edges_with_label(&self, source: NodeId, label: &str) -> Vec<EdgeId> {
         let label_id = match GLOBAL_INTERNER.get_id(label) {
             Some(id) => id,
@@ -460,6 +463,7 @@ impl CurrentStorage {
     }
 
     /// Get incoming edges with a specific label.
+    #[inline]
     pub fn get_incoming_edges_with_label(&self, target: NodeId, label: &str) -> Vec<EdgeId> {
         let label_id = match GLOBAL_INTERNER.get_id(label) {
             Some(id) => id,
