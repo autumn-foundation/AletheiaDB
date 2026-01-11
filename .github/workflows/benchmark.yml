@@ -53,6 +53,18 @@ jobs:
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          # Note: This cache excludes target/criterion, which is cached separately below
+
+      - name: Cache Criterion baselines
+        uses: actions/cache@v4
+        with:
+          path: target/criterion
+          # Use branch-based key so baselines persist across dependency changes
+          # For PRs: uses head branch name, for trunk: uses 'trunk'
+          key: ${{ runner.os }}-criterion-${{ github.head_ref || github.ref_name }}
+          restore-keys: |
+            ${{ runner.os }}-criterion-trunk
+            ${{ runner.os }}-criterion-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -119,9 +131,9 @@ jobs:
           alert-threshold: '150%'
           comment-on-alert: true
           fail-on-alert: false
-          # Store in dev/bench for historical charts
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench
+          # Use external JSON file instead of gh-pages branch
+          # This creates data.js file locally that we can deploy
+          external-data-json-path: dev/bench/data.js
           save-data-file: true
           # Generate the benchmark data file locally instead of pushing
           # We'll deploy it with peaceiris/actions-gh-pages in a later step
