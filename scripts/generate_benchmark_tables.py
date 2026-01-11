@@ -105,6 +105,11 @@ def collect_benchmark_results(criterion_dir: Path) -> dict[str, list[BenchmarkRe
     # Walk through criterion directory structure
     for root, dirs, files in os.walk(criterion_dir):
         if 'estimates.json' in files:
+            # Skip Criterion's base/ directories (used for internal comparison)
+            # We only want the latest results (in new/ or root)
+            if 'base' in Path(root).parts:
+                continue
+
             estimates_path = Path(root) / 'estimates.json'
             result = parse_criterion_estimates(estimates_path, criterion_dir)
 
@@ -117,44 +122,6 @@ def collect_benchmark_results(criterion_dir: Path) -> dict[str, list[BenchmarkRe
                     results[suite].append(result)
 
     return dict(results)
-
-
-def collect_base_and_new_results(criterion_dir: Path) -> dict[str, tuple[Optional[BenchmarkResult], Optional[BenchmarkResult]]]:
-    """
-    Collect benchmark results separated into base and new runs.
-
-    Returns:
-        Dictionary mapping benchmark name to (base_result, new_result) tuple.
-        Either element can be None if that variant doesn't exist.
-    """
-    results = {}
-
-    # Walk through criterion directory structure
-    for root, dirs, files in os.walk(criterion_dir):
-        if 'estimates.json' in files:
-            estimates_path = Path(root) / 'estimates.json'
-            result = parse_criterion_estimates(estimates_path, criterion_dir)
-
-            if result:
-                # Check if this is a base or new result
-                parts = Path(root).relative_to(criterion_dir).parts
-                is_base = 'base' in parts
-                is_new = 'new' in parts
-
-                # Initialize entry if it doesn't exist
-                if result.name not in results:
-                    results[result.name] = (None, None)
-
-                # Update base or new result
-                if is_base:
-                    results[result.name] = (result, results[result.name][1])
-                elif is_new:
-                    results[result.name] = (results[result.name][0], result)
-                else:
-                    # No base/new distinction - treat as new result
-                    results[result.name] = (results[result.name][0], result)
-
-    return results
 
 
 def generate_html_table(suite_name: str, results: list[BenchmarkResult]) -> str:
@@ -264,7 +231,7 @@ def load_performance_targets() -> list[dict]:
     """Load performance targets from JSON file."""
     targets_path = Path(__file__).parent.parent / "benchmarks" / "performance-targets.json"
     try:
-        with open(targets_path, 'r', encoding='utf-8') as f:
+        with open(targets_path, 'r') as f:
             data = json.load(f)
             return data.get('targets', [])
     except (FileNotFoundError, json.JSONDecodeError) as e:
@@ -280,13 +247,12 @@ def match_benchmark_to_target(bench_name: str, targets: list[dict]) -> Optional[
         (target_dict, target_value_ns, operator) if matched, None otherwise
     """
     # Map benchmark names to target metrics
+    # Note: Time-travel targets are validated by benches/temporal_query.rs (full suite only)
     bench_to_metric = {
         'target_single_hop/traverse_one_hop': 'Current-state single-hop traversal',
         'target_3_hop/traverse_three_hops': 'Current-state 3-hop traversal',
         'target_batch_insertion/insert_1000_edges': 'Batch insertion throughput',
-        'target_time_travel/at_anchor': 'Time-travel at anchor',
-        'target_time_travel/with_5_deltas': 'Time-travel with deltas (avg 5)',
-        'target_time_travel/worst_case_9_deltas': 'Time-travel worst case (9 deltas)',
+        # Time-travel benchmarks are in temporal_query.rs for weekly runs
     }
 
     metric_name = bench_to_metric.get(bench_name)
@@ -523,7 +489,7 @@ def generate_index_page(all_results: dict[str, list[BenchmarkResult]], output_di
 
     # Write index page
     index_path = output_dir / "index.html"
-    with open(index_path, 'w', encoding='utf-8') as f:
+    with open(index_path, 'w') as f:
         f.write(html)
 
     print(f"Generated index page: {index_path}")
@@ -560,121 +526,16 @@ def parse_history_data(history_path: Path) -> dict[str, float]:
     return {}
 
 
-def generate_pr_comment_with_comparison(
-    base_new_results: dict[str, tuple[Optional[BenchmarkResult], Optional[BenchmarkResult]]],
-    output_path: Path
-) -> None:
-    """Generate a markdown summary with base vs new comparison (one row per metric)."""
-
-    md = """## 🚀 Benchmark Results
-
-Benchmarks have been run for this PR.
-
-### 📊 Performance Summary (Top 10)
-
-| Benchmark | Base | New | Change % | Std Dev |
-|-----------|------|-----|----------|---------|
-"""
-
-    # Sort benchmarks by name for consistent ordering
-    sorted_benchmarks = sorted(base_new_results.keys())
-
-    # Keep track of regressions and improvements
-    regressions = []
-    improvements = []
-    threshold = 0.10  # 10%
-
-    # Show top 10 benchmarks
-    count = 0
-    for bench_name in sorted_benchmarks:
-        if count >= 10:
-            break
-
-        base_bench, new_bench = base_new_results[bench_name]
-
-        # Need at least a new result
-        if not new_bench:
-            continue
-
-        # Format base value
-        if base_bench:
-            base_str = f"{base_bench.mean:.2f} {base_bench.unit}"
-
-            # Calculate change percentage
-            if base_bench.mean_ns > 0:
-                diff_percent = ((new_bench.mean_ns - base_bench.mean_ns) / base_bench.mean_ns) * 100
-
-                # Determine status emoji
-                if abs(diff_percent) < threshold * 100:
-                    # Within threshold - no significant change
-                    change_str = f"~{diff_percent:+.1f}%"
-                elif diff_percent > 0:
-                    # Slower = regression
-                    change_str = f"🔴 {diff_percent:+.1f}%"
-                    regressions.append((bench_name, new_bench, diff_percent))
-                else:
-                    # Faster = improvement
-                    change_str = f"🟢 {diff_percent:+.1f}%"
-                    improvements.append((bench_name, new_bench, diff_percent))
-            else:
-                change_str = "N/A"
-        else:
-            base_str = "N/A"
-            change_str = "New"
-
-        # Format new value and std dev
-        new_str = f"{new_bench.mean:.2f} {new_bench.unit}"
-        std_dev_str = f"± {new_bench.std_dev:.2f} {new_bench.unit}"
-
-        md += f"| {bench_name} | {base_str} | {new_str} | {change_str} | {std_dev_str} |\n"
-        count += 1
-
-    # Add regression/improvement summaries if any
-    if regressions:
-        md += "\n### ⚠️ Performance Regressions (>10% Slower)\n\n"
-        for bench_name, bench, diff in regressions:
-            md += f"- **{bench_name}**: {diff:+.1f}% slower\n"
-
-    if improvements:
-        md += "\n### ✅ Performance Improvements (>10% Faster)\n\n"
-        for bench_name, bench, diff in improvements:
-            md += f"- **{bench_name}**: {abs(diff):.1f}% faster\n"
-
-    md += """
----
-*Full benchmark results available in workflow artifacts*
-
-📊 [View detailed results](https://madmax983.github.io/GallifreyDB/benchmarks/)
-📈 [Historical trends](https://madmax983.github.io/GallifreyDB/dev/bench/index.html)
-"""
-
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(md)
-
-    print(f"Generated PR comment: {output_path}")
-
-
 def generate_pr_comment(all_results: dict[str, list[BenchmarkResult]], output_path: Path, history: dict[str, float]) -> None:
-    """Generate a markdown summary for PR comments with proper base vs new comparison."""
+    """Generate a markdown summary for PR comments comparing current PR vs trunk (from history)."""
 
-    # Collect base and new results separately
-    base_new_results = {}
+    # Flatten results
+    current_results = []
     for suite_name, results in all_results.items():
-        for bench in results:
-            if bench.name not in base_new_results:
-                base_new_results[bench.name] = {'base': None, 'new': None}
+        current_results.extend(results)
 
-            # Determine if this is base or new by checking if there's historical data
-            # If we have history data for this benchmark, treat current as "new"
-            # Otherwise, this might be a standalone run without base/new distinction
-            if bench.name in history:
-                # We have history - this is a comparison run
-                # The "old" value from history is base, current is new
-                base_new_results[bench.name]['new'] = bench
-                # We'll use history dict for base values
-            else:
-                # No history - might be first run or standalone
-                base_new_results[bench.name]['new'] = bench
+    # Sort by name for consistent ordering
+    current_results.sort(key=lambda r: r.name)
 
     md = """## 🚀 Benchmark Results
 
@@ -682,32 +543,23 @@ Benchmarks have been run for this PR.
 
 ### 📊 Performance Summary (Top 10)
 
-| Benchmark | Base | New | Change % | Std Dev |
-|-----------|------|-----|----------|---------|
+| Benchmark | Base (trunk) | New (PR) | Change % | Std Dev |
+|-----------|--------------|----------|----------|---------|
 """
 
-    # Sort benchmarks by name for consistent ordering
-    sorted_benchmarks = sorted(base_new_results.keys())
-
-    # Keep track of regressions and improvements
+    # Compare with history
+    threshold = 0.10  # 10%
     regressions = []
     improvements = []
-    threshold = 0.10  # 10%
 
-    # Show top 10 benchmarks
     count = 0
-    for bench_name in sorted_benchmarks:
+    for bench in current_results:
         if count >= 10:
             break
 
-        info = base_new_results[bench_name]
-        new_bench = info.get('new')
-
-        if not new_bench:
-            continue
-
-        base_val_ns = history.get(bench_name)
-        new_val_ns = new_bench.mean_ns
+        # Get historical baseline (trunk)
+        base_val_ns = history.get(bench.name)
+        new_val_ns = bench.mean_ns
 
         # Format base value
         if base_val_ns:
@@ -720,16 +572,16 @@ Benchmarks have been run for this PR.
 
                 # Determine status emoji
                 if abs(diff_percent) < threshold * 100:
-                    # Within threshold - no change
+                    # Within threshold - no significant change
                     change_str = f"~{diff_percent:+.1f}%"
                 elif diff_percent > 0:
                     # Slower = regression
                     change_str = f"🔴 {diff_percent:+.1f}%"
-                    regressions.append((bench_name, new_bench, diff_percent))
+                    regressions.append((bench, diff_percent))
                 else:
                     # Faster = improvement
                     change_str = f"🟢 {diff_percent:+.1f}%"
-                    improvements.append((bench_name, new_bench, diff_percent))
+                    improvements.append((bench, abs(diff_percent)))
             else:
                 change_str = "N/A"
         else:
@@ -737,22 +589,22 @@ Benchmarks have been run for this PR.
             change_str = "New"
 
         # Format new value and std dev
-        new_str = f"{new_bench.mean:.2f} {new_bench.unit}"
-        std_dev_str = f"± {new_bench.std_dev:.2f} {new_bench.unit}"
+        new_str = f"{bench.mean:.2f} {bench.unit}"
+        std_dev_str = f"± {bench.std_dev:.2f} {bench.unit}"
 
-        md += f"| {bench_name} | {base_str} | {new_str} | {change_str} | {std_dev_str} |\n"
+        md += f"| {bench.name} | {base_str} | {new_str} | {change_str} | {std_dev_str} |\n"
         count += 1
 
     # Add regression/improvement summaries if any
     if regressions:
         md += "\n### ⚠️ Performance Regressions (>10% Slower)\n\n"
-        for bench_name, bench, diff in regressions:
-            md += f"- **{bench_name}**: {diff:+.1f}% slower\n"
+        for bench, diff in regressions:
+            md += f"- **{bench.name}**: {diff:+.1f}% slower\n"
 
     if improvements:
         md += "\n### ✅ Performance Improvements (>10% Faster)\n\n"
-        for bench_name, bench, diff in improvements:
-            md += f"- **{bench_name}**: {abs(diff):.1f}% faster\n"
+        for bench, diff in improvements:
+            md += f"- **{bench.name}**: {diff:.1f}% faster\n"
 
     md += """
 ---
@@ -856,11 +708,8 @@ def main():
         generate_index_page(all_results, args.output)
         print("\nDone! Open benchmark-results/index.html to view results")
     elif args.format == 'pr-comment':
-        print(f"\nGenerating PR comment with base/new comparison...")
-        # Use the specialized collection for base/new comparison
-        base_new_results = collect_base_and_new_results(args.input)
-        print(f"Found {len(base_new_results)} benchmarks with base/new comparison")
-        generate_pr_comment_with_comparison(base_new_results, args.output)
+        print(f"\nGenerating PR comment...")
+        generate_pr_comment(all_results, args.output, history)
         print(f"\nDone! PR comment written to {args.output}")
     elif args.format == 'json':
         print(f"\nGenerating JSON for github-action-benchmark...")
