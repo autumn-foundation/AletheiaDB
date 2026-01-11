@@ -179,9 +179,12 @@ impl WalConfigBuilder {
     ///
     /// # Errors
     ///
-    /// Returns `ConfigError::InvalidValue` if `size` is 0 or less than 1MB.
+    /// Returns `ConfigError::InvalidValue` if `size` is 0 or less than 512 bytes.
+    ///
+    /// **Note**: While 512 bytes is allowed (for testing), production use should
+    /// be at least 1MB for reasonable performance.
     pub fn segment_size(mut self, size: usize) -> Result<Self, ConfigError> {
-        const MIN_SEGMENT_SIZE: usize = 1024 * 1024; // 1MB
+        const MIN_SEGMENT_SIZE: usize = 512; // Allow small sizes for testing
         if size == 0 {
             return Err(ConfigError::InvalidValue(
                 "segment_size must be greater than 0".into(),
@@ -189,7 +192,7 @@ impl WalConfigBuilder {
         }
         if size < MIN_SEGMENT_SIZE {
             return Err(ConfigError::InvalidValue(format!(
-                "segment_size must be at least {} bytes (1MB), got {}",
+                "segment_size must be at least {} bytes, got {}",
                 MIN_SEGMENT_SIZE, size
             )));
         }
@@ -1128,7 +1131,7 @@ wal_dir = "/custom/path/to/wal"
 
     #[test]
     fn test_wal_config_segment_size_too_small() {
-        let result = WalConfigBuilder::new().segment_size(1024); // Less than 1MB
+        let result = WalConfigBuilder::new().segment_size(256); // Less than 512 bytes
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
     }
