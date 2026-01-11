@@ -106,8 +106,7 @@ impl Node {
         use crate::core::interning::GLOBAL_INTERNER;
         GLOBAL_INTERNER
             .get_id(label)
-            .map(|id| self.label == id)
-            .unwrap_or(false)
+            .is_some_and(|id| self.label == id)
     }
 }
 
@@ -220,8 +219,7 @@ impl Edge {
         use crate::core::interning::GLOBAL_INTERNER;
         GLOBAL_INTERNER
             .get_id(label)
-            .map(|id| self.label == id)
-            .unwrap_or(false)
+            .is_some_and(|id| self.label == id)
     }
 
     /// Check if this edge connects the given source and target nodes.
