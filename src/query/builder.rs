@@ -278,7 +278,7 @@ impl QueryBuilder<state::HasNodes> {
     /// Cost = O(1) node lookup + O(log N) HNSW search where N = indexed vectors
     ///
     /// # Panics
-    /// Panics in debug mode if k = 0
+    /// Panics if k = 0
     ///
     /// # Example
     ///
@@ -297,7 +297,9 @@ impl QueryBuilder<state::HasNodes> {
         source_node: NodeId,
         k: usize,
     ) -> QueryBuilder<state::HasVectorResults> {
-        assert!(k > 0, "k must be greater than 0");
+        if k == 0 {
+            panic!("k must be greater than 0");
+        }
         self.add_op(QueryOp::SimilarTo {
             source_node,
             k,
@@ -333,7 +335,7 @@ impl QueryBuilder<state::HasNodes> {
     /// ```
     ///
     /// # Panics
-    /// Panics in debug mode if k = 0
+    /// Panics if k = 0
     pub fn similar_to_builder(
         self,
         source_node: NodeId,
@@ -512,7 +514,9 @@ pub struct SimilarToBuilder<S: QueryState> {
 
 impl<S: QueryState> SimilarToBuilder<S> {
     fn new(source_node: NodeId, k: usize, query_builder: QueryBuilder<S>) -> Self {
-        assert!(k > 0, "k must be greater than 0");
+        if k == 0 {
+            panic!("k must be greater than 0");
+        }
         SimilarToBuilder {
             source_node,
             k,
