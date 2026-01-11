@@ -572,6 +572,139 @@ This enables multiple Claude instances to work in parallel without conflicts. Ea
 
 See `WORKTREE_WORKFLOW.md` for complete documentation.
 
+### Configuration System
+
+GallifreyDB provides a unified configuration system via `GallifreyDBConfig` that consolidates all settings for WAL, historical storage, and vector indexes.
+
+#### Programmatic Configuration
+
+```rust
+use gallifreydb::{GallifreyDB, config::{GallifreyDBConfig, WalConfigBuilder, HistoricalConfigBuilder}};
+use gallifreydb::storage::wal::DurabilityMode;
+
+// Build configuration programmatically
+let config = GallifreyDBConfig::builder()
+    .wal(WalConfigBuilder::new()
+        .num_stripes(32).unwrap()               // 32 concurrent append stripes
+        .stripe_capacity(2048).unwrap()          // 2048 entries per stripe
+        .write_buffer_size(128 * 1024).unwrap() // 128KB write buffer
+        .segment_size(128 * 1024 * 1024).unwrap() // 128MB segments
+        .durability_mode(DurabilityMode::group_commit_default())
+        .build())
+    .historical(HistoricalConfigBuilder::new()
+        .max_versions_per_entity(5000).unwrap()
+        .max_reconstruction_depth(200).unwrap()
+        .reconstruction_cache_size(20000).unwrap()
+        .build())
+    .build();
+
+let db = GallifreyDB::with_unified_config(config);
+```
+
+#### TOML Configuration Files
+
+Configuration can be loaded from TOML files (requires default `config-toml` feature):
+
+```toml
+# config/production.toml
+[wal]
+num_stripes = 64
+stripe_capacity = 4096
+write_buffer_size = 262144    # 256KB
+segment_size = 268435456      # 256MB
+flush_interval_ms = 10
+wal_dir = "data/wal"
+segments_to_retain = 20
+
+[historical]
+max_versions_per_entity = 10000
+max_reconstruction_depth = 200
+reconstruction_cache_size = 100000
+
+[vector]
+max_k = 10000
+max_layer = 16
+```
+
+```rust
+use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+
+let config = GallifreyDBConfig::from_toml_file("config/production.toml")?;
+let db = GallifreyDB::with_unified_config(config);
+```
+
+#### Configuration Presets
+
+**Embedded Systems** (minimal memory):
+```rust
+let config = GallifreyDBConfig::builder()
+    .wal(WalConfigBuilder::new()
+        .num_stripes(4).unwrap()
+        .stripe_capacity(256).unwrap()
+        .write_buffer_size(16 * 1024).unwrap()
+        .segment_size(16 * 1024 * 1024).unwrap()
+        .build())
+    .historical(HistoricalConfigBuilder::new()
+        .max_versions_per_entity(100).unwrap()
+        .reconstruction_cache_size(1000).unwrap()
+        .build())
+    .build();
+```
+
+**Cloud Deployment** (high throughput):
+```rust
+let config = GallifreyDBConfig::builder()
+    .wal(WalConfigBuilder::new()
+        .num_stripes(64).unwrap()
+        .stripe_capacity(4096).unwrap()
+        .write_buffer_size(256 * 1024).unwrap()
+        .segment_size(256 * 1024 * 1024).unwrap()
+        .build())
+    .historical(HistoricalConfigBuilder::new()
+        .max_versions_per_entity(10000).unwrap()
+        .reconstruction_cache_size(100000).unwrap()
+        .build())
+    .build();
+```
+
+#### Key Configuration Parameters
+
+**WAL Configuration:**
+- `num_stripes`: Concurrency level (must be power of 2, default: 16)
+- `stripe_capacity`: Ring buffer size per stripe (default: 1024)
+- `write_buffer_size`: I/O buffer size in bytes (default: 64KB)
+- `segment_size`: WAL segment file size (default: 64MB, min: 1MB)
+- `segments_to_retain`: Number of segments to keep (default: 10)
+- `durability_mode`: Synchronous, GroupCommit, Async, or AsyncBatched
+
+**Historical Storage Configuration:**
+- `max_versions_per_entity`: Version limit per entity (default: 1000)
+- `max_reconstruction_depth`: Max anchor chain depth (default: 100, max: 1000)
+- `reconstruction_cache_size`: LFU cache size (default: 10000)
+
+**Vector Index Configuration:**
+- `max_k`: Maximum k for k-NN queries (default: 10000, DoS protection)
+- `max_layer`: Maximum HNSW layers (default: 16)
+
+#### Builder Validation
+
+All builder methods validate inputs and return `Result<Self, ConfigError>`:
+
+```rust
+// This will error with ConfigError::InvalidValue
+let result = WalConfigBuilder::new()
+    .num_stripes(0);  // Error: must be > 0
+
+assert!(result.is_err());
+```
+
+#### Feature Flags
+
+- **`config-toml`** (default): Enable TOML configuration file support
+  - Adds `serde` and `toml` dependencies
+  - Enables `from_toml_file()`, `from_toml_str()`, `to_toml_file()`, `to_toml_string()` methods
+  - Disable with `default-features = false` if only using programmatic configuration
+
 ### ⚠️ MANDATORY: Pre-Commit Quality Checks
 
 **BEFORE EVERY COMMIT, you MUST run these commands in order:**

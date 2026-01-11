@@ -18,9 +18,9 @@ arc-swap = "1.7"
 quick_cache = "0.6"
 crossbeam-channel = "0.5"
 
-# Configuration support
-serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
+# Configuration support (optional TOML config files)
+serde = { version = "1.0", features = ["derive"], optional = true }
+toml = { version = "0.8", optional = true }
 
 # Optional Tracy profiling support
 tracy-client = { version = "0.17", optional = true, default-features = false }
@@ -73,8 +73,12 @@ observability-honeycomb = ["observability", "dep:tracing-honeycomb", "dep:libhon
 observability-prometheus = ["observability", "dep:metrics", "dep:metrics-exporter-prometheus"]
 
 # Default features
-default = []
-# Embedding generation features (serde is now always available)
+default = ["config-toml"]
+
+# Configuration file support (TOML)
+config-toml = ["dep:serde", "dep:toml"]
+
+# Embedding generation features
 embeddings = ["dep:tokio", "dep:async-trait", "dep:serde_json"]
 
 # Individual provider features (each implies 'embeddings')

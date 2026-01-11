@@ -22,6 +22,7 @@
 //! let db = GallifreyDB::with_unified_config(config);
 //! ```
 
+#[cfg(feature = "config-toml")]
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -30,8 +31,9 @@ use std::path::Path;
 ///
 /// Controls buffer sizes, stripe configuration, flush behavior, and durability settings.
 /// This consolidates all WAL-related configuration in one place.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "config-toml", serde(default))]
 #[non_exhaustive]
 pub struct WalConfig {
     /// Number of stripes for concurrent appends (must be power of 2).
@@ -226,8 +228,9 @@ impl Default for WalConfigBuilder {
 /// Configuration for historical storage.
 ///
 /// Controls versioning, reconstruction limits, and caching behavior.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "config-toml", serde(default))]
 #[non_exhaustive]
 pub struct HistoricalConfig {
     /// Maximum versions to retain per entity before pruning.
@@ -338,8 +341,9 @@ impl Default for HistoricalConfigBuilder {
 /// Configuration for vector index system.
 ///
 /// Controls limits for k-NN queries and HNSW index structure.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "config-toml", serde(default))]
 #[non_exhaustive]
 pub struct VectorIndexConfig {
     /// Maximum value of k for k-NN queries.
@@ -435,8 +439,9 @@ impl Default for VectorIndexConfigBuilder {
 ///
 /// This consolidates all configuration settings for the database,
 /// making it easy to tune for different deployment scenarios.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "config-toml", serde(default))]
 #[non_exhaustive]
 pub struct GallifreyDBConfig {
     /// WAL configuration
@@ -509,6 +514,7 @@ impl GallifreyDBConfig {
     ///
     /// let config = GallifreyDBConfig::from_toml_file("config.toml")?;
     /// ```
+    #[cfg(feature = "config-toml")]
     pub fn from_toml_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let contents =
             fs::read_to_string(path.as_ref()).map_err(|e| ConfigError::IoError(e.to_string()))?;
@@ -530,6 +536,7 @@ impl GallifreyDBConfig {
     ///
     /// let config = GallifreyDBConfig::from_toml_str(toml_str)?;
     /// ```
+    #[cfg(feature = "config-toml")]
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
         toml::from_str(s).map_err(|e| ConfigError::ParseError(e.to_string()))
     }
@@ -544,6 +551,7 @@ impl GallifreyDBConfig {
     /// let config = GallifreyDBConfig::default();
     /// config.to_toml_file("config.toml")?;
     /// ```
+    #[cfg(feature = "config-toml")]
     pub fn to_toml_file<P: AsRef<Path>>(&self, path: P) -> Result<(), ConfigError> {
         let toml_string = self.to_toml_string()?;
         fs::write(path.as_ref(), toml_string).map_err(|e| ConfigError::IoError(e.to_string()))?;
@@ -551,6 +559,7 @@ impl GallifreyDBConfig {
     }
 
     /// Convert configuration to a TOML string.
+    #[cfg(feature = "config-toml")]
     pub fn to_toml_string(&self) -> Result<String, ConfigError> {
         toml::to_string_pretty(self).map_err(|e| ConfigError::SerializeError(e.to_string()))
     }
@@ -795,6 +804,7 @@ mod tests {
     // TOML configuration tests
 
     #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_serialization() {
         let config = GallifreyDBConfig::default();
         let toml_string = config.to_toml_string().unwrap();
@@ -811,6 +821,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_deserialization_partial() {
         // Test partial config - only override WAL settings
         let toml_str = r#"
@@ -837,6 +848,7 @@ max_layer = 16
     }
 
     #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_deserialization_complete() {
         let toml_str = r#"
 [wal]
@@ -876,6 +888,7 @@ max_layer = 32
     }
 
     #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_round_trip() {
         // Create config with custom values
         let original = GallifreyDBConfig::builder()
@@ -912,6 +925,7 @@ max_layer = 32
     }
 
     #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_file_save_and_load() {
         use tempfile::NamedTempFile;
 
@@ -934,6 +948,7 @@ max_layer = 32
     }
 
     #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_embedded_system_example() {
         let toml_str = r#"
 # Embedded system configuration
@@ -962,6 +977,7 @@ max_layer = 8
     }
 
     #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_cloud_deployment_example() {
         let toml_str = r#"
 # Cloud deployment configuration
@@ -990,6 +1006,7 @@ max_layer = 24
     }
 
     #[test]
+    #[cfg(feature = "config-toml")]
     fn test_toml_parse_error() {
         let invalid_toml = "this is not valid toml {]";
         let result = GallifreyDBConfig::from_toml_str(invalid_toml);

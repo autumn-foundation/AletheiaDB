@@ -661,6 +661,13 @@ impl WriteTransaction {
             self.current.insert_node_direct(node, commit_timestamp)?;
         } else {
             self.current.update_node_direct(node, commit_timestamp)?;
+
+            // Close the current version's transaction_time in historical storage
+            // This marks the end of this version's visibility
+            if let Some(current_version_id) = historical.get_current_node_version(node_id) {
+                historical
+                    .close_node_version_transaction_time(current_version_id, commit_timestamp)?;
+            }
         }
 
         // Store in historical storage (consume properties, avoiding second clone)
@@ -718,6 +725,13 @@ impl WriteTransaction {
             self.current.insert_edge_direct(edge)?;
         } else {
             self.current.update_edge_direct(edge)?;
+
+            // Close the current version's transaction_time in historical storage
+            // This marks the end of this version's visibility
+            if let Some(current_version_id) = historical.get_current_edge_version(edge_id) {
+                historical
+                    .close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
+            }
         }
 
         // Store in historical storage (consume properties, avoiding second clone)

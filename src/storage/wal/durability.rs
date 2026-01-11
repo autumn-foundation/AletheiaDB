@@ -35,7 +35,8 @@ use std::time::Duration;
 /// let config = WalConfig::default()
 ///     .with_durability_mode(DurabilityMode::async_mode(100));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
 pub enum DurabilityMode {
     /// Fsync after every commit. Maximum durability, minimum throughput.
     ///
