@@ -51,7 +51,7 @@ fn test_temporal_edge_lookup_basic() {
     // Get the timestamp of the first version from HistoricalStorage
     let t1 = {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
         version.temporal.valid_time().start() + 1
@@ -85,7 +85,7 @@ fn test_temporal_edge_lookup_basic() {
     println!("\n=== Dumping edge version chain ===");
     {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         if let Some(head_version_id) = hist_guard.get_current_edge_version(edge_id) {
             println!("Head version: {:?}", head_version_id);
             let mut current_id = head_version_id;
@@ -116,7 +116,7 @@ fn test_temporal_edge_lookup_basic() {
     println!("\n=== Verifying temporal edge lookup at t1={} ===", t1);
     {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         match hist_guard.find_edge_version_at_time(edge_id, t1, t1) {
             Some(version_id) => {
                 let version = hist_guard.get_edge_version(version_id).unwrap();
@@ -182,7 +182,7 @@ fn test_temporal_edge_multiple_updates() {
     // Get timestamp of first version
     timestamps.push({
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
         version.temporal.valid_time().start() + 1
@@ -205,7 +205,7 @@ fn test_temporal_edge_multiple_updates() {
         // Capture timestamp after each update
         timestamps.push({
             let historical = db.__test_historical_storage();
-            let hist_guard = historical.read().unwrap();
+            let hist_guard = historical.read();
             let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
             let version = hist_guard.get_edge_version(version_id).unwrap();
             version.temporal.valid_time().start() + 1
@@ -220,7 +220,7 @@ fn test_temporal_edge_multiple_updates() {
 
     // Verify we can retrieve each historical state
     let historical = db.__test_historical_storage();
-    let hist_guard = historical.read().unwrap();
+    let hist_guard = historical.read();
 
     for (i, &timestamp) in timestamps[..timestamps.len() - 1].iter().enumerate() {
         let version_id = hist_guard
@@ -273,7 +273,7 @@ fn test_temporal_edge_interval_closing() {
     // Get first version
     let (v1_id, v1_start) = {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
         (version_id, version.temporal.valid_time().start())
@@ -293,7 +293,7 @@ fn test_temporal_edge_interval_closing() {
     // Get second version
     let v2_start = {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
         version.temporal.valid_time().start()
@@ -302,7 +302,7 @@ fn test_temporal_edge_interval_closing() {
     // Verify first version interval was closed
     {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         let v1 = hist_guard.get_edge_version(v1_id).unwrap();
 
         assert!(
@@ -323,7 +323,7 @@ fn test_temporal_edge_interval_closing() {
 
     // Verify temporal queries work correctly for both periods
     let historical = db.__test_historical_storage();
-    let hist_guard = historical.read().unwrap();
+    let hist_guard = historical.read();
 
     // Query at t1 (during v1)
     let t1 = v1_start + 1;
@@ -397,7 +397,7 @@ fn test_temporal_edge_version_chain_integrity() {
     // Verify version chain integrity
     {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
 
         let mut current_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let mut version_count = 0;
@@ -484,7 +484,7 @@ fn test_temporal_edge_anchor_delta_pattern() {
     // Verify anchor/delta pattern: v0(A), v1(D), v2(D), v3(A), v4(D), v5(D)
     {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
 
         let mut version_ids = vec![];
         let mut current_id = hist_guard.get_current_edge_version(edge_id).unwrap();
@@ -559,7 +559,7 @@ fn test_temporal_edge_with_vector_properties() {
     // Capture timestamp
     let t1 = {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
         version.temporal.valid_time().start() + 1
@@ -583,7 +583,7 @@ fn test_temporal_edge_with_vector_properties() {
     // Verify temporal lookup returns correct vector
     {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
 
         let version_id = hist_guard
             .find_edge_version_at_time(edge_id, t1, t1)

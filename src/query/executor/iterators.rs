@@ -3,8 +3,9 @@
 //! Pull-based iterators for query execution. Each physical operator
 //! has a corresponding iterator that lazily produces results.
 
+use parking_lot::RwLock;
 use std::collections::{HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[cfg(feature = "observability")]
 use tracing;
@@ -233,11 +234,7 @@ impl ResultIterator for TemporalNodeIterator {
         self.node_ids.next().map(|id| {
             // Acquire read lock on historical storage (per-node)
             // For bulk queries, use BatchTemporalNodeIterator instead
-            let historical = self.historical.read().map_err(|_| {
-                crate::utils::error::StorageError::LockPoisoned {
-                    lock_type: "historical_storage_read",
-                }
-            })?;
+            let historical = self.historical.read();
 
             // Find the version valid at the requested time
             let version_id =
@@ -308,12 +305,7 @@ impl BatchTemporalNodeIterator {
         historical: Arc<RwLock<HistoricalStorage>>,
     ) -> Result<Self> {
         // Acquire lock once for all nodes
-        let guard =
-            historical
-                .read()
-                .map_err(|_| crate::utils::error::StorageError::LockPoisoned {
-                    lock_type: "historical_storage_read",
-                })?;
+        let guard = historical.read();
 
         // Reconstruct all nodes while holding the lock
         let results: Vec<Result<QueryRow>> = node_ids
@@ -1993,7 +1985,7 @@ mod tests {
             .intern("Person")
             .unwrap();
         {
-            let mut hist = historical.write().unwrap();
+            let mut hist = historical.write();
             hist.add_node_version(
                 node,
                 crate::core::id::VersionId::new(1).unwrap(),
@@ -2037,7 +2029,7 @@ mod tests {
         use crate::storage::historical::HistoricalStorage;
 
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
-        let mut hist = historical.write().unwrap();
+        let mut hist = historical.write();
 
         // Add 3 nodes
         for i in 1..=3 {

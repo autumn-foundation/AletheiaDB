@@ -316,7 +316,7 @@ fn test_vector_snapshot_id_stored_in_anchors() {
 
     // Access historical storage to verify snapshot IDs
     let historical = db.__test_historical_storage();
-    let historical_read = historical.read().expect("Failed to acquire read lock");
+    let historical_read = historical.read();
 
     // Check all node versions
     let mut anchor_count = 0;

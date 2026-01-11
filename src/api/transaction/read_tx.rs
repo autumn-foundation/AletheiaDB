@@ -15,7 +15,8 @@ use crate::storage::historical::HistoricalStorage;
 use crate::storage::version::VersionMetadata;
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::RwLockExt;
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 /// Read-only transaction
 ///
@@ -277,6 +278,7 @@ mod tests {
     use super::*;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::time;
+    use parking_lot::RwLock;
     use std::collections::HashSet;
     use std::sync::Arc;
 

@@ -22,7 +22,8 @@ use crate::storage::version::AnchorConfig;
 use crate::storage::wal::{DurabilityMode, WalConfig, WriteAheadLog, WriteOptions};
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::{MutexExt, RwLockExt};
-use std::sync::{Arc, Mutex, RwLock};
+use parking_lot::RwLock;
+use std::sync::{Arc, Mutex};
 
 /// Main GallifreyDB database.
 ///
@@ -843,13 +844,7 @@ impl GallifreyDB {
         let node_hook = Arc::clone(&hook);
         let edge_hook = hook;
 
-        let mut historical = self.historical.write().map_err(|_| {
-            crate::utils::error::Error::Storage(
-                crate::utils::error::StorageError::InconsistentState {
-                    reason: "Historical storage lock poisoned".to_string(),
-                },
-            )
-        })?;
+        let mut historical = self.historical.write();
 
         historical.register_pre_node_anchor_hook(node_hook);
         historical.register_pre_edge_anchor_hook(edge_hook);

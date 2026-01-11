@@ -23,7 +23,7 @@ fn test_temporal_lookup_directly() {
     // Get the timestamp of the first version from HistoricalStorage
     let t1 = {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         let version_id = hist_guard.get_current_node_version(node_id).unwrap();
         let version = hist_guard.get_node_version(version_id).unwrap();
         // Use a timestamp between this version's start and the next update
@@ -57,7 +57,7 @@ fn test_temporal_lookup_directly() {
     println!("\n=== Dumping version chain ===");
     {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         if let Some(head_version_id) = hist_guard.get_current_node_version(node_id) {
             println!("Head version: {:?}", head_version_id);
             let mut current_id = head_version_id;
@@ -88,7 +88,7 @@ fn test_temporal_lookup_directly() {
     println!("\n=== Manual version lookup ===");
     {
         let historical = db.__test_historical_storage();
-        let hist_guard = historical.read().unwrap();
+        let hist_guard = historical.read();
         match hist_guard.find_node_version_at_time(node_id, t1, t1) {
             Some(version_id) => {
                 let version = hist_guard.get_node_version(version_id).unwrap();

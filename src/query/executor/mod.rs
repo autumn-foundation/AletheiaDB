@@ -7,12 +7,8 @@
 mod iterators;
 mod results;
 
-// TODO: Consider migrating to parking_lot::RwLock for consistency with CurrentStorage
-// and other performance-critical components. Currently using std::sync::RwLock to match
-// the type used in db.rs for HistoricalStorage. A dedicated PR should migrate all
-// historical storage access (db.rs, read_tx.rs, write_tx.rs) to parking_lot::RwLock.
-// See: CurrentStorage, HnswIndex, TemporalVectorIndex which already use parking_lot.
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
@@ -259,7 +255,7 @@ mod tests {
             .unwrap();
         let bob_label = alice_label;
         {
-            let mut hist = historical.write().unwrap();
+            let mut hist = historical.write();
             hist.add_node_version(
                 alice,
                 crate::core::id::VersionId::new(1).unwrap(),
