@@ -43,7 +43,6 @@ async-trait = { version = "0.1", optional = true }
 
 # HTTP client for API-based providers (OpenAI, HuggingFace, Ollama)
 reqwest = { version = "0.11", features = ["json"], optional = true }
-# Note: serde is now a required dependency (moved to main dependencies)
 serde_json = { version = "1.0", optional = true }
 
 # ONNX runtime for local model inference
