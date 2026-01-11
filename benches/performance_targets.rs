@@ -145,12 +145,14 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
     // Setup: Create database with anchored versions
+    // Anchor interval is 10, so anchors are at v0, v10, v20, etc.
     let db = GallifreyDB::new();
     let node_id = db
         .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
         .unwrap();
 
-    // Create 10 versions (anchor at v0, v10)
+    // Create 10 additional versions (v1-v10)
+    // This creates anchors at v0 (initial create) and v10
     for i in 1..=10 {
         db.write(|tx| {
             tx.update_node(
@@ -167,8 +169,9 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
 
     group.bench_function("at_anchor", |b| {
         b.iter(|| {
-            // Query at anchor point (version 0 or 10)
-            let result = db.get_node_at_time(black_box(node_id), black_box(0), black_box(0));
+            // Query at anchor point v10 (transaction time 10)
+            // This should hit the anchor directly with no delta reconstruction
+            let result = db.get_node_at_time(black_box(node_id), black_box(10), black_box(10));
             black_box(result)
         })
     });
@@ -181,13 +184,14 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
 fn bench_time_travel_with_deltas(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
-    // Setup: Create database with 15 versions (anchors at v0, v10)
+    // Setup: Create database with 15 versions
+    // Anchors at v0, v10, v20 (default anchor_interval = 10)
     let db = GallifreyDB::new();
     let node_id = db
         .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
         .unwrap();
 
-    // Create 15 versions
+    // Create 15 additional versions (v1-v15)
     for i in 1..=15 {
         db.write(|tx| {
             tx.update_node(
@@ -204,9 +208,9 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
 
     group.bench_function("with_5_deltas", |b| {
         b.iter(|| {
-            // Query at version 5 (5 deltas from anchor at v0)
-            // Note: This is a simplified version - actual delta count may vary
-            let result = db.get_node_at_time(black_box(node_id), black_box(5000), black_box(5000));
+            // Query at v5 (transaction time 5)
+            // This requires: anchor@v0 + 5 deltas (v1, v2, v3, v4, v5)
+            let result = db.get_node_at_time(black_box(node_id), black_box(5), black_box(5));
             black_box(result)
         })
     });
@@ -219,13 +223,14 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
 fn bench_time_travel_worst_case(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
-    // Setup: Create database with 19 versions (anchors at v0, v10)
+    // Setup: Create database with 19 versions
+    // Anchors at v0, v10, v20 (default anchor_interval = 10)
     let db = GallifreyDB::new();
     let node_id = db
         .create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").build())
         .unwrap();
 
-    // Create 19 versions
+    // Create 19 additional versions (v1-v19)
     for i in 1..=19 {
         db.write(|tx| {
             tx.update_node(
@@ -242,8 +247,9 @@ fn bench_time_travel_worst_case(c: &mut Criterion) {
 
     group.bench_function("worst_case_9_deltas", |b| {
         b.iter(|| {
-            // Query at version 9 (9 deltas from anchor at v0, just before v10 anchor)
-            let result = db.get_node_at_time(black_box(node_id), black_box(9000), black_box(9000));
+            // Query at v9 (transaction time 9)
+            // This is worst case: anchor@v0 + 9 deltas (v1-v9), just before next anchor@v10
+            let result = db.get_node_at_time(black_box(node_id), black_box(9), black_box(9));
             black_box(result)
         })
     });
