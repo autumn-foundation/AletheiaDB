@@ -469,6 +469,11 @@ pub enum QueryError {
         /// The actual type
         actual: String,
     },
+    /// Query execution error (runtime failure).
+    ExecutionError {
+        /// The error message
+        message: String,
+    },
 }
 
 impl fmt::Display for QueryError {
@@ -491,6 +496,9 @@ impl fmt::Display for QueryError {
             }
             QueryError::TypeMismatch { expected, actual } => {
                 write!(f, "Type mismatch: expected {}, got {}", expected, actual)
+            }
+            QueryError::ExecutionError { message } => {
+                write!(f, "Query execution error: {}", message)
             }
         }
     }

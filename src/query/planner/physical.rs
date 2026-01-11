@@ -95,6 +95,22 @@ pub enum PhysicalOp {
         timestamp: Timestamp,
     },
 
+    /// Find nodes similar to a specific node by extracting its embedding
+    /// and performing k-NN search. This is a compound operation that:
+    /// 1. Looks up the source node
+    /// 2. Extracts the embedding from the specified property
+    /// 3. Performs HNSW k-NN search with that embedding
+    SimilarToNode {
+        /// Source node whose embedding to use
+        source_node: NodeId,
+        /// Property key containing the embedding vector
+        property_key: String,
+        /// Number of results to return
+        k: usize,
+        /// Optional label filter for results
+        label_filter: Option<String>,
+    },
+
     // === Traversal Operators ===
     /// Graph traversal using adjacency index
     IndexedTraversal {
@@ -232,6 +248,7 @@ impl PhysicalOp {
             PhysicalOp::HnswSearch { .. } => "HnswSearch",
             PhysicalOp::TemporalNodeLookup { .. } => "TemporalNodeLookup",
             PhysicalOp::TemporalVectorSearch { .. } => "TemporalVectorSearch",
+            PhysicalOp::SimilarToNode { .. } => "SimilarToNode",
             PhysicalOp::IndexedTraversal { .. } => "IndexedTraversal",
             PhysicalOp::HashJoin { .. } => "HashJoin",
             PhysicalOp::Union { .. } => "Union",
@@ -260,6 +277,7 @@ impl PhysicalOp {
                 | PhysicalOp::HnswSearch { .. }
                 | PhysicalOp::TemporalNodeLookup { .. }
                 | PhysicalOp::TemporalVectorSearch { .. }
+                | PhysicalOp::SimilarToNode { .. }
                 | PhysicalOp::Empty
         )
     }
@@ -273,6 +291,7 @@ impl PhysicalOp {
             | PhysicalOp::HnswSearch { .. }
             | PhysicalOp::TemporalNodeLookup { .. }
             | PhysicalOp::TemporalVectorSearch { .. }
+            | PhysicalOp::SimilarToNode { .. }
             | PhysicalOp::Empty => 1,
 
             PhysicalOp::IndexedTraversal { input, .. }
@@ -330,6 +349,17 @@ impl PhysicalOp {
                 format!(
                     "{prefix}{name} (ids: {:?}, vt: {}, tt: {}, batch: {})",
                     node_ids, valid_time, transaction_time, use_batch
+                )
+            }
+            PhysicalOp::SimilarToNode {
+                source_node,
+                property_key,
+                k,
+                label_filter,
+            } => {
+                format!(
+                    "{prefix}{name} (source: {:?}, prop: {}, k: {}, label: {:?})",
+                    source_node, property_key, k, label_filter
                 )
             }
             PhysicalOp::IndexedTraversal {

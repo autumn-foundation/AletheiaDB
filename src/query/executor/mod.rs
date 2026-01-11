@@ -184,6 +184,89 @@ impl QueryExecutor {
             }
 
             PhysicalOp::Empty => Ok(Box::new(iterators::EmptyIterator)),
+            PhysicalOp::SimilarToNode {
+                source_node,
+                property_key,
+                k,
+                label_filter,
+            } => {
+                // 1. Validate that property_key matches the indexed property
+                let indexed_property =
+                    self.current.get_indexed_property_name().ok_or_else(|| {
+                        crate::utils::error::Error::Query(
+                            crate::utils::error::QueryError::ExecutionError {
+                                message:
+                                    "No vector index is enabled. Call enable_vector_index() first."
+                                        .to_string(),
+                            },
+                        )
+                    })?;
+
+                if property_key != &indexed_property {
+                    return Err(crate::utils::error::Error::Query(
+                        crate::utils::error::QueryError::ExecutionError {
+                            message: format!(
+                                "Property key '{}' does not match indexed property '{}'. \
+                                 Vector index was built on '{}', so similar_to queries must use the same property.",
+                                property_key, indexed_property, indexed_property
+                            ),
+                        },
+                    ));
+                }
+
+                // 2. Look up the source node
+                let node = self.current.get_node(*source_node).map_err(|_| {
+                    crate::utils::error::Error::Query(
+                        crate::utils::error::QueryError::ExecutionError {
+                            message: format!("Source node {:?} not found", source_node),
+                        },
+                    )
+                })?;
+
+                // 3. Extract the embedding from the specified property
+                let embedding = node
+                    .properties
+                    .get(property_key)
+                    .and_then(|v: &crate::core::PropertyValue| v.as_vector())
+                    .ok_or_else(|| {
+                        crate::utils::error::Error::Query(
+                            crate::utils::error::QueryError::ExecutionError {
+                                message: format!(
+                                    "Node {:?} does not have a vector property '{}'",
+                                    source_node, property_key
+                                ),
+                            },
+                        )
+                    })?;
+
+                // 4. Perform HNSW search with the extracted embedding.
+                // Request k+1 results to account for filtering out the source node.
+                // Use checked_add to prevent overflow (though k=usize::MAX is extremely unlikely).
+                let k_with_source = k.checked_add(1).unwrap_or(*k);
+                let mut results = if let Some(label) = label_filter {
+                    self.current.find_similar_by_embedding_with_label(
+                        embedding,
+                        label,
+                        k_with_source,
+                    )?
+                } else {
+                    self.current
+                        .find_similar_by_embedding(embedding, k_with_source)?
+                };
+
+                // Remove source node from results. In vector similarity with cosine distance,
+                // a node has similarity 1.0 with itself, so it's always the first result.
+                // Filtering it out ensures we return k truly *different* nodes.
+                results.retain(|(node_id, _)| node_id != source_node);
+
+                // Trim to requested k results after filtering
+                results.truncate(*k);
+
+                Ok(Box::new(iterators::VectorResultIterator::new(
+                    results,
+                    Arc::clone(&self.current),
+                )))
+            }
 
             // For unsupported operations, return error
             _ => Err(crate::utils::error::Error::Query(
@@ -612,5 +695,387 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].entity.node_id(), Some(bob));
+    }
+
+    // ==================== SimilarTo Tests ====================
+
+    #[test]
+    fn test_similar_to_node_execution() {
+        use crate::core::PropertyMapBuilder;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let (storage, historical) = create_test_storage();
+        let executor = QueryExecutor::new(Arc::clone(&storage), historical);
+
+        // Enable vector index first
+        storage
+            .enable_vector_index("embedding", HnswConfig::new(3, DistanceMetric::Cosine))
+            .unwrap();
+
+        // Create test nodes with embeddings
+        let embedding1 = vec![1.0, 0.0, 0.0];
+        let embedding2 = vec![0.9, 0.1, 0.0]; // Similar to embedding1
+        let embedding3 = vec![0.0, 1.0, 0.0]; // Different from embedding1
+
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert("title", "Doc1")
+                    .insert_vector("embedding", &embedding1)
+                    .build(),
+            )
+            .unwrap();
+
+        let node2 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert("title", "Doc2")
+                    .insert_vector("embedding", &embedding2)
+                    .build(),
+            )
+            .unwrap();
+
+        let _node3 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert("title", "Doc3")
+                    .insert_vector("embedding", &embedding3)
+                    .build(),
+            )
+            .unwrap();
+
+        // Execute SimilarTo query
+        let plan = PhysicalPlan {
+            root: PhysicalOp::SimilarToNode {
+                source_node: node1,
+                property_key: "embedding".to_string(),
+                k: 5,
+                label_filter: None,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        // Should find node2 as most similar (excluding node1 itself)
+        assert!(!rows.is_empty());
+        assert_eq!(rows[0].entity.node_id(), Some(node2));
+    }
+
+    #[test]
+    fn test_similar_to_with_label_filter() {
+        use crate::core::PropertyMapBuilder;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let (storage, historical) = create_test_storage();
+        let executor = QueryExecutor::new(Arc::clone(&storage), historical);
+
+        // Enable vector index first
+        storage
+            .enable_vector_index("embedding", HnswConfig::new(3, DistanceMetric::Cosine))
+            .unwrap();
+
+        let embedding = vec![1.0, 0.0, 0.0];
+
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &embedding)
+                    .build(),
+            )
+            .unwrap();
+
+        // Create similar node with different label
+        let _node2 = storage
+            .create_node(
+                "Other",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.9, 0.1, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        // Create similar node with same label
+        let node3 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.95, 0.05, 0.0])
+                    .build(),
+            )
+            .unwrap();
+
+        let plan = PhysicalPlan {
+            root: PhysicalOp::SimilarToNode {
+                source_node: node1,
+                property_key: "embedding".to_string(),
+                k: 5,
+                label_filter: Some("Doc".to_string()),
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        // Should only find node3 (Doc label), not node2 (Other label)
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entity.node_id(), Some(node3));
+    }
+
+    #[test]
+    fn test_similar_to_source_node_not_found() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let (storage, historical) = create_test_storage();
+
+        // Enable vector index so we can test the "node not found" error
+        storage
+            .enable_vector_index("embedding", HnswConfig::new(3, DistanceMetric::Cosine))
+            .unwrap();
+
+        let executor = QueryExecutor::new(storage, historical);
+
+        let nonexistent_node = NodeId::new(9999).unwrap();
+
+        let plan = PhysicalPlan {
+            root: PhysicalOp::SimilarToNode {
+                source_node: nonexistent_node,
+                property_key: "embedding".to_string(),
+                k: 5,
+                label_filter: None,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+        };
+
+        let result = executor.execute(plan);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Source node"));
+        }
+    }
+
+    #[test]
+    fn test_similar_to_missing_vector_property() {
+        use crate::core::PropertyMapBuilder;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let (storage, historical) = create_test_storage();
+        let executor = QueryExecutor::new(Arc::clone(&storage), historical);
+
+        // Enable vector index so we can test the "missing property" error
+        storage
+            .enable_vector_index("embedding", HnswConfig::new(3, DistanceMetric::Cosine))
+            .unwrap();
+
+        // Create node without vector property
+        let node = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert("title", "No embedding")
+                    .build(),
+            )
+            .unwrap();
+
+        let plan = PhysicalPlan {
+            root: PhysicalOp::SimilarToNode {
+                source_node: node,
+                property_key: "embedding".to_string(),
+                k: 5,
+                label_filter: None,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+        };
+
+        let result = executor.execute(plan);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.to_string().contains("does not have a vector property"));
+        }
+    }
+
+    #[test]
+    fn test_similar_to_custom_property_key() {
+        use crate::core::PropertyMapBuilder;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let (storage, historical) = create_test_storage();
+        let executor = QueryExecutor::new(Arc::clone(&storage), historical);
+
+        // Enable vector index on custom property first
+        storage
+            .enable_vector_index("custom_vector", HnswConfig::new(3, DistanceMetric::Cosine))
+            .unwrap();
+
+        let embedding1 = vec![1.0, 0.0, 0.0];
+        let embedding2 = vec![0.9, 0.1, 0.0];
+
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("custom_vector", &embedding1)
+                    .build(),
+            )
+            .unwrap();
+
+        let node2 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("custom_vector", &embedding2)
+                    .build(),
+            )
+            .unwrap();
+
+        let plan = PhysicalPlan {
+            root: PhysicalOp::SimilarToNode {
+                source_node: node1,
+                property_key: "custom_vector".to_string(),
+                k: 5,
+                label_filter: None,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert!(!rows.is_empty());
+        assert_eq!(rows[0].entity.node_id(), Some(node2));
+    }
+
+    #[test]
+    fn test_similar_to_no_vector_index() {
+        use crate::core::PropertyMapBuilder;
+
+        let (storage, historical) = create_test_storage();
+        let executor = QueryExecutor::new(Arc::clone(&storage), historical);
+
+        let embedding = vec![1.0, 0.0, 0.0];
+
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &embedding)
+                    .build(),
+            )
+            .unwrap();
+
+        // NOTE: Vector index NOT enabled for "embedding" property
+
+        let plan = PhysicalPlan {
+            root: PhysicalOp::SimilarToNode {
+                source_node: node1,
+                property_key: "embedding".to_string(),
+                k: 5,
+                label_filter: None,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+        };
+
+        let result = executor.execute(plan);
+        assert!(
+            result.is_err(),
+            "Should return error when vector index is not enabled"
+        );
+
+        // Verify error message indicates index not found
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            assert!(
+                error_msg.contains("index") || error_msg.contains("Index"),
+                "Error should mention missing index: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_similar_to_fewer_results_than_k() {
+        use crate::core::PropertyMapBuilder;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let (storage, historical) = create_test_storage();
+        let executor = QueryExecutor::new(Arc::clone(&storage), historical);
+
+        // Enable vector index
+        storage
+            .enable_vector_index("embedding", HnswConfig::new(3, DistanceMetric::Cosine))
+            .unwrap();
+
+        // Create only 3 nodes total
+        let embedding1 = vec![1.0, 0.0, 0.0];
+        let embedding2 = vec![0.9, 0.1, 0.0];
+        let embedding3 = vec![0.8, 0.2, 0.0];
+
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &embedding1)
+                    .build(),
+            )
+            .unwrap();
+
+        let _node2 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &embedding2)
+                    .build(),
+            )
+            .unwrap();
+
+        let _node3 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &embedding3)
+                    .build(),
+            )
+            .unwrap();
+
+        // Request k=10 similar nodes, but only 2 exist (3 total - 1 source)
+        let plan = PhysicalPlan {
+            root: PhysicalOp::SimilarToNode {
+                source_node: node1,
+                property_key: "embedding".to_string(),
+                k: 10,
+                label_filter: None,
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        // Should return only 2 results (3 nodes - source node), not 10
+        assert_eq!(
+            rows.len(),
+            2,
+            "Should return only 2 results when database has fewer nodes than k"
+        );
     }
 }

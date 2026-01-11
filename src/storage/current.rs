@@ -135,6 +135,14 @@ impl CurrentStorage {
         self.vector_index_state.read().is_enabled()
     }
 
+    /// Get the property name that is currently indexed.
+    ///
+    /// Returns `Some(property_name)` if a vector index is enabled,
+    /// or `None` if no index is configured.
+    pub fn get_indexed_property_name(&self) -> Option<String> {
+        self.vector_index_state.read().property_name.clone()
+    }
+
     /// Get vector index configuration for checkpoint persistence.
     ///
     /// Returns the current vector index configuration if enabled, or disabled

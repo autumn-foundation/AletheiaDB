@@ -191,6 +191,17 @@ pub enum ScanOp {
         /// Timestamp for the historical query
         timestamp: Timestamp,
     },
+    /// Find nodes similar to a specific node by extracting its embedding
+    SimilarToNode {
+        /// Source node whose embedding to use
+        source_node: NodeId,
+        /// Property key containing the embedding vector
+        property_key: String,
+        /// Number of results to return
+        k: usize,
+        /// Optional label filter for results
+        label_filter: Option<String>,
+    },
 }
 
 /// Unary operations that transform a single input.
