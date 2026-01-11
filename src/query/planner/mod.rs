@@ -14,6 +14,7 @@ use std::sync::Arc;
 #[cfg(feature = "observability")]
 use tracing;
 
+use crate::storage::CurrentStorage;
 use crate::utils::error::{Error, QueryError, Result};
 
 use super::builder::Query;
@@ -33,16 +34,22 @@ pub struct QueryPlanner {
     cost_model: CostModel,
     /// Optimization rules to apply
     rules: Vec<Box<dyn OptimizationRule>>,
+    /// Reference to current storage for index validation
+    storage: Arc<CurrentStorage>,
 }
 
 impl QueryPlanner {
-    /// Create a new query planner with the given statistics
+    /// Create a new query planner with the given statistics and storage
+    ///
+    /// The storage reference is used to validate that required indexes exist during
+    /// query planning, providing earlier and more informative error messages.
     #[must_use]
-    pub fn new(stats: Arc<Statistics>) -> Self {
+    pub fn new(stats: Arc<Statistics>, storage: Arc<CurrentStorage>) -> Self {
         QueryPlanner {
             stats,
             cost_model: CostModel::default(),
             rules: rules::default_rules(),
+            storage,
         }
     }
 
@@ -373,12 +380,11 @@ impl QueryPlanner {
 
     /// Convert a scan operation to physical
     ///
-    /// # Limitations
+    /// # Index Validation
     ///
-    /// See issue #309: This function does not validate that required indexes exist (e.g., vector index
-    /// for HnswSearch). Validation happens at execution time in the executor. For better
-    /// error messages, the planner should receive a reference to CurrentStorage to check
-    /// index availability during planning.
+    /// This function validates that required indexes exist before generating physical
+    /// operations. If a vector index is required but not enabled, it returns an
+    /// `IndexNotFound` error with a helpful hint on how to enable the index.
     fn scan_to_physical(
         &self,
         scan: &ScanOp,
@@ -414,6 +420,21 @@ impl QueryPlanner {
                 label_filter,
                 metric: _,
             } => {
+                // Validate that vector index is enabled
+                if !self.storage.is_vector_index_enabled() {
+                    let property_name = self
+                        .storage
+                        .get_indexed_property_name()
+                        .unwrap_or_else(|| "embedding".to_string());
+                    return Err(Error::Query(QueryError::IndexNotFound {
+                        index_type: "vector".to_string(),
+                        property_name,
+                        hint: Some(
+                            "Call db.enable_vector_index(\"embedding\", config) first".to_string(),
+                        ),
+                    }));
+                }
+
                 if let Some((_, tx_time)) = temporal.as_ref().and_then(|ctx| ctx.as_of) {
                     return Ok(PhysicalOp::TemporalVectorSearch {
                         embedding: embedding.clone(),
@@ -448,22 +469,53 @@ impl QueryPlanner {
                 embedding,
                 k,
                 timestamp,
-            } => Ok(PhysicalOp::TemporalVectorSearch {
-                embedding: embedding.clone(),
-                k: *k,
-                timestamp: *timestamp,
-            }),
+            } => {
+                // Validate that vector index is enabled for temporal search
+                if !self.storage.is_vector_index_enabled() {
+                    let property_name = self
+                        .storage
+                        .get_indexed_property_name()
+                        .unwrap_or_else(|| "embedding".to_string());
+                    return Err(Error::Query(QueryError::IndexNotFound {
+                        index_type: "vector".to_string(),
+                        property_name,
+                        hint: Some(
+                            "Call db.enable_vector_index(\"embedding\", config) first".to_string(),
+                        ),
+                    }));
+                }
+
+                Ok(PhysicalOp::TemporalVectorSearch {
+                    embedding: embedding.clone(),
+                    k: *k,
+                    timestamp: *timestamp,
+                })
+            }
             ScanOp::SimilarToNode {
                 source_node,
                 property_key,
                 k,
                 label_filter,
-            } => Ok(PhysicalOp::SimilarToNode {
-                source_node: *source_node,
-                property_key: property_key.clone(),
-                k: *k,
-                label_filter: label_filter.clone(),
-            }),
+            } => {
+                // Validate that vector index is enabled for SimilarTo queries
+                if !self.storage.is_vector_index_enabled() {
+                    let property_name = property_key.clone();
+                    return Err(Error::Query(QueryError::IndexNotFound {
+                        index_type: "vector".to_string(),
+                        property_name,
+                        hint: Some(
+                            "Call db.enable_vector_index(\"embedding\", config) first".to_string(),
+                        ),
+                    }));
+                }
+
+                Ok(PhysicalOp::SimilarToNode {
+                    source_node: *source_node,
+                    property_key: property_key.clone(),
+                    k: *k,
+                    label_filter: label_filter.clone(),
+                })
+            }
         }
     }
 
@@ -503,11 +555,28 @@ impl QueryPlanner {
                 depth: depth.max_depth().unwrap_or(10),
             }),
 
-            UnaryOp::VectorRank { embedding, top_k } => Ok(PhysicalOp::VectorRerank {
-                input: Box::new(input),
-                embedding: embedding.clone(),
-                k: top_k.unwrap_or(10),
-            }),
+            UnaryOp::VectorRank { embedding, top_k } => {
+                // Validate that vector index is enabled for reranking
+                if !self.storage.is_vector_index_enabled() {
+                    let property_name = self
+                        .storage
+                        .get_indexed_property_name()
+                        .unwrap_or_else(|| "embedding".to_string());
+                    return Err(Error::Query(QueryError::IndexNotFound {
+                        index_type: "vector".to_string(),
+                        property_name,
+                        hint: Some(
+                            "Call db.enable_vector_index(\"embedding\", config) first".to_string(),
+                        ),
+                    }));
+                }
+
+                Ok(PhysicalOp::VectorRerank {
+                    input: Box::new(input),
+                    embedding: embedding.clone(),
+                    k: top_k.unwrap_or(10),
+                })
+            }
 
             UnaryOp::Sort { key, descending } => Ok(PhysicalOp::Sort {
                 input: Box::new(input),
@@ -580,32 +649,50 @@ mod tests {
     use crate::query::plan::QueryHints;
 
     fn test_planner() -> QueryPlanner {
-        QueryPlanner::new(Arc::new(Statistics::default()))
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::hnsw::HnswConfig;
+        use crate::storage::CurrentStorage;
+
+        // Create storage with vector index enabled for most tests
+        let storage = Arc::new(CurrentStorage::new());
+        let config = HnswConfig::new(4, DistanceMetric::Cosine);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        QueryPlanner::new(Arc::new(Statistics::default()), storage)
     }
 
     // ==================== Basic Planner Tests ====================
 
     #[test]
     fn test_planner_new() {
+        use crate::storage::CurrentStorage;
+
         let stats = Arc::new(Statistics::default());
-        let planner = QueryPlanner::new(Arc::clone(&stats));
+        let storage = Arc::new(CurrentStorage::new());
+        let planner = QueryPlanner::new(Arc::clone(&stats), storage);
         // Verify the planner was created (no public fields to check)
         let _ = planner;
     }
 
     #[test]
     fn test_planner_with_cost_model() {
+        use crate::storage::CurrentStorage;
+
         let stats = Arc::new(Statistics::default());
+        let storage = Arc::new(CurrentStorage::new());
         let custom_cost = CostModel::default();
-        let planner = QueryPlanner::new(stats).with_cost_model(custom_cost);
+        let planner = QueryPlanner::new(stats, storage).with_cost_model(custom_cost);
         let _ = planner;
     }
 
     #[test]
     fn test_planner_with_rules() {
+        use crate::storage::CurrentStorage;
+
         let stats = Arc::new(Statistics::default());
+        let storage = Arc::new(CurrentStorage::new());
         let custom_rules: Vec<Box<dyn OptimizationRule>> = vec![];
-        let planner = QueryPlanner::new(stats).with_rules(custom_rules);
+        let planner = QueryPlanner::new(stats, storage).with_rules(custom_rules);
         let _ = planner;
     }
 
@@ -1370,5 +1457,97 @@ mod tests {
             }
             _ => panic!("Expected SimilarToNode"),
         }
+    }
+
+    // ==================== Index Validation Tests (Issue #309) ====================
+
+    #[test]
+    fn test_vector_search_without_index_error() {
+        use crate::storage::CurrentStorage;
+
+        // Create planner with storage (no vector index enabled)
+        let storage = Arc::new(CurrentStorage::new());
+        let planner = QueryPlanner::new(Arc::new(Statistics::default()), storage);
+
+        let embedding = [0.1f32; 4];
+        let query = QueryBuilder::new().find_similar(&embedding, 10).build();
+
+        // Should fail during planning with IndexNotFound error
+        let result = planner.plan(query);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_msg = format!("{}", err);
+        assert!(err_msg.contains("index"));
+        assert!(err_msg.contains("embedding"));
+        assert!(
+            err_msg.contains("enable_vector_index"),
+            "Error message should provide hint to enable index: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_vector_rerank_without_index_error() {
+        use crate::storage::CurrentStorage;
+
+        let storage = Arc::new(CurrentStorage::new());
+        let planner = QueryPlanner::new(Arc::new(Statistics::default()), storage);
+
+        let embedding = [0.1f32; 4];
+        let query = QueryBuilder::new()
+            .start(NodeId::new(1).unwrap())
+            .rank_by_similarity(&embedding, 10)
+            .build();
+
+        let result = planner.plan(query);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_msg = format!("{}", err).to_lowercase();
+        assert!(err_msg.contains("vector"));
+        assert!(err_msg.contains("index"));
+        assert!(err_msg.contains("embedding"));
+    }
+
+    #[test]
+    fn test_similar_to_without_index_error() {
+        use crate::storage::CurrentStorage;
+
+        let storage = Arc::new(CurrentStorage::new());
+        let planner = QueryPlanner::new(Arc::new(Statistics::default()), storage);
+
+        let source_node = NodeId::new(1).unwrap();
+        let query = QueryBuilder::new()
+            .start(source_node)
+            .similar_to(source_node, 10)
+            .build();
+
+        let result = planner.plan(query);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let err_msg = format!("{}", err);
+        assert!(err_msg.contains("index"));
+    }
+
+    #[test]
+    fn test_temporal_vector_search_without_index_error() {
+        use crate::storage::CurrentStorage;
+
+        let storage = Arc::new(CurrentStorage::new());
+        let planner = QueryPlanner::new(Arc::new(Statistics::default()), storage);
+
+        let embedding = [0.1f32; 4];
+        let query = QueryBuilder::new()
+            .as_of(1000, 2000)
+            .find_similar(&embedding, 10)
+            .build();
+
+        let result = planner.plan(query);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, crate::utils::error::Error::Query(_)));
     }
 }

@@ -474,6 +474,15 @@ pub enum QueryError {
         /// The error message
         message: String,
     },
+    /// Required index not found during query planning.
+    IndexNotFound {
+        /// The type of index required (e.g., "vector")
+        index_type: String,
+        /// The property name being indexed
+        property_name: String,
+        /// Optional hint on how to fix the issue
+        hint: Option<String>,
+    },
 }
 
 impl fmt::Display for QueryError {
@@ -499,6 +508,21 @@ impl fmt::Display for QueryError {
             }
             QueryError::ExecutionError { message } => {
                 write!(f, "Query execution error: {}", message)
+            }
+            QueryError::IndexNotFound {
+                index_type,
+                property_name,
+                hint,
+            } => {
+                write!(
+                    f,
+                    "Query requires {} index on '{}' property which is not enabled",
+                    index_type, property_name
+                )?;
+                if let Some(hint_msg) = hint {
+                    write!(f, ". Hint: {}", hint_msg)?;
+                }
+                Ok(())
             }
         }
     }
@@ -917,6 +941,28 @@ mod tests {
         };
         assert!(format!("{}", err).contains("Invalid graph traversal"));
         assert!(format!("{}", err).contains("edge doesn't connect nodes"));
+
+        // Test IndexNotFound without hint
+        let err = QueryError::IndexNotFound {
+            index_type: "vector".to_string(),
+            property_name: "embedding".to_string(),
+            hint: None,
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("vector index"));
+        assert!(display.contains("embedding"));
+        assert!(display.contains("not enabled"));
+
+        // Test IndexNotFound with hint
+        let err = QueryError::IndexNotFound {
+            index_type: "vector".to_string(),
+            property_name: "embedding".to_string(),
+            hint: Some("Call db.enable_vector_index(\"embedding\", config) first".to_string()),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("vector index"));
+        assert!(display.contains("embedding"));
+        assert!(display.contains("enable_vector_index"));
     }
 
     #[test]

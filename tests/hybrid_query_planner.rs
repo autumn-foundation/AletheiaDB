@@ -6,7 +6,7 @@
 use gallifreydb::{
     DistanceMetric, GallifreyDB, HnswConfig, NodeId, PropertyMapBuilder, WriteOps,
     query::{QueryBuilder, QueryPlanner},
-    storage::version::AnchorConfig,
+    storage::{CurrentStorage, version::AnchorConfig},
 };
 use std::sync::Arc;
 
@@ -17,6 +17,15 @@ fn create_test_db() -> GallifreyDB {
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
     db
+}
+
+/// Helper to create a test planner with vector index enabled.
+fn create_test_planner() -> QueryPlanner {
+    let storage = Arc::new(CurrentStorage::new());
+    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+    storage.enable_vector_index("embedding", config).unwrap();
+    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
+    QueryPlanner::new(stats, storage)
 }
 
 /// Helper to create a social graph for testing.
@@ -87,8 +96,7 @@ fn test_query_builder_basic() {
     let query = QueryBuilder::new().start(alice).build();
 
     // Verify by planning - if planning succeeds, the query is valid
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     assert!(planner.plan(query).is_ok());
     println!("✓ Query builder creates valid query");
 }
@@ -105,8 +113,7 @@ fn test_query_builder_with_filter() {
         .build();
 
     // Verify by planning
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     assert!(planner.plan(query).is_ok());
     println!("✓ Query builder with filter works");
 }
@@ -120,8 +127,7 @@ fn test_query_builder_traverse() {
     let query = QueryBuilder::new().start(alice).traverse("KNOWS").build();
 
     // Verify by planning
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     assert!(planner.plan(query).is_ok());
     println!("✓ Query builder with traversal works");
 }
@@ -135,8 +141,7 @@ fn test_query_builder_vector_search() {
     let query = QueryBuilder::new().find_similar(&embedding, 5).build();
 
     // Verify by planning
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     assert!(planner.plan(query).is_ok());
     println!("✓ Query builder for vector search works");
 }
@@ -155,8 +160,7 @@ fn test_query_builder_hybrid() {
         .build();
 
     // Verify by planning
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     assert!(planner.plan(query).is_ok());
     println!("✓ Query builder for hybrid query works");
 }
@@ -184,8 +188,7 @@ fn test_planner_node_lookup() {
 
     let query = QueryBuilder::new().start(alice).build();
 
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     // Should produce a NodeLookup physical op
@@ -203,8 +206,7 @@ fn test_planner_traversal() {
 
     let query = QueryBuilder::new().start(alice).traverse("KNOWS").build();
 
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     // Should produce an IndexedTraversal
@@ -222,8 +224,7 @@ fn test_planner_vector_search() {
     let embedding = [1.0f32, 0.0, 0.0, 0.0];
     let query = QueryBuilder::new().find_similar(&embedding, 5).build();
 
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     // Should produce an HnswSearch
@@ -246,8 +247,7 @@ fn test_planner_hybrid_graph_vector() {
         .rank_by_similarity(&embedding, 10)
         .build();
 
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     // Should produce VectorRerank(IndexedTraversal(NodeLookup))
@@ -265,8 +265,7 @@ fn test_planner_temporal_lookup() {
 
     let query = QueryBuilder::new().as_of(1000, 1000).start(alice).build();
 
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     // Should produce TemporalNodeLookup
@@ -310,8 +309,7 @@ fn test_plan_explain() {
         .limit(5)
         .build();
 
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     // Get explain output from the root operation
@@ -328,8 +326,7 @@ fn test_plan_depth() {
 
     // Simple query - shallow plan
     let simple = QueryBuilder::new().start(alice).build();
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats.clone());
+    let planner = create_test_planner();
     let simple_plan = planner.plan(simple).expect("Planning failed");
     assert_eq!(simple_plan.root.depth(), 1);
 
@@ -359,8 +356,7 @@ fn test_minimal_query() {
     let fake_id = NodeId::new(99999).expect("valid id");
     let query = QueryBuilder::new().start(fake_id).build();
 
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
 
     // Planning should succeed (execution would return empty results)
     let result = planner.plan(query);
@@ -379,8 +375,7 @@ fn test_multi_hop_traversal_query() {
         .traverse_n("KNOWS", 2)
         .build();
 
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     assert!(matches!(
@@ -398,8 +393,7 @@ fn test_scan_all_nodes() {
     // Scan all nodes with label
     let query = QueryBuilder::new().scan(Some("Person")).build();
 
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     assert!(matches!(
@@ -498,8 +492,7 @@ fn test_full_hybrid_temporal_graph_vector() {
     assert!(query.operation_count() >= 3);
 
     // Plan should work
-    let stats = Arc::new(gallifreydb::query::planner::Statistics::default());
-    let planner = QueryPlanner::new(stats);
+    let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     // Should be a VectorRerank over something
