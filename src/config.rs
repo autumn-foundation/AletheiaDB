@@ -3,7 +3,13 @@
 //! This module provides a centralized configuration system that consolidates
 //! all previously hardcoded values across WAL, historical storage, and vector indexes.
 //!
-//! # Example
+//! # Features
+//!
+//! - **`config-toml`** (enabled by default): Adds TOML file support via `from_toml_file()`,
+//!   `from_toml_str()`, `to_toml_file()`, and `to_toml_string()` methods.
+//!   Disable with `default-features = false` if only using programmatic configuration.
+//!
+//! # Example (Programmatic)
 //!
 //! ```ignore
 //! use gallifreydb::config::{GallifreyDBConfig, WalConfigBuilder, HistoricalConfigBuilder};
@@ -19,6 +25,15 @@
 //!         .build())
 //!     .build();
 //!
+//! let db = GallifreyDB::with_unified_config(config);
+//! ```
+//!
+//! # Example (TOML - requires `config-toml` feature)
+//!
+//! ```ignore
+//! use gallifreydb::config::GallifreyDBConfig;
+//!
+//! let config = GallifreyDBConfig::from_toml_file("config.toml")?;
 //! let db = GallifreyDB::with_unified_config(config);
 //! ```
 
@@ -119,9 +134,11 @@ impl WalConfigBuilder {
         }
         let rounded = num_stripes.next_power_of_two();
         if rounded != num_stripes {
-            eprintln!(
-                "Warning: num_stripes {} rounded to next power of 2: {}",
-                num_stripes, rounded
+            #[cfg(feature = "observability")]
+            tracing::warn!(
+                original = num_stripes,
+                rounded = rounded,
+                "num_stripes rounded to next power of 2"
             );
         }
         self.config.num_stripes = rounded;
@@ -181,9 +198,18 @@ impl WalConfigBuilder {
     }
 
     /// Set the flush interval in milliseconds.
-    pub fn flush_interval_ms(mut self, ms: u64) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `ms` is 0.
+    pub fn flush_interval_ms(mut self, ms: u64) -> Result<Self, ConfigError> {
+        if ms == 0 {
+            return Err(ConfigError::InvalidValue(
+                "flush_interval_ms must be greater than 0".into(),
+            ));
+        }
         self.config.flush_interval_ms = ms;
-        self
+        Ok(self)
     }
 
     /// Set the WAL directory path.
@@ -617,6 +643,7 @@ mod tests {
             .segment_size(128 * 1024 * 1024)
             .unwrap()
             .flush_interval_ms(20)
+            .unwrap()
             .build();
 
         assert_eq!(config.num_stripes, 32);
@@ -793,7 +820,8 @@ mod tests {
         let config = GallifreyDBConfig::builder()
             .wal(
                 WalConfigBuilder::new()
-                    .flush_interval_ms(100) // Longer interval for batching
+                    .flush_interval_ms(100)
+                    .unwrap() // Longer interval for batching
                     .build(),
             )
             .build();
@@ -1108,6 +1136,13 @@ wal_dir = "/custom/path/to/wal"
     #[test]
     fn test_wal_config_zero_segments_to_retain() {
         let result = WalConfigBuilder::new().segments_to_retain(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_wal_config_zero_flush_interval() {
+        let result = WalConfigBuilder::new().flush_interval_ms(0);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
     }
