@@ -144,9 +144,9 @@ fn bench_batch_insertion_target(c: &mut Criterion) {
 ///
 /// Version/Timestamp Semantics:
 /// - Uses actual wallclock microsecond timestamps for tx_time and valid_time
-/// - Captures timestamp after 10th update (which should be an anchor)
+/// - Captures the commit timestamp from the 10th update (which should be an anchor)
 /// - Anchor interval is 10, so anchors are created every 10 updates
-/// - Query uses the captured timestamp to retrieve the anchor directly
+/// - Query uses the exact commit timestamp to retrieve the anchor directly
 fn bench_time_travel_at_anchor(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
@@ -159,27 +159,26 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
         )
         .expect("Benchmark setup: create_node should succeed with valid input");
 
-    // Create 10 updates and capture the timestamp after update 10 (anchor)
+    // Create 10 updates and capture the commit timestamp at update 10 (anchor)
     let mut timestamp_at_10 = 0i64;
     for i in 1..=10 {
-        db.write(|tx| {
-            tx.update_node(
-                node_id,
-                PropertyMapBuilder::new()
-                    .insert("name", "Alice")
-                    .insert("version", i)
-                    .build(),
-            )?;
-            Ok(())
-        })
-        .expect("Benchmark setup: update_node should succeed with valid input");
+        let commit_ts = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("version", i)
+                        .build(),
+                )?;
+                Ok(())
+            })
+            .expect("Benchmark setup: update_node should succeed with valid input")
+            .1; // Extract commit timestamp
 
-        // Capture timestamp after 10th update (anchor point)
+        // Capture commit timestamp at 10th update (anchor point)
         if i == 10 {
-            timestamp_at_10 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
+            timestamp_at_10 = commit_ts;
         }
     }
 
@@ -204,7 +203,7 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
 ///
 /// Version/Timestamp Semantics:
 /// - Uses actual wallclock microsecond timestamps
-/// - Captures timestamp after 5th update (delta, not anchor)
+/// - Captures the commit timestamp from the 5th update (delta, not anchor)
 /// - Query requires finding nearest anchor (after update 1) and applying ~4 deltas
 fn bench_time_travel_with_deltas(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
@@ -219,27 +218,26 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
         )
         .expect("Benchmark setup: create_node should succeed with valid input");
 
-    // Create 15 updates and capture timestamp after update 5 (delta)
+    // Create 15 updates and capture commit timestamp at update 5 (delta)
     let mut timestamp_at_5 = 0i64;
     for i in 1..=15 {
-        db.write(|tx| {
-            tx.update_node(
-                node_id,
-                PropertyMapBuilder::new()
-                    .insert("name", "Alice")
-                    .insert("version", i)
-                    .build(),
-            )?;
-            Ok(())
-        })
-        .expect("Benchmark setup: update_node should succeed with valid input");
+        let commit_ts = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("version", i)
+                        .build(),
+                )?;
+                Ok(())
+            })
+            .expect("Benchmark setup: update_node should succeed with valid input")
+            .1; // Extract commit timestamp
 
-        // Capture timestamp after 5th update (delta point)
+        // Capture commit timestamp at 5th update (delta point)
         if i == 5 {
-            timestamp_at_5 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
+            timestamp_at_5 = commit_ts;
         }
     }
 
@@ -264,7 +262,7 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
 ///
 /// Version/Timestamp Semantics:
 /// - Uses actual wallclock microsecond timestamps
-/// - Captures timestamp after 9th update (just before anchor at update 11)
+/// - Captures the commit timestamp from the 9th update (just before anchor at update 11)
 /// - Query requires finding nearest anchor (after update 1) and applying 8 deltas (updates 2-9)
 ///
 /// This is the worst case for anchor_interval=10 (9 versions between anchors)
@@ -281,27 +279,26 @@ fn bench_time_travel_worst_case(c: &mut Criterion) {
         )
         .expect("Benchmark setup: create_node should succeed with valid input");
 
-    // Create 19 updates and capture timestamp after update 9 (worst case delta)
+    // Create 19 updates and capture commit timestamp at update 9 (worst case delta)
     let mut timestamp_at_9 = 0i64;
     for i in 1..=19 {
-        db.write(|tx| {
-            tx.update_node(
-                node_id,
-                PropertyMapBuilder::new()
-                    .insert("name", "Alice")
-                    .insert("version", i)
-                    .build(),
-            )?;
-            Ok(())
-        })
-        .expect("Benchmark setup: update_node should succeed with valid input");
+        let commit_ts = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("version", i)
+                        .build(),
+                )?;
+                Ok(())
+            })
+            .expect("Benchmark setup: update_node should succeed with valid input")
+            .1; // Extract commit timestamp
 
-        // Capture timestamp after 9th update (worst case - just before anchor@11)
+        // Capture commit timestamp at 9th update (worst case - just before anchor@11)
         if i == 9 {
-            timestamp_at_9 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
+            timestamp_at_9 = commit_ts;
         }
     }
 

@@ -164,7 +164,7 @@ impl WriteTransaction {
     /// - **Async**: Returns after flush to OS cache (background thread syncs)
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
-    pub fn commit(mut self) -> Result<()> {
+    pub fn commit(mut self) -> Result<Timestamp> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!(
             "transaction_commit",
@@ -321,7 +321,7 @@ impl WriteTransaction {
             );
         }
 
-        Ok(())
+        Ok(commit_timestamp)
     }
 
     /// Rollback the transaction.
@@ -669,10 +669,30 @@ impl WriteTransaction {
         } else {
             self.current.update_node_direct(node, commit_timestamp)?;
 
-            // For updates, close the current version's transaction_time in historical storage.
-            // This is necessary because when multiple updates occur in the same transaction,
-            // they all have the same commit_timestamp, so the auto-closing logic in
-            // add_node_version won't work (new_tx_time == prev_tx_time).
+            // For updates, explicitly close the current version's transaction_time in historical storage.
+            //
+            // WHY THIS IS NEEDED:
+            // When multiple updates to the same node occur in a SINGLE transaction, they all share
+            // the same commit_timestamp. The auto-closing logic in add_node_version() checks:
+            //   if new_tx_time > prev_tx_time { close prev_version }
+            // But when new_tx_time == prev_tx_time (same transaction), this check fails.
+            //
+            // EXAMPLE SCENARIO:
+            //   db.write(|tx| {
+            //       tx.update_node(node_id, props1)?;  // First update
+            //       tx.update_node(node_id, props2)?;  // Second update - SAME commit_timestamp!
+            //       Ok(())
+            //   })?;
+            //
+            // Without explicit closing, the version chain would be corrupt:
+            // - Version 1: tx_time [T1, ∞)  <- Should be [T1, T2)
+            // - Version 2: tx_time [T2, ∞)  <- Never created because T2 == T2
+            //
+            // With explicit closing:
+            // - Version 1: tx_time [T1, T2)  <- Explicitly closed before adding Version 2
+            // - Version 2: tx_time [T2, ∞)  <- Correctly added with same T2
+            //
+            // See test: test_multiple_updates_same_transaction in tests/benchmark_validation.rs
             if let Some(current_version_id) = historical.get_current_node_version(node_id) {
                 historical
                     .close_node_version_transaction_time(current_version_id, commit_timestamp)?;
@@ -735,10 +755,30 @@ impl WriteTransaction {
         } else {
             self.current.update_edge_direct(edge)?;
 
-            // For updates, close the current version's transaction_time in historical storage.
-            // This is necessary because when multiple updates occur in the same transaction,
-            // they all have the same commit_timestamp, so the auto-closing logic in
-            // add_edge_version won't work (new_tx_time == prev_tx_time).
+            // For updates, explicitly close the current version's transaction_time in historical storage.
+            //
+            // WHY THIS IS NEEDED:
+            // When multiple updates to the same edge occur in a SINGLE transaction, they all share
+            // the same commit_timestamp. The auto-closing logic in add_edge_version() checks:
+            //   if new_tx_time > prev_tx_time { close prev_version }
+            // But when new_tx_time == prev_tx_time (same transaction), this check fails.
+            //
+            // EXAMPLE SCENARIO:
+            //   db.write(|tx| {
+            //       tx.update_edge(edge_id, props1)?;  // First update
+            //       tx.update_edge(edge_id, props2)?;  // Second update - SAME commit_timestamp!
+            //       Ok(())
+            //   })?;
+            //
+            // Without explicit closing, the version chain would be corrupt:
+            // - Version 1: tx_time [T1, ∞)  <- Should be [T1, T2)
+            // - Version 2: tx_time [T2, ∞)  <- Never created because T2 == T2
+            //
+            // With explicit closing:
+            // - Version 1: tx_time [T1, T2)  <- Explicitly closed before adding Version 2
+            // - Version 2: tx_time [T2, ∞)  <- Correctly added with same T2
+            //
+            // See test: test_multiple_updates_same_transaction in tests/benchmark_validation.rs
             if let Some(current_version_id) = historical.get_current_edge_version(edge_id) {
                 historical
                     .close_edge_version_transaction_time(current_version_id, commit_timestamp)?;

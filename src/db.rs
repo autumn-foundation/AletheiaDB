@@ -323,8 +323,33 @@ impl GallifreyDB {
     {
         let mut tx = self.write_transaction()?;
         let result = f(&mut tx)?;
-        tx.commit()?;
+        tx.commit()?; // Ignore commit timestamp for simple write()
         Ok(result)
+    }
+
+    /// Execute a write operation and return both the result and commit timestamp.
+    ///
+    /// This is useful for benchmarks and tests that need to query the database
+    /// at the exact commit timestamp to verify temporal semantics.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (node_id, commit_ts) = db.write_with_timestamp(|tx| {
+    ///     tx.create_node("Person", properties)
+    /// })?;
+    ///
+    /// // Query at exact commit timestamp
+    /// let node = db.get_node_at_time(node_id, commit_ts, commit_ts)?;
+    /// ```
+    pub fn write_with_timestamp<F, T>(&self, f: F) -> Result<(T, Timestamp)>
+    where
+        F: FnOnce(&mut WriteTransaction) -> Result<T>,
+    {
+        let mut tx = self.write_transaction()?;
+        let result = f(&mut tx)?;
+        let commit_ts = tx.commit()?;
+        Ok((result, commit_ts))
     }
 
     /// Execute a write operation with custom durability options.
@@ -357,7 +382,7 @@ impl GallifreyDB {
     {
         let mut tx = self.write_transaction_with_options(options)?;
         let result = f(&mut tx)?;
-        tx.commit()?;
+        tx.commit()?; // Ignore commit timestamp for simple write_with_options()
         Ok(result)
     }
 

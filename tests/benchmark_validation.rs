@@ -95,59 +95,40 @@ fn test_delta_reconstruction_produces_correct_state() {
         )
         .expect("create_node should succeed");
 
-    // Create 15 updates with incrementing values and capture timestamps
-    // We capture timestamps AFTER each update commits to ensure we have
-    // timestamps between committed transactions
-    let mut timestamp_after_5 = 0i64; // State should be at value=5
-    let mut timestamp_after_9 = 0i64; // State should be at value=9
-    let mut timestamp_after_10 = 0i64; // State should be at value=10
+    // Create 15 updates with incrementing values and capture commit timestamps
+    // This uses the actual commit timestamp from each transaction, ensuring
+    // precise temporal semantics without relying on external timing coordination
+    let mut commit_ts_5 = 0i64; // Commit timestamp of update 5
+    let mut commit_ts_9 = 0i64; // Commit timestamp of update 9
+    let mut commit_ts_10 = 0i64; // Commit timestamp of update 10
+    let mut commit_ts_15 = 0i64; // Commit timestamp of update 15
 
     for i in 1..=15 {
-        // Add small sleep before transaction to ensure different commit timestamps
-        // Without this, all transactions complete in <30 microseconds
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        let commit_ts = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("name", "Alice")
+                        .insert("value", i)
+                        .build(),
+                )?;
+                Ok(())
+            })
+            .expect("update_node should succeed")
+            .1; // Extract commit timestamp
 
-        db.write(|tx| {
-            tx.update_node(
-                node_id,
-                PropertyMapBuilder::new()
-                    .insert("name", "Alice")
-                    .insert("value", i)
-                    .build(),
-            )?;
-            Ok(())
-        })
-        .expect("update_node should succeed");
-
-        // Capture timestamp AFTER commits 5, 9, 10
-        // This gives us a timestamp between committed transactions
+        // Capture commit timestamps for specific updates
         if i == 5 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            timestamp_after_5 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
+            commit_ts_5 = commit_ts;
         } else if i == 9 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            timestamp_after_9 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
+            commit_ts_9 = commit_ts;
         } else if i == 10 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            timestamp_after_10 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros() as i64;
+            commit_ts_10 = commit_ts;
+        } else if i == 15 {
+            commit_ts_15 = commit_ts;
         }
     }
-
-    // Capture timestamp after all updates
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    let timestamp_after_15 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_micros() as i64;
 
     // Verify historical stats
     let stats = db.historical_stats().expect("Should get stats");
@@ -161,41 +142,112 @@ fn test_delta_reconstruction_produces_correct_state() {
     );
     assert_eq!(stats.node_delta_count, 14, "Should have 14 deltas");
 
-    // Query at different time points using actual timestamps
-    // timestamp_after_5 should give us state at value=5 (after update 5 committed)
+    // Query at different time points using exact commit timestamps
+    // This tests that temporal queries work correctly with the actual transaction_time
     let node_at_5 = db
-        .get_node_at_time(node_id, timestamp_after_5, timestamp_after_5)
-        .expect("Query after update 5 should succeed");
+        .get_node_at_time(node_id, commit_ts_5, commit_ts_5)
+        .expect("Query at update 5 commit timestamp should succeed");
     let node_at_9 = db
-        .get_node_at_time(node_id, timestamp_after_9, timestamp_after_9)
-        .expect("Query after update 9 should succeed");
+        .get_node_at_time(node_id, commit_ts_9, commit_ts_9)
+        .expect("Query at update 9 commit timestamp should succeed");
     let node_at_10 = db
-        .get_node_at_time(node_id, timestamp_after_10, timestamp_after_10)
-        .expect("Query after update 10 should succeed");
+        .get_node_at_time(node_id, commit_ts_10, commit_ts_10)
+        .expect("Query at update 10 commit timestamp should succeed");
     let node_at_15 = db
-        .get_node_at_time(node_id, timestamp_after_15, timestamp_after_15)
-        .expect("Query after update 15 should succeed");
+        .get_node_at_time(node_id, commit_ts_15, commit_ts_15)
+        .expect("Query at update 15 commit timestamp should succeed");
 
-    // Verify each query returns the correct state for that time
+    // Verify each query returns the correct state at that exact commit timestamp
     assert_eq!(
         node_at_5.properties.get("value"),
         Some(&5i64.into()),
-        "Query after update 5 should show value=5"
+        "Query at commit_ts_5 should show value=5"
     );
     assert_eq!(
         node_at_9.properties.get("value"),
         Some(&9i64.into()),
-        "Query after update 9 should show value=9"
+        "Query at commit_ts_9 should show value=9"
     );
     assert_eq!(
         node_at_10.properties.get("value"),
         Some(&10i64.into()),
-        "Query after update 10 should show value=10"
+        "Query at commit_ts_10 should show value=10"
     );
     assert_eq!(
         node_at_15.properties.get("value"),
         Some(&15i64.into()),
-        "Query after update 15 should show value=15"
+        "Query at commit_ts_15 should show value=15"
+    );
+}
+
+/// Test multiple updates in the same transaction
+///
+/// This tests the edge case where a transaction performs multiple updates to the
+/// same entity. All operations in the transaction share the same commit_timestamp,
+/// which requires explicit closing of previous versions before adding new ones.
+#[test]
+fn test_multiple_updates_same_transaction() {
+    let db = GallifreyDB::new();
+
+    let node_id = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .expect("create_node should succeed");
+
+    // Perform multiple updates in the SAME transaction
+    // All updates will share the same commit_timestamp
+    let (_result, commit_ts) = db
+        .write_with_timestamp(|tx| {
+            // First update in transaction
+            tx.update_node(
+                node_id,
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .build(),
+            )?;
+
+            // Second update in same transaction
+            tx.update_node(
+                node_id,
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 31i64)
+                    .build(),
+            )?;
+
+            // Third update in same transaction
+            tx.update_node(
+                node_id,
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 32i64)
+                    .build(),
+            )?;
+
+            Ok(())
+        })
+        .expect("Multiple updates in same transaction should succeed");
+
+    // Query at the commit timestamp should show the final state (age=32)
+    let node = db
+        .get_node_at_time(node_id, commit_ts, commit_ts)
+        .expect("Query at commit timestamp should succeed");
+
+    assert_eq!(
+        node.properties.get("age"),
+        Some(&32i64.into()),
+        "Query at commit_ts should show final update (age=32)"
+    );
+
+    // Verify historical stats
+    // Initial version (age absent) + 3 updates = 4 versions total
+    let stats = db.historical_stats().expect("Should get stats");
+    assert_eq!(
+        stats.total_node_versions, 4,
+        "Should have 4 versions (initial + 3 updates in same tx)"
     );
 }
 
