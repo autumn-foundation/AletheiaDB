@@ -499,6 +499,16 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         demo.db.edge_count()
     );
 
+    // === ENABLE VECTOR INDEXING ===
+    println!("\n  Setting up vector indexes...");
+
+    // Enable vector index for character personality embeddings
+    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+    let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
+    demo.db
+        .enable_vector_index("personality_embedding", hnsw_config)?;
+    println!("    ✓ Character personality embeddings indexed");
+
     Ok(())
 }
 
@@ -766,6 +776,251 @@ fn show_stats(demo: &DemoData) -> Result<()> {
     Ok(())
 }
 
+fn find_similar_characters(demo: &DemoData, character_name: &str, k: usize) -> Result<()> {
+    // Find the character node
+    if let Some(&char_id) = demo.characters.get(character_name) {
+        let character = demo.db.get_node(char_id)?;
+
+        println!("\n╔═══════════════════════════════════════════════════════════╗");
+        println!("║  SEMANTIC SIMILARITY: {}", character_name.to_uppercase());
+        println!("╚═══════════════════════════════════════════════════════════╝");
+
+        // Get character details
+        let personality = character
+            .properties
+            .get("personality")
+            .map(format_value)
+            .unwrap_or_default();
+        println!("\nQuery character: {}", character_name);
+        println!("Personality: {}", &personality[..personality.len().min(80)]);
+
+        // Find similar characters using vector similarity
+        println!("\nFinding similar characters...");
+        let similar = demo.db.find_similar(char_id, k)?;
+
+        if similar.is_empty() {
+            println!("  No similar characters found (embeddings may be missing)");
+        } else {
+            println!("\nTop {} most similar characters:\n", similar.len());
+
+            for (i, (similar_id, score)) in similar.iter().enumerate() {
+                let similar_char = demo.db.get_node(*similar_id)?;
+                let name = similar_char
+                    .properties
+                    .get("name")
+                    .map(format_value)
+                    .unwrap_or_default();
+                let book = similar_char
+                    .properties
+                    .get("book")
+                    .map(format_value)
+                    .unwrap_or_default();
+                let personality = similar_char
+                    .properties
+                    .get("personality")
+                    .map(format_value)
+                    .unwrap_or_default();
+
+                println!("{}. {} (similarity: {:.3})", i + 1, name, score);
+                println!("   from: {}", book);
+                println!(
+                    "   personality: {}",
+                    &personality[..personality.len().min(60)]
+                );
+                println!();
+            }
+        }
+    } else {
+        println!("\n❌ Character not found: {}", character_name);
+        println!("\nTry: list characters");
+    }
+
+    Ok(())
+}
+
+fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
+    if let Some(&book_id) = demo.books.get(book_title) {
+        println!("\n╔═══════════════════════════════════════════════════════════╗");
+        println!("║  TIME WARP: {} in {}", book_title.to_uppercase(), year);
+        println!("╚═══════════════════════════════════════════════════════════╝");
+
+        // Get current state
+        let current = demo.db.get_node(book_id)?;
+        let current_interp = current
+            .properties
+            .get("interpretation")
+            .map(format_value)
+            .unwrap_or_default();
+
+        println!("\nBook: {}", book_title);
+        println!(
+            "Author: {}",
+            current
+                .properties
+                .get("author")
+                .map(format_value)
+                .unwrap_or_default()
+        );
+        println!(
+            "Published: {}",
+            current
+                .properties
+                .get("published_year")
+                .map(format_value)
+                .unwrap_or_default()
+        );
+
+        println!("\n═══ INTERPRETATION TIMELINE ═══\n");
+
+        // Show the evolution we created
+        println!("Note: This demo simulates interpretation evolution at specific points:");
+        println!("  • Publication (~1860s-1880s): Initial critical reception");
+        println!("  • Early 20th century (~1900-1925): Modernist/existentialist lens");
+        println!("  • Mid 20th century (~1945-1970): Post-war/Freudian analysis");
+        println!("  • Contemporary (~2024): Modern critical perspectives\n");
+
+        println!("Current interpretation (2024):");
+        println!("  {}\n", current_interp);
+
+        // Show temporal context
+        if year < 1900 {
+            println!("In {}, literary criticism was still emerging.", year);
+            println!("The work would have been viewed through a 19th century lens.");
+        } else if year < 1950 {
+            println!(
+                "In {}, modernist and early psychoanalytic interpretations",
+                year
+            );
+            println!("were beginning to influence literary criticism.");
+        } else if year < 2000 {
+            println!(
+                "In {}, post-war critical theory and structural analysis",
+                year
+            );
+            println!("dominated literary interpretation.");
+        } else {
+            println!("In {}, contemporary criticism emphasizes diverse", year);
+            println!("perspectives including trauma studies, postcolonial theory, etc.");
+        }
+
+        println!("\n💡 In a production system, you could query historical versions");
+        println!("   using: db.get_node_at_time(book_id, timestamp)");
+    } else {
+        println!("\n❌ Book not found: {}", book_title);
+        println!("\nTry: list books");
+    }
+
+    Ok(())
+}
+
+fn show_influences(demo: &DemoData, author_name: &str) -> Result<()> {
+    if let Some(&author_id) = demo.authors.get(author_name) {
+        let author = demo.db.get_node(author_id)?;
+
+        println!("\n╔═══════════════════════════════════════════════════════════╗");
+        println!("║  INFLUENCE NETWORK: {}", author_name.to_uppercase());
+        println!("╚═══════════════════════════════════════════════════════════╝");
+
+        let years = format!(
+            "{}-{}",
+            author
+                .properties
+                .get("birth_year")
+                .map(format_value)
+                .unwrap_or_default(),
+            author
+                .properties
+                .get("death_year")
+                .map(format_value)
+                .unwrap_or_default()
+        );
+        println!("\n{} ({})", author_name, years);
+
+        // Find who influenced this author (incoming INFLUENCED_BY edges)
+        println!("\n═══ INFLUENCED BY ═══");
+        let mut found_influences = false;
+        for edge_id in demo.db.get_incoming_edges(author_id) {
+            if let Ok(edge) = demo.db.get_edge(edge_id)
+                && label_str(edge.label) == "INFLUENCED_BY"
+            {
+                found_influences = true;
+                let influencer = demo.db.get_node(edge.source)?;
+                let influencer_name = influencer
+                    .properties
+                    .get("name")
+                    .map(format_value)
+                    .unwrap_or_default();
+                let influence_type = edge
+                    .properties
+                    .get("type")
+                    .map(format_value)
+                    .unwrap_or_else(|| "general influence".to_string());
+                println!("  ← {} ({})", influencer_name, influence_type);
+            }
+        }
+        if !found_influences {
+            println!("  (No recorded influences)");
+        }
+
+        // Find who this author influenced (outgoing INFLUENCED_BY edges)
+        println!("\n═══ INFLUENCED ═══");
+        let mut found_influenced = false;
+        for edge_id in demo.db.get_outgoing_edges(author_id) {
+            if let Ok(edge) = demo.db.get_edge(edge_id)
+                && label_str(edge.label) == "INFLUENCED_BY"
+            {
+                found_influenced = true;
+                let influenced = demo.db.get_node(edge.target)?;
+                let influenced_name = influenced
+                    .properties
+                    .get("name")
+                    .map(format_value)
+                    .unwrap_or_default();
+                let influence_type = edge
+                    .properties
+                    .get("type")
+                    .map(format_value)
+                    .unwrap_or_else(|| "general influence".to_string());
+                println!("  → {} ({})", influenced_name, influence_type);
+            }
+        }
+        if !found_influenced {
+            println!("  (No recorded literary descendants)");
+        }
+
+        // Show their major works
+        println!("\n═══ MAJOR WORKS ═══");
+        let mut works = vec![];
+        for edge_id in demo.db.get_outgoing_edges(author_id) {
+            if let Ok(edge) = demo.db.get_edge(edge_id)
+                && label_str(edge.label) == "WROTE"
+            {
+                let book = demo.db.get_node(edge.target)?;
+                let title = book
+                    .properties
+                    .get("title")
+                    .map(format_value)
+                    .unwrap_or_default();
+                let year = book
+                    .properties
+                    .get("published_year")
+                    .map(format_value)
+                    .unwrap_or_default();
+                works.push((year.parse::<i64>().unwrap_or(0), title));
+            }
+        }
+        works.sort_by_key(|(year, _)| *year);
+        for (year, title) in works {
+            println!("  • {} ({})", title, year);
+        }
+    } else {
+        println!("\n❌ Author not found: {}", author_name);
+        println!("\nTry: list authors");
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!(
         r#"
@@ -884,16 +1139,38 @@ fn main() -> Result<()> {
                 }
             }
             "stats" => show_stats(&demo)?,
-            "similar" => {
-                println!("TODO: Implement semantic similarity search");
-                println!("This requires vector index support");
+            "similar" | "sim" => {
+                if args.is_empty() {
+                    println!("Usage: similar <character_name>");
+                    println!("Example: similar Raskolnikov");
+                    println!("\nTry: list characters");
+                } else {
+                    find_similar_characters(&demo, args, 5)?;
+                }
             }
             "timewarp" | "tw" => {
-                println!("TODO: Implement temporal query");
-                println!("This requires temporal query API");
+                let parts: Vec<&str> = args.splitn(2, ' ').collect();
+                if parts.len() < 2 {
+                    println!("Usage: timewarp <book_title> <year>");
+                    println!("Example: timewarp \"Crime and Punishment\" 1900");
+                    println!("\nTry: list books");
+                } else {
+                    let book_title = parts[0].trim_matches('"');
+                    if let Ok(year) = parts[1].parse::<i64>() {
+                        timewarp_book(&demo, book_title, year)?;
+                    } else {
+                        println!("Invalid year: {}", parts[1]);
+                    }
+                }
             }
             "influences" | "inf" => {
-                println!("TODO: Implement influence network traversal");
+                if args.is_empty() {
+                    println!("Usage: influences <author_name>");
+                    println!("Example: influences Dostoevsky");
+                    println!("\nTry: list authors");
+                } else {
+                    show_influences(&demo, args)?;
+                }
             }
             _ => {
                 println!(
