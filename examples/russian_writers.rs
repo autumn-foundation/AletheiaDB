@@ -18,10 +18,10 @@ use gallifreydb::{
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::{Context, Editor, Helper};
-use rustyline::hint::Hinter;
 use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
+use rustyline::{Context, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -167,6 +167,9 @@ impl RussianLitCompleter {
                 "tw".to_string(),
                 "influences".to_string(),
                 "inf".to_string(),
+                "drift".to_string(),
+                "evolution".to_string(),
+                "evo".to_string(),
                 "list authors".to_string(),
                 "list books".to_string(),
                 "list characters".to_string(),
@@ -241,6 +244,16 @@ impl Completer for RussianLitCompleter {
                             candidates.push(Pair {
                                 display: format!("\"{}\"", name),
                                 replacement: format!("\"{}\" ", name),
+                            });
+                        }
+                    }
+                }
+                "drift" | "evolution" | "evo" => {
+                    for name in &self.characters {
+                        if name.to_lowercase().contains(&arg_prefix) {
+                            candidates.push(Pair {
+                                display: name.clone(),
+                                replacement: name.clone(),
                             });
                         }
                     }
@@ -544,14 +557,20 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     println!("  ✓ Loaded {} movements", movements.len());
     println!("  ✓ Loaded {} events", events.len());
 
-    // === ENABLE VECTOR INDEXING ===
+    // === ENABLE TEMPORAL VECTOR INDEXING ===
     // IMPORTANT: Must enable BEFORE creating nodes so embeddings are automatically indexed
-    println!("\n  Setting up vector indexes...");
+    // Using temporal indexing to track semantic drift over time
+    println!("\n  Setting up temporal vector indexes...");
+    use gallifreydb::index::vector::temporal::TemporalVectorConfig;
     use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+
     let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
+    let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+
     demo.db
-        .enable_vector_index("personality_embedding", hnsw_config)?;
-    println!("    ✓ Vector index enabled for personality_embedding");
+        .enable_temporal_vector_index("personality_embedding", temporal_config)?;
+    println!("    ✓ Temporal vector index enabled for personality_embedding");
+    println!("    ✓ Will create snapshots to track semantic drift");
 
     // === CREATE AUTHORS ===
     println!("\n  Creating Authors...");
@@ -843,6 +862,127 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
 
     println!("\n  ✓ Created temporal versions showing evolution of literary criticism");
 
+    // === EVOLVE CHARACTER PERSONALITIES (WITH EMBEDDINGS) ===
+    // Demonstrate semantic drift: how our understanding of character personalities evolved
+    println!("\n  Evolving character personalities (semantic drift demo)...\n");
+
+    let character_evolutions = [
+        (
+            "Rodion Raskolnikov",
+            vec![
+                (
+                    1900,
+                    "Psychologically complex anti-hero torn by guilt and moral struggle. \
+                     Dostoevsky's masterful portrayal of a tormented soul.",
+                ),
+                (
+                    1950,
+                    "Existential hero struggling with absurdity and alienation. Precursor to \
+                     Camus and Sartre. Emblematic of modern anxiety.",
+                ),
+                (
+                    2024,
+                    "Trauma survivor with mental illness driven by poverty and social isolation. \
+                     Complex portrayal of desperation and psychological breakdown.",
+                ),
+            ],
+        ),
+        (
+            "Anna Karenina",
+            vec![
+                (
+                    1925,
+                    "Passionate woman constrained by rigid social conventions. Feminist reading \
+                     emphasizes her quest for authentic love.",
+                ),
+                (
+                    1960,
+                    "Victim of patriarchal oppression and limited choices. Critique of marriage \
+                     as economic transaction. Tragic heroine.",
+                ),
+                (
+                    2024,
+                    "Complex individual struggling with mental health, societal judgment, and \
+                     limited agency. Modern empathy for her psychological state.",
+                ),
+            ],
+        ),
+        (
+            "Prince Myshkin",
+            vec![
+                (
+                    1920,
+                    "Christ-like figure of pure goodness and compassion. Embodies Dostoevsky's \
+                     moral ideals. Tragedy of innocence.",
+                ),
+                (
+                    1970,
+                    "Psychological study of neurodivergence and epilepsy. Outsider perspective \
+                     on corrupt society. Misunderstood visionary.",
+                ),
+                (
+                    2024,
+                    "Neurodivergent individual navigating social expectations. Authentic self in \
+                     world of performative behavior. Disability representation.",
+                ),
+            ],
+        ),
+    ];
+
+    for (character_name, stages) in &character_evolutions {
+        if let Some(&character_id) = demo.characters.get(*character_name) {
+            println!("  Evolving understanding: {}", character_name);
+
+            // Get original embedding to perturb
+            let original_node = demo.db.get_node(character_id)?;
+            let original_embedding = if let Some(gallifreydb::PropertyValue::Vector(vec)) =
+                original_node.properties.get("personality_embedding")
+            {
+                vec.clone()
+            } else {
+                println!("    ⚠️  No personality_embedding found, skipping");
+                continue;
+            };
+
+            for (year, evolved_personality) in stages {
+                // Simulate semantic drift by perturbing the original embedding
+                // This mimics how our understanding of the character evolved over time
+                let drift_factor = (*year as f32 - 1866.0) / 1000.0; // 0.0 to ~0.16
+                let perturbed_embedding: Vec<f32> = original_embedding
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &val)| {
+                        // Add controlled perturbation based on year
+                        let noise = ((i as f32 * drift_factor).sin()) * 0.15;
+                        (val + noise).clamp(-1.0, 1.0)
+                    })
+                    .collect();
+
+                // Update both personality text AND embedding
+                demo.db.write(|tx| {
+                    tx.update_node(
+                        character_id,
+                        PropertyMapBuilder::new()
+                            .insert("personality", *evolved_personality)
+                            .insert_vector("personality_embedding", &perturbed_embedding)
+                            .build(),
+                    )
+                })?;
+
+                println!(
+                    "    {} → {}",
+                    year,
+                    &evolved_personality[..60.min(evolved_personality.len())]
+                );
+
+                // Small delay to ensure distinct timestamps
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    println!("\n  ✓ Created temporal versions with semantic drift in embeddings");
+
     Ok(())
 }
 
@@ -1031,7 +1171,10 @@ fn find_similar_characters(demo: &DemoData, character_name: &str, k: usize) -> R
         if character_name.to_lowercase() != full_name.to_lowercase() {
             println!("  (matched '{}' to '{}')", character_name, full_name);
         }
-        println!("Personality: {}", wrap_text(&personality, 70, "             "));
+        println!(
+            "Personality: {}",
+            wrap_text(&personality, 70, "             ")
+        );
 
         // Find similar characters using vector similarity
         println!("\nFinding similar characters...");
@@ -1283,6 +1426,145 @@ fn show_influences(demo: &DemoData, author_name: &str) -> Result<()> {
     Ok(())
 }
 
+fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
+    // Find character with fuzzy matching
+    if let Some((name, &character_id)) = find_character_fuzzy(&demo.characters, character_name) {
+        println!("\n=== Semantic Drift: {} ===\n", name);
+
+        // Get the temporal vector index
+        let temporal_index = demo.db.get_temporal_vector_index().ok_or_else(|| {
+            gallifreydb::Error::other("Temporal vector index not enabled".to_string())
+        })?;
+
+        // Get the original (current) embedding
+        let current_node = demo.db.get_node(character_id)?;
+        let reference_embedding = if let Some(gallifreydb::PropertyValue::Vector(vec)) =
+            current_node.properties.get("personality_embedding")
+        {
+            vec.clone()
+        } else {
+            println!("❌ No personality_embedding found for this character");
+            return Ok(());
+        };
+
+        // Track drift from 1866 to 2024
+        use gallifreydb::core::temporal::TimeRange;
+        let time_range = TimeRange::new(
+            year_to_timestamp(1866), // Start of our data
+            now_timestamp()?,        // Current time
+        )?;
+
+        println!("Tracking semantic drift from original understanding to present:\n");
+
+        // Get drift timeline (returns cosine similarity, not distance)
+        match temporal_index.track_semantic_drift(character_id, &reference_embedding, time_range) {
+            Ok(drift_timeline) => {
+                let drift_vec: Vec<(gallifreydb::Timestamp, f32)> = drift_timeline;
+                if drift_vec.is_empty() {
+                    println!(
+                        "  No temporal versions found (character may not have evolving embeddings)"
+                    );
+                } else {
+                    println!("  Time Point              Cosine Distance  Interpretation");
+                    println!("  ───────────────────────────────────────────────────────────");
+
+                    for (timestamp, similarity) in drift_vec {
+                        // Convert similarity to distance: distance = 1.0 - similarity
+                        let distance = 1.0 - similarity;
+
+                        // Convert timestamp to approximate year
+                        let year = 1970 + (timestamp / (365 * 86400 * 1_000_000));
+
+                        // Get personality at this point in time
+                        let historical_node =
+                            demo.db
+                                .get_node_at_time(character_id, timestamp, now_timestamp()?)?;
+                        let personality = historical_node
+                            .properties
+                            .get("personality")
+                            .map(format_value)
+                            .unwrap_or_else(|| "Unknown".to_string());
+
+                        // Truncate personality for display
+                        let personality_short = if personality.len() > 50 {
+                            format!("{}...", &personality[..47])
+                        } else {
+                            personality
+                        };
+
+                        println!(
+                            "  ~{:4}                  {:.4}           {}",
+                            year, distance, personality_short
+                        );
+                    }
+
+                    println!(
+                        "\n  💡 Cosine distance measures semantic drift (0.0 = identical, 2.0 = opposite)"
+                    );
+                    println!(
+                        "     Higher values indicate our understanding of the character has evolved"
+                    );
+                }
+            }
+            Err(e) => {
+                println!("  ⚠️  Error tracking drift: {}", e);
+                println!("     (This may happen if temporal snapshots haven't been created yet)");
+            }
+        }
+    } else {
+        println!("\n❌ Character not found: {}", character_name);
+        println!("\nTry: list characters");
+    }
+
+    Ok(())
+}
+
+fn show_personality_evolution(demo: &DemoData, character_name: &str) -> Result<()> {
+    // Find character with fuzzy matching
+    if let Some((name, &character_id)) = find_character_fuzzy(&demo.characters, character_name) {
+        println!("\n=== Personality Evolution: {} ===\n", name);
+
+        // Get all historical versions
+        let current_time = now_timestamp()?;
+
+        println!("How our understanding of this character evolved over time:\n");
+
+        // We'll manually query specific years we know have versions
+        let years = [1866, 1900, 1920, 1925, 1950, 1960, 1970, 2024];
+
+        for &year in &years {
+            let query_time = year_to_timestamp(year);
+
+            match demo
+                .db
+                .get_node_at_time(character_id, query_time, current_time)
+            {
+                Ok(historical_node) => {
+                    if let Some(personality) = historical_node.properties.get("personality") {
+                        let personality_text = format_value(personality);
+                        println!("┌─ {} {}", year, "─".repeat(60 - year.to_string().len()));
+                        println!("│");
+                        let wrapped = wrap_text(&personality_text, 70, "│ ");
+                        println!("│ {}", wrapped);
+                        println!("│");
+                    }
+                }
+                Err(_) => {
+                    // No version at this time, skip
+                }
+            }
+        }
+
+        println!("└{}\n", "─".repeat(65));
+        println!("💡 This shows how literary criticism evolved from publication to present");
+    } else {
+        println!("\n❌ Character not found: {}", character_name);
+        println!("\nTry: list characters");
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!(
         r#"
@@ -1299,9 +1581,11 @@ BROWSE:
 
 SEMANTIC SEARCH (Vector Embeddings):
   similar <character>      - Find similar characters
+  drift <character>        - Show semantic drift over time
 
 TEMPORAL QUERIES (Time Travel):
   timewarp <book> <year>   - See how interpretation evolved
+  evolution <character>    - Show personality evolution timeline
 
 GRAPH QUERIES:
   influences <author>      - Show who influenced/was influenced
@@ -1314,6 +1598,8 @@ SYSTEM:
 Examples:
   > show Fyodor Dostoevsky
   > similar Raskolnikov
+  > drift Raskolnikov
+  > evolution "Anna Karenina"
   > timewarp "Crime and Punishment" 1900
   > influences Dostoevsky
   > list books
@@ -1451,6 +1737,26 @@ fn main() -> Result<()> {
                     println!("\nTry: list authors");
                 } else {
                     show_influences(&demo, args)?;
+                }
+            }
+            "drift" => {
+                if args.is_empty() {
+                    println!("Usage: drift <character_name>");
+                    println!("Example: drift Raskolnikov");
+                    println!("\nShows semantic drift over time");
+                    println!("Try: list characters");
+                } else {
+                    show_semantic_drift(&demo, args)?;
+                }
+            }
+            "evolution" | "evo" => {
+                if args.is_empty() {
+                    println!("Usage: evolution <character_name>");
+                    println!("Example: evolution \"Anna Karenina\"");
+                    println!("\nShows personality evolution over time");
+                    println!("Try: list characters");
+                } else {
+                    show_personality_evolution(&demo, args)?;
                 }
             }
             _ => {
