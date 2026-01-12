@@ -57,3 +57,6 @@ __pycache__/
 pr-comment.md
 test-pr-comment*.md
 benchmark-summary.md
+
+# Temporary Claude working directories
+tmpclaude-*-cwd
