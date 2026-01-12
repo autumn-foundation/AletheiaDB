@@ -1195,7 +1195,7 @@ impl GallifreyDB {
 
         // Use cached statistics for cost-based optimization
         // Statistics are shared across all queries for this database instance
-        let planner = QueryPlanner::new(Arc::clone(&self.stats));
+        let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
         let physical_plan = planner.plan(query)?;
 
         // Execute the plan
