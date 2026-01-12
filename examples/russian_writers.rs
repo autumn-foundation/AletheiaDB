@@ -565,16 +565,25 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     println!("  ✓ Loaded {} movements", movements.len());
     println!("  ✓ Loaded {} events", events.len());
 
-    // === ENABLE TEMPORAL VECTOR INDEXING ===
+    // === ENABLE VECTOR INDEXING ===
     // IMPORTANT: Must enable BEFORE creating nodes so embeddings are automatically indexed
-    // Using temporal indexing to track semantic drift over time
-    println!("\n  Setting up temporal vector indexes...");
+    // Enable both current-state and temporal indexes:
+    // 1. Current index: for fast similarity searches (find_similar)
+    // 2. Temporal index: for tracking semantic drift over time
+    println!("\n  Setting up vector indexes...");
     use gallifreydb::index::vector::temporal::{
         RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
     };
     use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
 
     let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
+
+    // Enable current-state vector index for fast similarity searches
+    demo.db
+        .enable_vector_index("personality_embedding", hnsw_config.clone())?;
+    println!("    ✓ Current vector index enabled for personality_embedding");
+
+    // Enable temporal vector index for semantic drift tracking
     let temporal_config = TemporalVectorConfig {
         hnsw_config,
         // Snapshot strategy aligned with graph anchor_interval (both set to 2)
