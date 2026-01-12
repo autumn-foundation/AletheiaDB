@@ -561,16 +561,26 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     // IMPORTANT: Must enable BEFORE creating nodes so embeddings are automatically indexed
     // Using temporal indexing to track semantic drift over time
     println!("\n  Setting up temporal vector indexes...");
-    use gallifreydb::index::vector::temporal::TemporalVectorConfig;
+    use gallifreydb::index::vector::temporal::{
+        RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+    };
     use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
 
     let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
-    let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
+    let temporal_config = TemporalVectorConfig {
+        hnsw_config,
+        // Create snapshots every 2 transactions (instead of default 10)
+        // This ensures we capture the 3-4 character evolution stages
+        snapshot_strategy: SnapshotStrategy::TransactionInterval(2),
+        retention_policy: RetentionPolicy::KeepAll, // Keep all snapshots for demo
+        max_snapshots: 100,                         // Maximum snapshots to retain
+        full_snapshot_interval: 5,                  // Full snapshot every 5 snapshots
+    };
 
     demo.db
         .enable_temporal_vector_index("personality_embedding", temporal_config)?;
     println!("    ✓ Temporal vector index enabled for personality_embedding");
-    println!("    ✓ Will create snapshots to track semantic drift");
+    println!("    ✓ Snapshots every 2 transactions to capture semantic drift");
 
     // === CREATE AUTHORS ===
     println!("\n  Creating Authors...");
