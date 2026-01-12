@@ -867,11 +867,9 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
                     tx.update_node(book_id, props! { "interpretation" => *interpretation })
                 })?;
 
-                println!(
-                    "    {} → {}",
-                    year,
-                    &interpretation[..60.min(interpretation.len())]
-                );
+                // Truncate interpretation (character-aware)
+                let truncated: String = interpretation.chars().take(60).collect();
+                println!("    {} → {}", year, truncated);
 
                 // Small delay to ensure distinct timestamps
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -988,11 +986,9 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
                     )
                 })?;
 
-                println!(
-                    "    {} → {}",
-                    year,
-                    &evolved_personality[..60.min(evolved_personality.len())]
-                );
+                // Truncate personality (character-aware)
+                let truncated: String = evolved_personality.chars().take(60).collect();
+                println!("    {} → {}", year, truncated);
 
                 // Small delay to ensure distinct timestamps
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1036,9 +1032,10 @@ fn show_entity(demo: &DemoData, name: &str) -> Result<()> {
 
             let value_str = format_value(value);
 
-            // Truncate long values
-            if value_str.len() > 100 {
-                println!("  {}: {}...", key_str, &value_str[..97]);
+            // Truncate long values (character-aware, not byte-aware)
+            if value_str.chars().count() > 100 {
+                let truncated: String = value_str.chars().take(97).collect();
+                println!("  {}: {}...", key_str, truncated);
             } else {
                 println!("  {}: {}", key_str, value_str);
             }
@@ -1529,9 +1526,10 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
                                     .map(format_value)
                                     .unwrap_or_else(|| "Unknown".to_string());
 
-                                // Truncate for display
-                                if personality.len() > 50 {
-                                    format!("{}...", &personality[..47])
+                                // Truncate for display (character-aware)
+                                if personality.chars().count() > 50 {
+                                    let truncated: String = personality.chars().take(47).collect();
+                                    format!("{}...", truncated)
                                 } else {
                                     personality
                                 }
