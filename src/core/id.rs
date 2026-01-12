@@ -279,6 +279,24 @@ impl IdGenerator {
     pub fn current(&self) -> u64 {
         self.next_id.load(Ordering::SeqCst)
     }
+
+    /// Reset the generator to a specific value.
+    ///
+    /// This is used during recovery to initialize the ID generator from the maximum ID
+    /// found in the WAL, ensuring continued ID generation without conflicts.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The next ID to generate (typically max_id + 1)
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses `Ordering::SeqCst` to ensure all threads observe the reset consistently.
+    /// This is critical during recovery when re-initializing generators.
+    #[inline]
+    pub(crate) fn reset_to(&self, value: u64) {
+        self.next_id.store(value, Ordering::SeqCst);
+    }
 }
 
 impl Default for IdGenerator {

@@ -101,6 +101,42 @@ impl CurrentStorage {
         }
     }
 
+    /// Initialize the node ID generator with a specific starting value.
+    ///
+    /// This is used during recovery to ensure the ID generator continues from
+    /// the maximum ID found in the WAL, preventing ID conflicts.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The next ID to generate (typically max_id + 1)
+    pub(crate) fn init_node_id_generator(&self, start: u64) {
+        self.node_id_gen.reset_to(start);
+    }
+
+    /// Initialize the edge ID generator with a specific starting value.
+    ///
+    /// This is used during recovery to ensure the ID generator continues from
+    /// the maximum ID found in the WAL, preventing ID conflicts.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The next ID to generate (typically max_id + 1)
+    pub(crate) fn init_edge_id_generator(&self, start: u64) {
+        self.edge_id_gen.reset_to(start);
+    }
+
+    /// Initialize the version ID generator with a specific starting value.
+    ///
+    /// This is used during recovery to ensure the ID generator continues from
+    /// the maximum ID found in the WAL, preventing ID conflicts.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The next ID to generate (typically max_id + 1)
+    pub(crate) fn init_version_id_generator(&self, start: u64) {
+        self.version_id_gen.reset_to(start);
+    }
+
     /// Enable vector indexing for a specific property.
     ///
     /// Once enabled, nodes with the specified property will be automatically
