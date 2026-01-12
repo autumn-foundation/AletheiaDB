@@ -11,6 +11,20 @@
 //! - If `k` (vector search limit) < expected traversal fanout: do vector search first
 //! - If traversal fanout is smaller: do traversal first
 //!
+//! ## Semantic Change
+//!
+//! **IMPORTANT**: This optimization changes query semantics when reordering occurs.
+//!
+//! - **Original**: `VectorRank(Traverse(input))` - Traverse the graph from starting nodes,
+//!   then rank all reachable nodes by vector similarity
+//! - **Optimized**: `Traverse(VectorSearch(k))` - Find k most similar nodes via vector search,
+//!   then traverse from those nodes
+//!
+//! The reordering assumes the goal is to find the k most relevant nodes within the graph
+//! structure, not to exhaustively traverse then filter. This is the correct interpretation
+//! for most hybrid queries, but may produce different results if the original query intent
+//! was truly "traverse everything, then rank".
+//!
 //! # Example Transformations
 //!
 //! ## Case 1: Vector search is more selective
