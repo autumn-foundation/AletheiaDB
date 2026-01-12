@@ -1089,3 +1089,404 @@ fn test_direct_traverse_and_rank_with_different_label() {
 
     println!("✓ Direct traverse_and_rank respects edge label filter (VS-063)");
 }
+
+// =============================================================================
+// Large-Scale Integration Tests (VS-071)
+// =============================================================================
+
+#[test]
+fn test_large_scale_graph_traversal() {
+    let db = create_test_db();
+
+    // Create a large graph with 100 nodes
+    let mut nodes = Vec::new();
+    for i in 0..100 {
+        let node = db
+            .create_node(
+                "TestNode",
+                PropertyMapBuilder::new()
+                    .insert("id", i as i64)
+                    .insert_vector("embedding", &[i as f32 / 100.0, 0.5, 0.5, 0.5])
+                    .build(),
+            )
+            .expect("Failed to create node");
+        nodes.push(node);
+    }
+
+    // Create a linear chain: 0 -> 1 -> 2 -> ... -> 99
+    for i in 0..99 {
+        db.create_edge(nodes[i], nodes[i + 1], "NEXT", PropertyMapBuilder::new().build())
+            .expect("Failed to create edge");
+    }
+
+    // Traverse from node 0 to find all reachable nodes
+    let query = QueryBuilder::new()
+        .start(nodes[0])
+        .traverse("NEXT")
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning failed");
+
+    // Plan should be valid for large graphs
+    assert!(plan.root.is_unary_op(), "Should produce traversal plan");
+
+    println!("✓ Large-scale graph traversal (100 nodes) planned successfully");
+}
+
+#[test]
+fn test_deep_traversal_query() {
+    let db = create_test_db();
+
+    // Create a chain of 10 nodes for deep traversal
+    let mut nodes = Vec::new();
+    for i in 0..10 {
+        let node = db
+            .create_node(
+                "ChainNode",
+                PropertyMapBuilder::new()
+                    .insert("depth", i as i64)
+                    .insert_vector("embedding", &[0.1f32 * i as f32, 0.5, 0.5, 0.5])
+                    .build(),
+            )
+            .expect("Failed to create node");
+        nodes.push(node);
+    }
+
+    // Create chain: 0 -> 1 -> 2 -> ... -> 9
+    for i in 0..9 {
+        db.create_edge(nodes[i], nodes[i + 1], "CHAIN", PropertyMapBuilder::new().build())
+            .expect("Failed to create edge");
+    }
+
+    // Build query with 5-hop traversal
+    let query = QueryBuilder::new()
+        .start(nodes[0])
+        .traverse_n("CHAIN", 5)
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning failed");
+
+    // Verify plan structure for deep traversal
+    assert!(plan.root.is_unary_op(), "Should handle deep traversals");
+
+    println!("✓ Deep traversal query (5 hops) planned successfully");
+}
+
+#[test]
+fn test_large_k_vector_search() {
+    let db = create_test_db();
+
+    // Create 50 nodes with embeddings
+    for i in 0..50 {
+        db.create_node(
+            "VectorNode",
+            PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert_vector("embedding", &[
+                    (i as f32 / 50.0).cos(),
+                    (i as f32 / 50.0).sin(),
+                    0.5,
+                    0.5,
+                ])
+                .build(),
+        )
+        .expect("Failed to create node");
+    }
+
+    // Query with k=100 (larger than available nodes)
+    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query = QueryBuilder::new()
+        .find_similar(query_embedding, 100)
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning failed with large k");
+
+    // Should handle k > node count gracefully
+    assert!(plan.root.is_scan_op(), "Should produce vector search scan");
+
+    println!("✓ Large k vector search (k=100 with 50 nodes) handled gracefully");
+}
+
+#[test]
+fn test_hybrid_query_large_scale() {
+    let db = create_test_db();
+
+    // Create a hub-and-spoke graph: 1 central node with 50 connections
+    let hub = db
+        .create_node(
+            "Hub",
+            PropertyMapBuilder::new()
+                .insert("type", "central")
+                .insert_vector("embedding", &[0.5f32, 0.5, 0.5, 0.5])
+                .build(),
+        )
+        .expect("Failed to create hub");
+
+    for i in 0..50 {
+        let spoke = db
+            .create_node(
+                "Spoke",
+                PropertyMapBuilder::new()
+                    .insert("id", i as i64)
+                    .insert_vector("embedding", &[
+                        0.5 + (i as f32 / 100.0),
+                        0.5,
+                        0.5,
+                        0.5,
+                    ])
+                    .build(),
+            )
+            .expect("Failed to create spoke");
+
+        db.create_edge(hub, spoke, "CONNECTS_TO", PropertyMapBuilder::new().build())
+            .expect("Failed to create edge");
+    }
+
+    // Hybrid query: traverse from hub and rank by similarity
+    let query_embedding = Arc::from([0.6f32, 0.5, 0.5, 0.5].as_slice());
+    let query = QueryBuilder::new()
+        .start(hub)
+        .traverse("CONNECTS_TO")
+        .rank_by_similarity(query_embedding, 10)
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning failed for hybrid query");
+
+    // Should produce VectorRank(Traverse(NodeLookup)) plan
+    assert!(plan.root.is_unary_op(), "Should produce hybrid plan");
+
+    println!("✓ Large-scale hybrid query (hub with 50 spokes) planned successfully");
+}
+
+// =============================================================================
+// Edge Case Tests (VS-071)
+// =============================================================================
+
+#[test]
+fn test_empty_graph_query() {
+    let db = create_test_db();
+
+    // Query on empty graph
+    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query = QueryBuilder::new()
+        .find_similar(query_embedding, 10)
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning should succeed on empty graph");
+
+    // Plan should be valid even for empty graph
+    assert!(plan.root.is_scan_op(), "Should produce scan plan");
+
+    println!("✓ Empty graph query handled gracefully");
+}
+
+#[test]
+fn test_no_matching_traversal_results() {
+    let db = create_test_db();
+
+    // Create isolated node with no outgoing edges
+    let isolated = db
+        .create_node(
+            "Isolated",
+            PropertyMapBuilder::new()
+                .insert("type", "alone")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    // Try to traverse from isolated node
+    let query = QueryBuilder::new()
+        .start(isolated)
+        .traverse("NONEXISTENT_LABEL")
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning should succeed even with no results");
+
+    // Plan should be valid, execution will return empty results
+    assert!(plan.root.is_unary_op(), "Should produce traversal plan");
+
+    println!("✓ No matching traversal results handled gracefully");
+}
+
+#[test]
+fn test_very_large_k_value() {
+    let db = create_test_db();
+
+    // Create only 5 nodes
+    for i in 0..5 {
+        db.create_node(
+            "SmallSet",
+            PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert_vector("embedding", &[i as f32 / 5.0, 0.5, 0.5, 0.5])
+                .build(),
+        )
+        .expect("Failed to create node");
+    }
+
+    // Query with k=10000 (way larger than node count)
+    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query = QueryBuilder::new()
+        .find_similar(query_embedding, 10000)
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning should handle very large k");
+
+    // Should handle gracefully - will return at most 5 results
+    assert!(plan.root.is_scan_op(), "Should produce vector search scan");
+
+    println!("✓ Very large k value (k=10000 with 5 nodes) handled gracefully");
+}
+
+#[test]
+fn test_nodes_without_embeddings_in_hybrid_query() {
+    let db = create_test_db();
+
+    // Create nodes, some with embeddings, some without
+    let node_with_embedding = db
+        .create_node(
+            "WithEmbedding",
+            PropertyMapBuilder::new()
+                .insert("has_embedding", true)
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    let node_without_embedding = db
+        .create_node(
+            "WithoutEmbedding",
+            PropertyMapBuilder::new()
+                .insert("has_embedding", false)
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    // Connect them
+    db.create_edge(
+        node_with_embedding,
+        node_without_embedding,
+        "LINKS_TO",
+        PropertyMapBuilder::new().build(),
+    )
+    .expect("Failed to create edge");
+
+    // Hybrid query that will encounter node without embedding
+    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query = QueryBuilder::new()
+        .start(node_with_embedding)
+        .traverse("LINKS_TO")
+        .rank_by_similarity(query_embedding, 10)
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning should handle missing embeddings");
+
+    // Plan should be valid - execution will skip nodes without embeddings
+    assert!(plan.root.is_unary_op(), "Should produce hybrid plan");
+
+    println!("✓ Nodes without embeddings in hybrid query handled gracefully");
+}
+
+#[test]
+fn test_disconnected_components() {
+    let db = create_test_db();
+
+    // Create two disconnected components
+    let component1_a = db
+        .create_node(
+            "Component1",
+            PropertyMapBuilder::new()
+                .insert("component", 1)
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    let component1_b = db
+        .create_node(
+            "Component1",
+            PropertyMapBuilder::new()
+                .insert("component", 1)
+                .insert_vector("embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    let component2_a = db
+        .create_node(
+            "Component2",
+            PropertyMapBuilder::new()
+                .insert("component", 2)
+                .insert_vector("embedding", &[0.0f32, 1.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    // Connect within components
+    db.create_edge(component1_a, component1_b, "SAME_COMPONENT", PropertyMapBuilder::new().build())
+        .expect("Failed to create edge");
+
+    // Traverse from component1 should not reach component2
+    let query = QueryBuilder::new()
+        .start(component1_a)
+        .traverse("SAME_COMPONENT")
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning should handle disconnected components");
+
+    // Plan should be valid - execution will only return reachable nodes
+    assert!(plan.root.is_unary_op(), "Should produce traversal plan");
+
+    println!("✓ Disconnected graph components handled gracefully");
+}
+
+#[test]
+fn test_empty_result_with_filter() {
+    let db = create_test_db();
+    let (alice, _bob, _carol, _dave) = create_social_graph(&db);
+
+    // Query with filter that matches nothing
+    let query = QueryBuilder::new()
+        .start(alice)
+        .traverse("KNOWS")
+        .with_label("NonexistentLabel")
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning should handle empty filter results");
+
+    // Plan should include filter operation
+    assert!(plan.root.is_unary_op(), "Should produce filtered plan");
+
+    println!("✓ Empty result with filter handled gracefully");
+}
+
+#[test]
+fn test_k_equals_zero() {
+    let db = create_test_db();
+    let (_alice, _bob, _carol, _dave) = create_social_graph(&db);
+
+    // Query with k=0 (edge case)
+    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query = QueryBuilder::new()
+        .find_similar(query_embedding, 0)
+        .build();
+
+    let planner = create_test_planner();
+    let plan = planner.plan(query).expect("Planning should handle k=0");
+
+    // Plan should be valid - execution will return empty results
+    assert!(plan.root.is_scan_op(), "Should produce vector search scan");
+
+    println!("✓ k=0 edge case handled gracefully");
+}

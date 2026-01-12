@@ -11,9 +11,11 @@ use super::stats::Statistics;
 
 mod limit_pushdown;
 mod predicate_pushdown;
+mod vector_search_reordering;
 
 pub use limit_pushdown::LimitPushdown;
 pub use predicate_pushdown::PredicatePushdown;
+pub use vector_search_reordering::VectorSearchReordering;
 
 /// Trait for optimization rules.
 ///
@@ -39,8 +41,8 @@ pub fn default_rules() -> Vec<Box<dyn OptimizationRule>> {
     vec![
         Box::new(PredicatePushdown),
         Box::new(LimitPushdown),
+        Box::new(VectorSearchReordering),
         // Future rules:
-        // Box::new(VectorSearchReordering),
         // Box::new(TemporalBatching),
         // Box::new(IndexSelection),
     ]
@@ -59,5 +61,6 @@ mod tests {
         let names: Vec<&str> = rules.iter().map(|r| r.name()).collect();
         assert!(names.contains(&"predicate-pushdown"));
         assert!(names.contains(&"limit-pushdown"));
+        assert!(names.contains(&"vector-search-reordering"));
     }
 }
