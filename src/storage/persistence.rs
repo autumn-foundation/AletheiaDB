@@ -33,6 +33,19 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Transaction ID used for recovered operations during WAL replay.
+///
+/// During recovery, we replay operations from the WAL but don't have access to the
+/// original transaction IDs. Using TxId(0) marks these as "recovered" operations.
+///
+/// **Limitation**: Original transaction provenance is not preserved across recovery.
+/// This means temporal queries cannot distinguish which operations were part of the
+/// same transaction after a crash/restart.
+///
+/// **Future Enhancement**: To preserve transaction IDs, the WAL format would need to
+/// be extended to store TxId with each operation (see Issue #86).
+const RECOVERY_TX_ID: u64 = 0;
+
 /// Configuration for checkpoint behavior
 #[derive(Debug, Clone)]
 pub struct CheckpointConfig {
@@ -459,6 +472,11 @@ impl PersistenceManager {
         let mut max_version_id: u64 = 0;
 
         // Track next version_id for sequential version assignment
+        // NOTE: We track both max_version_id and next_version_id because:
+        // - max_version_id: Tracks the highest version ID seen (for ID generator init)
+        // - next_version_id: Tracks the next ID to assign for delete tombstones
+        // We can't optimize this to compute next_version_id at the end because delete
+        // operations need to generate tombstone version IDs during replay.
         let mut next_version_id: u64 = 1;
 
         // Replay WAL entries since checkpoint
@@ -637,13 +655,21 @@ impl PersistenceManager {
         next_version_id: &mut u64,
     ) -> Result<()> {
         // Intern the label string (WAL stores strings, but Node needs InternedString)
-        let interned_label = GLOBAL_INTERNER.intern(&label)?;
+        let interned_label =
+            GLOBAL_INTERNER
+                .intern(&label)
+                .map_err(|e| StorageError::WalError {
+                    reason: format!(
+                        "Failed to intern node label '{}' for node_id={} during recovery: {}",
+                        label, node_id, e
+                    ),
+                })?;
 
         // Extract commit timestamp from temporal interval
         let commit_timestamp = temporal.transaction_time().start();
 
         // Create version metadata with recovery transaction ID (0)
-        let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+        let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
         // Generate unique version_id for this version (sequential across all entities)
         let version_id = VersionId::new(*next_version_id)?;
@@ -682,13 +708,21 @@ impl PersistenceManager {
         next_version_id: &mut u64,
     ) -> Result<()> {
         // Intern the label string (WAL stores strings, but Edge needs InternedString)
-        let interned_label = GLOBAL_INTERNER.intern(&label)?;
+        let interned_label =
+            GLOBAL_INTERNER
+                .intern(&label)
+                .map_err(|e| StorageError::WalError {
+                    reason: format!(
+                        "Failed to intern edge label '{}' for edge_id={} during recovery: {}",
+                        label, edge_id, e
+                    ),
+                })?;
 
         // Extract commit timestamp from temporal interval
         let commit_timestamp = temporal.transaction_time().start();
 
         // Create version metadata with recovery transaction ID (0)
-        let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+        let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
         // Generate unique version_id for this version (sequential across all entities)
         let version_id = VersionId::new(*next_version_id)?;
@@ -735,13 +769,20 @@ impl PersistenceManager {
         temporal: BiTemporalInterval,
     ) -> Result<()> {
         // Intern the label string (WAL stores strings, but Node needs InternedString)
-        let interned_label = GLOBAL_INTERNER.intern(&label)?;
+        let interned_label = GLOBAL_INTERNER.intern(&label).map_err(|e| {
+            StorageError::WalError {
+                reason: format!(
+                    "Failed to intern node label '{}' for node_id={} version_id={} during recovery: {}",
+                    label, node_id, version_id, e
+                ),
+            }
+        })?;
 
         // Extract commit timestamp from temporal interval
         let commit_timestamp = temporal.transaction_time().start();
 
         // Create version metadata with recovery transaction ID (0)
-        let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+        let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
         // Create the updated node with all metadata
         let node = Node::with_metadata(
@@ -782,13 +823,20 @@ impl PersistenceManager {
         temporal: BiTemporalInterval,
     ) -> Result<()> {
         // Intern the label string (WAL stores strings, but Edge needs InternedString)
-        let interned_label = GLOBAL_INTERNER.intern(&label)?;
+        let interned_label = GLOBAL_INTERNER.intern(&label).map_err(|e| {
+            StorageError::WalError {
+                reason: format!(
+                    "Failed to intern edge label '{}' for edge_id={} version_id={} during recovery: {}",
+                    label, edge_id, version_id, e
+                ),
+            }
+        })?;
 
         // Extract commit timestamp from temporal interval
         let commit_timestamp = temporal.transaction_time().start();
 
         // Create version metadata with recovery transaction ID (0)
-        let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+        let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
         // Create the updated edge with all metadata
         let edge = Edge::with_metadata(
