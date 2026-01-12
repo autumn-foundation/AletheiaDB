@@ -16,10 +16,15 @@ use gallifreydb::{
     GLOBAL_INTERNER, GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
     WriteOps,
 };
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::{Context, Editor, Helper};
+use rustyline::hint::Hinter;
+use rustyline::highlight::Highlighter;
+use rustyline::validate::Validator;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -142,6 +147,123 @@ struct SimilarToRelation {
 }
 
 // ============================================================================
+// Auto-complete Helper
+// ============================================================================
+
+struct RussianLitCompleter {
+    commands: Vec<String>,
+    authors: Vec<String>,
+    books: Vec<String>,
+    characters: Vec<String>,
+}
+
+impl RussianLitCompleter {
+    fn new(demo: &DemoData) -> Self {
+        Self {
+            commands: vec![
+                "similar".to_string(),
+                "sim".to_string(),
+                "timewarp".to_string(),
+                "tw".to_string(),
+                "influences".to_string(),
+                "inf".to_string(),
+                "list authors".to_string(),
+                "list books".to_string(),
+                "list characters".to_string(),
+                "list themes".to_string(),
+                "stats".to_string(),
+                "help".to_string(),
+                "quit".to_string(),
+                "exit".to_string(),
+            ],
+            authors: demo.authors.keys().cloned().collect(),
+            books: demo.books.keys().cloned().collect(),
+            characters: demo.characters.keys().cloned().collect(),
+        }
+    }
+}
+
+impl Completer for RussianLitCompleter {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let line = &line[..pos];
+        let mut candidates = Vec::new();
+
+        // Split into command and args
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+
+        if parts.len() == 1 {
+            // Completing command
+            let prefix = parts[0].to_lowercase();
+            for cmd in &self.commands {
+                if cmd.to_lowercase().starts_with(&prefix) {
+                    candidates.push(Pair {
+                        display: cmd.clone(),
+                        replacement: cmd.clone(),
+                    });
+                }
+            }
+        } else {
+            // Completing arguments
+            let cmd = parts[0];
+            let arg_prefix = parts[1].to_lowercase();
+
+            match cmd {
+                "similar" | "sim" => {
+                    for name in &self.characters {
+                        if name.to_lowercase().contains(&arg_prefix) {
+                            candidates.push(Pair {
+                                display: name.clone(),
+                                replacement: name.clone(),
+                            });
+                        }
+                    }
+                }
+                "influences" | "inf" => {
+                    for name in &self.authors {
+                        if name.to_lowercase().contains(&arg_prefix) {
+                            candidates.push(Pair {
+                                display: name.clone(),
+                                replacement: name.clone(),
+                            });
+                        }
+                    }
+                }
+                "timewarp" | "tw" => {
+                    for name in &self.books {
+                        if name.to_lowercase().contains(&arg_prefix) {
+                            candidates.push(Pair {
+                                display: format!("\"{}\"", name),
+                                replacement: format!("\"{}\" ", name),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok((0, candidates))
+    }
+}
+
+impl Hinter for RussianLitCompleter {
+    type Hint = String;
+}
+
+impl Highlighter for RussianLitCompleter {}
+
+impl Validator for RussianLitCompleter {}
+
+impl Helper for RussianLitCompleter {}
+
+// ============================================================================
 // Demo State
 // ============================================================================
 
@@ -186,6 +308,48 @@ fn label_str(label: InternedString) -> String {
         .resolve(label)
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{:?}", label))
+}
+
+/// Wrap text at word boundaries with indentation for continuation lines
+///
+/// Example: wrap_text("This is a long text", 10, "  ") →
+///   "This is a\n  long text"
+fn wrap_text(text: &str, width: usize, indent: &str) -> String {
+    let mut result = String::new();
+    let mut current_line = String::new();
+    let mut first_line = true;
+
+    for word in text.split_whitespace() {
+        let word_len = word.len();
+        let current_len = current_line.len();
+
+        // Check if adding this word would exceed width
+        if current_len > 0 && current_len + 1 + word_len > width {
+            // Flush current line and start a new one
+            if !first_line {
+                result.push_str(indent);
+            }
+            result.push_str(&current_line);
+            result.push('\n');
+            current_line.clear();
+            first_line = false;
+        }
+
+        if !current_line.is_empty() {
+            current_line.push(' ');
+        }
+        current_line.push_str(word);
+    }
+
+    // Add the last line
+    if !current_line.is_empty() {
+        if !first_line {
+            result.push_str(indent);
+        }
+        result.push_str(&current_line);
+    }
+
+    result
 }
 
 /// Parse command arguments respecting quoted strings
@@ -867,7 +1031,7 @@ fn find_similar_characters(demo: &DemoData, character_name: &str, k: usize) -> R
         if character_name.to_lowercase() != full_name.to_lowercase() {
             println!("  (matched '{}' to '{}')", character_name, full_name);
         }
-        println!("Personality: {}", &personality[..personality.len().min(80)]);
+        println!("Personality: {}", wrap_text(&personality, 70, "             "));
 
         // Find similar characters using vector similarity
         println!("\nFinding similar characters...");
@@ -898,10 +1062,8 @@ fn find_similar_characters(demo: &DemoData, character_name: &str, k: usize) -> R
 
                 println!("{}. {} (similarity: {:.3})", i + 1, name, score);
                 println!("   from: {}", book);
-                println!(
-                    "   personality: {}",
-                    &personality[..personality.len().min(60)]
-                );
+                println!("   personality:");
+                println!("      {}", wrap_text(&personality, 60, "      "));
                 println!();
             }
         }
@@ -1197,17 +1359,37 @@ fn main() -> Result<()> {
 
     print_help();
 
+    // Initialize rustyline with auto-complete
+    let completer = RussianLitCompleter::new(&demo);
+    let mut rl = Editor::new()
+        .map_err(|e| gallifreydb::Error::other(format!("Failed to initialize readline: {}", e)))?;
+    rl.set_helper(Some(completer));
+
+    println!("\n💡 Tip: Use TAB for auto-complete!");
+
     // Main REPL loop
     loop {
-        print!("\nrussian-lit> ");
-        if io::stdout().flush().is_err() {
-            break; // Exit gracefully if stdout fails
-        }
-
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input).is_err() {
-            break;
-        }
+        let readline = rl.readline("\nrussian-lit> ");
+        let input = match readline {
+            Ok(line) => {
+                rl.add_history_entry(&line).map_err(|e| {
+                    gallifreydb::Error::other(format!("Failed to add history entry: {}", e))
+                })?;
+                line
+            }
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl-C
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                // Ctrl-D
+                println!("\n До свидания! (Goodbye!)\n");
+                break;
+            }
+            Err(_) => {
+                break;
+            }
+        };
 
         let input = input.trim();
         if input.is_empty() {

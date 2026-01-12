@@ -85,6 +85,8 @@ serial_test = "3.0"
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util"] }
 # Mutex for serializing env var tests
 lazy_static = "1.4"
+# Readline with auto-complete for examples
+rustyline = "14.0"
 
 [features]
 # Nova experimental features
