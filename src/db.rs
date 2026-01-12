@@ -1133,6 +1133,45 @@ impl GallifreyDB {
             .find_similar_by_embedding_with_label(embedding, label, k)
     }
 
+    /// Find k most similar nodes at a specific point in time.
+    ///
+    /// This method performs a temporal vector search, finding nodes with embeddings
+    /// most similar to the query embedding as they existed at the specified timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - Query embedding vector to search for
+    /// * `k` - Maximum number of results to return
+    /// * `timestamp` - Point in time to query (in microseconds since epoch)
+    ///
+    /// # Returns
+    ///
+    /// A vector of (NodeId, similarity_score) tuples, sorted by similarity in descending order.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::Vector(VectorError::IndexError)` if temporal vector index is not enabled
+    /// - `Error::Vector(VectorError::*)` if the query embedding is invalid
+    /// - `Error::Temporal(*)` if no snapshot exists at the given timestamp
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find documents similar to a query at a specific point in time
+    /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
+    /// let results = db.find_similar_as_of(&query_embedding, 10, timestamp_2023)?;
+    /// ```
+    pub fn find_similar_as_of(
+        &self,
+        embedding: &[f32],
+        k: usize,
+        timestamp: Timestamp,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar_as_of").entered();
+        self.current.find_similar_as_of(embedding, k, timestamp)
+    }
+
     // ========================================================================
     // Hybrid Query Planner API (VS-060)
     // ========================================================================

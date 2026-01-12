@@ -200,9 +200,67 @@ pub fn traverse_and_rank(
     Ok(results)
 }
 
+/// Find k most similar nodes at a specific point in time.
+///
+/// This function performs a temporal vector search, finding nodes with embeddings
+/// most similar to the query embedding as they existed at the specified timestamp.
+///
+/// # Arguments
+///
+/// * `db` - Database instance
+/// * `embedding` - Query embedding vector to search for
+/// * `k` - Maximum number of results to return
+/// * `timestamp` - Point in time to query (in microseconds since epoch)
+///
+/// # Returns
+///
+/// A vector of (NodeId, similarity_score) tuples, sorted by similarity in descending order.
+/// The similarity score is cosine similarity in the range [-1, 1], where higher is more similar.
+///
+/// # Errors
+///
+/// - `Error::Vector(VectorError::IndexError)` if temporal vector index is not enabled
+/// - `Error::Vector(VectorError::*)` if the query embedding is invalid
+/// - `Error::Temporal(*)` if the timestamp is invalid or no snapshot exists
+///
+/// # Behavior Notes
+///
+/// - Requires temporal vector indexing to be enabled via `enable_temporal_vector_index()`
+/// - Returns results from the nearest snapshot at or before the given timestamp
+/// - If no snapshots exist at the given timestamp, returns an error
+/// - Empty results indicate no vectors existed at that timestamp (not an error)
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use gallifreydb::query::hybrid::find_similar_as_of;
+/// use gallifreydb::core::temporal::time;
+///
+/// // Find documents similar to a query embedding at a specific timestamp
+/// let query_embedding = vec![0.1f32; 384];
+/// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
+/// let similar_docs = find_similar_as_of(&db, &query_embedding, 10, timestamp_2023)?;
+///
+/// for (node_id, similarity) in similar_docs {
+///     println!("Document {:?} was similar at that time: {:.3}", node_id, similarity);
+/// }
+/// ```
+pub fn find_similar_as_of(
+    db: &GallifreyDB,
+    embedding: &[f32],
+    k: usize,
+    timestamp: crate::core::temporal::Timestamp,
+) -> Result<Vec<(NodeId, f32)>> {
+    // Validate embedding
+    validate_vector(embedding)?;
+
+    // Delegate to database method
+    db.find_similar_as_of(embedding, k, timestamp)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::transaction::WriteOps;
     use crate::core::property::PropertyMapBuilder;
     use crate::index::vector::{DistanceMetric, HnswConfig};
     use crate::utils::error::VectorError;
@@ -635,6 +693,267 @@ mod tests {
         assert_eq!(
             results[0].0, narcissist,
             "Should return self as result of self-loop"
+        );
+    }
+    // Tests for find_similar_as_of
+
+    /// Helper to create a test database with temporal vector indexing enabled.
+    fn create_temporal_test_db() -> GallifreyDB {
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let temporal_config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            retention_policy: RetentionPolicy::KeepN(100),
+            max_snapshots: 100,
+            full_snapshot_interval: 5,
+            hnsw_config,
+        };
+        db.enable_temporal_vector_index("embedding", temporal_config)
+            .expect("Failed to enable temporal vector index");
+        db
+    }
+
+    #[test]
+    fn test_find_similar_as_of_basic() {
+        let db = create_temporal_test_db();
+
+        // Create initial nodes
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .build(),
+            )
+            .expect("Failed to create Alice");
+
+        let bob = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Bob")
+                    .insert_vector("embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                    .build(),
+            )
+            .expect("Failed to create Bob");
+
+        let carol = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Carol")
+                    .insert_vector("embedding", &[0.0f32, 1.0, 0.0, 0.0])
+                    .build(),
+            )
+            .expect("Failed to create Carol");
+
+        // Get current timestamp
+        use crate::core::temporal::time;
+        let timestamp = time::now();
+
+        // Query: Find similar nodes to Alice's embedding
+        let alice_embedding = [1.0f32, 0.0, 0.0, 0.0];
+        let results =
+            find_similar_as_of(&db, &alice_embedding, 10, timestamp).expect("Query should succeed");
+
+        // Should return all 3 nodes
+        assert_eq!(results.len(), 3, "Should return all nodes");
+
+        // Verify ordering: Alice (exact match), Bob (similar), Carol (different)
+        assert_eq!(results[0].0, alice, "Alice should be most similar");
+        assert_eq!(results[1].0, bob, "Bob should be second most similar");
+        assert_eq!(results[2].0, carol, "Carol should be least similar");
+
+        // Verify similarity scores are in valid range and descending
+        assert!(
+            results[0].1 >= results[1].1,
+            "Scores should be in descending order"
+        );
+        assert!(
+            results[1].1 >= results[2].1,
+            "Scores should be in descending order"
+        );
+    }
+
+    #[test]
+    fn test_find_similar_as_of_respects_k_limit() {
+        let db = create_temporal_test_db();
+
+        // Create multiple nodes
+        for i in 0..5 {
+            let vector = [i as f32 / 5.0, 1.0 - i as f32 / 5.0, 0.0, 0.0];
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("Person{}", i))
+                    .insert_vector("embedding", &vector)
+                    .build(),
+            )
+            .expect("Failed to create node");
+        }
+
+        use crate::core::temporal::time;
+        let timestamp = time::now();
+
+        // Query with k=2
+        let query_embedding = [0.5f32, 0.5, 0.0, 0.0];
+        let results =
+            find_similar_as_of(&db, &query_embedding, 2, timestamp).expect("Query should succeed");
+
+        assert_eq!(results.len(), 2, "Should respect k=2 limit");
+    }
+
+    #[test]
+    fn test_find_similar_as_of_temporal_consistency() {
+        let db = create_temporal_test_db();
+
+        // Create node with initial embedding
+        let node = db
+            .create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Doc")
+                    .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                    .build(),
+            )
+            .expect("Failed to create node");
+
+        use crate::core::temporal::time;
+        let timestamp_before = time::now();
+
+        // Wait a bit to ensure timestamp difference
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Update node with different embedding using write transaction
+        db.write(|tx| {
+            tx.update_node(
+                node,
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.0f32, 1.0, 0.0, 0.0])
+                    .build(),
+            )
+        })
+        .expect("Failed to update node");
+        let timestamp_after = time::now();
+
+        // Query at old timestamp - should find old embedding
+        let old_query = [1.0f32, 0.0, 0.0, 0.0];
+        let results_old = find_similar_as_of(&db, &old_query, 10, timestamp_before)
+            .expect("Query at old timestamp should succeed");
+
+        assert_eq!(
+            results_old.len(),
+            1,
+            "Should find one node at old timestamp"
+        );
+        assert_eq!(results_old[0].0, node, "Should find the same node");
+        assert!(
+            results_old[0].1 > 0.99,
+            "Old embedding should be very similar to old query"
+        );
+
+        // Query at new timestamp - should find new embedding
+        let new_query = [0.0f32, 1.0, 0.0, 0.0];
+        let results_new = find_similar_as_of(&db, &new_query, 10, timestamp_after)
+            .expect("Query at new timestamp should succeed");
+
+        assert_eq!(
+            results_new.len(),
+            1,
+            "Should find one node at new timestamp"
+        );
+        assert_eq!(results_new[0].0, node, "Should find the same node");
+        assert!(
+            results_new[0].1 > 0.99,
+            "New embedding should be very similar to new query"
+        );
+    }
+
+    #[test]
+    fn test_find_similar_as_of_invalid_embedding() {
+        let db = create_temporal_test_db();
+
+        use crate::core::temporal::time;
+        let timestamp = time::now();
+
+        // Test with NaN
+        let nan_embedding = [f32::NAN, 0.0, 0.0, 0.0];
+        let result = find_similar_as_of(&db, &nan_embedding, 10, timestamp);
+        assert!(result.is_err(), "Should reject NaN embedding");
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Vector(VectorError::ContainsNaN { .. })
+            ),
+            "Should return ContainsNaN error"
+        );
+
+        // Test with Infinity
+        let inf_embedding = [f32::INFINITY, 0.0, 0.0, 0.0];
+        let result = find_similar_as_of(&db, &inf_embedding, 10, timestamp);
+        assert!(result.is_err(), "Should reject Infinity embedding");
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Vector(VectorError::ContainsInfinity { .. })
+            ),
+            "Should return ContainsInfinity error"
+        );
+    }
+
+    #[test]
+    fn test_find_similar_as_of_no_temporal_index() {
+        // Create DB without temporal index
+        let db = create_test_db(); // Uses regular vector index only
+
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node");
+
+        use crate::core::temporal::time;
+        let timestamp = time::now();
+
+        let query_embedding = [1.0f32, 0.0, 0.0, 0.0];
+        let result = find_similar_as_of(&db, &query_embedding, 10, timestamp);
+
+        assert!(
+            result.is_err(),
+            "Should return error when temporal index not enabled"
+        );
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::utils::error::Error::Vector(VectorError::IndexError(_))
+            ),
+            "Should return IndexError"
+        );
+    }
+
+    #[test]
+    fn test_find_similar_as_of_empty_database() {
+        let db = create_temporal_test_db();
+
+        use crate::core::temporal::time;
+        let timestamp = time::now();
+
+        let query_embedding = [1.0f32, 0.0, 0.0, 0.0];
+        let results = find_similar_as_of(&db, &query_embedding, 10, timestamp)
+            .expect("Query on empty database should succeed");
+
+        assert_eq!(
+            results.len(),
+            0,
+            "Should return empty results for empty database"
         );
     }
 }
