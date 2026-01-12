@@ -984,11 +984,49 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
                     })
                     .collect();
 
-                // Update both personality text AND embedding
+                // Get existing properties to preserve them
+                let name = original_node
+                    .properties
+                    .get("name")
+                    .and_then(|v| {
+                        if let gallifreydb::PropertyValue::String(s) = v {
+                            Some(&**s)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+                let book = original_node
+                    .properties
+                    .get("book")
+                    .and_then(|v| {
+                        if let gallifreydb::PropertyValue::String(s) = v {
+                            Some(&**s)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+                let author = original_node
+                    .properties
+                    .get("author")
+                    .and_then(|v| {
+                        if let gallifreydb::PropertyValue::String(s) = v {
+                            Some(&**s)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+
+                // Update personality AND embedding, but preserve name/book/author
                 demo.db.write(|tx| {
                     tx.update_node(
                         character_id,
                         PropertyMapBuilder::new()
+                            .insert("name", name)
+                            .insert("book", book)
+                            .insert("author", author)
                             .insert("personality", *evolved_personality)
                             .insert_vector("personality_embedding", &perturbed_embedding)
                             .build(),
