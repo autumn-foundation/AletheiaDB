@@ -44,6 +44,7 @@ class Author:
     major_themes: str
     wikipedia_url: str
     style_embedding: Optional[List[float]] = None
+    semantic_embedding: Optional[List[float]] = None  # Universal embedding for cross-entity similarity
 
 
 @dataclass
@@ -60,6 +61,7 @@ class Book:
     interpretation: str
     wikipedia_url: str
     theme_embedding: Optional[List[float]] = None
+    semantic_embedding: Optional[List[float]] = None  # Universal embedding for cross-entity similarity
 
 
 @dataclass
@@ -74,6 +76,7 @@ class Character:
     arc: str
     significance: str
     personality_embedding: Optional[List[float]] = None
+    semantic_embedding: Optional[List[float]] = None  # Universal embedding for cross-entity similarity
 
 
 @dataclass
@@ -83,6 +86,7 @@ class Theme:
     description: str
     examples: str
     theme_embedding: Optional[List[float]] = None
+    semantic_embedding: Optional[List[float]] = None  # Universal embedding for cross-entity similarity
 
 
 @dataclass
@@ -281,8 +285,12 @@ class DataCollector:
 
             # Generate style embedding (content-focused, no author name)
             style_text = f"Writing style: {author.writing_style}. Major themes: {author.major_themes}"
-            print(f"    Generating embedding...")
+            print(f"    Generating embeddings...")
             author.style_embedding = self.embeddings.embed(style_text)
+
+            # Generate semantic embedding (for cross-entity similarity)
+            semantic_text = f"Literary style and themes: {author.writing_style}. {author.major_themes}"
+            author.semantic_embedding = self.embeddings.embed(semantic_text)
 
             authors.append(author)
             time.sleep(0.5)  # Be nice to Wikipedia
@@ -353,11 +361,18 @@ class DataCollector:
             )
 
             # Generate theme embedding (content-focused, no book title)
-            # Truncate summary for embedding to stay within model's token limit
-            summary_for_embedding = book.summary[:800]  # ~400 tokens, leaves room for themes
+            # Clean summary: skip first sentence (usually has author/book/character names)
+            sentences = book.summary.split('. ')
+            clean_summary = '. '.join(sentences[1:]) if len(sentences) > 1 else book.summary
+            summary_for_embedding = clean_summary[:800]  # ~400 tokens, leaves room for themes
             theme_text = f"{summary_for_embedding}. Themes: {book.themes}"
-            print(f"    Generating embedding...")
+            print(f"    Generating embeddings...")
             book.theme_embedding = self.embeddings.embed(theme_text)
+
+            # Generate semantic embedding (for cross-entity similarity)
+            # Use themes + cleaned plot summary
+            semantic_text = f"Literary work about: {book.themes}. {summary_for_embedding[:400]}"
+            book.semantic_embedding = self.embeddings.embed(semantic_text)
 
             books.append(book)
             time.sleep(0.5)
@@ -490,8 +505,13 @@ class DataCollector:
             # Generate personality embedding (pure traits only, no names/context/plot)
             # Exclude description (has character/book/author names) and arc (has shared plot events)
             personality_text = f"Character personality: {character.personality}"
-            print(f"    Generating embedding...")
+            print(f"    Generating embeddings...")
             character.personality_embedding = self.embeddings.embed(personality_text)
+
+            # Generate semantic embedding (for cross-entity similarity)
+            # Use personality traits as the semantic content
+            semantic_text = f"Character with traits: {character.personality}"
+            character.semantic_embedding = self.embeddings.embed(semantic_text)
 
             characters.append(character)
             time.sleep(0.2)
@@ -541,9 +561,15 @@ class DataCollector:
                 examples=examples,
             )
 
-            # Generate theme embedding (content-focused, no theme name)
-            theme_text = f"{theme.description}. Examples in literature: {theme.examples}"
+            # Generate theme embedding (content-focused, no theme name or examples)
+            # Exclude examples (they contain character/book names like "Alyosha (Brothers Karamazov)")
+            theme_text = f"Literary theme: {theme.description}"
+            print(f"    Generating embeddings for {name}...")
             theme.theme_embedding = self.embeddings.embed(theme_text)
+
+            # Generate semantic embedding (for cross-entity similarity)
+            semantic_text = f"Theme: {theme.description}"
+            theme.semantic_embedding = self.embeddings.embed(semantic_text)
 
             themes.append(theme)
 
