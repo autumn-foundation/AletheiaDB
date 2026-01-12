@@ -44,6 +44,8 @@ struct Author {
     wikipedia_url: String,
     #[serde(default)]
     style_embedding: Option<Vec<f32>>,
+    #[serde(default)]
+    semantic_embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -60,6 +62,8 @@ struct Book {
     wikipedia_url: String,
     #[serde(default)]
     theme_embedding: Option<Vec<f32>>,
+    #[serde(default)]
+    semantic_embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -74,6 +78,8 @@ struct Character {
     significance: String,
     #[serde(default)]
     personality_embedding: Option<Vec<f32>>,
+    #[serde(default)]
+    semantic_embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -83,6 +89,8 @@ struct Theme {
     examples: String,
     #[serde(default)]
     theme_embedding: Option<Vec<f32>>,
+    #[serde(default)]
+    semantic_embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -583,6 +591,11 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         .enable_vector_index("personality_embedding", hnsw_config.clone())?;
     println!("    ✓ Current vector index enabled for personality_embedding");
 
+    // Enable semantic_embedding index for cross-entity similarity
+    demo.db
+        .enable_vector_index("semantic_embedding", hnsw_config.clone())?;
+    println!("    ✓ Current vector index enabled for semantic_embedding (cross-entity)");
+
     // Enable temporal vector index for semantic drift tracking
     let temporal_config = TemporalVectorConfig {
         hnsw_config,
@@ -613,9 +626,12 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
             .insert("major_themes", author.major_themes.as_str())
             .insert("wikipedia_url", author.wikipedia_url.as_str());
 
-        // Add embedding if present
+        // Add embeddings if present
         if let Some(embedding) = author.style_embedding {
             builder = builder.insert_vector("style_embedding", &embedding);
+        }
+        if let Some(embedding) = author.semantic_embedding {
+            builder = builder.insert_vector("semantic_embedding", &embedding);
         }
 
         let node_id = demo.db.create_node("Author", builder.build())?;
@@ -640,6 +656,9 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         if let Some(embedding) = book.theme_embedding {
             builder = builder.insert_vector("theme_embedding", &embedding);
         }
+        if let Some(embedding) = book.semantic_embedding {
+            builder = builder.insert_vector("semantic_embedding", &embedding);
+        }
 
         let node_id = demo.db.create_node("Book", builder.build())?;
         demo.books.insert(book.title, node_id);
@@ -661,6 +680,9 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         if let Some(embedding) = character.personality_embedding {
             builder = builder.insert_vector("personality_embedding", &embedding);
         }
+        if let Some(embedding) = character.semantic_embedding {
+            builder = builder.insert_vector("semantic_embedding", &embedding);
+        }
 
         let node_id = demo.db.create_node("Character", builder.build())?;
         demo.characters.insert(character.name, node_id);
@@ -676,6 +698,9 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
 
         if let Some(embedding) = theme.theme_embedding {
             builder = builder.insert_vector("theme_embedding", &embedding);
+        }
+        if let Some(embedding) = theme.semantic_embedding {
+            builder = builder.insert_vector("semantic_embedding", &embedding);
         }
 
         let node_id = demo.db.create_node("Theme", builder.build())?;
