@@ -230,9 +230,9 @@ impl CurrentStorage {
         }
     }
 
-     /// Checks if a vector index is currently enabled.
-     pub fn has_vector_index(&self, _property_name: &str) -> bool {
-         self.vector_index_state.read().index.is_some()
+     /// Checks if a vector index is currently enabled for the given property.
+     pub fn has_vector_index(&self, property_name: &str) -> bool {
+         self.vector_index_state.read().property_name.as_deref() == Some(property_name)
      }
     /// Create a node with the given label and properties.
     ///
