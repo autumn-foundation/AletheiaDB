@@ -1487,9 +1487,30 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
                     println!("  Time Point              Cosine Distance  Interpretation");
                     println!("  ───────────────────────────────────────────────────────────");
 
-                    for (timestamp, similarity) in drift_vec {
+                    // Filter consecutive duplicates to show only meaningful drift changes
+                    let mut prev_distance: Option<f32> = None;
+                    let mut shown_count = 0;
+                    const MAX_DRIFT_ENTRIES: usize = 10;
+
+                    for (timestamp, similarity) in &drift_vec {
                         // Convert similarity to distance: distance = 1.0 - similarity
                         let distance = 1.0 - similarity;
+
+                        // Skip consecutive duplicates (same distance within 0.001 threshold)
+                        if let Some(prev) = prev_distance
+                            && (distance - prev).abs() < 0.001
+                        {
+                            continue;
+                        }
+
+                        // Limit output to avoid flooding console
+                        if shown_count >= MAX_DRIFT_ENTRIES {
+                            println!(
+                                "  ... ({} more snapshots omitted)",
+                                drift_vec.len() - shown_count
+                            );
+                            break;
+                        }
 
                         // Convert timestamp to approximate year
                         let year = 1970 + (timestamp / (365 * 86400 * 1_000_000));
@@ -1498,7 +1519,7 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
                         // Note: Vector snapshot timestamps might not exactly match graph version timestamps
                         let personality_short = match demo.db.get_node_at_time(
                             character_id,
-                            timestamp,
+                            *timestamp,
                             now_timestamp()?,
                         ) {
                             Ok(historical_node) => {
@@ -1524,6 +1545,15 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
                         println!(
                             "  ~{:4}                  {:.4}           {}",
                             year, distance, personality_short
+                        );
+
+                        prev_distance = Some(distance);
+                        shown_count += 1;
+                    }
+
+                    if shown_count == 0 {
+                        println!(
+                            "  (All drift values were duplicates - no semantic evolution detected)"
                         );
                     }
 
