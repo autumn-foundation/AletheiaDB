@@ -612,9 +612,12 @@ impl PersistenceManager {
 
         let final_lsn = wal.current_lsn();
 
-        // TODO: Initialize ID generators with max_id + 1 (Issue #291)
-        // For now, just track the max IDs - generator initialization will be added later
-        // let _ = (max_node_id, max_edge_id, max_version_id); // Silence unused warnings
+        // Initialize ID generators with max_id + 1 to prevent ID conflicts (Issue #291)
+        // If max_id is 0 (empty WAL), generators start from 1 (default behavior)
+        // Otherwise, generators continue from max_id + 1
+        current.init_node_id_generator(max_node_id + 1);
+        current.init_edge_id_generator(max_edge_id + 1);
+        current.init_version_id_generator(max_version_id + 1);
 
         Ok((current, historical, final_lsn))
     }
