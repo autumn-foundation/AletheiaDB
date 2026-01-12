@@ -935,6 +935,16 @@ impl GallifreyDB {
         property_name: &str,
         config: TemporalVectorConfig,
     ) -> Result<()> {
+        if let Some(indexed_prop) = self.current.get_indexed_property_name() {
+            if indexed_prop != property_name {
+                return Err(crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                    format!("A vector index is already enabled on property '{}', but a temporal index is requested for '{}'. Only one vector index property is supported at a time.", indexed_prop, property_name)
+                )));
+            }
+        } else {
+            self.enable_vector_index(property_name, config.hnsw_config.clone())?;
+        }
+
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("enable_temporal_vector_index").entered();
 
