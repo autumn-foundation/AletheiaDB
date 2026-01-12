@@ -188,6 +188,75 @@ fn label_str(label: InternedString) -> String {
         .unwrap_or_else(|| format!("{:?}", label))
 }
 
+/// Parse command arguments respecting quoted strings
+///
+/// Example: `"Crime and Punishment" 1900` → ["Crime and Punishment", "1900"]
+fn parse_quoted_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current_arg = String::new();
+    let mut in_quotes = false;
+
+    for ch in input.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+            }
+            ' ' if !in_quotes => {
+                if !current_arg.is_empty() {
+                    args.push(current_arg.trim().to_string());
+                    current_arg.clear();
+                }
+            }
+            _ => {
+                current_arg.push(ch);
+            }
+        }
+    }
+
+    if !current_arg.is_empty() {
+        args.push(current_arg.trim().to_string());
+    }
+
+    args
+}
+
+/// Find a character by name with fuzzy matching
+///
+/// Supports:
+/// - Exact match: "Rodion Raskolnikov"
+/// - Last name only: "Raskolnikov"
+/// - Case-insensitive: "raskolnikov"
+/// - Partial match: "Raskol"
+fn find_character_fuzzy<'a>(
+    characters: &'a HashMap<String, NodeId>,
+    query: &str,
+) -> Option<(&'a String, &'a NodeId)> {
+    let query_lower = query.to_lowercase();
+
+    // Try exact match first (case-insensitive)
+    for (name, id) in characters.iter() {
+        if name.to_lowercase() == query_lower {
+            return Some((name, id));
+        }
+    }
+
+    // Try last name match (handles "Raskolnikov" for "Rodion Raskolnikov")
+    for (name, id) in characters.iter() {
+        if name.split_whitespace().last().map(|s| s.to_lowercase()) == Some(query_lower.clone()) {
+            return Some((name, id));
+        }
+    }
+
+    // Try partial match (case-insensitive substring)
+    for (name, id) in characters.iter() {
+        if name.to_lowercase().contains(&query_lower) {
+            return Some((name, id));
+        }
+    }
+
+    None
+}
+
 /// Get current timestamp in microseconds since UNIX epoch
 fn now_timestamp() -> Result<Timestamp> {
     SystemTime::now()
@@ -310,6 +379,15 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     println!("  ✓ Loaded {} themes", themes.len());
     println!("  ✓ Loaded {} movements", movements.len());
     println!("  ✓ Loaded {} events", events.len());
+
+    // === ENABLE VECTOR INDEXING ===
+    // IMPORTANT: Must enable BEFORE creating nodes so embeddings are automatically indexed
+    println!("\n  Setting up vector indexes...");
+    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+    let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
+    demo.db
+        .enable_vector_index("personality_embedding", hnsw_config)?;
+    println!("    ✓ Vector index enabled for personality_embedding");
 
     // === CREATE AUTHORS ===
     println!("\n  Creating Authors...");
@@ -502,16 +580,6 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         demo.db.node_count(),
         demo.db.edge_count()
     );
-
-    // === ENABLE VECTOR INDEXING ===
-    println!("\n  Setting up vector indexes...");
-
-    // Enable vector index for character personality embeddings
-    use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
-    let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
-    demo.db
-        .enable_vector_index("personality_embedding", hnsw_config)?;
-    println!("    ✓ Character personality embeddings indexed");
 
     Ok(())
 }
@@ -781,12 +849,12 @@ fn show_stats(demo: &DemoData) -> Result<()> {
 }
 
 fn find_similar_characters(demo: &DemoData, character_name: &str, k: usize) -> Result<()> {
-    // Find the character node
-    if let Some(&char_id) = demo.characters.get(character_name) {
+    // Find the character node with fuzzy matching
+    if let Some((full_name, &char_id)) = find_character_fuzzy(&demo.characters, character_name) {
         let character = demo.db.get_node(char_id)?;
 
         println!("\n╔═══════════════════════════════════════════════════════════╗");
-        println!("║  SEMANTIC SIMILARITY: {}", character_name.to_uppercase());
+        println!("║  SEMANTIC SIMILARITY: {}", full_name.to_uppercase());
         println!("╚═══════════════════════════════════════════════════════════╝");
 
         // Get character details
@@ -795,7 +863,10 @@ fn find_similar_characters(demo: &DemoData, character_name: &str, k: usize) -> R
             .get("personality")
             .map(format_value)
             .unwrap_or_default();
-        println!("\nQuery character: {}", character_name);
+        println!("\nQuery character: {}", full_name);
+        if character_name.to_lowercase() != full_name.to_lowercase() {
+            println!("  (matched '{}' to '{}')", character_name, full_name);
+        }
         println!("Personality: {}", &personality[..personality.len().min(80)]);
 
         // Find similar characters using vector similarity
@@ -1180,18 +1251,15 @@ fn main() -> Result<()> {
                 }
             }
             "timewarp" | "tw" => {
-                let parts: Vec<&str> = args.splitn(2, ' ').collect();
+                let parts = parse_quoted_args(args);
                 if parts.len() < 2 {
                     println!("Usage: timewarp <book_title> <year>");
                     println!("Example: timewarp \"Crime and Punishment\" 1900");
                     println!("\nTry: list books");
+                } else if let Ok(year) = parts[1].parse::<i64>() {
+                    timewarp_book(&demo, &parts[0], year)?;
                 } else {
-                    let book_title = parts[0].trim_matches('"');
-                    if let Ok(year) = parts[1].parse::<i64>() {
-                        timewarp_book(&demo, book_title, year)?;
-                    } else {
-                        println!("Invalid year: {}", parts[1]);
-                    }
+                    println!("Invalid year: {}", parts[1]);
                 }
             }
             "influences" | "inf" => {
