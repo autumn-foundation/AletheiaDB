@@ -230,6 +230,10 @@ impl CurrentStorage {
         }
     }
 
+     /// Checks if a vector index is currently enabled.
+     pub fn has_vector_index(&self, _property_name: &str) -> bool {
+         self.vector_index_state.read().index.is_some()
+     }
     /// Create a node with the given label and properties.
     ///
     /// Returns the ID of the newly created node.

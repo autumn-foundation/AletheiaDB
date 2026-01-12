@@ -935,6 +935,10 @@ impl GallifreyDB {
         property_name: &str,
         config: TemporalVectorConfig,
     ) -> Result<()> {
+        if !self.current.has_vector_index(property_name) {
+            self.enable_vector_index(property_name, config.hnsw_config.clone())?;
+        }
+
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("enable_temporal_vector_index").entered();
 
