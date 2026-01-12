@@ -13,13 +13,15 @@
 //! Run with: cargo run --example russian_writers
 
 use gallifreydb::{
-    GLOBAL_INTERNER, GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, WriteOps,
+    GLOBAL_INTERNER, GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
+    WriteOps,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Data Structures (matching Python fetcher output)
@@ -183,6 +185,28 @@ fn label_str(label: InternedString) -> String {
         .resolve(label)
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{:?}", label))
+}
+
+/// Get current timestamp in microseconds since UNIX epoch
+fn now_timestamp() -> Result<Timestamp> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as Timestamp)
+        .map_err(|e| gallifreydb::Error::other(format!("System time error: {}", e)))
+}
+
+/// Create approximate timestamp for Jan 1 of a given year
+///
+/// NOTE: This is an approximation that doesn't account for leap years.
+/// It's sufficient for demonstration purposes but shouldn't be used
+/// for production temporal queries. Use a proper datetime library like
+/// `chrono` for accurate timestamp conversion.
+fn year_to_timestamp(year: i64) -> Timestamp {
+    // Rough approximation: microseconds since epoch for Jan 1 of that year
+    // Average 365.25 days/year to approximate leap years
+    let years_since_1970 = year.saturating_sub(1970);
+    let days = (years_since_1970 * 365) + (years_since_1970 / 4);
+    days.saturating_mul(86400).saturating_mul(1_000_000)
 }
 
 /// Helper to format property values nicely
@@ -817,22 +841,18 @@ fn find_similar_characters(demo: &DemoData, character_name: &str, k: usize) -> R
     Ok(())
 }
 
-/// Simulate temporal queries by showing literary interpretation context
+/// Query how a book's interpretation evolved over time using GallifreyDB's temporal API
 ///
-/// NOTE: This is a SIMULATED temporal query for demonstration purposes.
-/// It shows historical context but doesn't use GallifreyDB's actual temporal API.
-///
-/// In production, you would use:
-/// - `db.get_node_at_time(node_id, timestamp)` for point-in-time queries
-/// - `db.get_node_history(node_id)` for full version history
-/// - Temporal indexes for efficient time-range queries
+/// This demonstrates bi-temporal queries by retrieving the book's state as it
+/// existed at a specific point in time. The example shows how literary criticism
+/// evolved from publication to present day.
 fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
     if let Some(&book_id) = demo.books.get(book_title) {
         println!("\n╔═══════════════════════════════════════════════════════════╗");
         println!("║  TIME WARP: {} in {}", book_title.to_uppercase(), year);
         println!("╚═══════════════════════════════════════════════════════════╝");
 
-        // Get current state (in production, this would be get_node_at_time)
+        // Get current state
         let current = demo.db.get_node(book_id)?;
         let current_interp = current
             .properties
@@ -858,41 +878,63 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
                 .unwrap_or_default()
         );
 
-        println!("\n═══ INTERPRETATION TIMELINE ═══\n");
+        println!("\n═══ TEMPORAL QUERY: INTERPRETATION IN {} ═══\n", year);
 
-        // Show the evolution we created
-        println!("Note: This demo simulates interpretation evolution at specific points:");
-        println!("  • Publication (~1860s-1880s): Initial critical reception");
-        println!("  • Early 20th century (~1900-1925): Modernist/existentialist lens");
-        println!("  • Mid 20th century (~1945-1970): Post-war/Freudian analysis");
-        println!("  • Contemporary (~2024): Modern critical perspectives\n");
+        // Convert year to timestamp and get current transaction time
+        let query_timestamp = year_to_timestamp(year);
+        let current_tx_time = now_timestamp()?;
 
-        println!("Current interpretation (2024):");
-        println!("  {}\n", current_interp);
+        // Use GallifreyDB's temporal API to get the node as it was in that year
+        match demo
+            .db
+            .get_node_at_time(book_id, query_timestamp, current_tx_time)
+        {
+            Ok(historical_node) => {
+                let historical_interp = historical_node
+                    .properties
+                    .get("interpretation")
+                    .map(format_value)
+                    .unwrap_or_else(|| "No interpretation recorded yet".to_string());
 
-        // Show temporal context
-        if year < 1900 {
-            println!("In {}, literary criticism was still emerging.", year);
-            println!("The work would have been viewed through a 19th century lens.");
-        } else if year < 1950 {
-            println!(
-                "In {}, modernist and early psychoanalytic interpretations",
-                year
-            );
-            println!("were beginning to influence literary criticism.");
-        } else if year < 2000 {
-            println!(
-                "In {}, post-war critical theory and structural analysis",
-                year
-            );
-            println!("dominated literary interpretation.");
-        } else {
-            println!("In {}, contemporary criticism emphasizes diverse", year);
-            println!("perspectives including trauma studies, postcolonial theory, etc.");
+                println!("Interpretation in {}:", year);
+                println!("  {}\n", historical_interp);
+
+                // Compare with current interpretation
+                println!("Current interpretation (2024):");
+                println!("  {}\n", current_interp);
+
+                // Show temporal context
+                if year < 1900 {
+                    println!("In {}, literary criticism was still emerging.", year);
+                    println!("The work would have been viewed through a 19th century lens.");
+                } else if year < 1950 {
+                    println!(
+                        "In {}, modernist and early psychoanalytic interpretations",
+                        year
+                    );
+                    println!("were beginning to influence literary criticism.");
+                } else if year < 2000 {
+                    println!(
+                        "In {}, post-war critical theory and structural analysis",
+                        year
+                    );
+                    println!("dominated literary interpretation.");
+                } else {
+                    println!("In {}, contemporary criticism emphasizes diverse", year);
+                    println!("perspectives including trauma studies, postcolonial theory, etc.");
+                }
+            }
+            Err(_) => {
+                println!("⚠️  No version of this book exists at year {}", year);
+                println!(
+                    "The book may not have been published yet, or no updates were recorded."
+                );
+            }
         }
 
-        println!("\n💡 In a production system, you could query historical versions");
-        println!("   using: db.get_node_at_time(book_id, timestamp)");
+        println!("\n💡 This query used: db.get_node_at_time(book_id, valid_time, tx_time)");
+        println!("   Valid Time: Jan 1, {} (approximate)", year);
+        println!("   Transaction Time: now (latest committed state)");
     } else {
         println!("\n❌ Book not found: {}", book_title);
         println!("\nTry: list books");
