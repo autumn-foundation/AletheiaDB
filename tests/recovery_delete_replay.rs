@@ -187,13 +187,11 @@ fn test_replay_delete_edge_basic() -> Result<()> {
     // And: Nodes should still exist
     assert_eq!(current.node_count(), 2);
 
-    // And: Historical storage should have 1 edge version (create + delete tombstone)
-    // Note: Currently we may not have tombstone edges implemented, so this might be 1
+    // And: Historical storage should have 2 edge versions (create + delete tombstone)
     let hist_stats = historical.stats();
-    // With tombstone: 2 versions, without tombstone: 1 version (just closed)
-    assert!(
-        hist_stats.total_edge_versions >= 1,
-        "Should have at least 1 edge version"
+    assert_eq!(
+        hist_stats.total_edge_versions, 2,
+        "Should have 2 edge versions (create + tombstone)"
     );
 
     Ok(())

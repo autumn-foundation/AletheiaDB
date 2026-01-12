@@ -370,8 +370,13 @@ fn test_replay_create_node_tracks_max_id() -> Result<()> {
     // Then: All nodes recovered
     assert_eq!(current.node_count(), 3);
 
-    // TODO: Once ID generator recovery is implemented (Issue #291),
-    // verify that max_node_id is tracked as 100
+    // And: Node ID generator should be initialized to max_id + 1 (100 + 1 = 101)
+    let next_node_id = current.create_node("NewNode", PropertyMap::new())?;
+    assert_eq!(
+        next_node_id.as_u64(),
+        101,
+        "Node ID generator should start from max_id + 1"
+    );
 
     Ok(())
 }

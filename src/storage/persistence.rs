@@ -528,8 +528,9 @@ impl PersistenceManager {
                     // Track max version ID
                     max_version_id = max_version_id.max(version_id.as_u64());
 
-                    // CRITICAL: Update next_version_id to avoid conflicts with delete tombstones
+                    // CRITICAL: Update next_version_id to avoid conflicts with subsequent operations
                     // If this update uses version_id = N, the next version should be N+1
+                    // This applies to all future operations (updates, deletes, creates)
                     next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
                     // Replay the UpdateNode operation
@@ -553,8 +554,9 @@ impl PersistenceManager {
                     // Track max version ID
                     max_version_id = max_version_id.max(version_id.as_u64());
 
-                    // CRITICAL: Update next_version_id to avoid conflicts with delete tombstones
+                    // CRITICAL: Update next_version_id to avoid conflicts with subsequent operations
                     // If this update uses version_id = N, the next version should be N+1
+                    // This applies to all future operations (updates, deletes, creates)
                     next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
                     // Replay the UpdateEdge operation
