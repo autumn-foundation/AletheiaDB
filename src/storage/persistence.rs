@@ -12,11 +12,19 @@
 //! - Are created based on time or WAL size thresholds
 //! - Store complete current state + metadata for historical storage
 
-use crate::core::temporal::{Timestamp, time};
+use crate::api::transaction::types::TxId;
+use crate::core::{
+    GLOBAL_INTERNER,
+    graph::{Edge, Node},
+    id::{EdgeId, NodeId, VersionId},
+    property::PropertyMap,
+    temporal::{BiTemporalInterval, Timestamp, time},
+};
 use crate::index::vector::HnswConfig;
 use crate::storage::{
     current::CurrentStorage,
     historical::HistoricalStorage,
+    version::VersionMetadata,
     wal::{LSN, concurrent_system::ConcurrentWalSystem},
 };
 use crate::utils::error::{Result, StorageError};
@@ -437,7 +445,7 @@ impl PersistenceManager {
         // In production, would deserialize storage from checkpoint
         // For now, always start with empty storage
         let current = CurrentStorage::new();
-        let historical = HistoricalStorage::new();
+        let mut historical = HistoricalStorage::new();
 
         let start_lsn = if let Some(cp) = checkpoint {
             cp.metadata.lsn.next()
@@ -445,34 +453,358 @@ impl PersistenceManager {
             LSN::initial()
         };
 
+        // Track max IDs during replay for ID generator initialization (Issue #291)
+        let mut max_node_id: u64 = 0;
+        let mut max_edge_id: u64 = 0;
+        let mut max_version_id: u64 = 0;
+
+        // Track next version_id for sequential version assignment
+        let mut next_version_id: u64 = 1;
+
         // Replay WAL entries since checkpoint
         let wal_entries = wal.read_from(start_lsn)?;
 
-        for _entry in wal_entries {
-            // See issue #287: Implement basic WAL replay loop
-            // See issue #290: Implement DeleteNode/DeleteEdge replay with correct bi-temporal semantics
-            //
-            // IMPORTANT: When implementing replay for DeleteNode/DeleteEdge operations,
-            // you MUST close the previous version's transaction_time BEFORE creating
-            // the tombstone. This is critical for correct bi-temporal semantics.
-            //
-            // The tombstone's temporal.transaction_time().start() contains the
-            // commit_timestamp that should be used to close the previous version.
-            //
-            // Example for DeleteNode:
-            //   let commit_timestamp = temporal.transaction_time().start();
-            //   if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
-            //       historical.close_node_version_transaction_time(prev_version_id, commit_timestamp)?;
-            //   }
-            //   // Then create the tombstone...
-            //
-            // See: write_tx.rs apply_changes() for the reference implementation.
-            // Related: Issue #12 - Time-travel queries returning deleted entities.
+        for entry in wal_entries {
+            use crate::storage::wal::WalOperation;
+
+            match entry.operation {
+                WalOperation::CreateNode {
+                    node_id,
+                    label,
+                    properties,
+                    temporal,
+                } => {
+                    // Track max node ID for ID generator initialization (Issue #291)
+                    max_node_id = max_node_id.max(node_id.as_u64());
+
+                    // Replay the CreateNode operation
+                    self.replay_create_node(
+                        &current,
+                        &mut historical,
+                        node_id,
+                        label,
+                        properties,
+                        temporal,
+                        &mut next_version_id,
+                    )?;
+
+                    // Track max version ID
+                    max_version_id = max_version_id.max(next_version_id - 1);
+                }
+                WalOperation::CreateEdge {
+                    edge_id,
+                    source,
+                    target,
+                    label,
+                    properties,
+                    temporal,
+                } => {
+                    // Track max edge ID for ID generator initialization (Issue #291)
+                    max_edge_id = max_edge_id.max(edge_id.as_u64());
+
+                    // Replay the CreateEdge operation
+                    self.replay_create_edge(
+                        &current,
+                        &mut historical,
+                        edge_id,
+                        source,
+                        target,
+                        label,
+                        properties,
+                        temporal,
+                        &mut next_version_id,
+                    )?;
+
+                    // Track max version ID
+                    max_version_id = max_version_id.max(next_version_id - 1);
+                }
+                WalOperation::UpdateNode {
+                    node_id,
+                    version_id,
+                    label,
+                    properties,
+                    temporal,
+                } => {
+                    // Track max version ID
+                    max_version_id = max_version_id.max(version_id.as_u64());
+
+                    // Replay the UpdateNode operation
+                    self.replay_update_node(
+                        &current,
+                        &mut historical,
+                        node_id,
+                        version_id,
+                        label,
+                        properties,
+                        temporal,
+                    )?;
+                }
+                WalOperation::UpdateEdge {
+                    edge_id,
+                    version_id,
+                    label,
+                    properties,
+                    temporal,
+                } => {
+                    // Track max version ID
+                    max_version_id = max_version_id.max(version_id.as_u64());
+
+                    // Replay the UpdateEdge operation
+                    // Note: source and target are not in WalOperation::UpdateEdge
+                    // We need to get them from current storage
+                    let current_edge = current.get_edge(edge_id)?;
+                    self.replay_update_edge(
+                        &current,
+                        &mut historical,
+                        edge_id,
+                        version_id,
+                        current_edge.source,
+                        current_edge.target,
+                        label,
+                        properties,
+                        temporal,
+                    )?;
+                }
+                WalOperation::DeleteNode {
+                    node_id: _,
+                    temporal: _,
+                } => {
+                    // TODO: Implement replay_delete_node (Issue #290)
+                    //
+                    // CRITICAL: When implementing, you MUST close the previous version's
+                    // transaction_time BEFORE creating the tombstone. This is critical for
+                    // correct bi-temporal semantics.
+                    //
+                    // Example:
+                    //   let commit_timestamp = temporal.transaction_time().start();
+                    //   if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
+                    //       historical.close_node_version_transaction_time(prev_version_id, commit_timestamp)?;
+                    //   }
+                    //   // Then create the tombstone...
+                    //
+                    // See: write_tx.rs apply_changes() for reference implementation.
+                }
+                WalOperation::DeleteEdge {
+                    edge_id: _,
+                    temporal: _,
+                } => {
+                    // TODO: Implement replay_delete_edge (Issue #290)
+                    // Same critical bi-temporal semantics as DeleteNode
+                }
+                WalOperation::Checkpoint { lsn, timestamp: _ } => {
+                    // Update recovery tracking - checkpoint markers indicate progress
+                    self.last_checkpoint_lsn = lsn;
+                }
+            }
         }
 
         let final_lsn = wal.current_lsn();
 
+        // TODO: Initialize ID generators with max_id + 1 (Issue #291)
+        // For now, just track the max IDs - generator initialization will be added later
+        // let _ = (max_node_id, max_edge_id, max_version_id); // Silence unused warnings
+
         Ok((current, historical, final_lsn))
+    }
+
+    /// Replay CreateNode operation during recovery
+    #[allow(clippy::too_many_arguments)]
+    fn replay_create_node(
+        &self,
+        current: &CurrentStorage,
+        historical: &mut HistoricalStorage,
+        node_id: NodeId,
+        label: String,
+        properties: PropertyMap,
+        temporal: BiTemporalInterval,
+        next_version_id: &mut u64,
+    ) -> Result<()> {
+        // Intern the label string (WAL stores strings, but Node needs InternedString)
+        let interned_label = GLOBAL_INTERNER.intern(&label)?;
+
+        // Extract commit timestamp from temporal interval
+        let commit_timestamp = temporal.transaction_time().start();
+
+        // Create version metadata with recovery transaction ID (0)
+        let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+
+        // Generate unique version_id for this version (sequential across all entities)
+        let version_id = VersionId::new(*next_version_id)?;
+        *next_version_id += 1;
+
+        // Create the node with all metadata
+        let node = Node::with_metadata(
+            node_id,
+            interned_label,
+            properties.clone(),
+            version_id,
+            metadata,
+        );
+
+        // Insert into current storage (handles vector indexing automatically)
+        current.insert_node_direct(node, commit_timestamp)?;
+
+        // Add to historical storage for temporal queries
+        historical.add_node_version(node_id, version_id, temporal, interned_label, properties)?;
+
+        Ok(())
+    }
+
+    /// Replay CreateEdge operation during recovery
+    #[allow(clippy::too_many_arguments)]
+    fn replay_create_edge(
+        &self,
+        current: &CurrentStorage,
+        historical: &mut HistoricalStorage,
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        label: String,
+        properties: PropertyMap,
+        temporal: BiTemporalInterval,
+        next_version_id: &mut u64,
+    ) -> Result<()> {
+        // Intern the label string (WAL stores strings, but Edge needs InternedString)
+        let interned_label = GLOBAL_INTERNER.intern(&label)?;
+
+        // Extract commit timestamp from temporal interval
+        let commit_timestamp = temporal.transaction_time().start();
+
+        // Create version metadata with recovery transaction ID (0)
+        let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+
+        // Generate unique version_id for this version (sequential across all entities)
+        let version_id = VersionId::new(*next_version_id)?;
+        *next_version_id += 1;
+
+        // Create the edge with all metadata
+        let edge = Edge::with_metadata(
+            edge_id,
+            interned_label,
+            source,
+            target,
+            properties.clone(),
+            version_id,
+            metadata,
+        );
+
+        // Insert into current storage
+        current.insert_edge_direct(edge)?;
+
+        // Add to historical storage for temporal queries
+        historical.add_edge_version(
+            edge_id,
+            version_id,
+            temporal,
+            interned_label,
+            source,
+            target,
+            properties,
+        )?;
+
+        Ok(())
+    }
+
+    /// Replay UpdateNode operation during recovery
+    #[allow(clippy::too_many_arguments)]
+    fn replay_update_node(
+        &self,
+        current: &CurrentStorage,
+        historical: &mut HistoricalStorage,
+        node_id: NodeId,
+        version_id: VersionId,
+        label: String,
+        properties: PropertyMap,
+        temporal: BiTemporalInterval,
+    ) -> Result<()> {
+        // Intern the label string (WAL stores strings, but Node needs InternedString)
+        let interned_label = GLOBAL_INTERNER.intern(&label)?;
+
+        // Extract commit timestamp from temporal interval
+        let commit_timestamp = temporal.transaction_time().start();
+
+        // Create version metadata with recovery transaction ID (0)
+        let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+
+        // Create the updated node with all metadata
+        let node = Node::with_metadata(
+            node_id,
+            interned_label,
+            properties.clone(),
+            version_id,
+            metadata,
+        );
+
+        // Update in current storage (handles vector indexing automatically)
+        current.update_node_direct(node, commit_timestamp)?;
+
+        // Close previous version's transaction_time in historical storage
+        // This is CRITICAL for correct bi-temporal semantics
+        if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
+            historical.close_node_version_transaction_time(prev_version_id, commit_timestamp)?;
+        }
+
+        // Add new version to historical storage for temporal queries
+        historical.add_node_version(node_id, version_id, temporal, interned_label, properties)?;
+
+        Ok(())
+    }
+
+    /// Replay UpdateEdge operation during recovery
+    #[allow(clippy::too_many_arguments)]
+    fn replay_update_edge(
+        &self,
+        current: &CurrentStorage,
+        historical: &mut HistoricalStorage,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        source: NodeId,
+        target: NodeId,
+        label: String,
+        properties: PropertyMap,
+        temporal: BiTemporalInterval,
+    ) -> Result<()> {
+        // Intern the label string (WAL stores strings, but Edge needs InternedString)
+        let interned_label = GLOBAL_INTERNER.intern(&label)?;
+
+        // Extract commit timestamp from temporal interval
+        let commit_timestamp = temporal.transaction_time().start();
+
+        // Create version metadata with recovery transaction ID (0)
+        let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+
+        // Create the updated edge with all metadata
+        let edge = Edge::with_metadata(
+            edge_id,
+            interned_label,
+            source,
+            target,
+            properties.clone(),
+            version_id,
+            metadata,
+        );
+
+        // Update in current storage
+        current.update_edge_direct(edge)?;
+
+        // Close previous version's transaction_time in historical storage
+        // This is CRITICAL for correct bi-temporal semantics
+        if let Some(prev_version_id) = historical.get_current_edge_version(edge_id) {
+            historical.close_edge_version_transaction_time(prev_version_id, commit_timestamp)?;
+        }
+
+        // Add new version to historical storage for temporal queries
+        historical.add_edge_version(
+            edge_id,
+            version_id,
+            temporal,
+            interned_label,
+            source,
+            target,
+            properties,
+        )?;
+
+        Ok(())
     }
 }
 
