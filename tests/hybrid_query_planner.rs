@@ -5,6 +5,7 @@
 
 use gallifreydb::{
     DistanceMetric, GallifreyDB, HnswConfig, NodeId, PropertyMapBuilder, WriteOps,
+    query::planner::physical::PhysicalOp,
     query::{QueryBuilder, QueryPlanner, traverse_and_rank},
     storage::{CurrentStorage, version::AnchorConfig},
 };
@@ -1115,21 +1116,26 @@ fn test_large_scale_graph_traversal() {
 
     // Create a linear chain: 0 -> 1 -> 2 -> ... -> 99
     for i in 0..99 {
-        db.create_edge(nodes[i], nodes[i + 1], "NEXT", PropertyMapBuilder::new().build())
-            .expect("Failed to create edge");
+        db.create_edge(
+            nodes[i],
+            nodes[i + 1],
+            "NEXT",
+            PropertyMapBuilder::new().build(),
+        )
+        .expect("Failed to create edge");
     }
 
     // Traverse from node 0 to find all reachable nodes
-    let query = QueryBuilder::new()
-        .start(nodes[0])
-        .traverse("NEXT")
-        .build();
+    let query = QueryBuilder::new().start(nodes[0]).traverse("NEXT").build();
 
     let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
 
     // Plan should be valid for large graphs
-    assert!(plan.root.is_unary_op(), "Should produce traversal plan");
+    assert!(
+        matches!(plan.root, PhysicalOp::IndexedTraversal { .. }),
+        "Should produce traversal plan"
+    );
 
     println!("✓ Large-scale graph traversal (100 nodes) planned successfully");
 }
@@ -1155,8 +1161,13 @@ fn test_deep_traversal_query() {
 
     // Create chain: 0 -> 1 -> 2 -> ... -> 9
     for i in 0..9 {
-        db.create_edge(nodes[i], nodes[i + 1], "CHAIN", PropertyMapBuilder::new().build())
-            .expect("Failed to create edge");
+        db.create_edge(
+            nodes[i],
+            nodes[i + 1],
+            "CHAIN",
+            PropertyMapBuilder::new().build(),
+        )
+        .expect("Failed to create edge");
     }
 
     // Build query with 5-hop traversal
@@ -1169,7 +1180,10 @@ fn test_deep_traversal_query() {
     let plan = planner.plan(query).expect("Planning failed");
 
     // Verify plan structure for deep traversal
-    assert!(plan.root.is_unary_op(), "Should handle deep traversals");
+    assert!(
+        matches!(plan.root, PhysicalOp::IndexedTraversal { .. }),
+        "Should handle deep traversals"
+    );
 
     println!("✓ Deep traversal query (5 hops) planned successfully");
 }
@@ -1184,28 +1198,29 @@ fn test_large_k_vector_search() {
             "VectorNode",
             PropertyMapBuilder::new()
                 .insert("id", i as i64)
-                .insert_vector("embedding", &[
-                    (i as f32 / 50.0).cos(),
-                    (i as f32 / 50.0).sin(),
-                    0.5,
-                    0.5,
-                ])
+                .insert_vector(
+                    "embedding",
+                    &[(i as f32 / 50.0).cos(), (i as f32 / 50.0).sin(), 0.5, 0.5],
+                )
                 .build(),
         )
         .expect("Failed to create node");
     }
 
     // Query with k=100 (larger than available nodes)
-    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query_embedding = [1.0f32, 0.0, 0.0, 0.0];
     let query = QueryBuilder::new()
-        .find_similar(query_embedding, 100)
+        .find_similar(&query_embedding, 100)
         .build();
 
     let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed with large k");
 
     // Should handle k > node count gracefully
-    assert!(plan.root.is_scan_op(), "Should produce vector search scan");
+    assert!(
+        matches!(plan.root, PhysicalOp::HnswSearch { .. }),
+        "Should produce vector search scan"
+    );
 
     println!("✓ Large k vector search (k=100 with 50 nodes) handled gracefully");
 }
@@ -1231,12 +1246,7 @@ fn test_hybrid_query_large_scale() {
                 "Spoke",
                 PropertyMapBuilder::new()
                     .insert("id", i as i64)
-                    .insert_vector("embedding", &[
-                        0.5 + (i as f32 / 100.0),
-                        0.5,
-                        0.5,
-                        0.5,
-                    ])
+                    .insert_vector("embedding", &[0.5 + (i as f32 / 100.0), 0.5, 0.5, 0.5])
                     .build(),
             )
             .expect("Failed to create spoke");
@@ -1246,18 +1256,23 @@ fn test_hybrid_query_large_scale() {
     }
 
     // Hybrid query: traverse from hub and rank by similarity
-    let query_embedding = Arc::from([0.6f32, 0.5, 0.5, 0.5].as_slice());
+    let query_embedding = [0.6f32, 0.5, 0.5, 0.5];
     let query = QueryBuilder::new()
         .start(hub)
         .traverse("CONNECTS_TO")
-        .rank_by_similarity(query_embedding, 10)
+        .rank_by_similarity(&query_embedding, 10)
         .build();
 
     let planner = create_test_planner();
-    let plan = planner.plan(query).expect("Planning failed for hybrid query");
+    let plan = planner
+        .plan(query)
+        .expect("Planning failed for hybrid query");
 
     // Should produce VectorRank(Traverse(NodeLookup)) plan
-    assert!(plan.root.is_unary_op(), "Should produce hybrid plan");
+    assert!(
+        matches!(plan.root, PhysicalOp::VectorRerank { .. }),
+        "Should produce hybrid plan"
+    );
 
     println!("✓ Large-scale hybrid query (hub with 50 spokes) planned successfully");
 }
@@ -1268,19 +1283,24 @@ fn test_hybrid_query_large_scale() {
 
 #[test]
 fn test_empty_graph_query() {
-    let db = create_test_db();
+    let _db = create_test_db();
 
     // Query on empty graph
-    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query_embedding = [1.0f32, 0.0, 0.0, 0.0];
     let query = QueryBuilder::new()
-        .find_similar(query_embedding, 10)
+        .find_similar(&query_embedding, 10)
         .build();
 
     let planner = create_test_planner();
-    let plan = planner.plan(query).expect("Planning should succeed on empty graph");
+    let plan = planner
+        .plan(query)
+        .expect("Planning should succeed on empty graph");
 
     // Plan should be valid even for empty graph
-    assert!(plan.root.is_scan_op(), "Should produce scan plan");
+    assert!(
+        matches!(plan.root, PhysicalOp::HnswSearch { .. }),
+        "Should produce scan plan"
+    );
 
     println!("✓ Empty graph query handled gracefully");
 }
@@ -1307,10 +1327,15 @@ fn test_no_matching_traversal_results() {
         .build();
 
     let planner = create_test_planner();
-    let plan = planner.plan(query).expect("Planning should succeed even with no results");
+    let plan = planner
+        .plan(query)
+        .expect("Planning should succeed even with no results");
 
     // Plan should be valid, execution will return empty results
-    assert!(plan.root.is_unary_op(), "Should produce traversal plan");
+    assert!(
+        matches!(plan.root, PhysicalOp::IndexedTraversal { .. }),
+        "Should produce traversal plan"
+    );
 
     println!("✓ No matching traversal results handled gracefully");
 }
@@ -1332,16 +1357,21 @@ fn test_very_large_k_value() {
     }
 
     // Query with k=10000 (way larger than node count)
-    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query_embedding = [1.0f32, 0.0, 0.0, 0.0];
     let query = QueryBuilder::new()
-        .find_similar(query_embedding, 10000)
+        .find_similar(&query_embedding, 10000)
         .build();
 
     let planner = create_test_planner();
-    let plan = planner.plan(query).expect("Planning should handle very large k");
+    let plan = planner
+        .plan(query)
+        .expect("Planning should handle very large k");
 
     // Should handle gracefully - will return at most 5 results
-    assert!(plan.root.is_scan_op(), "Should produce vector search scan");
+    assert!(
+        matches!(plan.root, PhysicalOp::HnswSearch { .. }),
+        "Should produce vector search scan"
+    );
 
     println!("✓ Very large k value (k=10000 with 5 nodes) handled gracefully");
 }
@@ -1380,18 +1410,23 @@ fn test_nodes_without_embeddings_in_hybrid_query() {
     .expect("Failed to create edge");
 
     // Hybrid query that will encounter node without embedding
-    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query_embedding = [1.0f32, 0.0, 0.0, 0.0];
     let query = QueryBuilder::new()
         .start(node_with_embedding)
         .traverse("LINKS_TO")
-        .rank_by_similarity(query_embedding, 10)
+        .rank_by_similarity(&query_embedding, 10)
         .build();
 
     let planner = create_test_planner();
-    let plan = planner.plan(query).expect("Planning should handle missing embeddings");
+    let plan = planner
+        .plan(query)
+        .expect("Planning should handle missing embeddings");
 
     // Plan should be valid - execution will skip nodes without embeddings
-    assert!(plan.root.is_unary_op(), "Should produce hybrid plan");
+    assert!(
+        matches!(plan.root, PhysicalOp::VectorRerank { .. }),
+        "Should produce hybrid plan with VectorRerank"
+    );
 
     println!("✓ Nodes without embeddings in hybrid query handled gracefully");
 }
@@ -1421,7 +1456,7 @@ fn test_disconnected_components() {
         )
         .expect("Failed to create node");
 
-    let component2_a = db
+    let _component2_a = db
         .create_node(
             "Component2",
             PropertyMapBuilder::new()
@@ -1432,8 +1467,13 @@ fn test_disconnected_components() {
         .expect("Failed to create node");
 
     // Connect within components
-    db.create_edge(component1_a, component1_b, "SAME_COMPONENT", PropertyMapBuilder::new().build())
-        .expect("Failed to create edge");
+    db.create_edge(
+        component1_a,
+        component1_b,
+        "SAME_COMPONENT",
+        PropertyMapBuilder::new().build(),
+    )
+    .expect("Failed to create edge");
 
     // Traverse from component1 should not reach component2
     let query = QueryBuilder::new()
@@ -1442,10 +1482,15 @@ fn test_disconnected_components() {
         .build();
 
     let planner = create_test_planner();
-    let plan = planner.plan(query).expect("Planning should handle disconnected components");
+    let plan = planner
+        .plan(query)
+        .expect("Planning should handle disconnected components");
 
     // Plan should be valid - execution will only return reachable nodes
-    assert!(plan.root.is_unary_op(), "Should produce traversal plan");
+    assert!(
+        matches!(plan.root, PhysicalOp::IndexedTraversal { .. }),
+        "Should produce traversal plan"
+    );
 
     println!("✓ Disconnected graph components handled gracefully");
 }
@@ -1463,10 +1508,15 @@ fn test_empty_result_with_filter() {
         .build();
 
     let planner = create_test_planner();
-    let plan = planner.plan(query).expect("Planning should handle empty filter results");
+    let plan = planner
+        .plan(query)
+        .expect("Planning should handle empty filter results");
 
     // Plan should include filter operation
-    assert!(plan.root.is_unary_op(), "Should produce filtered plan");
+    assert!(
+        matches!(plan.root, PhysicalOp::Filter { .. }),
+        "Should produce filtered plan"
+    );
 
     println!("✓ Empty result with filter handled gracefully");
 }
@@ -1477,16 +1527,19 @@ fn test_k_equals_zero() {
     let (_alice, _bob, _carol, _dave) = create_social_graph(&db);
 
     // Query with k=0 (edge case)
-    let query_embedding = Arc::from([1.0f32, 0.0, 0.0, 0.0].as_slice());
+    let query_embedding = [1.0f32, 0.0, 0.0, 0.0];
     let query = QueryBuilder::new()
-        .find_similar(query_embedding, 0)
+        .find_similar(&query_embedding, 0)
         .build();
 
     let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning should handle k=0");
 
     // Plan should be valid - execution will return empty results
-    assert!(plan.root.is_scan_op(), "Should produce vector search scan");
+    assert!(
+        matches!(plan.root, PhysicalOp::HnswSearch { .. }),
+        "Should produce vector search scan"
+    );
 
     println!("✓ k=0 edge case handled gracefully");
 }

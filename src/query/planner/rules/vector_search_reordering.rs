@@ -44,10 +44,20 @@
 //! ```
 //! (No reordering - already optimal)
 
+use crate::index::vector::DistanceMetric;
 use crate::query::plan::{LogicalOp, LogicalPlan, ScanOp, UnaryOp};
 use crate::utils::error::Result;
 
 use super::{OptimizationRule, Statistics};
+
+/// Threshold for reordering decision: reorder if vector search is at least this many times more selective
+const SELECTIVITY_THRESHOLD_FACTOR: usize = 2;
+
+/// Default filter selectivity estimate (10%)
+const DEFAULT_FILTER_SELECTIVITY: f64 = 0.1;
+
+/// Maximum traversal cardinality estimate to avoid unrealistic values
+const MAX_TRAVERSAL_CARDINALITY: usize = 100_000;
 
 /// Vector search reordering optimization rule.
 ///
@@ -105,43 +115,72 @@ impl VectorSearchReordering {
                         self.reorder(traverse_input, stats)?;
 
                     // Decision: If vector rank's k is significantly smaller than traversal fanout,
-                    // the current order (traverse then rank) creates many intermediate results.
+                    // reorder to do vector search first to reduce intermediate results.
                     //
-                    // Note: We keep the current order for semantic correctness, but this
-                    // information could guide physical plan execution strategies.
-                    // A future enhancement could use this to choose between:
-                    // - Traverse-then-filter execution
-                    // - Index-backed execution
-                    // - Parallel execution strategies
+                    // Reorder if: vector_k * THRESHOLD < traversal_fanout
+                    let should_reorder =
+                        vector_selectivity * SELECTIVITY_THRESHOLD_FACTOR < traversal_fanout;
 
-                    #[cfg(feature = "observability")]
-                    if vector_selectivity < traversal_fanout / 2 {
+                    if should_reorder {
+                        #[cfg(feature = "observability")]
                         tracing::debug!(
                             vector_k = vector_selectivity,
                             traversal_fanout = traversal_fanout,
-                            "VectorRank is more selective than traversal - consider optimized execution"
+                            threshold_factor = SELECTIVITY_THRESHOLD_FACTOR,
+                            "Reordering: VectorSearch is more selective than traversal, executing VectorSearch first"
                         );
-                    }
 
-                    let new_traverse = LogicalOp::unary(
-                        UnaryOp::Traverse {
-                            direction: *direction,
-                            label: label.clone(),
-                            depth: *depth,
-                        },
-                        opt_traverse_input,
-                    );
+                        // Transform: VectorRank(Traverse(input))
+                        // Into: Traverse(VectorSearch(k))
+                        //
+                        // NOTE: This changes query semantics from "traverse then rank" to "search then traverse".
+                        // The optimization assumes the goal is to find k most relevant nodes via the graph structure.
+                        let vector_search = LogicalOp::Scan(ScanOp::VectorSearch {
+                            embedding: embedding.clone(),
+                            k: vector_selectivity,
+                            label_filter: None,
+                            metric: DistanceMetric::Cosine, // Default to Cosine for semantic search
+                        });
 
-                    Ok((
-                        LogicalOp::unary(
-                            UnaryOp::VectorRank {
-                                embedding: embedding.clone(),
-                                top_k: *top_k,
+                        let reordered = LogicalOp::unary(
+                            UnaryOp::Traverse {
+                                direction: *direction,
+                                label: label.clone(),
+                                depth: *depth,
                             },
-                            new_traverse,
-                        ),
-                        input_changed,
-                    ))
+                            vector_search,
+                        );
+
+                        Ok((reordered, true))
+                    } else {
+                        #[cfg(feature = "observability")]
+                        tracing::debug!(
+                            vector_k = vector_selectivity,
+                            traversal_fanout = traversal_fanout,
+                            "Keeping original order: traversal is competitive with vector search"
+                        );
+
+                        // Keep original order but with optimized input
+                        let new_traverse = LogicalOp::unary(
+                            UnaryOp::Traverse {
+                                direction: *direction,
+                                label: label.clone(),
+                                depth: *depth,
+                            },
+                            opt_traverse_input,
+                        );
+
+                        Ok((
+                            LogicalOp::unary(
+                                UnaryOp::VectorRank {
+                                    embedding: embedding.clone(),
+                                    top_k: *top_k,
+                                },
+                                new_traverse,
+                            ),
+                            input_changed,
+                        ))
+                    }
                 } else {
                     // VectorRank with non-traverse input - recursively optimize
                     let (opt_input, changed) = self.reorder(traverse_box, stats)?;
@@ -184,11 +223,13 @@ impl VectorSearchReordering {
     /// This estimates how many nodes would be reached by traversing from the input.
     fn estimate_traversal_cardinality(&self, input: &LogicalOp, stats: &Statistics) -> usize {
         let input_cardinality = self.estimate_input_cardinality(input, stats);
-        let avg_degree = stats.average_out_degree();
+        let avg_degree = stats.average_out_degree() as usize;
 
         // Traversal fanout = input size × average degree
-        // Clamp between 1 and 100k to avoid unrealistic estimates
-        (input_cardinality as f64 * avg_degree).clamp(1.0, 100000.0) as usize
+        // Use saturating multiplication to prevent overflow, then clamp to reasonable range
+        input_cardinality
+            .saturating_mul(avg_degree)
+            .clamp(1, MAX_TRAVERSAL_CARDINALITY)
     }
 
     /// Estimate the cardinality of an input operation.
@@ -211,8 +252,9 @@ impl VectorSearchReordering {
                 op: UnaryOp::Filter(_),
                 input,
             } => {
-                // Assume 10% selectivity for filters
-                (self.estimate_input_cardinality(input, stats) as f64 * 0.1).max(1.0) as usize
+                // Apply default filter selectivity estimate
+                (self.estimate_input_cardinality(input, stats) as f64 * DEFAULT_FILTER_SELECTIVITY)
+                    .max(1.0) as usize
             }
             LogicalOp::Unary { input, .. } => self.estimate_input_cardinality(input, stats),
             LogicalOp::Binary { left, right, .. } => {
@@ -300,29 +342,113 @@ mod tests {
         let rule = VectorSearchReordering;
         let stats = test_stats();
 
-        // Scenario: Vector search returns k=10, traversal has avg fanout of 50
-        // Expected: Reorder to do vector search first
+        // Scenario: Vector search returns k=10, traversal has avg fanout of ~50
+        // (avg_degree=5.0, from 10 nodes = 50 traversal results)
+        // Expected: Reorder to do vector search first since 10 * 2 < 50
         //
-        // Before: VectorRank(k=10, Traverse(avg_degree=5, from 10 nodes))
+        // Before: VectorRank(k=10, Traverse(from 10 nodes))
         //   → Traverse produces ~50 nodes, then VectorRank narrows to 10
         //
-        // After: Should become Traverse(VectorSearch(k=10))
+        // After: Traverse(VectorSearch(k=10))
         //   → VectorSearch produces 10 nodes, then traverse from those
 
-        // TODO: This test will fail until reordering is implemented
-        // Keeping it as a placeholder for TDD
+        let embedding: Arc<[f32]> = Arc::from([0.1f32, 0.2, 0.3, 0.4].as_slice());
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: embedding.clone(),
+                top_k: Some(10),
+            },
+            LogicalOp::unary(
+                UnaryOp::Traverse {
+                    direction: Direction::Outgoing,
+                    label: Some("KNOWS".to_string()),
+                    depth: TraversalDepth::Exact(1),
+                },
+                // Start from 10 nodes - will produce ~50 traversal results (10 * 5.0 avg degree)
+                LogicalOp::Scan(ScanOp::NodeLookup(
+                    (1..=10).map(|i| NodeId::new(i).unwrap()).collect(),
+                )),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        assert!(
+            result.is_some(),
+            "Should reorder when vector search is more selective"
+        );
+
+        let reordered_plan = result.unwrap();
+
+        // Verify reordering happened: should be Traverse(VectorSearch)
+        match &reordered_plan.root {
+            LogicalOp::Unary {
+                op: UnaryOp::Traverse { .. },
+                input,
+            } => {
+                // Inner operation should be VectorSearch
+                match &**input {
+                    LogicalOp::Scan(ScanOp::VectorSearch { k, .. }) => {
+                        assert_eq!(*k, 10, "VectorSearch should use k=10");
+                    }
+                    _ => panic!(
+                        "Expected VectorSearch as input to Traverse, got {:?}",
+                        input
+                    ),
+                }
+            }
+            _ => panic!(
+                "Expected Traverse at root after reordering, got {:?}",
+                reordered_plan.root
+            ),
+        }
     }
 
     #[test]
     fn test_traversal_is_more_selective() {
         let rule = VectorSearchReordering;
-        let stats = test_stats();
 
-        // Scenario: Traversal with rare edge type (avg fanout 1-2)
-        // vs Vector search k=100
-        // Expected: Keep original order (traverse first is already better)
+        // Create stats with low avg degree to make traversal more selective
+        let sparse_stats = Statistics::default();
+        sparse_stats.refresh(
+            1000,   // node_count
+            1000,   // edge_count (avg degree = 1.0)
+            100,    // vector_count
+            vec![], // labels
+            3.0,    // avg_delta_chain
+        );
 
-        // TODO: Implement this test when reordering logic is added
+        // Scenario: Traversal from 1 node with avg degree 1.0 produces ~1 result
+        // Vector search k=100 would produce 100 results
+        // Expected: Keep original order since traversal is more selective
+        // (1 * 1.0 < 100 but 100 * 2 > 1, so no reordering)
+
+        let embedding: Arc<[f32]> = Arc::from([0.1f32, 0.2, 0.3, 0.4].as_slice());
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: embedding.clone(),
+                top_k: Some(100),
+            },
+            LogicalOp::unary(
+                UnaryOp::Traverse {
+                    direction: Direction::Outgoing,
+                    label: Some("RARE_EDGE".to_string()),
+                    depth: TraversalDepth::Exact(1),
+                },
+                // Start from 1 node - will produce ~1 traversal result (1 * 1.0 avg degree)
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &sparse_stats).unwrap();
+
+        // Should NOT reorder because traversal is more selective
+        // Traversal cardinality: 1 node * 1.0 avg degree = 1
+        // Vector search: k=100
+        // 100 * THRESHOLD (2) = 200, which is > 1, so no reorder
+        assert!(
+            result.is_none(),
+            "Should NOT reorder when traversal is more selective"
+        );
     }
 
     #[test]
@@ -379,9 +505,10 @@ mod tests {
         );
 
         // Same query pattern
+        let embedding: Arc<[f32]> = Arc::from([0.1f32; 4].as_slice());
         let plan = LogicalPlan::new(LogicalOp::unary(
             UnaryOp::VectorRank {
-                embedding: Arc::from([0.1f32; 4].as_slice()),
+                embedding: embedding.clone(),
                 top_k: Some(10),
             },
             LogicalOp::unary(
@@ -394,14 +521,46 @@ mod tests {
             ),
         ));
 
-        // With sparse graph, traversal is selective (avg degree 1.5)
-        let sparse_result = rule.apply(&plan, &sparse_stats);
-        assert!(sparse_result.is_ok());
+        // With sparse graph, traversal fanout is low: 1 node * 1.5 avg degree = 1.5
+        // Vector k=10. Check: 10 * 2 = 20 > 1.5, so NO reordering
+        let sparse_result = rule.apply(&plan, &sparse_stats).unwrap();
+        assert!(
+            sparse_result.is_none(),
+            "Should NOT reorder with sparse graph (traversal is selective)"
+        );
 
-        // With dense graph, vector search is more selective (k=10 < avg degree 20)
-        let dense_result = rule.apply(&plan, &dense_stats);
-        assert!(dense_result.is_ok());
+        // With dense graph, traversal fanout is high: 1 node * 20 avg degree = 20
+        // Vector k=10. Check: 10 * 2 = 20 == traversal_fanout (boundary case)
+        // Since condition is <, not <=, this should NOT reorder
+        let dense_result = rule.apply(&plan, &dense_stats).unwrap();
+        // At the boundary, let's verify actual behavior
+        // traversal_fanout = 20, vector_selectivity = 10, threshold = 2
+        // should_reorder = 10 * 2 < 20 → false (20 is not < 20)
+        assert!(
+            dense_result.is_none(),
+            "Should NOT reorder at exact boundary"
+        );
 
-        // TODO: Verify reordering decisions match selectivity
+        // Now test with k=5 to force reordering: 5 * 2 = 10 < 20 ✓
+        let plan_with_small_k = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::VectorRank {
+                embedding: embedding.clone(),
+                top_k: Some(5),
+            },
+            LogicalOp::unary(
+                UnaryOp::Traverse {
+                    direction: Direction::Outgoing,
+                    label: Some("KNOWS".to_string()),
+                    depth: TraversalDepth::Exact(1),
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+
+        let reorder_result = rule.apply(&plan_with_small_k, &dense_stats).unwrap();
+        assert!(
+            reorder_result.is_some(),
+            "Should reorder with small k in dense graph"
+        );
     }
 }

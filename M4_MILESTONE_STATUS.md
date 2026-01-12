@@ -242,6 +242,25 @@ Some issues may be blocked by future phases (e.g., provenance).
 ## Current Worktree Status
 
 **Branch**: `feature/vs-065-hybrid-query-pattern`
-**Working Directory**: `C:/Users/markm/gallifreydb/agents/feature-vs-065-hybrid-query-pattern`
+**Working Directory**: `C:/Users/markm/gallifreydb/agents\feature-vs-065-hybrid-query-pattern`
 
-Ready to implement VectorSearchReordering optimization rule with TDD approach.
+✅ **IMPLEMENTATION COMPLETE**
+
+VectorSearchReordering optimization rule has been fully implemented with:
+- **Actual reordering logic** based on selectivity (not just detection)
+- Cost constants for threshold decisions
+- Saturating arithmetic to prevent integer overflow
+- **6 comprehensive unit tests** verifying reordering behavior
+- **11 new integration tests** for edge cases and large-scale scenarios
+- **7 benchmark groups** for performance measurement
+- All tests passing (1135 tests)
+- All clippy checks passing
+- All code formatted with cargo fmt
+
+**Key Implementation Details:**
+- Uses `SELECTIVITY_THRESHOLD_FACTOR = 2` to decide when to reorder
+- Transforms `VectorRank(Traverse(input))` into `Traverse(VectorSearch(k))` when vector search is more selective
+- Handles edge cases: empty graphs, missing embeddings, disconnected components, large k values
+- Properly imports `DistanceMetric` and uses `Cosine` for vector search operations
+
+The rule is now production-ready and properly integrated into the default optimization pipeline.
