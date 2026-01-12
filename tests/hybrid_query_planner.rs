@@ -5,7 +5,7 @@
 
 use gallifreydb::{
     DistanceMetric, GallifreyDB, HnswConfig, NodeId, PropertyMapBuilder, WriteOps,
-    query::{QueryBuilder, QueryPlanner},
+    query::{QueryBuilder, QueryPlanner, traverse_and_rank},
     storage::{CurrentStorage, version::AnchorConfig},
 };
 use std::sync::Arc;
@@ -1011,4 +1011,81 @@ fn test_execute_temporal_node_lookup_returns_historical_state() {
     );
 
     println!("✓ Temporal node lookup returns historical state (Issue #306)");
+}
+
+// =============================================================================
+// Direct Hybrid Query Function Tests (VS-063)
+// =============================================================================
+
+#[test]
+fn test_direct_traverse_and_rank_function() {
+    let db = create_test_db();
+    let (alice, bob, carol, _dave) = create_social_graph(&db);
+
+    // Test the direct traverse_and_rank function (not the convenience method)
+    // Note: Alice -> Bob, Alice -> Carol (Bob -> Dave, but Dave is not a direct neighbor of Alice)
+    let alice_embedding = [1.0f32, 0.0, 0.0, 0.0];
+    let results = traverse_and_rank(&db, alice, "KNOWS", &alice_embedding, 10)
+        .expect("traverse_and_rank failed");
+
+    // Should return 2 direct neighbors (Bob and Carol), not Dave (who is connected to Bob)
+    assert_eq!(results.len(), 2, "Should return 2 direct neighbors");
+
+    // Verify ordering: Bob should be most similar, then Carol
+    assert_eq!(results[0].0, bob, "Bob should be most similar");
+    assert_eq!(results[1].0, carol, "Carol should be second");
+
+    // Verify similarity scores are in descending order
+    assert!(
+        results[0].1 > results[1].1,
+        "Scores should be in descending order"
+    );
+
+    println!("✓ Direct traverse_and_rank function works correctly (VS-063)");
+}
+
+#[test]
+fn test_direct_traverse_and_rank_with_k_limit() {
+    let db = create_test_db();
+    let (alice, bob, _carol, _dave) = create_social_graph(&db);
+
+    // Test with k=1 to verify limit is respected
+    let alice_embedding = [1.0f32, 0.0, 0.0, 0.0];
+    let results = traverse_and_rank(&db, alice, "KNOWS", &alice_embedding, 1)
+        .expect("traverse_and_rank failed");
+
+    assert_eq!(results.len(), 1, "Should respect k=1 limit");
+    assert_eq!(results[0].0, bob, "Should return most similar (Bob)");
+
+    println!("✓ Direct traverse_and_rank respects k limit (VS-063)");
+}
+
+#[test]
+fn test_direct_traverse_and_rank_with_different_label() {
+    let db = create_test_db();
+    let (alice, _bob, _carol, _dave) = create_social_graph(&db);
+
+    // Create an additional node connected with different label
+    let eve = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Eve")
+                .insert_vector("embedding", &[0.95f32, 0.05, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create Eve");
+
+    db.create_edge(alice, eve, "WORKS_WITH", PropertyMapBuilder::new().build())
+        .expect("Failed to create Alice->Eve edge");
+
+    // Query with WORKS_WITH label should only return Eve
+    let alice_embedding = [1.0f32, 0.0, 0.0, 0.0];
+    let results = traverse_and_rank(&db, alice, "WORKS_WITH", &alice_embedding, 10)
+        .expect("traverse_and_rank failed");
+
+    assert_eq!(results.len(), 1, "Should only return WORKS_WITH edges");
+    assert_eq!(results[0].0, eve, "Should return Eve");
+
+    println!("✓ Direct traverse_and_rank respects edge label filter (VS-063)");
 }

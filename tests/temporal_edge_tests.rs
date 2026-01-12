@@ -17,8 +17,10 @@ fn test_temporal_edge_lookup_basic() {
         max_delta_chain: 10,
     });
 
-    // Small delay to ensure background flush thread has started (fixes CI race condition)
-    thread::sleep(Duration::from_millis(10));
+    // Increased delay to ensure background flush thread has started (fixes CI race condition)
+    // On heavily loaded CI systems, the default 10ms may not be sufficient for thread scheduling.
+    // Using 50ms provides better reliability without significantly impacting test execution time.
+    thread::sleep(Duration::from_millis(50));
 
     // Create nodes
     let alice = db
@@ -155,8 +157,10 @@ fn test_temporal_edge_multiple_updates() {
         max_delta_chain: 10,
     });
 
-    // Small delay to ensure background flush thread has started (fixes CI race condition)
-    thread::sleep(Duration::from_millis(10));
+    // Increased delay to ensure background flush thread has started (fixes CI race condition)
+    // On heavily loaded CI systems, the default 10ms may not be sufficient for thread scheduling.
+    // Using 50ms provides better reliability without significantly impacting test execution time.
+    thread::sleep(Duration::from_millis(50));
 
     // Create nodes
     let alice = db
@@ -258,8 +262,10 @@ fn test_temporal_edge_interval_closing() {
         max_delta_chain: 10,
     });
 
-    // Small delay to ensure background flush thread has started (fixes CI race condition)
-    thread::sleep(Duration::from_millis(10));
+    // Increased delay to ensure background flush thread has started (fixes CI race condition)
+    // On heavily loaded CI systems, the default 10ms may not be sufficient for thread scheduling.
+    // Using 50ms provides better reliability without significantly impacting test execution time.
+    thread::sleep(Duration::from_millis(50));
 
     // Create nodes
     let alice = db
@@ -462,8 +468,10 @@ fn test_temporal_edge_anchor_delta_pattern() {
         max_delta_chain: 10,
     });
 
-    // Small delay to ensure background flush thread has started (fixes CI race condition)
-    thread::sleep(Duration::from_millis(10));
+    // Increased delay to ensure background flush thread has started (fixes CI race condition)
+    // On heavily loaded CI systems, the default 10ms may not be sufficient for thread scheduling.
+    // Using 50ms provides better reliability without significantly impacting test execution time.
+    thread::sleep(Duration::from_millis(50));
 
     // Create nodes
     let alice = db
