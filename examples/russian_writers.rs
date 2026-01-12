@@ -1494,21 +1494,31 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
                         // Convert timestamp to approximate year
                         let year = 1970 + (timestamp / (365 * 86400 * 1_000_000));
 
-                        // Get personality at this point in time
-                        let historical_node =
-                            demo.db
-                                .get_node_at_time(character_id, timestamp, now_timestamp()?)?;
-                        let personality = historical_node
-                            .properties
-                            .get("personality")
-                            .map(format_value)
-                            .unwrap_or_else(|| "Unknown".to_string());
+                        // Try to get personality at this point in time
+                        // Note: Vector snapshot timestamps might not exactly match graph version timestamps
+                        let personality_short = match demo.db.get_node_at_time(
+                            character_id,
+                            timestamp,
+                            now_timestamp()?,
+                        ) {
+                            Ok(historical_node) => {
+                                let personality = historical_node
+                                    .properties
+                                    .get("personality")
+                                    .map(format_value)
+                                    .unwrap_or_else(|| "Unknown".to_string());
 
-                        // Truncate personality for display
-                        let personality_short = if personality.len() > 50 {
-                            format!("{}...", &personality[..47])
-                        } else {
-                            personality
+                                // Truncate for display
+                                if personality.len() > 50 {
+                                    format!("{}...", &personality[..47])
+                                } else {
+                                    personality
+                                }
+                            }
+                            Err(_) => {
+                                // Version not found at this exact timestamp - show drift anyway
+                                "(version not available)".to_string()
+                            }
                         };
 
                         println!(
