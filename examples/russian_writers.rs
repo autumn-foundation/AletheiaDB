@@ -167,7 +167,8 @@ impl DemoData {
 
     /// Lookup node by name across all entity types
     fn get_node(&self, name: &str) -> Option<NodeId> {
-        self.authors.get(name)
+        self.authors
+            .get(name)
             .or_else(|| self.books.get(name))
             .or_else(|| self.characters.get(name))
             .or_else(|| self.themes.get(name))
@@ -926,9 +927,7 @@ fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
             }
             Err(_) => {
                 println!("⚠️  No version of this book exists at year {}", year);
-                println!(
-                    "The book may not have been published yet, or no updates were recorded."
-                );
+                println!("The book may not have been published yet, or no updates were recorded.");
             }
         }
 
