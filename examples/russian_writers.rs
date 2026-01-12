@@ -10,18 +10,16 @@
 //! 1. Run the data fetcher: cd examples/russian_writers && python fetch_data.py
 //! 2. Ensure Ollama is running with all-minilm model
 //!
-//! Run with: cargo run --example russian_writers --features embedding-ollama
+//! Run with: cargo run --example russian_writers
 
 use gallifreydb::{
-    GLOBAL_INTERNER, GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, Timestamp,
-    WriteOps,
+    GLOBAL_INTERNER, GallifreyDB, InternedString, NodeId, PropertyMapBuilder, Result, WriteOps,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Data Structures (matching Python fetcher output)
@@ -147,7 +145,6 @@ struct SimilarToRelation {
 
 struct DemoData {
     db: GallifreyDB,
-    nodes: HashMap<String, NodeId>,
     // Track entities by type for easy lookup
     authors: HashMap<String, NodeId>,
     books: HashMap<String, NodeId>,
@@ -159,7 +156,6 @@ impl DemoData {
     fn new() -> Self {
         Self {
             db: GallifreyDB::new(),
-            nodes: HashMap::new(),
             authors: HashMap::new(),
             books: HashMap::new(),
             characters: HashMap::new(),
@@ -167,32 +163,19 @@ impl DemoData {
         }
     }
 
+    /// Lookup node by name across all entity types
     fn get_node(&self, name: &str) -> Option<NodeId> {
-        self.nodes.get(name).copied()
+        self.authors.get(name)
+            .or_else(|| self.books.get(name))
+            .or_else(|| self.characters.get(name))
+            .or_else(|| self.themes.get(name))
+            .copied()
     }
 }
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-/// Get current timestamp in microseconds
-#[allow(dead_code)]
-fn now_timestamp() -> Timestamp {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_micros() as Timestamp
-}
-
-/// Create timestamp for a specific year (for temporal queries)
-#[allow(dead_code)]
-fn year_timestamp(year: i64) -> Timestamp {
-    // Approximate: microseconds since epoch for Jan 1 of that year
-    let days_since_1970 = (year - 1970) * 365;
-    let seconds = days_since_1970 * 86400;
-    (seconds * 1_000_000) as Timestamp
-}
 
 /// Helper to get label string from InternedString
 fn label_str(label: InternedString) -> String {
@@ -322,7 +305,6 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         }
 
         let node_id = demo.db.create_node("Author", builder.build())?;
-        demo.nodes.insert(author.name.clone(), node_id);
         demo.authors.insert(author.name, node_id);
     }
 
@@ -346,7 +328,6 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         }
 
         let node_id = demo.db.create_node("Book", builder.build())?;
-        demo.nodes.insert(book.title.clone(), node_id);
         demo.books.insert(book.title, node_id);
     }
 
@@ -368,7 +349,6 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         }
 
         let node_id = demo.db.create_node("Character", builder.build())?;
-        demo.nodes.insert(character.name.clone(), node_id);
         demo.characters.insert(character.name, node_id);
     }
 
@@ -385,14 +365,13 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         }
 
         let node_id = demo.db.create_node("Theme", builder.build())?;
-        demo.nodes.insert(theme.name.clone(), node_id);
         demo.themes.insert(theme.name, node_id);
     }
 
     // === CREATE MOVEMENTS ===
     println!("  Creating Literary Movements...");
     for movement in movements {
-        let node_id = demo.db.create_node(
+        let _node_id = demo.db.create_node(
             "Movement",
             props! {
                 "name" => movement.name.as_str(),
@@ -401,13 +380,13 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
                 "key_figures" => movement.key_figures.as_str(),
             },
         )?;
-        demo.nodes.insert(movement.name, node_id);
+        // Note: Movements are not tracked by name since they're not queried individually
     }
 
     // === CREATE HISTORICAL EVENTS ===
     println!("  Creating Historical Events...");
     for event in events {
-        let node_id = demo.db.create_node(
+        let _node_id = demo.db.create_node(
             "HistoricalEvent",
             props! {
                 "name" => event.name.as_str(),
@@ -416,7 +395,7 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
                 "significance" => event.significance.as_str(),
             },
         )?;
-        demo.nodes.insert(event.name, node_id);
+        // Note: Historical events are not tracked by name since they're not queried individually
     }
 
     // === CREATE RELATIONSHIPS ===
@@ -838,13 +817,22 @@ fn find_similar_characters(demo: &DemoData, character_name: &str, k: usize) -> R
     Ok(())
 }
 
+/// Simulate temporal queries by showing literary interpretation context
+///
+/// NOTE: This is a SIMULATED temporal query for demonstration purposes.
+/// It shows historical context but doesn't use GallifreyDB's actual temporal API.
+///
+/// In production, you would use:
+/// - `db.get_node_at_time(node_id, timestamp)` for point-in-time queries
+/// - `db.get_node_history(node_id)` for full version history
+/// - Temporal indexes for efficient time-range queries
 fn timewarp_book(demo: &DemoData, book_title: &str, year: i64) -> Result<()> {
     if let Some(&book_id) = demo.books.get(book_title) {
         println!("\n╔═══════════════════════════════════════════════════════════╗");
         println!("║  TIME WARP: {} in {}", book_title.to_uppercase(), year);
         println!("╚═══════════════════════════════════════════════════════════╝");
 
-        // Get current state
+        // Get current state (in production, this would be get_node_at_time)
         let current = demo.db.get_node(book_id)?;
         let current_interp = current
             .properties
@@ -1100,7 +1088,9 @@ fn main() -> Result<()> {
     // Main REPL loop
     loop {
         print!("\nrussian-lit> ");
-        io::stdout().flush().unwrap();
+        if io::stdout().flush().is_err() {
+            break; // Exit gracefully if stdout fails
+        }
 
         let mut input = String::new();
         if io::stdin().read_line(&mut input).is_err() {

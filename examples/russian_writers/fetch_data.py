@@ -156,7 +156,7 @@ class EmbeddingGenerator:
         """Test that Ollama is running and model is available"""
         try:
             ollama.list()
-            print(f"✓ Connected to Ollama")
+            print(f"[OK] Connected to Ollama")
         except Exception as e:
             print(f"Error: Cannot connect to Ollama")
             print(f"Please ensure Ollama is running: ollama serve")
@@ -287,7 +287,7 @@ class DataCollector:
             authors.append(author)
             time.sleep(0.5)  # Be nice to Wikipedia
 
-        print(f"✓ Collected {len(authors)} authors")
+        print(f"[OK] Collected {len(authors)} authors")
         return authors
 
     def collect_books(self) -> List[Book]:
@@ -360,7 +360,7 @@ class DataCollector:
             books.append(book)
             time.sleep(0.5)
 
-        print(f"✓ Collected {len(books)} books")
+        print(f"[OK] Collected {len(books)} books")
         return books
 
     def collect_characters(self) -> List[Character]:
@@ -493,7 +493,7 @@ class DataCollector:
             characters.append(character)
             time.sleep(0.2)
 
-        print(f"✓ Collected {len(characters)} characters")
+        print(f"[OK] Collected {len(characters)} characters")
         return characters
 
     def collect_themes(self) -> List[Theme]:
@@ -544,7 +544,7 @@ class DataCollector:
 
             themes.append(theme)
 
-        print(f"✓ Collected {len(themes)} themes")
+        print(f"[OK] Collected {len(themes)} themes")
         return themes
 
     def collect_movements(self) -> List[Movement]:
@@ -579,7 +579,7 @@ class DataCollector:
             ),
         ]
 
-        print(f"✓ Collected {len(movements)} movements")
+        print(f"[OK] Collected {len(movements)} movements")
         return movements
 
     def collect_events(self) -> List[HistoricalEvent]:
@@ -620,7 +620,7 @@ class DataCollector:
             ),
         ]
 
-        print(f"✓ Collected {len(events)} historical events")
+        print(f"[OK] Collected {len(events)} historical events")
         return events
 
     def generate_relationships(self, authors: List[Author],
@@ -709,7 +709,7 @@ class DataCollector:
             })
 
         total = sum(len(v) for v in relationships.values())
-        print(f"✓ Generated {total} relationships")
+        print(f"[OK] Generated {total} relationships")
 
         return relationships
 

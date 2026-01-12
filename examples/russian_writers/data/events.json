@@ -1,0 +1,32 @@
+[
+  {
+    "name": "Napoleonic Invasion of Russia",
+    "year": 1812,
+    "description": "Napoleon's invasion and retreat from Russia",
+    "significance": "Central event in War and Peace; shaped Russian national identity"
+  },
+  {
+    "name": "Decembrist Revolt",
+    "year": 1825,
+    "description": "Failed uprising by liberal nobles against tsarist autocracy",
+    "significance": "Influenced Pushkin and generation of writers; symbolized idealism vs autocracy"
+  },
+  {
+    "name": "Emancipation of Serfs",
+    "year": 1861,
+    "description": "Alexander II freed Russian serfs",
+    "significance": "Major social upheaval; backdrop for Turgenev, Dostoevsky, Tolstoy"
+  },
+  {
+    "name": "Assassination of Alexander II",
+    "year": 1881,
+    "description": "Tsar killed by revolutionary terrorists",
+    "significance": "Led to repression; backdrop for nihilism in literature"
+  },
+  {
+    "name": "1905 Revolution",
+    "year": 1905,
+    "description": "Failed revolution against tsarist autocracy",
+    "significance": "Influenced Gorky's revolutionary themes; foreshadowed 1917"
+  }
+]

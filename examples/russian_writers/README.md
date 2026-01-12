@@ -45,8 +45,10 @@ This will:
 
 4. **Run the example:**
 ```bash
-cargo run --example russian_writers --features embedding-ollama
+cargo run --example russian_writers
 ```
+
+Note: The example uses pre-generated embeddings from step 3, so no embedding feature flags are needed.
 
 ## Example Queries
 
