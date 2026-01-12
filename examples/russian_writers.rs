@@ -586,17 +586,15 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
 
     let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
 
-    // Enable current-state vector index for fast similarity searches
-    demo.db
-        .enable_vector_index("personality_embedding", hnsw_config.clone())?;
-    println!("    ✓ Current vector index enabled for personality_embedding");
-
     // Enable semantic_embedding index for cross-entity similarity
+    // Note: GallifreyDB currently supports one vector index per database
+    // Using semantic_embedding enables similarity across all entity types (authors, books, characters, themes)
     demo.db
         .enable_vector_index("semantic_embedding", hnsw_config.clone())?;
     println!("    ✓ Current vector index enabled for semantic_embedding (cross-entity)");
 
     // Enable temporal vector index for semantic drift tracking
+    // Using semantic_embedding for temporal tracking as well
     let temporal_config = TemporalVectorConfig {
         hnsw_config,
         // Snapshot strategy aligned with graph anchor_interval (both set to 2)
@@ -609,8 +607,8 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     };
 
     demo.db
-        .enable_temporal_vector_index("personality_embedding", temporal_config)?;
-    println!("    ✓ Temporal vector index enabled for personality_embedding");
+        .enable_temporal_vector_index("semantic_embedding", temporal_config)?;
+    println!("    ✓ Temporal vector index enabled for semantic_embedding");
     println!("    ✓ Snapshots every 2 transactions to capture semantic drift");
 
     // === CREATE AUTHORS ===
@@ -987,11 +985,11 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
             // Get original embedding to perturb
             let original_node = demo.db.get_node(character_id)?;
             let original_embedding = if let Some(gallifreydb::PropertyValue::Vector(vec)) =
-                original_node.properties.get("personality_embedding")
+                original_node.properties.get("semantic_embedding")
             {
                 vec.clone()
             } else {
-                println!("    ⚠️  No personality_embedding found, skipping");
+                println!("    ⚠️  No semantic_embedding found, skipping");
                 continue;
             };
 
@@ -1053,7 +1051,7 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
                             .insert("book", book)
                             .insert("author", author)
                             .insert("personality", *evolved_personality)
-                            .insert_vector("personality_embedding", &perturbed_embedding)
+                            .insert_vector("semantic_embedding", &perturbed_embedding)
                             .build(),
                     )
                 })?;
@@ -1527,11 +1525,11 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
         // Get the original (current) embedding
         let current_node = demo.db.get_node(character_id)?;
         let reference_embedding = if let Some(gallifreydb::PropertyValue::Vector(vec)) =
-            current_node.properties.get("personality_embedding")
+            current_node.properties.get("semantic_embedding")
         {
             vec.clone()
         } else {
-            println!("❌ No personality_embedding found for this character");
+            println!("❌ No semantic_embedding found for this character");
             return Ok(());
         };
 
