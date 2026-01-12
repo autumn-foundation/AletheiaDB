@@ -353,7 +353,9 @@ class DataCollector:
             )
 
             # Generate theme embedding (content-focused, no book title)
-            theme_text = f"{book.summary}. Themes: {book.themes}"
+            # Truncate summary for embedding to stay within model's token limit
+            summary_for_embedding = book.summary[:800]  # ~400 tokens, leaves room for themes
+            theme_text = f"{summary_for_embedding}. Themes: {book.themes}"
             print(f"    Generating embedding...")
             book.theme_embedding = self.embeddings.embed(theme_text)
 
