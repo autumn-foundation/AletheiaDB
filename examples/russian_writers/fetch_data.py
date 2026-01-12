@@ -487,8 +487,9 @@ class DataCollector:
                 significance=significance,
             )
 
-            # Generate personality embedding (trait-focused, no character/book names)
-            personality_text = f"Personality: {character.personality}. {character.description}. Character arc: {character.arc}"
+            # Generate personality embedding (pure traits only, no names/context/plot)
+            # Exclude description (has character/book/author names) and arc (has shared plot events)
+            personality_text = f"Character personality: {character.personality}"
             print(f"    Generating embedding...")
             character.personality_embedding = self.embeddings.embed(personality_text)
 
