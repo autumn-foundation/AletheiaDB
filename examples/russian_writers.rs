@@ -291,8 +291,16 @@ struct DemoData {
 
 impl DemoData {
     fn new() -> Self {
+        // Configure graph database to create anchors every 2 versions
+        // This ensures temporal vector snapshots are created for our 3-4 character evolutions
+        // Without this, anchors (and vector snapshots) only created every 10 versions
+        let anchor_config = gallifreydb::storage::version::AnchorConfig {
+            anchor_interval: 2, // Create anchor every 2 versions (not 10)
+            max_delta_chain: 4, // Keep delta chain short
+        };
+
         Self {
-            db: GallifreyDB::new(),
+            db: GallifreyDB::with_config(anchor_config),
             authors: HashMap::new(),
             books: HashMap::new(),
             characters: HashMap::new(),
@@ -569,8 +577,9 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
     let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
     let temporal_config = TemporalVectorConfig {
         hnsw_config,
-        // Create snapshots every 2 transactions (instead of default 10)
-        // This ensures we capture the 3-4 character evolution stages
+        // Snapshot strategy aligned with graph anchor_interval (both set to 2)
+        // Snapshots are created via pre-anchor hooks, so they fire when anchors are created
+        // With anchor_interval=2 and TransactionInterval(2), snapshots created every 2 versions
         snapshot_strategy: SnapshotStrategy::TransactionInterval(2),
         retention_policy: RetentionPolicy::KeepAll, // Keep all snapshots for demo
         max_snapshots: 100,                         // Maximum snapshots to retain
