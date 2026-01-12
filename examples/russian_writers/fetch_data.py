@@ -279,8 +279,8 @@ class DataCollector:
                 wikipedia_url=self.wiki.get_page_url(name),
             )
 
-            # Generate style embedding
-            style_text = f"{author.writing_style}. {author.major_themes}. {author.biography}"
+            # Generate style embedding (content-focused, no author name)
+            style_text = f"Writing style: {author.writing_style}. Major themes: {author.major_themes}"
             print(f"    Generating embedding...")
             author.style_embedding = self.embeddings.embed(style_text)
 
@@ -352,8 +352,8 @@ class DataCollector:
                 wikipedia_url=self.wiki.get_page_url(title),
             )
 
-            # Generate theme embedding
-            theme_text = f"{book.title}. {book.summary}. Themes: {book.themes}"
+            # Generate theme embedding (content-focused, no book title)
+            theme_text = f"{book.summary}. Themes: {book.themes}"
             print(f"    Generating embedding...")
             book.theme_embedding = self.embeddings.embed(theme_text)
 
@@ -485,8 +485,8 @@ class DataCollector:
                 significance=significance,
             )
 
-            # Generate personality embedding
-            personality_text = f"{character.name}: {character.personality}. {character.description}. {character.arc}"
+            # Generate personality embedding (trait-focused, no character/book names)
+            personality_text = f"Personality: {character.personality}. {character.description}. Character arc: {character.arc}"
             print(f"    Generating embedding...")
             character.personality_embedding = self.embeddings.embed(personality_text)
 
@@ -538,8 +538,8 @@ class DataCollector:
                 examples=examples,
             )
 
-            # Generate theme embedding
-            theme_text = f"{theme.name}: {theme.description}. Examples: {theme.examples}"
+            # Generate theme embedding (content-focused, no theme name)
+            theme_text = f"{theme.description}. Examples in literature: {theme.examples}"
             theme.theme_embedding = self.embeddings.embed(theme_text)
 
             themes.append(theme)
