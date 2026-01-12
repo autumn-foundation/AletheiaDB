@@ -528,6 +528,10 @@ impl PersistenceManager {
                     // Track max version ID
                     max_version_id = max_version_id.max(version_id.as_u64());
 
+                    // CRITICAL: Update next_version_id to avoid conflicts with delete tombstones
+                    // If this update uses version_id = N, the next version should be N+1
+                    next_version_id = next_version_id.max(version_id.as_u64() + 1);
+
                     // Replay the UpdateNode operation
                     self.replay_update_node(
                         &current,
@@ -549,6 +553,10 @@ impl PersistenceManager {
                     // Track max version ID
                     max_version_id = max_version_id.max(version_id.as_u64());
 
+                    // CRITICAL: Update next_version_id to avoid conflicts with delete tombstones
+                    // If this update uses version_id = N, the next version should be N+1
+                    next_version_id = next_version_id.max(version_id.as_u64() + 1);
+
                     // Replay the UpdateEdge operation
                     // Note: source and target are not in WalOperation::UpdateEdge
                     // We need to get them from current storage
@@ -565,31 +573,35 @@ impl PersistenceManager {
                         temporal,
                     )?;
                 }
-                WalOperation::DeleteNode {
-                    node_id: _,
-                    temporal: _,
-                } => {
-                    // TODO: Implement replay_delete_node (Issue #290)
-                    //
-                    // CRITICAL: When implementing, you MUST close the previous version's
-                    // transaction_time BEFORE creating the tombstone. This is critical for
-                    // correct bi-temporal semantics.
-                    //
-                    // Example:
-                    //   let commit_timestamp = temporal.transaction_time().start();
-                    //   if let Some(prev_version_id) = historical.get_current_node_version(node_id) {
-                    //       historical.close_node_version_transaction_time(prev_version_id, commit_timestamp)?;
-                    //   }
-                    //   // Then create the tombstone...
-                    //
-                    // See: write_tx.rs apply_changes() for reference implementation.
+                WalOperation::DeleteNode { node_id, temporal } => {
+                    // Replay the DeleteNode operation
+                    // CRITICAL: This closes the previous version's transaction_time
+                    // BEFORE creating the tombstone for correct bi-temporal semantics
+                    self.replay_delete_node(
+                        &current,
+                        &mut historical,
+                        node_id,
+                        temporal,
+                        &mut next_version_id,
+                    )?;
+
+                    // Track max version ID
+                    max_version_id = max_version_id.max(next_version_id - 1);
                 }
-                WalOperation::DeleteEdge {
-                    edge_id: _,
-                    temporal: _,
-                } => {
-                    // TODO: Implement replay_delete_edge (Issue #290)
-                    // Same critical bi-temporal semantics as DeleteNode
+                WalOperation::DeleteEdge { edge_id, temporal } => {
+                    // Replay the DeleteEdge operation
+                    // CRITICAL: This closes the previous version's transaction_time
+                    // BEFORE creating the tombstone for correct bi-temporal semantics
+                    self.replay_delete_edge(
+                        &current,
+                        &mut historical,
+                        edge_id,
+                        temporal,
+                        &mut next_version_id,
+                    )?;
+
+                    // Track max version ID
+                    max_version_id = max_version_id.max(next_version_id - 1);
                 }
                 WalOperation::Checkpoint { lsn, timestamp: _ } => {
                     // Update recovery tracking - checkpoint markers indicate progress
@@ -803,6 +815,100 @@ impl PersistenceManager {
             target,
             properties,
         )?;
+
+        Ok(())
+    }
+
+    /// Replay DeleteNode operation during recovery
+    fn replay_delete_node(
+        &self,
+        current: &CurrentStorage,
+        historical: &mut HistoricalStorage,
+        node_id: NodeId,
+        temporal: BiTemporalInterval,
+        next_version_id: &mut u64,
+    ) -> Result<()> {
+        // Get the node before deleting (to capture label and properties for tombstone)
+        let node = current.get_node(node_id)?;
+
+        // Extract commit timestamp from temporal interval
+        let commit_timestamp = temporal.transaction_time().start();
+
+        // Close the current version's transaction_time in historical storage
+        // This is CRITICAL for correct bi-temporal semantics
+        if let Some(current_version_id) = historical.get_current_node_version(node_id) {
+            historical.close_node_version_transaction_time(current_version_id, commit_timestamp)?;
+        }
+
+        // Generate version ID for the tombstone
+        let tombstone_version_id = VersionId::new(*next_version_id)?;
+        *next_version_id += 1;
+
+        // Create tombstone temporal interval
+        // The tombstone marks when the deletion occurred. Its transaction_time
+        // starts at commit_timestamp and remains open. Its valid_time is closed
+        // immediately since the entity no longer exists.
+        let tombstone_temporal = temporal.close_valid_time(commit_timestamp);
+
+        // Add tombstone version to historical storage with the node's label and properties
+        historical.add_node_version(
+            node_id,
+            tombstone_version_id,
+            tombstone_temporal,
+            node.label,
+            node.properties.clone(),
+        )?;
+
+        // Delete from current storage
+        current.delete_node_direct(node_id, commit_timestamp)?;
+
+        Ok(())
+    }
+
+    /// Replay DeleteEdge operation during recovery
+    fn replay_delete_edge(
+        &self,
+        current: &CurrentStorage,
+        historical: &mut HistoricalStorage,
+        edge_id: EdgeId,
+        temporal: BiTemporalInterval,
+        next_version_id: &mut u64,
+    ) -> Result<()> {
+        // Get the edge before deleting (to capture label, source, target, properties for tombstone)
+        let edge = current.get_edge(edge_id)?;
+
+        // Extract commit timestamp from temporal interval
+        let commit_timestamp = temporal.transaction_time().start();
+
+        // Close the current version's transaction_time in historical storage
+        // This is CRITICAL for correct bi-temporal semantics
+        if let Some(current_version_id) = historical.get_current_edge_version(edge_id) {
+            historical.close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
+        }
+
+        // Generate version ID for the tombstone
+        let tombstone_version_id = VersionId::new(*next_version_id)?;
+        *next_version_id += 1;
+
+        // Create tombstone temporal interval
+        // The tombstone marks when the deletion occurred. Its transaction_time
+        // starts at commit_timestamp and remains open. Its valid_time is closed
+        // immediately since the entity no longer exists.
+        let tombstone_temporal = temporal.close_valid_time(commit_timestamp);
+
+        // Add tombstone version to historical storage with the edge's data
+        historical.add_edge_version(
+            edge_id,
+            tombstone_version_id,
+            tombstone_temporal,
+            edge.label,
+            edge.source,
+            edge.target,
+            edge.properties.clone(),
+        )?;
+
+        // Delete from current storage
+        current.delete_edge_direct(edge_id)?;
 
         Ok(())
     }
