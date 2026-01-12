@@ -659,7 +659,7 @@ fn populate_database(demo: &mut DemoData) -> Result<()> {
         }
 
         let node_id = demo.db.create_node("Book", builder.build())?;
-        demo.books.insert(book.title, node_id);
+        demo.books.insert(book.title.clone(), node_id);
     }
 
     // === CREATE CHARACTERS ===
@@ -895,9 +895,22 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
 
             for (year, interpretation) in stages {
                 // Create a new version with updated interpretation
-                demo.db.write(|tx| {
-                    tx.update_node(book_id, props! { "interpretation" => *interpretation })
-                })?;
+                // Note: update_node does a full replacement (PUT), so we need all properties
+                let current_node = demo.db.get_node(book_id)?;
+
+                // Rebuild PropertyMap with all existing properties plus updated interpretation
+                let mut builder = PropertyMapBuilder::new();
+                for (key, value) in current_node.properties.iter() {
+                    let key_str = label_str(*key);
+                    if key_str == "interpretation" {
+                        builder = builder.insert("interpretation", *interpretation);
+                    } else {
+                        builder = builder.insert_by_key(*key, value.clone());
+                    }
+                }
+
+                demo.db
+                    .write(|tx| tx.update_node(book_id, builder.build()))?;
 
                 // Truncate interpretation (character-aware)
                 let truncated: String = interpretation.chars().take(60).collect();
@@ -1007,54 +1020,25 @@ fn create_temporal_versions(demo: &mut DemoData) -> Result<()> {
                     })
                     .collect();
 
-                // Get existing properties to preserve them
-                let name = original_node
-                    .properties
-                    .get("name")
-                    .and_then(|v| {
-                        if let gallifreydb::PropertyValue::String(s) = v {
-                            Some(&**s)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or("");
-                let book = original_node
-                    .properties
-                    .get("book")
-                    .and_then(|v| {
-                        if let gallifreydb::PropertyValue::String(s) = v {
-                            Some(&**s)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or("");
-                let author = original_node
-                    .properties
-                    .get("author")
-                    .and_then(|v| {
-                        if let gallifreydb::PropertyValue::String(s) = v {
-                            Some(&**s)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or("");
+                // Note: update_node does a full replacement (PUT), so we need all properties
+                // Get current node to preserve all existing properties
+                let current_node = demo.db.get_node(character_id)?;
 
-                // Update personality AND embedding, but preserve name/book/author
-                demo.db.write(|tx| {
-                    tx.update_node(
-                        character_id,
-                        PropertyMapBuilder::new()
-                            .insert("name", name)
-                            .insert("book", book)
-                            .insert("author", author)
-                            .insert("personality", *evolved_personality)
-                            .insert_vector("semantic_embedding", &perturbed_embedding)
-                            .build(),
-                    )
-                })?;
+                // Rebuild PropertyMap with all existing properties plus updated personality and embedding
+                let mut builder = PropertyMapBuilder::new();
+                for (key, value) in current_node.properties.iter() {
+                    let key_str = label_str(*key);
+                    if key_str == "personality" {
+                        builder = builder.insert("personality", *evolved_personality);
+                    } else if key_str == "semantic_embedding" {
+                        builder = builder.insert_vector("semantic_embedding", &perturbed_embedding);
+                    } else {
+                        builder = builder.insert_by_key(*key, value.clone());
+                    }
+                }
+
+                demo.db
+                    .write(|tx| tx.update_node(character_id, builder.build()))?;
 
                 // Truncate personality (character-aware)
                 let truncated: String = evolved_personality.chars().take(60).collect();
@@ -1112,7 +1096,28 @@ fn show_entity(demo: &DemoData, name: &str) -> Result<()> {
         }
 
         // Show relationships
+        let incoming = demo.db.get_incoming_edges(node_id);
         let outgoing = demo.db.get_outgoing_edges(node_id);
+
+        if !incoming.is_empty() {
+            println!("\nIncoming relationships:");
+            for edge_id in incoming.iter().take(10) {
+                if let Ok(edge) = demo.db.get_edge(*edge_id) {
+                    let source = demo.db.get_node(edge.source)?;
+                    let source_name = source
+                        .properties
+                        .get("name")
+                        .or_else(|| source.properties.get("title"))
+                        .map(format_value)
+                        .unwrap_or_else(|| label_str(source.label));
+                    println!("  {} --[{}]-->", source_name, label_str(edge.label));
+                }
+            }
+            if incoming.len() > 10 {
+                println!("  ... and {} more", incoming.len() - 10);
+            }
+        }
+
         if !outgoing.is_empty() {
             println!("\nOutgoing relationships:");
             for edge_id in outgoing.iter().take(10) {
@@ -1238,67 +1243,195 @@ fn show_stats(demo: &DemoData) -> Result<()> {
     Ok(())
 }
 
-fn find_similar_characters(demo: &DemoData, character_name: &str, k: usize) -> Result<()> {
-    // Find the character node with fuzzy matching
-    if let Some((full_name, &char_id)) = find_character_fuzzy(&demo.characters, character_name) {
-        let character = demo.db.get_node(char_id)?;
+fn find_similar_entities(
+    demo: &DemoData,
+    entity_name: &str,
+    k: usize,
+    type_filter: Option<&str>,
+) -> Result<()> {
+    // Try to find the query entity across all types
+    let (query_id, query_label) = find_character_fuzzy(&demo.characters, entity_name)
+        .map(|(name, id)| (*id, name.clone()))
+        .or_else(|| {
+            demo.books
+                .get(entity_name)
+                .map(|id| (*id, entity_name.to_string()))
+        })
+        .or_else(|| {
+            demo.authors
+                .get(entity_name)
+                .map(|id| (*id, entity_name.to_string()))
+        })
+        .or_else(|| {
+            demo.themes
+                .get(entity_name)
+                .map(|id| (*id, entity_name.to_string()))
+        })
+        .ok_or_else(|| gallifreydb::Error::other(format!("Entity not found: {}", entity_name)))?;
 
-        println!("\n╔═══════════════════════════════════════════════════════════╗");
-        println!("║  SEMANTIC SIMILARITY: {}", full_name.to_uppercase());
-        println!("╚═══════════════════════════════════════════════════════════╝");
+    let query_node = demo.db.get_node(query_id)?;
 
-        // Get character details
-        let personality = character
-            .properties
-            .get("personality")
-            .map(format_value)
-            .unwrap_or_default();
-        println!("\nQuery character: {}", full_name);
-        if character_name.to_lowercase() != full_name.to_lowercase() {
-            println!("  (matched '{}' to '{}')", character_name, full_name);
-        }
+    println!("\n╔═══════════════════════════════════════════════════════════╗");
+    println!("║  SEMANTIC SIMILARITY: {}", query_label.to_uppercase());
+    println!("╚═══════════════════════════════════════════════════════════╝");
+
+    // Display query entity info
+    println!(
+        "\nQuery entity: {} ({})",
+        query_label,
+        label_str(query_node.label)
+    );
+    if entity_name.to_lowercase() != query_label.to_lowercase() {
+        println!("  (matched '{}' to '{}')", entity_name, query_label);
+    }
+
+    // Show relevant property based on entity type
+    if let Some(personality) = query_node.properties.get("personality") {
         println!(
             "Personality: {}",
-            wrap_text(&personality, 70, "             ")
+            wrap_text(&format_value(personality), 70, "             ")
         );
+    } else if let Some(themes) = query_node.properties.get("themes") {
+        println!(
+            "Themes: {}",
+            wrap_text(&format_value(themes), 70, "        ")
+        );
+    } else if let Some(style) = query_node.properties.get("writing_style") {
+        println!("Style: {}", wrap_text(&format_value(style), 70, "       "));
+    } else if let Some(desc) = query_node.properties.get("description") {
+        println!(
+            "Description: {}",
+            wrap_text(&format_value(desc), 70, "             ")
+        );
+    }
 
-        // Find similar characters using vector similarity
-        println!("\nFinding similar characters...");
-        let similar = demo.db.find_similar(char_id, k)?;
+    // Find similar entities using vector similarity
+    if let Some(filter) = type_filter {
+        println!("\nFinding similar entities (type: {})...", filter);
+    } else {
+        println!("\nFinding similar entities (all types)...");
+    }
+    let mut similar = demo.db.find_similar(query_id, k * 3)?; // Get more to allow filtering
 
-        if similar.is_empty() {
-            println!("  No similar characters found (embeddings may be missing)");
-        } else {
-            println!("\nTop {} most similar characters:\n", similar.len());
+    // Filter by type if specified
+    if let Some(filter_type) = type_filter {
+        similar.retain(|(node_id, _)| {
+            if let Ok(node) = demo.db.get_node(*node_id) {
+                label_str(node.label).eq_ignore_ascii_case(filter_type)
+            } else {
+                false
+            }
+        });
+        similar.truncate(k);
+    } else {
+        similar.truncate(k);
+    }
 
-            for (i, (similar_id, score)) in similar.iter().enumerate() {
-                let similar_char = demo.db.get_node(*similar_id)?;
-                let name = similar_char
-                    .properties
-                    .get("name")
-                    .map(format_value)
-                    .unwrap_or_default();
-                let book = similar_char
-                    .properties
-                    .get("book")
-                    .map(format_value)
-                    .unwrap_or_default();
-                let personality = similar_char
-                    .properties
-                    .get("personality")
-                    .map(format_value)
-                    .unwrap_or_default();
+    if similar.is_empty() {
+        println!("  No similar entities found (embeddings may be missing)");
+    } else {
+        println!("\nTop {} most similar entities:\n", similar.len());
 
-                println!("{}. {} (similarity: {:.3})", i + 1, name, score);
-                println!("   from: {}", book);
-                println!("   personality:");
-                println!("      {}", wrap_text(&personality, 60, "      "));
-                println!();
+        for (i, (similar_id, score)) in similar.iter().enumerate() {
+            let node = demo.db.get_node(*similar_id)?;
+            let entity_type = label_str(node.label);
+
+            // Display based on entity type
+            match entity_type.as_str() {
+                "Character" => {
+                    let name = node
+                        .properties
+                        .get("name")
+                        .map(format_value)
+                        .unwrap_or_default();
+                    let book = node
+                        .properties
+                        .get("book")
+                        .map(format_value)
+                        .unwrap_or_default();
+                    let personality = node
+                        .properties
+                        .get("personality")
+                        .map(format_value)
+                        .unwrap_or_default();
+
+                    println!("{}. {} [Character] (similarity: {:.3})", i + 1, name, score);
+                    println!("   from: {}", book);
+                    println!("   {}", wrap_text(&personality, 60, "   "));
+                    println!();
+                }
+                "Book" => {
+                    let title = node
+                        .properties
+                        .get("title")
+                        .map(format_value)
+                        .unwrap_or_default();
+                    let author = node
+                        .properties
+                        .get("author")
+                        .map(format_value)
+                        .unwrap_or_default();
+                    let themes = node
+                        .properties
+                        .get("themes")
+                        .map(format_value)
+                        .unwrap_or_default();
+
+                    println!("{}. {} [Book] (similarity: {:.3})", i + 1, title, score);
+                    println!("   by: {}", author);
+                    println!("   themes: {}", wrap_text(&themes, 60, "           "));
+                    println!();
+                }
+                "Author" => {
+                    let name = node
+                        .properties
+                        .get("name")
+                        .map(format_value)
+                        .unwrap_or_default();
+                    let years = format!(
+                        "{}-{}",
+                        node.properties
+                            .get("birth_year")
+                            .map(format_value)
+                            .unwrap_or_default(),
+                        node.properties
+                            .get("death_year")
+                            .map(format_value)
+                            .unwrap_or_default()
+                    );
+                    let style = node
+                        .properties
+                        .get("writing_style")
+                        .map(format_value)
+                        .unwrap_or_default();
+
+                    println!("{}. {} [Author] (similarity: {:.3})", i + 1, name, score);
+                    println!("   {}", years);
+                    println!("   {}", wrap_text(&style, 60, "   "));
+                    println!();
+                }
+                "Theme" => {
+                    let name = node
+                        .properties
+                        .get("name")
+                        .map(format_value)
+                        .unwrap_or_default();
+                    let description = node
+                        .properties
+                        .get("description")
+                        .map(format_value)
+                        .unwrap_or_default();
+
+                    println!("{}. {} [Theme] (similarity: {:.3})", i + 1, name, score);
+                    println!("   {}", wrap_text(&description, 60, "   "));
+                    println!();
+                }
+                _ => {
+                    println!("{}. [{}] (similarity: {:.3})", i + 1, entity_type, score);
+                    println!();
+                }
             }
         }
-    } else {
-        println!("\n❌ Character not found: {}", character_name);
-        println!("\nTry: list characters");
     }
 
     Ok(())
@@ -1427,15 +1560,16 @@ fn show_influences(demo: &DemoData, author_name: &str) -> Result<()> {
         );
         println!("\n{} ({})", author_name, years);
 
-        // Find who influenced this author (incoming INFLUENCED_BY edges)
+        // Find who influenced this author (outgoing INFLUENCED_BY edges to their influences)
+        // Edge semantics: Author --[INFLUENCED_BY]--> Influencer
         println!("\n═══ INFLUENCED BY ═══");
         let mut found_influences = false;
-        for edge_id in demo.db.get_incoming_edges(author_id) {
+        for edge_id in demo.db.get_outgoing_edges(author_id) {
             if let Ok(edge) = demo.db.get_edge(edge_id)
                 && label_str(edge.label) == "INFLUENCED_BY"
             {
                 found_influences = true;
-                let influencer = demo.db.get_node(edge.source)?;
+                let influencer = demo.db.get_node(edge.target)?;
                 let influencer_name = influencer
                     .properties
                     .get("name")
@@ -1453,15 +1587,16 @@ fn show_influences(demo: &DemoData, author_name: &str) -> Result<()> {
             println!("  (No recorded influences)");
         }
 
-        // Find who this author influenced (outgoing INFLUENCED_BY edges)
+        // Find who this author influenced (incoming INFLUENCED_BY edges from their followers)
+        // Edge semantics: Follower --[INFLUENCED_BY]--> Author
         println!("\n═══ INFLUENCED ═══");
         let mut found_influenced = false;
-        for edge_id in demo.db.get_outgoing_edges(author_id) {
+        for edge_id in demo.db.get_incoming_edges(author_id) {
             if let Ok(edge) = demo.db.get_edge(edge_id)
                 && label_str(edge.label) == "INFLUENCED_BY"
             {
                 found_influenced = true;
-                let influenced = demo.db.get_node(edge.target)?;
+                let influenced = demo.db.get_node(edge.source)?;
                 let influenced_name = influenced
                     .properties
                     .get("name")
@@ -1584,18 +1719,35 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
 
                         // Try to get personality at this point in time
                         // Note: Vector snapshot timestamps might not exactly match graph version timestamps
-                        let personality_short = match demo.db.get_node_at_time(
-                            character_id,
-                            *timestamp,
-                            now_timestamp()?,
-                        ) {
-                            Ok(historical_node) => {
-                                let personality = historical_node
-                                    .properties
-                                    .get("personality")
-                                    .map(format_value)
-                                    .unwrap_or_else(|| "Unknown".to_string());
+                        // Workaround: Try a small time window (±1 second) to find nearest version
+                        let personality_short = {
+                            let mut found_personality = None;
 
+                            // Try exact timestamp first
+                            if let Ok(historical_node) =
+                                demo.db
+                                    .get_node_at_time(character_id, *timestamp, now_timestamp()?)
+                            {
+                                found_personality =
+                                    historical_node.properties.get("personality").cloned();
+                            } else {
+                                // Try timestamps within ±1 second window
+                                const TIME_WINDOW: i64 = 1_000_000; // 1 second in microseconds
+                                for offset in [0, TIME_WINDOW, TIME_WINDOW * 2, TIME_WINDOW * 5] {
+                                    if let Ok(historical_node) = demo.db.get_node_at_time(
+                                        character_id,
+                                        timestamp.saturating_sub(offset),
+                                        now_timestamp()?,
+                                    ) {
+                                        found_personality =
+                                            historical_node.properties.get("personality").cloned();
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if let Some(personality_value) = found_personality {
+                                let personality = format_value(&personality_value);
                                 // Truncate for display (character-aware)
                                 if personality.chars().count() > 50 {
                                     let truncated: String = personality.chars().take(47).collect();
@@ -1603,9 +1755,8 @@ fn show_semantic_drift(demo: &DemoData, character_name: &str) -> Result<()> {
                                 } else {
                                     personality
                                 }
-                            }
-                            Err(_) => {
-                                // Version not found at this exact timestamp - show drift anyway
+                            } else {
+                                // Version not found even with time window
                                 "(version not available)".to_string()
                             }
                         };
@@ -1656,28 +1807,61 @@ fn show_personality_evolution(demo: &DemoData, character_name: &str) -> Result<(
 
         println!("How our understanding of this character evolved over time:\n");
 
-        // We'll manually query specific years we know have versions
-        let years = [1866, 1900, 1920, 1925, 1950, 1960, 1970, 2024];
+        // Query using temporal vector index to get actual snapshot timestamps
+        // This ensures we query at times when versions actually exist
+        if let Some(temporal_index) = demo.db.get_temporal_vector_index() {
+            use gallifreydb::core::temporal::TimeRange;
+            let time_range = TimeRange::new(
+                year_to_timestamp(1866), // Start of our data
+                current_time,
+            )?;
 
-        for &year in &years {
-            let query_time = year_to_timestamp(year);
-
-            match demo
-                .db
-                .get_node_at_time(character_id, query_time, current_time)
+            // Get reference embedding for drift tracking (just to get snapshot timestamps)
+            let current_node = demo.db.get_node(character_id)?;
+            if let Some(gallifreydb::PropertyValue::Vector(ref_embedding)) =
+                current_node.properties.get("semantic_embedding")
             {
-                Ok(historical_node) => {
-                    if let Some(personality) = historical_node.properties.get("personality") {
-                        let personality_text = format_value(personality);
-                        println!("┌─ {} {}", year, "─".repeat(60 - year.to_string().len()));
-                        println!("│");
-                        let wrapped = wrap_text(&personality_text, 70, "│ ");
-                        println!("│ {}", wrapped);
-                        println!("│");
+                // Get drift timeline - this gives us the actual snapshot timestamps
+                if let Ok(drift_timeline) =
+                    temporal_index.track_semantic_drift(character_id, ref_embedding, time_range)
+                {
+                    for (timestamp, _) in drift_timeline {
+                        // Try to get version at this timestamp (with time window tolerance)
+                        let mut found_node = None;
+
+                        // Try exact timestamp first
+                        if let Ok(historical_node) =
+                            demo.db
+                                .get_node_at_time(character_id, timestamp, current_time)
+                        {
+                            found_node = Some(historical_node);
+                        } else {
+                            // Try timestamps within ±5 second window
+                            const TIME_WINDOW: i64 = 1_000_000; // 1 second in microseconds
+                            for offset in [0, TIME_WINDOW, TIME_WINDOW * 5, TIME_WINDOW * 10] {
+                                if let Ok(historical_node) = demo.db.get_node_at_time(
+                                    character_id,
+                                    timestamp.saturating_sub(offset),
+                                    current_time,
+                                ) {
+                                    found_node = Some(historical_node);
+                                    break;
+                                }
+                            }
+                        }
+
+                        if let Some(historical_node) = found_node
+                            && let Some(personality) = historical_node.properties.get("personality")
+                        {
+                            let personality_text = format_value(personality);
+                            let year = 1970 + (timestamp / (365 * 86400 * 1_000_000));
+                            println!("┌─ ~{} {}", year, "─".repeat(60 - year.to_string().len()));
+                            println!("│");
+                            let wrapped = wrap_text(&personality_text, 70, "│ ");
+                            println!("│ {}", wrapped);
+                            println!("│");
+                        }
                     }
-                }
-                Err(_) => {
-                    // No version at this time, skip
                 }
             }
         }
@@ -1707,7 +1891,7 @@ BROWSE:
   show <name>              - Show details for an entity
 
 SEMANTIC SEARCH (Vector Embeddings):
-  similar <character>      - Find similar characters
+  similar <entity> [--type <Type>] - Find similar entities (all types or filtered)
   drift <character>        - Show semantic drift over time
 
 TEMPORAL QUERIES (Time Travel):
@@ -1725,6 +1909,7 @@ SYSTEM:
 Examples:
   > show Fyodor Dostoevsky
   > similar Raskolnikov
+  > similar Dmitri --type Book
   > drift Raskolnikov
   > evolution "Anna Karenina"
   > timewarp "Crime and Punishment" 1900
@@ -1838,11 +2023,31 @@ fn main() -> Result<()> {
             "stats" => show_stats(&demo)?,
             "similar" | "sim" => {
                 if args.is_empty() {
-                    println!("Usage: similar <character_name>");
+                    println!("Usage: similar <entity_name> [--type <Type>]");
                     println!("Example: similar Raskolnikov");
-                    println!("\nTry: list characters");
+                    println!("         similar Dmitri --type Book");
+                    println!("\nTypes: Character, Book, Author, Theme");
                 } else {
-                    find_similar_characters(&demo, args, 5)?;
+                    // Parse arguments: entity name and optional --type filter
+                    let parts: Vec<&str> = args.split_whitespace().collect();
+                    let mut entity_name = String::new();
+                    let mut type_filter = None;
+
+                    let mut i = 0;
+                    while i < parts.len() {
+                        if parts[i] == "--type" && i + 1 < parts.len() {
+                            type_filter = Some(parts[i + 1]);
+                            i += 2;
+                        } else {
+                            if !entity_name.is_empty() {
+                                entity_name.push(' ');
+                            }
+                            entity_name.push_str(parts[i]);
+                            i += 1;
+                        }
+                    }
+
+                    find_similar_entities(&demo, &entity_name, 5, type_filter)?;
                 }
             }
             "timewarp" | "tw" => {
