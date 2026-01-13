@@ -245,10 +245,14 @@ impl ConcurrentWal {
         self.stripes.get(id)
     }
 
-    /// Append an operation (async mode - returns immediately).
+    /// Append an operation (async mode - returns immediately after buffering).
     ///
     /// The entry is buffered in a stripe's ring buffer and will be
     /// flushed to disk by the background flush coordinator.
+    ///
+    /// Note: "async" here means no durability wait (not non-blocking).
+    /// This method will block if the buffer is full until space becomes
+    /// available (backpressure), using exponential backoff.
     ///
     /// # Returns
     ///
@@ -258,13 +262,13 @@ impl ConcurrentWal {
         let data = self.serialize_entry(lsn, &operation)?;
         let stripe = self.get_stripe();
 
-        match stripe.append_async(lsn, data) {
+        match stripe.append_blocking(lsn, data) {
             Ok(()) => {
                 self.total_appends.fetch_add(1, Ordering::Relaxed);
                 Ok(lsn)
             }
             Err(_entry) => Err(Error::Storage(StorageError::WalError {
-                reason: "WAL buffer full - backpressure".to_string(),
+                reason: "WAL buffer closed".to_string(),
             })),
         }
     }
@@ -302,20 +306,21 @@ impl ConcurrentWal {
 
     /// Append an operation with a completion handle (for group commit).
     ///
-    /// Returns immediately with a handle that can be used to wait
-    /// for durability later.
+    /// Returns with a handle that can be used to wait for durability later.
+    /// This method will block if the buffer is full until space becomes
+    /// available (backpressure).
     pub fn append_with_handle(&self, operation: WalOperation) -> Result<(LSN, CompletionHandle)> {
         let lsn = self.lsn_allocator.allocate();
         let data = self.serialize_entry(lsn, &operation)?;
         let stripe = self.get_stripe();
 
-        match stripe.append_sync(lsn, data) {
+        match stripe.append_sync_blocking(lsn, data) {
             Ok(handle) => {
                 self.total_appends.fetch_add(1, Ordering::Relaxed);
                 Ok((lsn, handle))
             }
             Err(_entry) => Err(Error::Storage(StorageError::WalError {
-                reason: "WAL buffer full - backpressure".to_string(),
+                reason: "WAL buffer closed".to_string(),
             })),
         }
     }
