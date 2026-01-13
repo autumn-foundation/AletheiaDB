@@ -1638,3 +1638,34 @@ fn test_query_builder_type_safety() {
 
     println!("✓ QueryBuilder type-state pattern enforces valid query construction");
 }
+
+// ==================== QueryBuilder.execute() Tests ====================
+
+#[test]
+fn test_query_builder_execute_method() {
+    let db = create_test_db();
+
+    // Create a test node
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    // Execute query using the new .execute() method on QueryBuilder
+    let results = db
+        .query()
+        .start(alice)
+        .execute(&db)
+        .expect("Query execution failed");
+
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+    assert_eq!(rows.len(), 1, "Should return exactly one node");
+    assert_eq!(rows[0].entity.node_id(), Some(alice), "Should return Alice");
+
+    println!("✓ QueryBuilder.execute() method works correctly");
+}
