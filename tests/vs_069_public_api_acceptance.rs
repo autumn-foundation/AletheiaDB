@@ -120,48 +120,67 @@ fn test_shortcut_find_similar() {
 
     assert_eq!(similar.len(), 2, "Should find 2 similar nodes");
     assert_eq!(similar[0].0, bob, "Bob should be most similar to Alice");
+    // Verify similarity score is reasonable (Bob's embedding [0.9, 0.1, 0, 0] vs Alice's [1, 0, 0, 0])
+    assert!(
+        similar[0].1 > 0.8,
+        "Similarity should be high (>0.8), got {}",
+        similar[0].1
+    );
 }
 
 #[test]
 fn test_shortcut_find_similar_with_label() {
     let db = create_test_db();
-    let (alice, _bob, _carol) = create_social_graph(&db);
+    let (alice, bob, _carol) = create_social_graph(&db);
 
     // ACCEPTANCE: find_similar_with_label() shortcut must exist
     let similar = db
         .find_similar_with_label(alice, "Person", 5)
         .expect("find_similar_with_label should work");
 
-    assert!(!similar.is_empty(), "Should find similar Person nodes");
+    assert_eq!(similar.len(), 2, "Should find 2 similar Person nodes");
+    assert_eq!(
+        similar[0].0, bob,
+        "Bob should be most similar Person to Alice"
+    );
 }
 
 #[test]
 fn test_shortcut_find_similar_by_embedding() {
     let db = create_test_db();
-    let (_alice, _bob, _carol) = create_social_graph(&db);
+    let (alice, bob, _carol) = create_social_graph(&db);
 
     // ACCEPTANCE: find_similar_by_embedding() shortcut must exist
-    let embedding = [1.0f32, 0.0, 0.0, 0.0];
+    let embedding = [1.0f32, 0.0, 0.0, 0.0]; // Alice's embedding
     let similar = db
         .find_similar_by_embedding(&embedding, 2)
         .expect("find_similar_by_embedding should work");
 
-    assert!(!similar.is_empty(), "Should find similar nodes");
+    assert_eq!(similar.len(), 2, "Should find 2 nodes");
+    assert_eq!(similar[0].0, alice, "Alice should be most similar");
+    assert_eq!(similar[1].0, bob, "Bob should be second most similar");
 }
 
 #[test]
 fn test_shortcut_traverse_and_rank() {
     let db = create_test_db();
-    let (alice, _bob, _carol) = create_social_graph(&db);
+    let (alice, bob, carol) = create_social_graph(&db);
 
     // ACCEPTANCE: traverse_and_rank() shortcut must exist
-    let bob_embedding = [0.9f32, 0.1, 0.0, 0.0];
+    let bob_embedding = [0.9f32, 0.1, 0.0, 0.0]; // Bob's embedding
     let results = db
         .traverse_and_rank(alice, "KNOWS", &bob_embedding, 10)
         .expect("traverse_and_rank should work");
 
     let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
-    assert!(!rows.is_empty(), "Should find nodes via traversal");
+    assert_eq!(rows.len(), 2, "Should find both of Alice's neighbors");
+    let first = rows[0].entity.as_node().expect("Expected a node");
+    let second = rows[1].entity.as_node().expect("Expected a node");
+    assert_eq!(
+        first.id, bob,
+        "Bob should be ranked first (most similar to query embedding)"
+    );
+    assert_eq!(second.id, carol);
 }
 
 // ============================================================================
@@ -203,25 +222,27 @@ fn test_public_api_graph_only_query() {
 #[test]
 fn test_public_api_vector_only_query() {
     let db = create_test_db();
-    let (_alice, _bob, _carol) = create_social_graph(&db);
+    let (alice, bob, _carol) = create_social_graph(&db);
 
     // ACCEPTANCE: Public API must support vector-only queries
-    let embedding = [1.0f32, 0.0, 0.0, 0.0];
+    let embedding = [1.0f32, 0.0, 0.0, 0.0]; // Alice's embedding
     let query = db.query().find_similar(&embedding, 2).build();
 
     let results = db.execute_query(query).expect("Query should succeed");
     let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
 
-    assert!(!rows.is_empty(), "Should find similar nodes");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].entity.as_node().expect("Expected a node").id, alice);
+    assert_eq!(rows[1].entity.as_node().expect("Expected a node").id, bob);
 }
 
 #[test]
 fn test_public_api_hybrid_graph_vector_query() {
     let db = create_test_db();
-    let (alice, _bob, _carol) = create_social_graph(&db);
+    let (alice, bob, carol) = create_social_graph(&db);
 
     // ACCEPTANCE: Public API must support hybrid Graph+Vector queries
-    let embedding = [0.9f32, 0.1, 0.0, 0.0];
+    let embedding = [0.9f32, 0.1, 0.0, 0.0]; // Bob's embedding
     let query = db
         .query()
         .start(alice)
@@ -232,7 +253,9 @@ fn test_public_api_hybrid_graph_vector_query() {
     let results = db.execute_query(query).expect("Query should succeed");
     let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
 
-    assert!(!rows.is_empty(), "Should find ranked results");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].entity.as_node().expect("Expected a node").id, bob);
+    assert_eq!(rows[1].entity.as_node().expect("Expected a node").id, carol);
 }
 
 #[test]
@@ -252,17 +275,17 @@ fn test_public_api_temporal_graph_query() {
     let results = db.execute_query(query).expect("Query should succeed");
     let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
 
-    assert!(!rows.is_empty(), "Should find historical results");
+    assert_eq!(rows.len(), 2, "Should find both of Alice's neighbors");
 }
 
 #[test]
 fn test_public_api_full_hybrid_query() {
     let db = create_test_db();
-    let (alice, _bob, _carol) = create_social_graph(&db);
+    let (alice, bob, carol) = create_social_graph(&db);
 
     // ACCEPTANCE: Public API must support full hybrid (Temporal+Graph+Vector)
     let timestamp = gallifreydb::core::temporal::time::now();
-    let embedding = [0.9f32, 0.1, 0.0, 0.0];
+    let embedding = [0.9f32, 0.1, 0.0, 0.0]; // Bob's embedding
 
     let query = db
         .query()
@@ -275,7 +298,9 @@ fn test_public_api_full_hybrid_query() {
     let results = db.execute_query(query).expect("Query should succeed");
     let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
 
-    assert!(!rows.is_empty(), "Full hybrid query should work");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].entity.as_node().expect("Expected a node").id, bob);
+    assert_eq!(rows[1].entity.as_node().expect("Expected a node").id, carol);
 }
 
 // ============================================================================
@@ -287,9 +312,11 @@ fn test_public_api_full_hybrid_query() {
 // 2. Checking that all public methods have /// doc comments
 // 3. Verifying examples compile with `cargo test --doc`
 //
-// This test ensures the documented examples compile:
+// This test validates that key API patterns compile correctly.
+//
+// To verify rustdoc examples themselves, run: `cargo test --doc`
 
-/// This test validates that key methods have rustdoc examples
+/// This test validates that key API patterns compile correctly
 #[test]
 fn test_rustdoc_examples_compile() {
     // If this test compiles, the basic API patterns work
@@ -321,7 +348,7 @@ fn test_vs_069_complete_acceptance() {
     // This test validates ALL acceptance criteria together
 
     let db = create_test_db();
-    let (alice, _bob, _carol) = create_social_graph(&db);
+    let (alice, bob, carol) = create_social_graph(&db);
 
     // 1. query() method exists ✓
     let builder = db.query();
@@ -355,10 +382,116 @@ fn test_vs_069_complete_acceptance() {
     let results = db.execute_query(query).expect("Full hybrid query works");
     let rows: Vec<_> = results.collect_all().expect("Can collect results");
 
-    assert!(
-        !rows.is_empty(),
-        "VS-069: All acceptance criteria validated"
-    );
+    assert_eq!(rows.len(), 2, "VS-069: All acceptance criteria validated");
+    assert_eq!(rows[0].entity.as_node().expect("Expected a node").id, bob);
+    assert_eq!(rows[1].entity.as_node().expect("Expected a node").id, carol);
+}
 
-    println!("✅ VS-069 Complete: All acceptance criteria validated");
+// ============================================================================
+// Edge Case Tests
+// ============================================================================
+
+#[test]
+fn test_find_similar_with_k_zero() {
+    let db = create_test_db();
+    let (alice, _bob, _carol) = create_social_graph(&db);
+
+    // Edge case: k=0 should return empty results
+    let similar = db.find_similar(alice, 0).expect("Should handle k=0");
+    assert_eq!(similar.len(), 0, "k=0 should return no results");
+}
+
+#[test]
+fn test_find_similar_nonexistent_node() {
+    use gallifreydb::NodeId;
+
+    let db = create_test_db();
+    let _graph = create_social_graph(&db);
+
+    // Edge case: Invalid node ID should error
+    let invalid_id = NodeId::new(99999).expect("Should create NodeId");
+    let result = db.find_similar(invalid_id, 10);
+
+    assert!(result.is_err(), "Should error on non-existent node");
+}
+
+#[test]
+fn test_find_similar_node_without_embedding() {
+    let db = create_test_db();
+
+    // Create a node without an embedding
+    let no_embedding_node = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "NoEmbedding")
+                .build(),
+        )
+        .expect("Should create node");
+
+    // Edge case: Node without embedding should error
+    let result = db.find_similar(no_embedding_node, 10);
+    assert!(
+        result.is_err(),
+        "Should error when node lacks vector property"
+    );
+}
+
+#[test]
+fn test_find_similar_with_large_k() {
+    let db = create_test_db();
+    let (alice, _bob, _carol) = create_social_graph(&db);
+
+    // Edge case: k > total nodes should return all nodes
+    let similar = db
+        .find_similar(alice, 1000)
+        .expect("Should handle k > total nodes");
+
+    // Should return all nodes with embeddings (alice, bob, carol = 3 total, but alice not included in results typically)
+    assert!(
+        similar.len() <= 1000,
+        "Should not exceed requested k, got {}",
+        similar.len()
+    );
+    assert!(similar.len() >= 2, "Should return at least bob and carol");
+}
+
+#[test]
+fn test_traverse_and_rank_no_edges() {
+    let db = create_test_db();
+
+    // Create an isolated node with no edges
+    let isolated = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Isolated")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Should create isolated node");
+
+    let embedding = [0.9f32, 0.1, 0.0, 0.0];
+    let results = db
+        .traverse_and_rank(isolated, "KNOWS", &embedding, 10)
+        .expect("Should handle nodes with no edges");
+
+    let rows: Vec<_> = results.collect_all().expect("Should collect results");
+    assert_eq!(rows.len(), 0, "Should return empty for isolated node");
+}
+
+#[test]
+fn test_query_with_invalid_embedding_dimensions() {
+    let db = create_test_db();
+    let (_alice, _bob, _carol) = create_social_graph(&db);
+
+    // Edge case: Wrong embedding dimensions
+    let wrong_dims = [1.0f32, 0.0]; // Only 2 dimensions, expected 4
+    let query = db.query().find_similar(&wrong_dims, 10).build();
+
+    let result = db.execute_query(query);
+    assert!(
+        result.is_err(),
+        "Should error on mismatched embedding dimensions"
+    );
 }
