@@ -3,11 +3,15 @@
 //! Defines the result types returned by query execution.
 
 use crate::core::graph::{Edge, Node};
+use crate::core::id::VersionId;
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
 use crate::utils::error::Result;
 
 use super::iterators::ResultIterator;
+
+/// A path through the graph, represented as a sequence of entity IDs.
+pub type Path = Vec<EntityId>;
 
 /// Entity identifier (node or edge).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -241,6 +245,244 @@ impl Iterator for QueryResults {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.iterator.size_hint()
+    }
+}
+
+/// Aggregated query results in a structured format.
+///
+/// Unlike `QueryResults` which provides streaming access through an iterator,
+/// `QueryResult` is a concrete struct that holds all results in structured vectors.
+/// This is useful for batch operations or when you want to inspect all results
+/// with their associated metadata at once.
+///
+/// # Example
+///
+/// ```ignore
+/// let result = query_results.collect_structured()?;
+/// println!("Found {} nodes", result.nodes.len());
+/// if let Some(scores) = &result.scores {
+///     println!("Top score: {}", scores[0]);
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct QueryResult {
+    /// Node IDs from the query results
+    pub nodes: Vec<NodeId>,
+    /// Similarity scores for ranked results (e.g., vector search)
+    pub scores: Option<Vec<f32>>,
+    /// Paths for traversal results
+    pub paths: Option<Vec<Path>>,
+    /// Version IDs for temporal results
+    pub versions: Option<Vec<VersionId>>,
+}
+
+impl QueryResult {
+    /// Create a new empty query result
+    #[must_use]
+    pub fn new() -> Self {
+        QueryResult {
+            nodes: Vec::new(),
+            scores: None,
+            paths: None,
+            versions: None,
+        }
+    }
+
+    /// Create a query result with just nodes
+    #[must_use]
+    pub fn with_nodes(nodes: Vec<NodeId>) -> Self {
+        QueryResult {
+            nodes,
+            scores: None,
+            paths: None,
+            versions: None,
+        }
+    }
+
+    /// Add scores to this result
+    #[must_use]
+    pub fn with_scores(mut self, scores: Vec<f32>) -> Self {
+        self.scores = Some(scores);
+        self
+    }
+
+    /// Add paths to this result
+    #[must_use]
+    pub fn with_paths(mut self, paths: Vec<Path>) -> Self {
+        self.paths = Some(paths);
+        self
+    }
+
+    /// Add versions to this result
+    #[must_use]
+    pub fn with_versions(mut self, versions: Vec<VersionId>) -> Self {
+        self.versions = Some(versions);
+        self
+    }
+
+    /// Get the number of results
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Check if the result is empty
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Get nodes with their scores (if available)
+    #[must_use]
+    pub fn nodes_with_scores(&self) -> Option<Vec<(NodeId, f32)>> {
+        self.scores.as_ref().map(|scores| {
+            self.nodes
+                .iter()
+                .zip(scores.iter())
+                .map(|(node, score)| (*node, *score))
+                .collect()
+        })
+    }
+
+    /// Get nodes with their paths (if available)
+    #[must_use]
+    pub fn nodes_with_paths(&self) -> Option<Vec<(NodeId, &Path)>> {
+        self.paths.as_ref().map(|paths| {
+            self.nodes
+                .iter()
+                .zip(paths.iter())
+                .map(|(node, path)| (*node, path))
+                .collect()
+        })
+    }
+
+    /// Get nodes with their versions (if available)
+    #[must_use]
+    pub fn nodes_with_versions(&self) -> Option<Vec<(NodeId, VersionId)>> {
+        self.versions.as_ref().map(|versions| {
+            self.nodes
+                .iter()
+                .zip(versions.iter())
+                .map(|(node, version)| (*node, *version))
+                .collect()
+        })
+    }
+}
+
+impl Default for QueryResult {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for QueryResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "QueryResult {{")?;
+        writeln!(f, "  nodes: {} items", self.nodes.len())?;
+
+        if let Some(scores) = &self.scores {
+            writeln!(f, "  scores: {} items", scores.len())?;
+            if !scores.is_empty() {
+                writeln!(
+                    f,
+                    "    range: [{:.3}, {:.3}]",
+                    scores.iter().copied().fold(f32::INFINITY, f32::min),
+                    scores.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                )?;
+            }
+        } else {
+            writeln!(f, "  scores: None")?;
+        }
+
+        if let Some(paths) = &self.paths {
+            writeln!(f, "  paths: {} items", paths.len())?;
+            if !paths.is_empty() {
+                let total_hops: usize = paths.iter().map(|p| p.len()).sum();
+                let avg_hops = total_hops as f32 / paths.len() as f32;
+                writeln!(f, "    avg path length: {:.1}", avg_hops)?;
+            }
+        } else {
+            writeln!(f, "  paths: None")?;
+        }
+
+        if let Some(versions) = &self.versions {
+            writeln!(f, "  versions: {} items", versions.len())?;
+        } else {
+            writeln!(f, "  versions: None")?;
+        }
+
+        write!(f, "}}")
+    }
+}
+
+impl QueryResults {
+    /// Collect all results into a structured `QueryResult`.
+    ///
+    /// This method aggregates all query rows into separate vectors for nodes, scores,
+    /// paths, and versions. Only fields that are present in at least one row will be
+    /// included in the result.
+    pub fn collect_structured(mut self) -> Result<QueryResult> {
+        // First pass: collect all rows
+        let mut rows = Vec::new();
+        while let Some(row) = self.iterator.next() {
+            rows.push(row?);
+        }
+
+        // Determine which fields we have
+        let has_any_scores = rows.iter().any(|r| r.score.is_some());
+        let has_any_paths = rows.iter().any(|r| r.path.is_some());
+        let has_any_versions = rows.iter().any(|r| r.timestamp.is_some());
+
+        // Second pass: extract data with padding
+        let mut nodes = Vec::new();
+        let mut scores = if has_any_scores {
+            Some(Vec::new())
+        } else {
+            None
+        };
+        let mut paths = if has_any_paths {
+            Some(Vec::new())
+        } else {
+            None
+        };
+        let mut versions = if has_any_versions {
+            Some(Vec::new())
+        } else {
+            None
+        };
+
+        for row in rows {
+            // Extract node ID
+            if let Some(node_id) = row.entity.node_id() {
+                nodes.push(node_id);
+            }
+
+            // Extract or pad scores
+            if let Some(ref mut s) = scores {
+                s.push(row.score.unwrap_or(0.0));
+            }
+
+            // Extract or pad paths
+            if let Some(ref mut p) = paths {
+                p.push(row.path.unwrap_or_default());
+            }
+
+            // Extract or pad versions
+            if let Some(ref mut v) = versions {
+                if let Some(timestamp) = row.timestamp {
+                    v.push(VersionId::new(timestamp as u64).unwrap());
+                } else {
+                    v.push(VersionId::new(0).unwrap());
+                }
+            }
+        }
+
+        Ok(QueryResult {
+            nodes,
+            scores,
+            paths,
+            versions,
+        })
     }
 }
 
@@ -582,5 +824,338 @@ mod tests {
 
         let result = results.take_n(5);
         assert!(result.is_err());
+    }
+
+    // ==================== QueryResult Tests ====================
+
+    #[test]
+    fn test_query_result_new() {
+        let result = QueryResult::new();
+        assert!(result.is_empty());
+        assert_eq!(result.len(), 0);
+        assert!(result.scores.is_none());
+        assert!(result.paths.is_none());
+        assert!(result.versions.is_none());
+    }
+
+    #[test]
+    fn test_query_result_default() {
+        let result = QueryResult::default();
+        assert!(result.is_empty());
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_query_result_with_nodes() {
+        let nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let result = QueryResult::with_nodes(nodes.clone());
+
+        assert_eq!(result.len(), 2);
+        assert!(!result.is_empty());
+        assert_eq!(result.nodes, nodes);
+        assert!(result.scores.is_none());
+        assert!(result.paths.is_none());
+        assert!(result.versions.is_none());
+    }
+
+    #[test]
+    fn test_query_result_with_scores() {
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let scores = vec![0.95];
+        let result = QueryResult::with_nodes(nodes).with_scores(scores.clone());
+
+        assert!(result.scores.is_some());
+        assert_eq!(result.scores.unwrap(), scores);
+    }
+
+    #[test]
+    fn test_query_result_with_paths() {
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let path = vec![EntityId::Node(NodeId::new(1).unwrap())];
+        let paths = vec![path.clone()];
+        let result = QueryResult::with_nodes(nodes).with_paths(paths.clone());
+
+        assert!(result.paths.is_some());
+        assert_eq!(result.paths.as_ref().unwrap()[0], path);
+    }
+
+    #[test]
+    fn test_query_result_with_versions() {
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let versions = vec![VersionId::new(100).unwrap()];
+        let result = QueryResult::with_nodes(nodes).with_versions(versions.clone());
+
+        assert!(result.versions.is_some());
+        assert_eq!(result.versions.unwrap(), versions);
+    }
+
+    #[test]
+    fn test_query_result_builder_pattern() {
+        let nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let scores = vec![0.9, 0.8];
+        let path1 = vec![EntityId::Node(NodeId::new(1).unwrap())];
+        let path2 = vec![EntityId::Node(NodeId::new(2).unwrap())];
+        let paths = vec![path1, path2];
+        let versions = vec![VersionId::new(100).unwrap(), VersionId::new(101).unwrap()];
+
+        let result = QueryResult::with_nodes(nodes.clone())
+            .with_scores(scores.clone())
+            .with_paths(paths.clone())
+            .with_versions(versions.clone());
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.nodes, nodes);
+        assert_eq!(result.scores, Some(scores));
+        assert_eq!(result.paths, Some(paths));
+        assert_eq!(result.versions, Some(versions));
+    }
+
+    #[test]
+    fn test_query_result_nodes_with_scores() {
+        let nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let scores = vec![0.9, 0.8];
+        let result = QueryResult::with_nodes(nodes.clone()).with_scores(scores.clone());
+
+        let pairs = result.nodes_with_scores();
+        assert!(pairs.is_some());
+
+        let pairs = pairs.unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], (nodes[0], scores[0]));
+        assert_eq!(pairs[1], (nodes[1], scores[1]));
+    }
+
+    #[test]
+    fn test_query_result_nodes_with_scores_none() {
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let result = QueryResult::with_nodes(nodes);
+
+        assert!(result.nodes_with_scores().is_none());
+    }
+
+    #[test]
+    fn test_query_result_nodes_with_paths() {
+        let nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let path1 = vec![EntityId::Node(NodeId::new(1).unwrap())];
+        let path2 = vec![EntityId::Node(NodeId::new(2).unwrap())];
+        let paths = vec![path1.clone(), path2.clone()];
+        let result = QueryResult::with_nodes(nodes.clone()).with_paths(paths);
+
+        let pairs = result.nodes_with_paths();
+        assert!(pairs.is_some());
+
+        let pairs = pairs.unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0, nodes[0]);
+        assert_eq!(pairs[0].1, &path1);
+        assert_eq!(pairs[1].0, nodes[1]);
+        assert_eq!(pairs[1].1, &path2);
+    }
+
+    #[test]
+    fn test_query_result_nodes_with_paths_none() {
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let result = QueryResult::with_nodes(nodes);
+
+        assert!(result.nodes_with_paths().is_none());
+    }
+
+    #[test]
+    fn test_query_result_nodes_with_versions() {
+        let nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let versions = vec![VersionId::new(100).unwrap(), VersionId::new(101).unwrap()];
+        let result = QueryResult::with_nodes(nodes.clone()).with_versions(versions.clone());
+
+        let pairs = result.nodes_with_versions();
+        assert!(pairs.is_some());
+
+        let pairs = pairs.unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], (nodes[0], versions[0]));
+        assert_eq!(pairs[1], (nodes[1], versions[1]));
+    }
+
+    #[test]
+    fn test_query_result_nodes_with_versions_none() {
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let result = QueryResult::with_nodes(nodes);
+
+        assert!(result.nodes_with_versions().is_none());
+    }
+
+    #[test]
+    fn test_query_result_display() {
+        let nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let scores = vec![0.9, 0.8];
+        let result = QueryResult::with_nodes(nodes).with_scores(scores);
+
+        let display = format!("{}", result);
+        assert!(display.contains("QueryResult"));
+        assert!(display.contains("nodes: 2 items"));
+        assert!(display.contains("scores: 2 items"));
+        assert!(display.contains("range:"));
+    }
+
+    #[test]
+    fn test_query_result_display_empty() {
+        let result = QueryResult::new();
+        let display = format!("{}", result);
+
+        assert!(display.contains("QueryResult"));
+        assert!(display.contains("nodes: 0 items"));
+        assert!(display.contains("scores: None"));
+        assert!(display.contains("paths: None"));
+        assert!(display.contains("versions: None"));
+    }
+
+    #[test]
+    fn test_query_result_display_with_paths() {
+        let nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let path1 = vec![
+            EntityId::Node(NodeId::new(1).unwrap()),
+            EntityId::Node(NodeId::new(2).unwrap()),
+        ];
+        let path2 = vec![
+            EntityId::Node(NodeId::new(3).unwrap()),
+            EntityId::Node(NodeId::new(4).unwrap()),
+            EntityId::Node(NodeId::new(5).unwrap()),
+        ];
+        let paths = vec![path1, path2];
+        let result = QueryResult::with_nodes(nodes).with_paths(paths);
+
+        let display = format!("{}", result);
+        assert!(display.contains("paths: 2 items"));
+        assert!(display.contains("avg path length:"));
+    }
+
+    #[test]
+    fn test_collect_structured_nodes_only() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap())),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(3).unwrap())),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert_eq!(structured.len(), 3);
+        assert_eq!(structured.nodes[0], NodeId::new(1).unwrap());
+        assert_eq!(structured.nodes[1], NodeId::new(2).unwrap());
+        assert_eq!(structured.nodes[2], NodeId::new(3).unwrap());
+        assert!(structured.scores.is_none());
+        assert!(structured.paths.is_none());
+        assert!(structured.versions.is_none());
+    }
+
+    #[test]
+    fn test_collect_structured_with_scores() {
+        let rows = vec![
+            QueryRow::with_score(EntityResult::NodeId(NodeId::new(1).unwrap()), 0.9),
+            QueryRow::with_score(EntityResult::NodeId(NodeId::new(2).unwrap()), 0.8),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert_eq!(structured.len(), 2);
+        assert!(structured.scores.is_some());
+
+        let scores = structured.scores.unwrap();
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0], 0.9);
+        assert_eq!(scores[1], 0.8);
+    }
+
+    #[test]
+    fn test_collect_structured_with_paths() {
+        let path1 = vec![
+            EntityId::Node(NodeId::new(1).unwrap()),
+            EntityId::Node(NodeId::new(2).unwrap()),
+        ];
+        let path2 = vec![EntityId::Node(NodeId::new(3).unwrap())];
+        let rows = vec![
+            QueryRow::with_path(EntityResult::NodeId(NodeId::new(1).unwrap()), path1.clone()),
+            QueryRow::with_path(EntityResult::NodeId(NodeId::new(2).unwrap()), path2.clone()),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert_eq!(structured.len(), 2);
+        assert!(structured.paths.is_some());
+
+        let paths = structured.paths.unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], path1);
+        assert_eq!(paths[1], path2);
+    }
+
+    #[test]
+    fn test_collect_structured_with_timestamps() {
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())).at_time(100),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap())).at_time(200),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert_eq!(structured.len(), 2);
+        assert!(structured.versions.is_some());
+
+        let versions = structured.versions.unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0], VersionId::new(100).unwrap());
+        assert_eq!(versions[1], VersionId::new(200).unwrap());
+    }
+
+    #[test]
+    fn test_collect_structured_hybrid() {
+        let path = vec![EntityId::Node(NodeId::new(1).unwrap())];
+        let rows = vec![
+            QueryRow::with_score(EntityResult::NodeId(NodeId::new(1).unwrap()), 0.95).at_time(100),
+            QueryRow::with_path(EntityResult::NodeId(NodeId::new(2).unwrap()), path.clone()),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert_eq!(structured.len(), 2);
+
+        // Should have scores (with padding for second row)
+        assert!(structured.scores.is_some());
+        let scores = structured.scores.as_ref().unwrap();
+        assert_eq!(scores[0], 0.95);
+        assert_eq!(scores[1], 0.0); // Padded
+
+        // Should have paths (with padding for first row)
+        assert!(structured.paths.is_some());
+        let paths = structured.paths.as_ref().unwrap();
+        assert!(paths[0].is_empty()); // Padded
+        assert_eq!(paths[1], path);
+
+        // Should have versions (with padding for second row)
+        assert!(structured.versions.is_some());
+        let versions = structured.versions.as_ref().unwrap();
+        assert_eq!(versions[0], VersionId::new(100).unwrap());
+        assert_eq!(versions[1], VersionId::new(0).unwrap()); // Padded
+    }
+
+    #[test]
+    fn test_collect_structured_empty() {
+        let rows: Vec<QueryRow> = vec![];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert!(structured.is_empty());
+        assert_eq!(structured.len(), 0);
+        assert!(structured.scores.is_none());
+        assert!(structured.paths.is_none());
+        assert!(structured.versions.is_none());
+    }
+
+    #[test]
+    fn test_path_type_alias() {
+        let path: Path = vec![
+            EntityId::Node(NodeId::new(1).unwrap()),
+            EntityId::Node(NodeId::new(2).unwrap()),
+        ];
+        assert_eq!(path.len(), 2);
     }
 }
