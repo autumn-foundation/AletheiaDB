@@ -79,11 +79,57 @@ impl WalStripe {
         self.append_entry(entry).map(|()| handle)
     }
 
-    /// Append a pre-constructed entry.
+    /// Append an entry to this stripe (sync mode with blocking - returns handle to wait on).
+    ///
+    /// This method blocks until space is available in the ring buffer.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(handle)` - Handle to wait for durability
+    /// - `Err(entry)` if buffer is closed
+    pub fn append_sync_blocking(
+        &self,
+        lsn: LSN,
+        data: Vec<u8>,
+    ) -> Result<CompletionHandle, PendingEntry> {
+        let (entry, handle) = PendingEntry::new_sync(lsn, data);
+        self.append_entry_blocking(entry).map(|()| handle)
+    }
+
+    /// Append an entry to this stripe (blocking mode - waits for space).
+    ///
+    /// This method blocks until space is available in the ring buffer.
+    /// It uses exponential backoff with sleep to avoid spinning.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if appended successfully (after waiting if needed)
+    /// - `Err(entry)` if buffer is closed
+    pub fn append_blocking(&self, lsn: LSN, data: Vec<u8>) -> Result<(), PendingEntry> {
+        let entry = PendingEntry::new_async(lsn, data);
+        self.append_entry_blocking(entry)
+    }
+
+    /// Append a pre-constructed entry (non-blocking).
     fn append_entry(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
         let data_len = entry.data.len();
 
         match self.ring_buffer.try_append(entry) {
+            Ok(()) => {
+                self.append_count.fetch_add(1, Ordering::Relaxed);
+                self.bytes_appended
+                    .fetch_add(data_len as u64, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Append a pre-constructed entry (blocking - waits for space).
+    fn append_entry_blocking(&self, entry: PendingEntry) -> Result<(), PendingEntry> {
+        let data_len = entry.data.len();
+
+        match self.ring_buffer.append_blocking(entry) {
             Ok(()) => {
                 self.append_count.fetch_add(1, Ordering::Relaxed);
                 self.bytes_appended
