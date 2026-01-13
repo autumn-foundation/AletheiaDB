@@ -1600,11 +1600,7 @@ mod tests {
 
         // Check that nested operators are indented correctly
         let lines: Vec<&str> = explanation.lines().collect();
-        assert_eq!(
-            lines.len(),
-            4,
-            "Expected 4 lines for header + 3 nested ops"
-        );
+        assert_eq!(lines.len(), 4, "Expected 4 lines for header + 3 nested ops");
         assert!(lines[1].starts_with("Filter"));
         assert!(lines[2].starts_with("  └─ IndexedTraversal"));
         assert!(lines[3].starts_with("    └─ NodeLookup"));

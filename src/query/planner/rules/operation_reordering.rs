@@ -16,15 +16,13 @@ use super::{OptimizationRule, Statistics};
 // (0.0 = filters everything, 1.0 = filters nothing)
 const NULL_CHECK_SELECTIVITY: f64 = 0.1; // Null checks are typically selective
 const EXISTENCE_CHECK_SELECTIVITY: f64 = 0.1; // Property existence checks
-const CONJUNCTION_SELECTIVITY: f64 = 0.1; // AND predicates (typically selective)
 const IN_PREDICATE_SELECTIVITY: f64 = 0.15; // IN predicates (depends on list size)
 const STRING_PREDICATE_SELECTIVITY: f64 = 0.2; // Contains/StartsWith/EndsWith
 const RANGE_PREDICATE_SELECTIVITY: f64 = 0.3; // Gt/Lt/Gte/Lte
-const DISJUNCTION_SELECTIVITY: f64 = 0.5; // OR predicates (less selective)
-const NOT_SELECTIVITY: f64 = 0.5; // NOT predicates (medium selectivity)
 const NOT_EQUALS_SELECTIVITY: f64 = 0.9; // Not-equals (typically less selective)
 const TRUE_SELECTIVITY: f64 = 1.0; // Filters nothing
 const FALSE_SELECTIVITY: f64 = 0.0; // Filters everything
+// Note: AND/OR/NOT selectivity is computed dynamically based on child predicates
 
 /// Operation reordering optimization rule.
 ///
@@ -677,5 +675,341 @@ mod tests {
 
         let result = rule.apply(&plan, &stats).unwrap();
         assert!(result.is_none(), "Single filter cannot be reordered");
+    }
+
+    #[test]
+    fn test_selectivity_and_predicate() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // AND of two predicates: selectivity should be product
+        // Use predicates with fixed selectivity (not dependent on property stats)
+        let pred = Predicate::And(vec![
+            Predicate::gt("score", 50i64), // RANGE_PREDICATE_SELECTIVITY = 0.3
+            Predicate::contains("name", "test"), // STRING_PREDICATE_SELECTIVITY = 0.2
+        ]);
+
+        let sel = rule.estimate_filter_selectivity(&pred, &stats);
+        // Expected: 0.3 * 0.2 = 0.06
+        assert!(
+            (sel - 0.06).abs() < 0.001,
+            "AND selectivity should be product, got {}",
+            sel
+        );
+    }
+
+    #[test]
+    fn test_selectivity_or_predicate() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // OR of two predicates: selectivity = 1 - (1-sel1) * (1-sel2)
+        // Use predicates with fixed selectivity
+        let pred = Predicate::Or(vec![
+            Predicate::gt("score", 50i64), // RANGE_PREDICATE_SELECTIVITY = 0.3
+            Predicate::contains("name", "test"), // STRING_PREDICATE_SELECTIVITY = 0.2
+        ]);
+
+        let sel = rule.estimate_filter_selectivity(&pred, &stats);
+        // Expected: 1 - (1-0.3) * (1-0.2) = 1 - 0.7 * 0.8 = 1 - 0.56 = 0.44
+        assert!(
+            (sel - 0.44).abs() < 0.001,
+            "OR selectivity should use union rule, got {}",
+            sel
+        );
+    }
+
+    #[test]
+    fn test_selectivity_not_predicate() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // NOT of a predicate: selectivity = 1 - inner_sel
+        // Use predicate with fixed selectivity
+        let pred = Predicate::Not(Box::new(Predicate::gt("score", 50i64))); // RANGE_PREDICATE_SELECTIVITY = 0.3
+
+        let sel = rule.estimate_filter_selectivity(&pred, &stats);
+        // Expected: 1 - 0.3 = 0.7
+        assert!(
+            (sel - 0.7).abs() < 0.001,
+            "NOT selectivity should be complement, got {}",
+            sel
+        );
+    }
+
+    #[test]
+    fn test_selectivity_empty_and() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Empty AND should have high selectivity (filters nothing)
+        let pred = Predicate::And(vec![]);
+        let sel = rule.estimate_filter_selectivity(&pred, &stats);
+        assert_eq!(sel, TRUE_SELECTIVITY);
+    }
+
+    #[test]
+    fn test_selectivity_empty_or() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Empty OR should have low selectivity (filters everything)
+        let pred = Predicate::Or(vec![]);
+        let sel = rule.estimate_filter_selectivity(&pred, &stats);
+        assert_eq!(sel, FALSE_SELECTIVITY);
+    }
+
+    #[test]
+    fn test_selectivity_nested_predicates() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Nested: AND(OR(a, b), c)
+        // Use predicates with fixed selectivity
+        let pred = Predicate::And(vec![
+            Predicate::Or(vec![
+                Predicate::gt("score", 50i64),       // RANGE = 0.3
+                Predicate::contains("name", "test"), // STRING = 0.2
+            ]),
+            Predicate::lt("age", 100i64), // RANGE_PREDICATE_SELECTIVITY = 0.3
+        ]);
+
+        let sel = rule.estimate_filter_selectivity(&pred, &stats);
+        // OR: 1 - (1-0.3) * (1-0.2) = 1 - 0.7 * 0.8 = 0.44
+        // AND: 0.44 * 0.3 = 0.132
+        assert!(
+            (sel - 0.132).abs() < 0.001,
+            "Nested predicates should compute correctly, got {}",
+            sel
+        );
+    }
+
+    #[test]
+    fn test_selectivity_all_types() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Test all predicate types have defined selectivity
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::True, &stats),
+            TRUE_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::False, &stats),
+            FALSE_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::gt("x", 1i64), &stats),
+            RANGE_PREDICATE_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::lt("x", 1i64), &stats),
+            RANGE_PREDICATE_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::contains("x", "y"), &stats),
+            STRING_PREDICATE_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(
+                &Predicate::StartsWith {
+                    key: "x".to_string(),
+                    prefix: "y".to_string()
+                },
+                &stats
+            ),
+            STRING_PREDICATE_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(
+                &Predicate::EndsWith {
+                    key: "x".to_string(),
+                    suffix: "y".to_string()
+                },
+                &stats
+            ),
+            STRING_PREDICATE_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::ne("x", 1i64), &stats),
+            NOT_EQUALS_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(
+                &Predicate::In {
+                    key: "x".to_string(),
+                    values: vec![
+                        crate::query::ir::PredicateValue::Int(1),
+                        crate::query::ir::PredicateValue::Int(2)
+                    ]
+                },
+                &stats
+            ),
+            IN_PREDICATE_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::exists("x"), &stats),
+            EXISTENCE_CHECK_SELECTIVITY
+        );
+        assert_eq!(
+            rule.estimate_filter_selectivity(&Predicate::NotExists("x".to_string()), &stats),
+            EXISTENCE_CHECK_SELECTIVITY
+        );
+    }
+
+    #[test]
+    fn test_predicates_equal_basic() {
+        let rule = OperationReordering;
+
+        // Same predicates should be equal
+        let p1 = Predicate::eq("name", "Alice");
+        let p2 = Predicate::eq("name", "Alice");
+        assert!(rule.predicates_equal(&p1, &p2));
+
+        // Different values should not be equal
+        let p3 = Predicate::eq("name", "Bob");
+        assert!(!rule.predicates_equal(&p1, &p3));
+
+        // Different keys should not be equal
+        let p4 = Predicate::eq("age", "Alice");
+        assert!(!rule.predicates_equal(&p1, &p4));
+    }
+
+    #[test]
+    fn test_predicates_equal_different_types() {
+        let rule = OperationReordering;
+
+        // Different predicate types should not be equal
+        let p1 = Predicate::eq("name", "Alice");
+        let p2 = Predicate::ne("name", "Alice");
+        assert!(!rule.predicates_equal(&p1, &p2));
+
+        let p3 = Predicate::gt("age", 30i64);
+        let p4 = Predicate::lt("age", 30i64);
+        assert!(!rule.predicates_equal(&p3, &p4));
+    }
+
+    #[test]
+    fn test_predicates_equal_and_or() {
+        let rule = OperationReordering;
+
+        // Same AND predicates
+        let p1 = Predicate::And(vec![
+            Predicate::eq("name", "Alice"),
+            Predicate::gt("age", 30i64),
+        ]);
+        let p2 = Predicate::And(vec![
+            Predicate::eq("name", "Alice"),
+            Predicate::gt("age", 30i64),
+        ]);
+        assert!(rule.predicates_equal(&p1, &p2));
+
+        // Different order in AND should not be equal (structural comparison)
+        let p3 = Predicate::And(vec![
+            Predicate::gt("age", 30i64),
+            Predicate::eq("name", "Alice"),
+        ]);
+        assert!(!rule.predicates_equal(&p1, &p3));
+
+        // Different length AND
+        let p4 = Predicate::And(vec![Predicate::eq("name", "Alice")]);
+        assert!(!rule.predicates_equal(&p1, &p4));
+
+        // AND vs OR
+        let p5 = Predicate::Or(vec![
+            Predicate::eq("name", "Alice"),
+            Predicate::gt("age", 30i64),
+        ]);
+        assert!(!rule.predicates_equal(&p1, &p5));
+    }
+
+    #[test]
+    fn test_predicates_equal_not() {
+        let rule = OperationReordering;
+
+        // Same NOT predicates
+        let p1 = Predicate::Not(Box::new(Predicate::eq("active", true)));
+        let p2 = Predicate::Not(Box::new(Predicate::eq("active", true)));
+        assert!(rule.predicates_equal(&p1, &p2));
+
+        // Different inner predicates
+        let p3 = Predicate::Not(Box::new(Predicate::eq("active", false)));
+        assert!(!rule.predicates_equal(&p1, &p3));
+    }
+
+    #[test]
+    fn test_predicates_equal_all_variants() {
+        let rule = OperationReordering;
+
+        // Test all variants for coverage
+        assert!(rule.predicates_equal(&Predicate::True, &Predicate::True));
+        assert!(rule.predicates_equal(&Predicate::False, &Predicate::False));
+        assert!(!rule.predicates_equal(&Predicate::True, &Predicate::False));
+
+        // String predicates
+        let c1 = Predicate::contains("text", "hello");
+        let c2 = Predicate::contains("text", "hello");
+        assert!(rule.predicates_equal(&c1, &c2));
+
+        let s1 = Predicate::StartsWith {
+            key: "text".to_string(),
+            prefix: "hello".to_string(),
+        };
+        let s2 = Predicate::StartsWith {
+            key: "text".to_string(),
+            prefix: "hello".to_string(),
+        };
+        assert!(rule.predicates_equal(&s1, &s2));
+
+        let e1 = Predicate::EndsWith {
+            key: "text".to_string(),
+            suffix: "world".to_string(),
+        };
+        let e2 = Predicate::EndsWith {
+            key: "text".to_string(),
+            suffix: "world".to_string(),
+        };
+        assert!(rule.predicates_equal(&e1, &e2));
+
+        // In predicate
+        let i1 = Predicate::In {
+            key: "id".to_string(),
+            values: vec![
+                crate::query::ir::PredicateValue::Int(1),
+                crate::query::ir::PredicateValue::Int(2),
+            ],
+        };
+        let i2 = Predicate::In {
+            key: "id".to_string(),
+            values: vec![
+                crate::query::ir::PredicateValue::Int(1),
+                crate::query::ir::PredicateValue::Int(2),
+            ],
+        };
+        assert!(rule.predicates_equal(&i1, &i2));
+
+        // Exists predicates
+        let ex1 = Predicate::exists("prop");
+        let ex2 = Predicate::exists("prop");
+        assert!(rule.predicates_equal(&ex1, &ex2));
+
+        let nex1 = Predicate::NotExists("prop".to_string());
+        let nex2 = Predicate::NotExists("prop".to_string());
+        assert!(rule.predicates_equal(&nex1, &nex2));
+    }
+
+    #[test]
+    fn test_selectivity_null_check() {
+        let rule = OperationReordering;
+        let stats = test_stats();
+
+        // Null checks should use NULL_CHECK_SELECTIVITY
+        let pred = Predicate::Eq {
+            key: "value".to_string(),
+            value: crate::query::ir::PredicateValue::Null,
+        };
+
+        let sel = rule.estimate_filter_selectivity(&pred, &stats);
+        assert_eq!(sel, NULL_CHECK_SELECTIVITY);
     }
 }
