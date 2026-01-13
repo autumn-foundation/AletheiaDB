@@ -12,6 +12,20 @@ use crate::utils::error::Result;
 
 use super::{OptimizationRule, Statistics};
 
+// Selectivity estimates for different predicate types
+// (0.0 = filters everything, 1.0 = filters nothing)
+const NULL_CHECK_SELECTIVITY: f64 = 0.1; // Null checks are typically selective
+const EXISTENCE_CHECK_SELECTIVITY: f64 = 0.1; // Property existence checks
+const CONJUNCTION_SELECTIVITY: f64 = 0.1; // AND predicates (typically selective)
+const IN_PREDICATE_SELECTIVITY: f64 = 0.15; // IN predicates (depends on list size)
+const STRING_PREDICATE_SELECTIVITY: f64 = 0.2; // Contains/StartsWith/EndsWith
+const RANGE_PREDICATE_SELECTIVITY: f64 = 0.3; // Gt/Lt/Gte/Lte
+const DISJUNCTION_SELECTIVITY: f64 = 0.5; // OR predicates (less selective)
+const NOT_SELECTIVITY: f64 = 0.5; // NOT predicates (medium selectivity)
+const NOT_EQUALS_SELECTIVITY: f64 = 0.9; // Not-equals (typically less selective)
+const TRUE_SELECTIVITY: f64 = 1.0; // Filters nothing
+const FALSE_SELECTIVITY: f64 = 0.0; // Filters everything
+
 /// Operation reordering optimization rule.
 ///
 /// This rule reorders operations based on cost estimates to minimize
@@ -194,61 +208,60 @@ impl OperationReordering {
     fn estimate_filter_selectivity(&self, predicate: &Predicate, stats: &Statistics) -> f64 {
         match predicate {
             Predicate::Eq { key, value } => {
-                // Use property statistics if available
+                // Special case: Null checks are typically selective
+                if matches!(value, crate::query::ir::PredicateValue::Null) {
+                    return NULL_CHECK_SELECTIVITY;
+                }
+
+                // Convert value to string for selectivity estimation
                 let value_str = match value {
-                    crate::query::ir::PredicateValue::String(s) => s.as_str(),
-                    crate::query::ir::PredicateValue::Int(i) => {
-                        return stats.estimate_selectivity(key, &i.to_string());
-                    }
-                    crate::query::ir::PredicateValue::Float(f) => {
-                        return stats.estimate_selectivity(key, &f.to_string());
-                    }
-                    crate::query::ir::PredicateValue::Bool(b) => {
-                        return stats.estimate_selectivity(key, &b.to_string());
-                    }
-                    crate::query::ir::PredicateValue::Null => return 0.1, // Null checks are typically selective
+                    crate::query::ir::PredicateValue::String(s) => s.clone(),
+                    crate::query::ir::PredicateValue::Int(i) => i.to_string(),
+                    crate::query::ir::PredicateValue::Float(f) => f.to_string(),
+                    crate::query::ir::PredicateValue::Bool(b) => b.to_string(),
+                    crate::query::ir::PredicateValue::Null => unreachable!(), // Already handled above
                 };
-                stats.estimate_selectivity(key, value_str)
+                stats.estimate_selectivity(key, &value_str)
             }
             Predicate::Gt { .. }
             | Predicate::Lt { .. }
             | Predicate::Gte { .. }
-            | Predicate::Lte { .. } => {
-                // Range predicates: estimate 30% selectivity
-                0.3
-            }
+            | Predicate::Lte { .. } => RANGE_PREDICATE_SELECTIVITY,
             Predicate::Contains { .. }
             | Predicate::StartsWith { .. }
-            | Predicate::EndsWith { .. } => {
-                // String predicates: estimate 20% selectivity
-                0.2
+            | Predicate::EndsWith { .. } => STRING_PREDICATE_SELECTIVITY,
+            Predicate::And(predicates) => {
+                // For AND: multiply selectivities (intersection rule)
+                // Empty AND defaults to high selectivity (filters nothing)
+                if predicates.is_empty() {
+                    return TRUE_SELECTIVITY;
+                }
+                predicates
+                    .iter()
+                    .map(|p| self.estimate_filter_selectivity(p, stats))
+                    .product()
             }
-            Predicate::And { .. } => {
-                // Conjunctions: typically more selective
-                0.1
+            Predicate::Or(predicates) => {
+                // For OR: use union rule: 1 - (1-sel1) * (1-sel2) * ...
+                // Empty OR defaults to low selectivity (filters everything)
+                if predicates.is_empty() {
+                    return FALSE_SELECTIVITY;
+                }
+                let complement_product: f64 = predicates
+                    .iter()
+                    .map(|p| 1.0 - self.estimate_filter_selectivity(p, stats))
+                    .product();
+                1.0 - complement_product
             }
-            Predicate::Or { .. } => {
-                // Disjunctions: typically less selective
-                0.5
+            Predicate::Not(inner) => {
+                // For NOT: complement of inner selectivity
+                1.0 - self.estimate_filter_selectivity(inner, stats)
             }
-            Predicate::Not { .. } => {
-                // Not: depends on inner, default to medium selectivity
-                0.5
-            }
-            Predicate::Ne { .. } => {
-                // Not-equals: typically less selective than equals
-                0.9
-            }
-            Predicate::In { .. } => {
-                // IN predicates: estimate 15% selectivity (depends on list size)
-                0.15
-            }
-            Predicate::Exists(_) | Predicate::NotExists(_) => {
-                // Existence checks: estimate 10% selectivity
-                0.1
-            }
-            Predicate::True => 1.0,  // Filters nothing
-            Predicate::False => 0.0, // Filters everything
+            Predicate::Ne { .. } => NOT_EQUALS_SELECTIVITY,
+            Predicate::In { .. } => IN_PREDICATE_SELECTIVITY,
+            Predicate::Exists(_) | Predicate::NotExists(_) => EXISTENCE_CHECK_SELECTIVITY,
+            Predicate::True => TRUE_SELECTIVITY,
+            Predicate::False => FALSE_SELECTIVITY,
         }
     }
 
@@ -306,10 +319,85 @@ impl OperationReordering {
         }
     }
 
-    /// Simple predicate equality check (by discriminant).
+    /// Structural predicate equality check.
+    ///
+    /// Performs deep structural comparison of predicates to determine if they
+    /// are semantically equivalent. This is used to detect if filter reordering
+    /// actually changed the plan structure.
     fn predicates_equal(&self, a: &Predicate, b: &Predicate) -> bool {
-        // Simple comparison using Debug formatting (not ideal but works for testing)
-        format!("{:?}", a) == format!("{:?}", b)
+        match (a, b) {
+            (Predicate::Eq { key: k1, value: v1 }, Predicate::Eq { key: k2, value: v2 }) => {
+                k1 == k2 && v1 == v2
+            }
+            (Predicate::Ne { key: k1, value: v1 }, Predicate::Ne { key: k2, value: v2 }) => {
+                k1 == k2 && v1 == v2
+            }
+            (Predicate::Gt { key: k1, value: v1 }, Predicate::Gt { key: k2, value: v2 }) => {
+                k1 == k2 && v1 == v2
+            }
+            (Predicate::Gte { key: k1, value: v1 }, Predicate::Gte { key: k2, value: v2 }) => {
+                k1 == k2 && v1 == v2
+            }
+            (Predicate::Lt { key: k1, value: v1 }, Predicate::Lt { key: k2, value: v2 }) => {
+                k1 == k2 && v1 == v2
+            }
+            (Predicate::Lte { key: k1, value: v1 }, Predicate::Lte { key: k2, value: v2 }) => {
+                k1 == k2 && v1 == v2
+            }
+            (
+                Predicate::In {
+                    key: k1,
+                    values: vs1,
+                },
+                Predicate::In {
+                    key: k2,
+                    values: vs2,
+                },
+            ) => k1 == k2 && vs1 == vs2,
+            (
+                Predicate::Contains {
+                    key: k1,
+                    substring: s1,
+                },
+                Predicate::Contains {
+                    key: k2,
+                    substring: s2,
+                },
+            ) => k1 == k2 && s1 == s2,
+            (
+                Predicate::StartsWith {
+                    key: k1,
+                    prefix: p1,
+                },
+                Predicate::StartsWith {
+                    key: k2,
+                    prefix: p2,
+                },
+            ) => k1 == k2 && p1 == p2,
+            (
+                Predicate::EndsWith {
+                    key: k1,
+                    suffix: s1,
+                },
+                Predicate::EndsWith {
+                    key: k2,
+                    suffix: s2,
+                },
+            ) => k1 == k2 && s1 == s2,
+            (Predicate::Exists(k1), Predicate::Exists(k2)) => k1 == k2,
+            (Predicate::NotExists(k1), Predicate::NotExists(k2)) => k1 == k2,
+            (Predicate::And(v1), Predicate::And(v2)) | (Predicate::Or(v1), Predicate::Or(v2)) => {
+                v1.len() == v2.len()
+                    && v1
+                        .iter()
+                        .zip(v2.iter())
+                        .all(|(p1, p2)| self.predicates_equal(p1, p2))
+            }
+            (Predicate::Not(p1), Predicate::Not(p2)) => self.predicates_equal(p1, p2),
+            (Predicate::True, Predicate::True) => true,
+            (Predicate::False, Predicate::False) => true,
+            _ => false,
+        }
     }
 }
 

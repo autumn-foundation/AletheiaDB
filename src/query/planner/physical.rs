@@ -1598,12 +1598,16 @@ mod tests {
         assert!(explanation.contains("IndexedTraversal"));
         assert!(explanation.contains("NodeLookup"));
 
-        // Check that nested operators are indented (basic check)
+        // Check that nested operators are indented correctly
         let lines: Vec<&str> = explanation.lines().collect();
-        assert!(
-            lines.len() >= 3,
-            "Should have multiple lines for nested ops"
+        assert_eq!(
+            lines.len(),
+            4,
+            "Expected 4 lines for header + 3 nested ops"
         );
+        assert!(lines[1].starts_with("Filter"));
+        assert!(lines[2].starts_with("  └─ IndexedTraversal"));
+        assert!(lines[3].starts_with("    └─ NodeLookup"));
     }
 
     #[test]
@@ -1691,9 +1695,9 @@ mod tests {
 
         let explanation = plan.explain();
 
-        // Should show cost components
-        assert!(explanation.contains("cpu") || explanation.contains("CPU"));
-        // Should show the actual cost value (15.5)
-        assert!(explanation.contains("15"));
+        // Check for exact formatted cost strings
+        assert!(explanation.contains("cpu=15.5"));
+        assert!(explanation.contains("io=2.0"));
+        assert!(explanation.contains("mem=1.0KB"));
     }
 }
