@@ -16,7 +16,7 @@ use super::{
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
-use crate::core::property::PropertyMap;
+use crate::core::property::{PropertyMap, PropertyMapBuilder};
 use crate::core::temporal::{BiTemporalInterval, Timestamp, time};
 use crate::index::temporal::TemporalIndexes;
 use crate::storage::VersionMetadata;
@@ -1416,20 +1416,32 @@ impl WriteOps for WriteTransaction {
             .into());
         }
 
-        // Get current node to preserve label
+        // Get current node to preserve label and existing properties
         let node = self.current.get_node(node_id)?;
         let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+
+        // PATCH semantics: Merge new properties with existing ones
+        // Start with existing properties
+        let mut builder = PropertyMapBuilder::from_map(node.properties.clone());
+
+        // Update/add properties from the incoming map
+        for (key, value) in properties.iter() {
+            builder = builder.insert_by_key(*key, value.clone());
+        }
+
+        // Build the final merged property map
+        let merged_properties = builder.build();
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;
         let temporal = BiTemporalInterval::current(timestamp);
 
-        // Buffer the write
+        // Buffer the write with merged properties
         self.buffer.add(super::BufferedWrite::UpdateNode {
             node_id,
             version_id,
             label: node.label,
-            properties,
+            properties: merged_properties,
             temporal,
         })?;
 
@@ -1446,22 +1458,34 @@ impl WriteOps for WriteTransaction {
             .into());
         }
 
-        // Get current edge to preserve source, target, label
+        // Get current edge to preserve source, target, label and existing properties
         let edge = self.current.get_edge(edge_id)?;
         let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
+
+        // PATCH semantics: Merge new properties with existing ones
+        // Start with existing properties
+        let mut builder = PropertyMapBuilder::from_map(edge.properties.clone());
+
+        // Update/add properties from the incoming map
+        for (key, value) in properties.iter() {
+            builder = builder.insert_by_key(*key, value.clone());
+        }
+
+        // Build the final merged property map
+        let merged_properties = builder.build();
 
         // Get timestamp for temporal interval
         let timestamp = self.start_timestamp;
         let temporal = BiTemporalInterval::current(timestamp);
 
-        // Buffer the write
+        // Buffer the write with merged properties
         self.buffer.add(super::BufferedWrite::UpdateEdge {
             edge_id,
             version_id,
             source: edge.source,
             target: edge.target,
             label: edge.label,
-            properties,
+            properties: merged_properties,
             temporal,
         })?;
 
@@ -1735,6 +1759,164 @@ mod tests {
     }
 
     #[test]
+    fn test_update_node_patch_preserves_existing_properties() {
+        // Test that update_node uses PATCH semantics - properties not mentioned are preserved
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a node with multiple properties
+        let initial_props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("city", "London")
+            .build();
+        let node_id = current.create_node("Person", initial_props).unwrap();
+
+        // Update only the age - name and city should be preserved
+        let update_props = PropertyMapBuilder::new().insert("age", 31i64).build();
+        tx.update_node(node_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // Verify all properties
+        let node = current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(31));
+        assert_eq!(
+            node.get_property("city").and_then(|v| v.as_str()),
+            Some("London")
+        );
+    }
+
+    #[test]
+    fn test_update_node_patch_adds_new_properties() {
+        // Test that update_node can add new properties without removing existing ones
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a node with one property
+        let initial_props = PropertyMapBuilder::new().insert("name", "Bob").build();
+        let node_id = current.create_node("Person", initial_props).unwrap();
+
+        // Add a new property
+        let update_props = PropertyMapBuilder::new().insert("age", 25i64).build();
+        tx.update_node(node_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // Both properties should exist
+        let node = current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Bob")
+        );
+        assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(25));
+    }
+
+    #[test]
+    fn test_update_node_patch_modifies_multiple_properties() {
+        // Test that update_node can modify multiple properties while preserving others
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a node with four properties
+        let initial_props = PropertyMapBuilder::new()
+            .insert("name", "Charlie")
+            .insert("age", 40i64)
+            .insert("city", "Paris")
+            .insert("occupation", "Engineer")
+            .build();
+        let node_id = current.create_node("Person", initial_props).unwrap();
+
+        // Update two properties
+        let update_props = PropertyMapBuilder::new()
+            .insert("age", 41i64)
+            .insert("city", "Berlin")
+            .build();
+        tx.update_node(node_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // All four properties should exist with correct values
+        let node = current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Charlie")
+        );
+        assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(41));
+        assert_eq!(
+            node.get_property("city").and_then(|v| v.as_str()),
+            Some("Berlin")
+        );
+        assert_eq!(
+            node.get_property("occupation").and_then(|v| v.as_str()),
+            Some("Engineer")
+        );
+    }
+
+    #[test]
+    fn test_update_node_patch_empty_update() {
+        // Test that empty update preserves all properties
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a node with properties
+        let initial_props = PropertyMapBuilder::new()
+            .insert("name", "Diana")
+            .insert("age", 35i64)
+            .build();
+        let node_id = current.create_node("Person", initial_props).unwrap();
+
+        // Empty update
+        let update_props = PropertyMapBuilder::new().build();
+        tx.update_node(node_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // All properties should still exist
+        let node = current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Diana")
+        );
+        assert_eq!(node.get_property("age").and_then(|v| v.as_int()), Some(35));
+    }
+
+    #[test]
+    fn test_update_node_patch_with_vector_properties() {
+        // Test PATCH behavior with vector properties
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a node with a vector and scalar property
+        let embedding = vec![0.1f32, 0.2, 0.3];
+        let initial_props = PropertyMapBuilder::new()
+            .insert("name", "Eve")
+            .insert_vector("embedding", &embedding)
+            .build();
+        let node_id = current.create_node("Document", initial_props).unwrap();
+
+        // Update only the name - embedding should be preserved
+        let update_props = PropertyMapBuilder::new()
+            .insert("name", "Eve Updated")
+            .build();
+        tx.update_node(node_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // Verify both properties
+        let node = current.get_node(node_id).unwrap();
+        assert_eq!(
+            node.get_property("name").and_then(|v| v.as_str()),
+            Some("Eve Updated")
+        );
+        assert!(node.get_property("embedding").is_some());
+        if let Some(vec_val) = node.get_property("embedding").and_then(|v| v.as_vector()) {
+            assert_eq!(vec_val.as_ref(), &[0.1f32, 0.2, 0.3]);
+        } else {
+            panic!("Vector property not found or wrong type");
+        }
+    }
+
+    #[test]
     fn test_update_edge() {
         let (mut tx, _temp_dir) = create_test_write_tx();
         let current = Arc::clone(&tx.current);
@@ -1773,6 +1955,211 @@ mod tests {
 
         // Should fail because edge doesn't exist
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_edge_patch_preserves_existing_properties() {
+        // Test that update_edge uses PATCH semantics - properties not mentioned are preserved
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props).unwrap();
+
+        // Create edge with multiple properties
+        let initial_props = PropertyMapBuilder::new()
+            .insert("weight", 5i64)
+            .insert("type", "friendship")
+            .insert("since", "2020")
+            .build();
+        let edge_id = current
+            .create_edge(node1, node2, "KNOWS", initial_props)
+            .unwrap();
+
+        // Update only the weight - type and since should be preserved
+        let update_props = PropertyMapBuilder::new().insert("weight", 10i64).build();
+        tx.update_edge(edge_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // Verify all properties
+        let edge = current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(10)
+        );
+        assert_eq!(
+            edge.get_property("type").and_then(|v| v.as_str()),
+            Some("friendship")
+        );
+        assert_eq!(
+            edge.get_property("since").and_then(|v| v.as_str()),
+            Some("2020")
+        );
+    }
+
+    #[test]
+    fn test_update_edge_patch_adds_new_properties() {
+        // Test that update_edge can add new properties without removing existing ones
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props).unwrap();
+
+        // Create edge with one property
+        let initial_props = PropertyMapBuilder::new().insert("weight", 5i64).build();
+        let edge_id = current
+            .create_edge(node1, node2, "KNOWS", initial_props)
+            .unwrap();
+
+        // Add a new property
+        let update_props = PropertyMapBuilder::new()
+            .insert("type", "colleague")
+            .build();
+        tx.update_edge(edge_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // Both properties should exist
+        let edge = current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(5)
+        );
+        assert_eq!(
+            edge.get_property("type").and_then(|v| v.as_str()),
+            Some("colleague")
+        );
+    }
+
+    #[test]
+    fn test_update_edge_patch_modifies_multiple_properties() {
+        // Test that update_edge can modify multiple properties while preserving others
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props).unwrap();
+
+        // Create edge with four properties
+        let initial_props = PropertyMapBuilder::new()
+            .insert("weight", 5i64)
+            .insert("type", "friendship")
+            .insert("since", "2020")
+            .insert("active", true)
+            .build();
+        let edge_id = current
+            .create_edge(node1, node2, "KNOWS", initial_props)
+            .unwrap();
+
+        // Update two properties
+        let update_props = PropertyMapBuilder::new()
+            .insert("weight", 8i64)
+            .insert("since", "2021")
+            .build();
+        tx.update_edge(edge_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // All four properties should exist with correct values
+        let edge = current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(8)
+        );
+        assert_eq!(
+            edge.get_property("type").and_then(|v| v.as_str()),
+            Some("friendship")
+        );
+        assert_eq!(
+            edge.get_property("since").and_then(|v| v.as_str()),
+            Some("2021")
+        );
+        assert_eq!(
+            edge.get_property("active").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_update_edge_patch_empty_update() {
+        // Test that empty update preserves all properties
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props).unwrap();
+
+        // Create edge with properties
+        let initial_props = PropertyMapBuilder::new()
+            .insert("weight", 5i64)
+            .insert("type", "friendship")
+            .build();
+        let edge_id = current
+            .create_edge(node1, node2, "KNOWS", initial_props)
+            .unwrap();
+
+        // Empty update
+        let update_props = PropertyMapBuilder::new().build();
+        tx.update_edge(edge_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // All properties should still exist
+        let edge = current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(5)
+        );
+        assert_eq!(
+            edge.get_property("type").and_then(|v| v.as_str()),
+            Some("friendship")
+        );
+    }
+
+    #[test]
+    fn test_update_edge_patch_with_vector_properties() {
+        // Test PATCH behavior with vector properties on edges
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes
+        let props = PropertyMapBuilder::new().build();
+        let node1 = current.create_node("Person", props.clone()).unwrap();
+        let node2 = current.create_node("Person", props).unwrap();
+
+        // Create edge with a vector and scalar property
+        let embedding = vec![0.5f32, 0.6, 0.7];
+        let initial_props = PropertyMapBuilder::new()
+            .insert("weight", 5i64)
+            .insert_vector("embedding", &embedding)
+            .build();
+        let edge_id = current
+            .create_edge(node1, node2, "SIMILAR", initial_props)
+            .unwrap();
+
+        // Update only the weight - embedding should be preserved
+        let update_props = PropertyMapBuilder::new().insert("weight", 10i64).build();
+        tx.update_edge(edge_id, update_props).unwrap();
+        tx.commit().unwrap();
+
+        // Verify both properties
+        let edge = current.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.get_property("weight").and_then(|v| v.as_int()),
+            Some(10)
+        );
+        assert!(edge.get_property("embedding").is_some());
+        if let Some(vec_val) = edge.get_property("embedding").and_then(|v| v.as_vector()) {
+            assert_eq!(vec_val.as_ref(), &[0.5f32, 0.6, 0.7]);
+        } else {
+            panic!("Vector property not found or wrong type");
+        }
     }
 
     #[test]
