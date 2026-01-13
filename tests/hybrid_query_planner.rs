@@ -28,6 +28,26 @@ fn create_test_planner() -> QueryPlanner {
     QueryPlanner::new(stats, storage)
 }
 
+/// Helper to assert a query executes successfully and returns expected count
+fn assert_query_returns_count(db: &GallifreyDB, query: gallifreydb::query::Query, expected: usize) {
+    let results = db.execute_query(query).expect("Query should succeed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+    assert_eq!(
+        rows.len(),
+        expected,
+        "Expected {} results, got {}",
+        expected,
+        rows.len()
+    );
+}
+
+/// Helper to assert a query executes successfully and returns non-empty results
+fn assert_query_succeeds(db: &GallifreyDB, query: gallifreydb::query::Query) {
+    let results = db.execute_query(query).expect("Query should succeed");
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+    assert!(!rows.is_empty(), "Query should return at least one result");
+}
+
 /// Helper to create a social graph for testing.
 /// Returns (alice_id, bob_id, carol_id, dave_id)
 fn create_social_graph(db: &GallifreyDB) -> (NodeId, NodeId, NodeId, NodeId) {
@@ -516,15 +536,15 @@ fn test_execute_node_lookup() {
 
     // Execute a simple node lookup query
     let query = db.query().start(alice).build();
+
+    // Use helper to assert query succeeds and returns results
+    assert_query_succeeds(&db, query.clone());
+
+    // Verify it's Alice specifically
     let results = db.execute_query(query).expect("Query execution failed");
-
-    // Collect all results
     let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
-
-    // Should return exactly one row (Alice)
     assert_eq!(rows.len(), 1, "Expected exactly one result");
 
-    // Verify it's Alice
     let row = &rows[0];
     let node = row.entity.as_node().expect("Expected a node");
     assert_eq!(node.id, alice);
@@ -1128,7 +1148,19 @@ fn test_direct_traverse_and_rank_with_different_label() {
 // Temporal + Vector Query Tests (Missing Pattern from Issue #78)
 // =============================================================================
 
+// NOTE: This test is currently ignored because the Temporal + Vector query pattern
+// (as_of + find_similar) requires planner support for TemporalVectorSearch physical operator.
+// The infrastructure exists (temporal vector indexes via VS-047), but the query planner
+// doesn't yet translate "as_of + find_similar" into a TemporalVectorSearch operation.
+//
+// To enable this test, implement:
+// 1. TemporalVectorSearch physical operator in planner/physical.rs
+// 2. Planner logic to detect temporal context + vector search
+// 3. Executor support in executor/mod.rs
+//
+// See: docs/VECTOR_SEARCH_DESIGN.md Phase 3 for temporal vector query design
 #[test]
+#[ignore = "Temporal + Vector query pattern not yet implemented in planner (Phase 3)"]
 fn test_temporal_vector_query() {
     use gallifreydb::index::vector::temporal::{
         RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
@@ -1188,26 +1220,21 @@ fn test_temporal_vector_query() {
         "Query should have vector search operation"
     );
 
-    // Execute the query (requires planner support for temporal vector queries)
-    let results = db.execute_query(query);
+    // Execute the query - this should succeed once planner support is added
+    let results = db
+        .execute_query(query)
+        .expect("Temporal + Vector query should succeed");
+    let rows: Vec<_> = results
+        .collect_all()
+        .expect("Should collect temporal vector search results");
 
-    // For now, we expect this might not be fully implemented
-    // This test documents the expected behavior
-    match results {
-        Ok(result_set) => {
-            let rows: Vec<_> = result_set.collect_all().expect("Failed to collect results");
-            // Should return Alice and Bob at the historical timestamp
-            assert!(
-                !rows.is_empty(),
-                "Should return temporal vector search results"
-            );
-            println!("✓ Temporal + Vector query executes successfully");
-        }
-        Err(_) => {
-            // If not yet implemented, this documents the requirement
-            println!("⚠ Temporal + Vector query not yet fully implemented (VS-065)");
-        }
-    }
+    // Should return Alice and Bob at the historical timestamp
+    assert!(
+        !rows.is_empty(),
+        "Should return temporal vector search results"
+    );
+
+    println!("✓ Temporal + Vector query executes successfully");
 }
 
 // =============================================================================
@@ -1245,43 +1272,33 @@ fn test_query_with_missing_vector_index() {
 
 #[test]
 fn test_query_with_invalid_node_id() {
+    use gallifreydb::utils::error::{Error, StorageError};
+
     let db = create_test_db();
 
     // Use a non-existent node ID
     let fake_id = NodeId::new(99999).expect("valid id");
     let query = db.query().start(fake_id).traverse("KNOWS").build();
 
-    let results = db.execute_query(query);
+    // Query planning should succeed - errors surface during execution
+    let results = db
+        .execute_query(query)
+        .expect("Query planning should succeed for invalid IDs");
 
-    // Query execution may succeed but collecting results should fail or return empty
-    match results {
-        Ok(result_set) => {
-            // Try to collect results - this might fail with NodeNotFound
-            match result_set.collect_all() {
-                Ok(rows) => {
-                    // If it succeeds, should be empty
-                    assert!(
-                        rows.is_empty(),
-                        "Should return empty results for non-existent node"
-                    );
-                }
-                Err(e) => {
-                    // Or it might fail with NodeNotFound error
-                    assert!(
-                        format!("{:?}", e).contains("NodeNotFound"),
-                        "Should fail with NodeNotFound error"
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            // Query might fail at planning stage
-            assert!(
-                format!("{:?}", e).contains("NodeNotFound")
-                    || format!("{:?}", e).contains("not found"),
-                "Should fail with NodeNotFound or similar error"
-            );
-        }
+    // Collecting results triggers execution and should produce NodeNotFound error
+    let collection_result = results.collect_all();
+
+    assert!(
+        collection_result.is_err(),
+        "Expected an error when collecting results for an invalid node ID"
+    );
+
+    if let Err(e) = collection_result {
+        assert!(
+            matches!(e, Error::Storage(StorageError::NodeNotFound(_))),
+            "Expected NodeNotFound error, but got {:?}",
+            e
+        );
     }
 
     println!("✓ Query handles non-existent node IDs gracefully");
@@ -1510,10 +1527,7 @@ fn test_statistics_based_optimization() {
         .limit(2)
         .build();
 
-    let results = db.execute_query(query).expect("Query should succeed");
-    let rows: Vec<_> = results.collect_all().expect("Failed to collect");
-
-    assert_eq!(rows.len(), 2, "Should respect limit");
+    assert_query_returns_count(&db, query, 2);
 
     println!("✓ Query planner uses statistics for optimization (Issue #78)");
 }
@@ -1529,10 +1543,7 @@ fn test_query_with_zero_limit() {
 
     let query = db.query().start(alice).traverse("KNOWS").limit(0).build();
 
-    let results = db.execute_query(query).expect("Query should succeed");
-    let rows: Vec<_> = results.collect_all().expect("Failed to collect");
-
-    assert_eq!(rows.len(), 0, "Limit of 0 should return no results");
+    assert_query_returns_count(&db, query, 0);
 
     println!("✓ Query handles zero limit correctly");
 }
