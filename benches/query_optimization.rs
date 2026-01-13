@@ -11,7 +11,7 @@
 
 mod common;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::PropertyMapBuilder;
 use gallifreydb::core::NodeId;
 use gallifreydb::index::vector::{DistanceMetric, hnsw::HnswConfig};

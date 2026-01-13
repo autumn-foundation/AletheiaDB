@@ -35,6 +35,7 @@ use std::time::Duration;
 /// # Production benchmarks
 /// BENCH_SAMPLE_SIZE=100 BENCH_MEASUREMENT_TIME=10 BENCH_WARMUP_TIME=5 cargo bench
 /// ```
+#[allow(dead_code)]
 pub fn configure_criterion() -> Criterion {
     let sample_size = std::env::var("BENCH_SAMPLE_SIZE")
         .ok()
