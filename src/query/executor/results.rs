@@ -264,6 +264,25 @@ impl Iterator for QueryResults {
 ///     println!("Top score: {}", scores[0]);
 /// }
 /// ```
+///
+/// # Padding Behavior
+///
+/// When collecting structured results from hybrid queries where not all rows have all fields,
+/// missing fields are padded with sensible defaults to maintain vector alignment:
+/// - Missing scores are padded with `0.0`
+/// - Missing paths are padded with empty vectors (`vec![]`)
+/// - Missing versions are padded with `VersionId(0)`
+///
+/// **Important**: Users should check the source query type to distinguish padding from actual values.
+/// For example, a score of `0.0` could be either a padding value or an actual similarity score of zero.
+/// The padding only occurs when at least one row has the field present.
+///
+/// # Performance Considerations
+///
+/// This method collects **ALL** results into memory before returning. For large result sets
+/// (>100K rows), prefer using the streaming `QueryResults` iterator directly. This method
+/// is optimized for batch operations on moderate result sets where you need random access
+/// to all results with their metadata.
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     /// Node IDs from the query results
@@ -383,12 +402,13 @@ impl std::fmt::Display for QueryResult {
         if let Some(scores) = &self.scores {
             writeln!(f, "  scores: {} items", scores.len())?;
             if !scores.is_empty() {
-                writeln!(
-                    f,
-                    "    range: [{:.3}, {:.3}]",
-                    scores.iter().copied().fold(f32::INFINITY, f32::min),
-                    scores.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-                )?;
+                // Check if any value is not normal (NaN or Inf)
+                let has_abnormal = scores.iter().any(|s| !s.is_finite());
+                if !has_abnormal {
+                    let min = scores.iter().copied().fold(f32::INFINITY, f32::min);
+                    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    writeln!(f, "    range: [{:.3}, {:.3}]", min, max)?;
+                }
             }
         } else {
             writeln!(f, "  scores: None")?;
@@ -421,6 +441,21 @@ impl QueryResults {
     /// This method aggregates all query rows into separate vectors for nodes, scores,
     /// paths, and versions. Only fields that are present in at least one row will be
     /// included in the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Any row fails to be read from the iterator
+    /// - A timestamp cannot be converted to a valid `VersionId` (exceeds `MAX_VALID_ID`)
+    ///
+    /// # Performance
+    ///
+    /// This method performs two passes over the data:
+    /// 1. Collects all rows into memory to determine which fields are present
+    /// 2. Extracts and pads data into separate vectors
+    ///
+    /// For very large result sets, this may consume significant memory. Consider using
+    /// the streaming iterator directly for result sets exceeding 100K rows.
     pub fn collect_structured(mut self) -> Result<QueryResult> {
         // First pass: collect all rows
         let mut rows = Vec::new();
@@ -470,9 +505,31 @@ impl QueryResults {
             // Extract or pad versions
             if let Some(ref mut v) = versions {
                 if let Some(timestamp) = row.timestamp {
-                    v.push(VersionId::new(timestamp as u64).unwrap());
+                    // Safely convert timestamp (i64) to VersionId (u64)
+                    // Negative timestamps are clamped to 0
+                    let ts_u64 = if timestamp < 0 {
+                        0_u64
+                    } else {
+                        timestamp as u64
+                    };
+
+                    // VersionId::new validates against MAX_VALID_ID
+                    let version_id = VersionId::new(ts_u64).map_err(|e| {
+                        crate::utils::error::Error::Query(
+                            crate::utils::error::QueryError::InvalidParameter {
+                                parameter: "timestamp".to_string(),
+                                reason: format!(
+                                    "Timestamp {} exceeds MAX_VALID_ID: {}",
+                                    timestamp, e
+                                ),
+                            },
+                        )
+                    })?;
+                    v.push(version_id);
                 } else {
-                    v.push(VersionId::new(0).unwrap());
+                    // Pad with version 0 for missing timestamps
+                    // SAFETY: VersionId(0) is always valid as 0 < MAX_VALID_ID
+                    v.push(VersionId::new(0).expect("VersionId(0) should always be valid"));
                 }
             }
         }
@@ -1157,5 +1214,120 @@ mod tests {
             EntityId::Node(NodeId::new(2).unwrap()),
         ];
         assert_eq!(path.len(), 2);
+    }
+
+    // ==================== Error Handling Tests ====================
+
+    #[test]
+    fn test_collect_structured_with_negative_timestamp() {
+        // Negative timestamps should be clamped to 0
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())).at_time(-100),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap())).at_time(-50),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert_eq!(structured.len(), 2);
+        assert!(structured.versions.is_some());
+
+        // Both negative timestamps should be clamped to VersionId(0)
+        let versions = structured.versions.unwrap();
+        assert_eq!(versions[0], VersionId::new(0).unwrap());
+        assert_eq!(versions[1], VersionId::new(0).unwrap());
+    }
+
+    #[test]
+    fn test_collect_structured_with_large_valid_timestamp() {
+        // Test with large timestamps that are valid
+        // Use values well below i64::MAX to ensure they're valid
+        let large_ts = i64::MAX / 2;
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())).at_time(large_ts),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap()))
+                .at_time(large_ts - 1000),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert_eq!(structured.len(), 2);
+        assert!(structured.versions.is_some());
+
+        let versions = structured.versions.unwrap();
+        assert_eq!(versions[0], VersionId::new(large_ts as u64).unwrap());
+        assert_eq!(
+            versions[1],
+            VersionId::new((large_ts - 1000) as u64).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_collect_structured_with_invalid_timestamp() {
+        // Create a timestamp that will exceed MAX_VALID_ID when cast to u64
+        // Since MAX_VALID_ID = u64::MAX - 1000, we need i64::MAX which becomes
+        // 9223372036854775807 as u64, which is less than MAX_VALID_ID
+        // So we create a custom row with an artificially large timestamp
+
+        // Note: Since Timestamp is i64, the maximum positive value is i64::MAX
+        // which as u64 is 9223372036854775807, which is actually < MAX_VALID_ID
+        // This means we can't actually create an invalid timestamp through normal means
+        // The invalid case would only occur with corrupted data or future changes
+
+        // For now, let's test that very large timestamps still work
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()))
+                .at_time(i64::MAX - 1000),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let result = results.collect_structured();
+        // Should succeed since i64::MAX as u64 < MAX_VALID_ID
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_query_result_display_with_nan_scores() {
+        let nodes = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+        let scores = vec![f32::NAN, 0.8];
+        let result = QueryResult::with_nodes(nodes).with_scores(scores);
+
+        let display = format!("{}", result);
+        assert!(display.contains("QueryResult"));
+        assert!(display.contains("nodes: 2 items"));
+        assert!(display.contains("scores: 2 items"));
+        // Should NOT contain "range:" because min/max are not finite
+        assert!(!display.contains("range:"));
+    }
+
+    #[test]
+    fn test_query_result_display_with_infinity_scores() {
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let scores = vec![f32::INFINITY];
+        let result = QueryResult::with_nodes(nodes).with_scores(scores);
+
+        let display = format!("{}", result);
+        assert!(display.contains("scores: 1 items"));
+        // Should NOT contain "range:" because max is infinite
+        assert!(!display.contains("range:"));
+    }
+
+    #[test]
+    fn test_collect_structured_mixed_timestamps() {
+        // Test mixed positive, negative, and zero timestamps
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())).at_time(100),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap())).at_time(-50),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(3).unwrap())).at_time(0),
+        ];
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+
+        let structured = results.collect_structured().unwrap();
+        assert_eq!(structured.len(), 3);
+        assert!(structured.versions.is_some());
+
+        let versions = structured.versions.unwrap();
+        assert_eq!(versions[0], VersionId::new(100).unwrap());
+        assert_eq!(versions[1], VersionId::new(0).unwrap()); // Clamped
+        assert_eq!(versions[2], VersionId::new(0).unwrap());
     }
 }
