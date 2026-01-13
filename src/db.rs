@@ -1048,8 +1048,6 @@ impl GallifreyDB {
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("find_similar_with_label").entered();
-        #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar").entered();
         self.current
             .find_similar_with_label(query_node_id, label, k)
     }
@@ -1092,8 +1090,6 @@ impl GallifreyDB {
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("find_similar_by_embedding").entered();
-        #[cfg(feature = "observability")]
-        let _span = tracing::info_span!("find_similar").entered();
         self.current.find_similar_by_embedding(embedding, k)
     }
 
