@@ -351,6 +351,7 @@ impl QueryPlanner {
             estimated_cost: cost,
             temporal_context: logical.temporal_context.clone(),
             parallel: logical.hints.parallel,
+            include_provenance: logical.hints.include_provenance,
         })
     }
 

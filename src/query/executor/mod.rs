@@ -76,7 +76,12 @@ impl QueryExecutor {
     /// Execute a physical plan and return results
     pub fn execute(&self, plan: PhysicalPlan) -> Result<QueryResults> {
         let iterator = self.execute_op(&plan.root)?;
-        Ok(QueryResults::new(iterator))
+        // Wrap with provenance filter to conditionally strip metadata
+        let filtered = Box::new(iterators::ProvenanceFilterIterator::new(
+            iterator,
+            plan.include_provenance,
+        ));
+        Ok(QueryResults::new(filtered))
     }
 
     /// Execute a physical operator, returning an iterator
@@ -417,6 +422,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -439,6 +445,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -461,6 +468,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -483,6 +491,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -508,6 +517,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -533,6 +543,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -559,6 +570,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -587,6 +599,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -612,6 +625,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -630,6 +644,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -654,6 +669,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         // This will return empty since there's no historical data yet
@@ -688,6 +704,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -758,6 +775,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -822,6 +840,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -857,6 +876,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let result = executor.execute(plan);
@@ -899,6 +919,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let result = executor.execute(plan);
@@ -952,6 +973,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");
@@ -991,6 +1013,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let result = executor.execute(plan);
@@ -1066,6 +1089,7 @@ mod tests {
             estimated_cost: Default::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
 
         let results = executor.execute(plan).expect("Execution failed");

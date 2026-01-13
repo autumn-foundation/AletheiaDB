@@ -945,21 +945,4 @@ mod tests {
 
         assert!(!query.hints.include_provenance);
     }
-
-    // ==================== Execute Method Tests ====================
-
-    // Note: These tests require GallifreyDB integration, so they're more like integration tests
-    // We'll write simpler unit-style tests here and full integration tests in tests/
-
-    #[test]
-    fn test_execute_signature_exists() {
-        // This test will fail to compile if execute() doesn't exist with the right signature
-        // We can't fully test execute() without a real database, but we can ensure the API exists
-
-        // This is a compile-time check - if this compiles, the API is correct
-        fn _check_execute_signature<S: QueryState>(_builder: QueryBuilder<S>) {
-            // We just need the type to exist, we won't call it
-            // The real functionality will be tested in integration tests
-        }
-    }
 }

@@ -23,6 +23,8 @@ pub struct PhysicalPlan {
     pub temporal_context: Option<TemporalContext>,
     /// Enable parallel execution
     pub parallel: bool,
+    /// Include provenance metadata (timestamps, paths) in results
+    pub include_provenance: bool,
 }
 
 impl PhysicalPlan {
@@ -468,6 +470,7 @@ mod tests {
             estimated_cost: Cost::default(),
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
         assert!(!plan.is_temporal());
 
@@ -479,6 +482,7 @@ mod tests {
                 between: None,
             }),
             parallel: false,
+            include_provenance: false,
         };
         assert!(temporal_plan.is_temporal());
     }
@@ -495,6 +499,7 @@ mod tests {
             },
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
         assert_eq!(plan.cpu_cost(), 42.0);
     }
@@ -511,6 +516,7 @@ mod tests {
             },
             temporal_context: None,
             parallel: false,
+            include_provenance: false,
         };
         assert_eq!(plan.memory_cost(), 1024);
     }
