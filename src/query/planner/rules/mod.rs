@@ -10,9 +10,11 @@ use crate::utils::error::Result;
 use super::stats::Statistics;
 
 mod limit_pushdown;
+mod operation_reordering;
 mod predicate_pushdown;
 
 pub use limit_pushdown::LimitPushdown;
+pub use operation_reordering::OperationReordering;
 pub use predicate_pushdown::PredicatePushdown;
 
 /// Trait for optimization rules.
@@ -39,6 +41,7 @@ pub fn default_rules() -> Vec<Box<dyn OptimizationRule>> {
     vec![
         Box::new(PredicatePushdown),
         Box::new(LimitPushdown),
+        Box::new(OperationReordering),
         // Future rules:
         // Box::new(VectorSearchReordering),
         // Box::new(TemporalBatching),
@@ -59,5 +62,6 @@ mod tests {
         let names: Vec<&str> = rules.iter().map(|r| r.name()).collect();
         assert!(names.contains(&"predicate-pushdown"));
         assert!(names.contains(&"limit-pushdown"));
+        assert!(names.contains(&"operation-reordering"));
     }
 }

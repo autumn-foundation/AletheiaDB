@@ -45,6 +45,196 @@ impl PhysicalPlan {
     pub fn memory_cost(&self) -> usize {
         self.estimated_cost.memory
     }
+
+    /// Generate a human-readable explanation of the query execution plan.
+    ///
+    /// This method produces a tree-like visualization showing:
+    /// - Physical operators and their nesting
+    /// - Estimated costs (CPU, I/O, memory)
+    /// - Estimated cardinalities (row counts)
+    /// - Temporal context if applicable
+    ///
+    /// # Example Output
+    ///
+    /// ```text
+    /// Physical Plan (cost: cpu=10.5µs, io=2, mem=1.0KB)
+    /// Filter (rows: ~100, cost: cpu=5.0µs)
+    ///   └─ IndexedTraversal (rows: ~1000, cost: cpu=5.0µs)
+    ///      └─ NodeLookup (rows: 1, cost: cpu=0.5µs)
+    /// ```
+    #[must_use]
+    pub fn explain(&self) -> String {
+        let mut output = String::new();
+
+        // Header with overall plan info
+        output.push_str(&format!(
+            "Physical Plan (cost: cpu={:.1}µs, io={:.1}, mem={})\n",
+            self.estimated_cost.cpu,
+            self.estimated_cost.io,
+            format_memory(self.estimated_cost.memory)
+        ));
+
+        if let Some(ref ctx) = self.temporal_context {
+            if let Some((valid, tx)) = ctx.as_of {
+                output.push_str(&format!(
+                    "  Temporal Context: as_of(valid={}, tx={})\n",
+                    valid, tx
+                ));
+            }
+            if let Some(ref range) = ctx.between {
+                output.push_str(&format!(
+                    "  Temporal Context: between({}, {})\n",
+                    range.start(),
+                    range.end()
+                ));
+            }
+        }
+
+        if self.parallel {
+            output.push_str("  Parallel execution enabled\n");
+        }
+
+        // Explain the operator tree
+        self.explain_op(&self.root, &mut output, 0, "");
+
+        output
+    }
+
+    /// Recursively explain an operator with indentation.
+    fn explain_op(&self, op: &PhysicalOp, output: &mut String, indent: usize, prefix: &str) {
+        let indent_str = "  ".repeat(indent);
+        let op_name = op.name();
+
+        // Build the line for this operator
+        let mut line = format!("{}{}{}", indent_str, prefix, op_name);
+
+        // Add operator-specific details
+        match op {
+            PhysicalOp::NodeLookup { node_ids } => {
+                line.push_str(&format!(" (rows: {})", node_ids.len()));
+            }
+            PhysicalOp::NodeScan {
+                label,
+                estimated_rows,
+            } => {
+                line.push_str(&format!(" (rows: ~{})", estimated_rows));
+                if let Some(l) = label {
+                    line.push_str(&format!(" [label={}]", l));
+                }
+            }
+            PhysicalOp::HnswSearch {
+                k, label_filter, ..
+            } => {
+                line.push_str(&format!(" (k={})", k));
+                if let Some(l) = label_filter {
+                    line.push_str(&format!(" [label={}]", l));
+                }
+            }
+            PhysicalOp::TemporalNodeLookup {
+                node_ids,
+                use_batch,
+                ..
+            } => {
+                line.push_str(&format!(" (rows: {}, batch={})", node_ids.len(), use_batch));
+            }
+            PhysicalOp::TemporalVectorSearch { k, timestamp, .. } => {
+                line.push_str(&format!(" (k={}, ts={})", k, timestamp));
+            }
+            PhysicalOp::SimilarToNode {
+                k, label_filter, ..
+            } => {
+                line.push_str(&format!(" (k={})", k));
+                if let Some(l) = label_filter {
+                    line.push_str(&format!(" [label={}]", l));
+                }
+            }
+            PhysicalOp::IndexedTraversal {
+                direction,
+                label,
+                depth,
+                ..
+            } => {
+                line.push_str(&format!(" (depth={}, dir={:?})", depth, direction));
+                if let Some(l) = label {
+                    line.push_str(&format!(" [label={}]", l));
+                }
+            }
+            PhysicalOp::Filter { predicate, .. } => {
+                line.push_str(&format!(" [{:?}]", predicate));
+            }
+            PhysicalOp::Limit { count, offset, .. } => {
+                line.push_str(&format!(" (count={}, offset={})", count, offset));
+            }
+            PhysicalOp::VectorRerank { k, .. } => {
+                line.push_str(&format!(" (k={})", k));
+            }
+            PhysicalOp::Sort {
+                key, descending, ..
+            } => {
+                line.push_str(&format!(" (key={:?}, desc={})", key, descending));
+            }
+            PhysicalOp::HashJoin {
+                left_key,
+                right_key,
+                ..
+            } => {
+                line.push_str(&format!(" ({}={})", left_key, right_key));
+            }
+            PhysicalOp::Project { properties, .. } => {
+                line.push_str(&format!(" ({})", properties.join(", ")));
+            }
+            _ => {} // Other operators don't need extra details
+        }
+
+        output.push_str(&line);
+        output.push('\n');
+
+        // Recursively explain children
+        match op {
+            // Unary operators
+            PhysicalOp::Filter { input, .. }
+            | PhysicalOp::VectorRerank { input, .. }
+            | PhysicalOp::Sort { input, .. }
+            | PhysicalOp::Limit { input, .. }
+            | PhysicalOp::Project { input, .. }
+            | PhysicalOp::Distinct { input, .. }
+            | PhysicalOp::Count { input, .. }
+            | PhysicalOp::Materialize { input, .. }
+            | PhysicalOp::TemporalTrack { input, .. }
+            | PhysicalOp::IndexedTraversal { input, .. } => {
+                self.explain_op(input, output, indent + 1, "└─ ");
+            }
+
+            // Binary operators
+            PhysicalOp::HashJoin { left, right, .. }
+            | PhysicalOp::Union { left, right }
+            | PhysicalOp::Intersect { left, right }
+            | PhysicalOp::Except { left, right } => {
+                self.explain_op(left, output, indent + 1, "├─ ");
+                self.explain_op(right, output, indent + 1, "└─ ");
+            }
+
+            // Leaf operators (no children)
+            _ => {}
+        }
+    }
+}
+
+/// Format memory size in human-readable form
+fn format_memory(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * KB;
+    const GB: usize = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1}GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1}KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{}B", bytes)
+    }
 }
 
 /// Physical operators that execute against storage.
@@ -1345,5 +1535,165 @@ mod tests {
             }
             .is_leaf()
         );
+    }
+
+    // ==================== Explain Tests ====================
+
+    #[test]
+    fn test_explain_simple_node_lookup() {
+        let plan = PhysicalPlan {
+            root: PhysicalOp::NodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()],
+            },
+            estimated_cost: Cost {
+                cpu: 1.0,
+                io: 0.0,
+                memory: 100,
+                network: 0.0,
+            },
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let explanation = plan.explain();
+
+        // Should include operator name
+        assert!(explanation.contains("NodeLookup"));
+        // Should include cost estimate
+        assert!(explanation.contains("cost"));
+        // Should include cardinality (2 nodes)
+        assert!(explanation.contains("rows"));
+    }
+
+    #[test]
+    fn test_explain_nested_operations() {
+        let plan = PhysicalPlan {
+            root: PhysicalOp::Filter {
+                input: Box::new(PhysicalOp::IndexedTraversal {
+                    input: Box::new(PhysicalOp::NodeLookup {
+                        node_ids: vec![NodeId::new(1).unwrap()],
+                    }),
+                    direction: Direction::Outgoing,
+                    label: Some("KNOWS".to_string()),
+                    depth: 2,
+                }),
+                predicate: Predicate::eq("age", 25i64),
+            },
+            estimated_cost: Cost {
+                cpu: 10.0,
+                io: 5.0,
+                memory: 1000,
+                network: 0.0,
+            },
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let explanation = plan.explain();
+
+        // Should show nested structure with indentation
+        assert!(explanation.contains("Filter"));
+        assert!(explanation.contains("IndexedTraversal"));
+        assert!(explanation.contains("NodeLookup"));
+
+        // Check that nested operators are indented (basic check)
+        let lines: Vec<&str> = explanation.lines().collect();
+        assert!(
+            lines.len() >= 3,
+            "Should have multiple lines for nested ops"
+        );
+    }
+
+    #[test]
+    fn test_explain_with_temporal_context() {
+        let plan = PhysicalPlan {
+            root: PhysicalOp::TemporalNodeLookup {
+                node_ids: vec![NodeId::new(1).unwrap()],
+                valid_time: 1000,
+                transaction_time: 2000,
+                use_batch: false,
+            },
+            estimated_cost: Cost {
+                cpu: 50.0,
+                io: 10.0,
+                memory: 500,
+                network: 0.0,
+            },
+            temporal_context: Some(TemporalContext {
+                as_of: Some((1000, 2000)),
+                between: None,
+            }),
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let explanation = plan.explain();
+
+        // Should mention temporal context
+        assert!(explanation.contains("Temporal") || explanation.contains("temporal"));
+        assert!(explanation.contains("TemporalNodeLookup"));
+    }
+
+    #[test]
+    fn test_explain_binary_operations() {
+        let plan = PhysicalPlan {
+            root: PhysicalOp::HashJoin {
+                left: Box::new(PhysicalOp::NodeScan {
+                    label: Some("Person".to_string()),
+                    estimated_rows: 100,
+                }),
+                right: Box::new(PhysicalOp::NodeScan {
+                    label: Some("Company".to_string()),
+                    estimated_rows: 50,
+                }),
+                left_key: "id".to_string(),
+                right_key: "person_id".to_string(),
+            },
+            estimated_cost: Cost {
+                cpu: 100.0,
+                io: 20.0,
+                memory: 5000,
+                network: 0.0,
+            },
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let explanation = plan.explain();
+
+        // Should show both sides of the join
+        assert!(explanation.contains("HashJoin"));
+        assert!(explanation.contains("Person"));
+        assert!(explanation.contains("Company"));
+    }
+
+    #[test]
+    fn test_explain_includes_cost_breakdown() {
+        let plan = PhysicalPlan {
+            root: PhysicalOp::HnswSearch {
+                embedding: Arc::from([0.1f32; 4].as_slice()),
+                k: 10,
+                label_filter: Some("Document".to_string()),
+            },
+            estimated_cost: Cost {
+                cpu: 15.5,
+                io: 2.0,
+                memory: 1024,
+                network: 0.0,
+            },
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let explanation = plan.explain();
+
+        // Should show cost components
+        assert!(explanation.contains("cpu") || explanation.contains("CPU"));
+        // Should show the actual cost value (15.5)
+        assert!(explanation.contains("15"));
     }
 }
