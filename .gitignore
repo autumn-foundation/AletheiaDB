@@ -60,3 +60,4 @@ benchmark-summary.md
 
 # Temporary Claude working directories
 tmpclaude-*-cwd
+run-benchmarks.bat
