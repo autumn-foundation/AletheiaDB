@@ -460,6 +460,79 @@ impl<S: QueryState> QueryBuilder<S> {
         self
     }
 
+    /// Include provenance metadata in query results.
+    ///
+    /// When enabled, query results will include additional metadata:
+    /// - Timestamps for temporal queries (valid time and transaction time)
+    /// - Traversal paths showing how each result was reached
+    /// - Version information for historical queries
+    ///
+    /// This is useful for:
+    /// - Audit trails and compliance
+    /// - Understanding data lineage
+    /// - Debugging complex queries
+    /// - LLM reasoning about knowledge evolution
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let results = db.query()
+    ///     .as_of(timestamp, tx_time)
+    ///     .start(node_id)
+    ///     .traverse("KNOWS")
+    ///     .with_provenance()
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn with_provenance(mut self) -> Self {
+        self.hints.include_provenance = true;
+        self
+    }
+
+    /// Execute the query against the database.
+    ///
+    /// This is a convenience method that combines `build()` and `db.execute_query()`.
+    /// It builds the query, optimizes it through the query planner, and executes it.
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - Reference to the database to execute against
+    ///
+    /// # Returns
+    ///
+    /// `QueryResults` iterator that can be consumed to retrieve results
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if query execution fails, including:
+    /// - Invalid node/edge IDs
+    /// - Missing vector index when required
+    /// - Temporal reconstruction failures
+    /// - Internal execution errors
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::GallifreyDB;
+    ///
+    /// let db = GallifreyDB::new();
+    /// let results = db.query()
+    ///     .start(alice_id)
+    ///     .traverse("KNOWS")
+    ///     .execute(&db)?;
+    ///
+    /// for row in results {
+    ///     let row = row?;
+    ///     println!("Found: {:?}", row.entity);
+    /// }
+    /// ```
+    pub fn execute(
+        self,
+        db: &crate::GallifreyDB,
+    ) -> crate::utils::error::Result<super::executor::QueryResults> {
+        let query = self.build();
+        db.execute_query(query)
+    }
     /// Build the final query
     #[must_use]
     pub fn build(self) -> Query {
@@ -839,5 +912,37 @@ mod tests {
         let _ = QueryBuilder::new()
             .start(test_node_id())
             .similar_to_builder(test_node_id(), 0); // Should panic
+    }
+
+    // ==================== Provenance Tests ====================
+
+    #[test]
+    fn test_with_provenance() {
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .with_provenance()
+            .build();
+
+        assert!(query.hints.include_provenance);
+    }
+
+    #[test]
+    fn test_with_provenance_fluent_chaining() {
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .traverse("KNOWS")
+            .with_provenance()
+            .limit(10)
+            .build();
+
+        assert!(query.hints.include_provenance);
+        assert_eq!(query.operation_count(), 3); // start + traverse + limit
+    }
+
+    #[test]
+    fn test_without_provenance_default() {
+        let query = QueryBuilder::new().start(test_node_id()).build();
+
+        assert!(!query.hints.include_provenance);
     }
 }

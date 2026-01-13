@@ -332,6 +332,8 @@ pub struct QueryHints {
     pub disabled_optimizations: Vec<String>,
     /// Enable parallel execution
     pub parallel: bool,
+    /// Include provenance metadata (timestamps, paths, version info) in results
+    pub include_provenance: bool,
 }
 
 /// Index hint for forcing specific index usage.

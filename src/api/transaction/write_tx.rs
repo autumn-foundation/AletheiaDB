@@ -1910,7 +1910,7 @@ mod tests {
         );
         assert!(node.get_property("embedding").is_some());
         if let Some(vec_val) = node.get_property("embedding").and_then(|v| v.as_vector()) {
-            assert_eq!(vec_val.as_ref(), &[0.1f32, 0.2, 0.3]);
+            assert_eq!(vec_val, &[0.1f32, 0.2, 0.3]);
         } else {
             panic!("Vector property not found or wrong type");
         }
@@ -2156,7 +2156,7 @@ mod tests {
         );
         assert!(edge.get_property("embedding").is_some());
         if let Some(vec_val) = edge.get_property("embedding").and_then(|v| v.as_vector()) {
-            assert_eq!(vec_val.as_ref(), &[0.5f32, 0.6, 0.7]);
+            assert_eq!(vec_val, &[0.5f32, 0.6, 0.7]);
         } else {
             panic!("Vector property not found or wrong type");
         }

@@ -880,6 +880,44 @@ impl ResultIterator for LimitIterator {
     }
 }
 
+/// Wrapper iterator that strips provenance metadata when include_provenance is false.
+///
+/// This iterator conditionally removes timestamp and path information from QueryRow
+/// results based on the query hint. When include_provenance is false, these fields
+/// are set to None for better performance and reduced memory usage.
+pub struct ProvenanceFilterIterator {
+    inner: Box<dyn ResultIterator>,
+    include_provenance: bool,
+}
+
+impl ProvenanceFilterIterator {
+    pub fn new(inner: Box<dyn ResultIterator>, include_provenance: bool) -> Self {
+        ProvenanceFilterIterator {
+            inner,
+            include_provenance,
+        }
+    }
+}
+
+impl ResultIterator for ProvenanceFilterIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        self.inner.next().map(|result| {
+            result.map(|mut row| {
+                if !self.include_provenance {
+                    // Strip provenance metadata
+                    row.path = None;
+                    row.timestamp = None;
+                }
+                row
+            })
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

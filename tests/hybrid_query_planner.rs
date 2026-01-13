@@ -1638,3 +1638,103 @@ fn test_query_builder_type_safety() {
 
     println!("✓ QueryBuilder type-state pattern enforces valid query construction");
 }
+
+// ==================== QueryBuilder.execute() Tests ====================
+
+#[test]
+fn test_query_builder_execute_method() {
+    let db = create_test_db();
+
+    // Create a test node
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node");
+
+    // Execute query using the new .execute() method on QueryBuilder
+    let results = db
+        .query()
+        .start(alice)
+        .execute(&db)
+        .expect("Query execution failed");
+
+    let rows: Vec<_> = results.collect_all().expect("Failed to collect results");
+    assert_eq!(rows.len(), 1, "Should return exactly one node");
+    assert_eq!(rows[0].entity.node_id(), Some(alice), "Should return Alice");
+
+    println!("✓ QueryBuilder.execute() method works correctly");
+}
+
+#[test]
+fn test_provenance_flag_strips_metadata() {
+    let db = create_test_db();
+
+    // Create test nodes
+    let alice = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create Alice");
+
+    let bob = db
+        .create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("name", "Bob")
+                .insert_vector("embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create Bob");
+
+    // Create edge
+    db.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+        .expect("Failed to create edge");
+
+    // Query WITHOUT provenance - path should be None
+    let results_no_prov = db.query().start(alice).traverse("KNOWS").build();
+    let rows_no_prov = db
+        .execute_query(results_no_prov)
+        .expect("Query failed")
+        .collect_all()
+        .expect("Failed to collect");
+
+    assert_eq!(rows_no_prov.len(), 1);
+    assert!(
+        rows_no_prov[0].path.is_none(),
+        "Path should be None without provenance flag"
+    );
+
+    // Query WITH provenance - path should be populated
+    let results_with_prov = db
+        .query()
+        .start(alice)
+        .traverse("KNOWS")
+        .with_provenance()
+        .build();
+    let rows_with_prov = db
+        .execute_query(results_with_prov)
+        .expect("Query failed")
+        .collect_all()
+        .expect("Failed to collect");
+
+    assert_eq!(rows_with_prov.len(), 1);
+    assert!(
+        rows_with_prov[0].path.is_some(),
+        "Path should be populated with provenance flag"
+    );
+    assert!(
+        rows_with_prov[0].path.as_ref().unwrap().len() >= 2,
+        "Path should have at least 2 entities"
+    );
+
+    println!("✓ Provenance flag correctly controls metadata inclusion");
+}
