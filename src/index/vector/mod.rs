@@ -92,6 +92,60 @@
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::utils::Result;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Quantization level for vector storage.
+///
+/// Lower precision reduces memory usage but may impact recall slightly.
+/// - F32: Full precision (default), no recall impact
+/// - F16: Half precision, ~2x memory savings, <1% recall impact typical
+/// - I8: Quarter precision, ~4x memory savings, 1-3% recall impact typical
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Quantization {
+    /// 32-bit floating point (default, full precision)
+    #[default]
+    F32,
+    /// 16-bit floating point (half precision, ~2x memory savings)
+    F16,
+    /// 8-bit signed integer (quarter precision, ~4x memory savings)
+    I8,
+}
+
+/// Storage mode for the vector index.
+///
+/// - InMemory: All data in RAM (default, fastest queries)
+/// - MemoryMapped: Data on disk, lazily loaded (saves RAM, slightly slower)
+#[derive(Debug, Clone, Default)]
+pub enum StorageMode {
+    /// Store index entirely in memory (default)
+    #[default]
+    InMemory,
+    /// Memory-map index from disk path
+    MemoryMapped {
+        /// Path to the index file
+        path: PathBuf,
+    },
+}
+
+/// Custom distance metric function.
+///
+/// Allows user-defined similarity functions for specialized use cases.
+pub struct CustomMetric {
+    /// Human-readable name for the metric
+    pub name: String,
+    /// The distance function: takes two vectors, returns distance (lower = more similar)
+    pub distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync>,
+}
+
+impl std::fmt::Debug for CustomMetric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomMetric")
+            .field("name", &self.name)
+            .field("distance_fn", &"<function>")
+            .finish()
+    }
+}
 
 /// Type alias for temporal search results: Vec<(timestamp, Vec<(node_id, similarity)>)>
 pub type TemporalSearchResults = Vec<(Timestamp, Vec<(NodeId, f32)>)>;
@@ -110,6 +164,12 @@ pub enum DistanceMetric {
     Euclidean,
     /// Dot product: inner product of vectors, range (-∞, ∞)
     DotProduct,
+    /// Haversine: great circle distance for geographic coordinates
+    Haversine,
+    /// Hamming: bit-level distance for binary vectors
+    Hamming,
+    /// Tanimoto: bit-level Jaccard similarity for chemical fingerprints
+    Tanimoto,
 }
 impl DistanceMetric {
     /// Encode distance metric as a byte for serialization.
@@ -133,6 +193,9 @@ impl DistanceMetric {
             DistanceMetric::Cosine => 0,
             DistanceMetric::Euclidean => 1,
             DistanceMetric::DotProduct => 2,
+            DistanceMetric::Haversine => 3,
+            DistanceMetric::Hamming => 4,
+            DistanceMetric::Tanimoto => 5,
         }
     }
 
@@ -157,6 +220,9 @@ impl DistanceMetric {
             0 => Ok(DistanceMetric::Cosine),
             1 => Ok(DistanceMetric::Euclidean),
             2 => Ok(DistanceMetric::DotProduct),
+            3 => Ok(DistanceMetric::Haversine),
+            4 => Ok(DistanceMetric::Hamming),
+            5 => Ok(DistanceMetric::Tanimoto),
             _ => Err(crate::utils::error::StorageError::CorruptedData(format!(
                 "Invalid distance metric encoding: {}",
                 value
@@ -468,6 +534,27 @@ mod tests {
         assert_eq!(metric, DistanceMetric::Cosine);
         assert_ne!(metric, DistanceMetric::Euclidean);
     }
+
+    #[test]
+    fn test_quantization_default() {
+        assert_eq!(Quantization::default(), Quantization::F32);
+    }
+
+    #[test]
+    fn test_storage_mode_default() {
+        assert!(matches!(StorageMode::default(), StorageMode::InMemory));
+    }
+
+    #[test]
+    fn test_distance_metric_new_variants() {
+        // Test new variants serialize/deserialize correctly
+        assert_eq!(DistanceMetric::Haversine.to_u8(), 3);
+        assert_eq!(DistanceMetric::Hamming.to_u8(), 4);
+        assert_eq!(DistanceMetric::Tanimoto.to_u8(), 5);
+        assert_eq!(DistanceMetric::from_u8(3).unwrap(), DistanceMetric::Haversine);
+        assert_eq!(DistanceMetric::from_u8(4).unwrap(), DistanceMetric::Hamming);
+        assert_eq!(DistanceMetric::from_u8(5).unwrap(), DistanceMetric::Tanimoto);
+    }
 }
 
 // HNSW implementation
@@ -478,6 +565,9 @@ pub mod temporal;
 
 // Re-export HNSW types for convenience
 pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};
+
+// Re-export new types for convenience
+pub use self::{CustomMetric, Quantization, StorageMode};
 
 // Re-export temporal types for convenience
 pub use temporal::{
