@@ -15,7 +15,7 @@ use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::vector::cosine_similarity;
 use gallifreydb::db::GallifreyDB;
 use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
-use gallifreydb::query::hybrid::traverse_and_rank;
+use gallifreydb::query::hybrid::{traverse_and_rank, find_similar_as_of};
 use std::cmp::Ordering;
 
 // Placeholder benchmark - will be replaced with actual benchmarks in subsequent tasks
