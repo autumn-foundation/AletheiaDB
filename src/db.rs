@@ -935,16 +935,9 @@ impl GallifreyDB {
         property_name: &str,
         config: TemporalVectorConfig,
     ) -> Result<()> {
-        if let Some(indexed_prop) = self.current.get_indexed_property_name() {
-            if indexed_prop != property_name {
-                return Err(crate::utils::error::Error::Vector(
-                    crate::utils::error::VectorError::IndexError(format!(
-                        "A vector index is already enabled on property '{}', but a temporal index is requested for '{}'. Only one vector index property is supported at a time.",
-                        indexed_prop, property_name
-                    )),
-                ));
-            }
-        } else {
+        // For multi-property support: check if current-state vector index exists for THIS property
+        // If not, enable it first (temporal requires current-state index)
+        if !self.current.is_vector_index_enabled_for(property_name) {
             self.enable_vector_index(property_name, config.hnsw_config.clone())?;
         }
 
@@ -4121,6 +4114,147 @@ mod tests {
         assert!(
             result.is_err(),
             "Should fail when property doesn't match temporal index"
+        );
+    }
+
+    // ========================================================================
+    // Multi-Property Temporal Index Tests (Issue #389 - Critical Fix)
+    // ========================================================================
+
+    /// Test that multiple temporal vector indexes can be enabled for different properties.
+    /// This is the critical test for multi-property temporal support.
+    #[test]
+    fn test_multi_property_temporal_indexes() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+
+        // Enable temporal index for FIRST property
+        let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("title_embedding")
+            .hnsw(hnsw_config1.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: hnsw_config1,
+            })
+            .enable()
+            .expect("Should enable first temporal index");
+
+        // Enable temporal index for SECOND property - should NOT overwrite first!
+        let hnsw_config2 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("content_embedding")
+            .hnsw(hnsw_config2.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: hnsw_config2,
+            })
+            .enable()
+            .expect("Should enable second temporal index");
+
+        // Create a node with both embeddings
+        let title_emb = vec![1.0f32, 0.0, 0.0, 0.0];
+        let content_emb = vec![0.0f32, 1.0, 0.0, 0.0];
+        let node_id = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("title_embedding", &title_emb)
+                    .insert_vector("content_embedding", &content_emb)
+                    .build(),
+            )
+            .unwrap();
+
+        // Both temporal indexes should work independently
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let query = vec![0.9f32, 0.1, 0.0, 0.0];
+
+        // Query first property's temporal index
+        let result1 = db.find_similar_as_of_in(
+            "title_embedding",
+            &query,
+            10,
+            crate::core::temporal::time::now(),
+        );
+        assert!(
+            result1.is_ok(),
+            "First temporal index should still work: {:?}",
+            result1.err()
+        );
+
+        // Query second property's temporal index
+        let result2 = db.find_similar_as_of_in(
+            "content_embedding",
+            &query,
+            10,
+            crate::core::temporal::time::now(),
+        );
+        assert!(
+            result2.is_ok(),
+            "Second temporal index should work: {:?}",
+            result2.err()
+        );
+
+        // Both track_drift_in should work
+        let reference = vec![1.0f32, 0.0, 0.0, 0.0];
+        let drift1 = db.track_drift_in("title_embedding", node_id, &reference, time_range);
+        assert!(
+            drift1.is_ok(),
+            "track_drift_in for first property should work"
+        );
+
+        let drift2 = db.track_drift_in("content_embedding", node_id, &reference, time_range);
+        assert!(
+            drift2.is_ok(),
+            "track_drift_in for second property should work"
+        );
+    }
+
+    /// Test that temporal queries on non-existent property fail gracefully.
+    #[test]
+    fn test_temporal_query_nonexistent_property() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+
+        // Enable temporal index for one property
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config,
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        // Query a property that has NO temporal index enabled
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let result = db.find_similar_as_of_in(
+            "nonexistent_property",
+            &query,
+            10,
+            crate::core::temporal::time::now(),
+        );
+
+        assert!(
+            result.is_err(),
+            "Should fail for property without temporal index"
         );
     }
 }

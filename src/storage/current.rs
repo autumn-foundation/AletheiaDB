@@ -76,7 +76,17 @@ impl VectorIndexState {
     }
 }
 
-/// Internal state for temporal vector indexing.
+/// Entry for a temporal vector index (multi-property support).
+struct TemporalVectorIndexEntry {
+    /// The temporal vector index for this property
+    index: Arc<TemporalVectorIndex>,
+    /// Configuration used to create this index
+    #[allow(dead_code)]
+    config: TemporalVectorConfig,
+}
+
+/// Legacy internal state for temporal vector indexing.
+/// Kept for backward compatibility with existing code paths.
 struct TemporalVectorIndexState {
     index: Option<Arc<TemporalVectorIndex>>,
     property_name: Option<String>,
@@ -92,6 +102,7 @@ impl TemporalVectorIndexState {
         }
     }
 
+    #[allow(dead_code)] // Kept for backward compatibility with legacy single-property API
     fn is_enabled(&self) -> bool {
         self.index.is_some()
     }
@@ -116,7 +127,10 @@ pub struct CurrentStorage {
     vector_indexes: DashMap<String, VectorIndexEntry>,
     /// Vector index state (legacy single-property, for backward compatibility)
     vector_index_state: Arc<RwLock<VectorIndexState>>,
-    /// Temporal vector index state (Phase 3)
+    /// Multi-property temporal vector indexes (Issue #389 fix)
+    /// Maps property name -> TemporalVectorIndexEntry
+    temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>,
+    /// Legacy temporal vector index state (for backward compatibility)
     temporal_vector_index_state: Arc<RwLock<TemporalVectorIndexState>>,
 }
 
@@ -130,6 +144,7 @@ impl CurrentStorage {
             version_id_gen: IdGenerator::new(),
             vector_indexes: DashMap::new(),
             vector_index_state: Arc::new(RwLock::new(VectorIndexState::new())),
+            temporal_vector_indexes: DashMap::new(),
             temporal_vector_index_state: Arc::new(RwLock::new(TemporalVectorIndexState::new())),
         }
     }
@@ -231,6 +246,13 @@ impl CurrentStorage {
     /// Returns `true` if at least one property has a vector index.
     pub fn is_vector_index_enabled(&self) -> bool {
         !self.vector_indexes.is_empty() || self.vector_index_state.read().is_enabled()
+    }
+
+    /// Check if vector indexing is enabled for a specific property.
+    ///
+    /// Returns `true` if the property has a vector index configured.
+    pub fn is_vector_index_enabled_for(&self, property_name: &str) -> bool {
+        self.vector_indexes.contains_key(property_name)
     }
 
     /// Get the first/default property name that is currently indexed.
@@ -1040,19 +1062,31 @@ impl CurrentStorage {
         property_name: &str,
         config: TemporalVectorConfig,
     ) -> Result<()> {
-        let mut state = self.temporal_vector_index_state.write();
-        if state.is_enabled() {
+        // Check if already enabled for this specific property
+        if self.temporal_vector_indexes.contains_key(property_name) {
             return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError(
-                    "Temporal vector index is already enabled".to_string(),
-                ),
+                crate::utils::error::VectorError::IndexError(format!(
+                    "Temporal vector index is already enabled for property '{}'",
+                    property_name
+                )),
             ));
         }
 
         // Create temporal vector index wrapped in Arc for sharing
         let index = Arc::new(TemporalVectorIndex::new(config.clone())?);
 
-        // Store state
+        // Insert into multi-property DashMap
+        self.temporal_vector_indexes.insert(
+            property_name.to_string(),
+            TemporalVectorIndexEntry {
+                index: Arc::clone(&index),
+                config: config.clone(),
+            },
+        );
+
+        // Also update legacy state for backward compatibility
+        // (uses the most recently added index)
+        let mut state = self.temporal_vector_index_state.write();
         state.index = Some(index);
         state.property_name = Some(property_name.to_string());
         state.config = Some(config);
@@ -1060,14 +1094,32 @@ impl CurrentStorage {
         Ok(())
     }
 
-    /// Check if temporal vector indexing is enabled.
+    /// Check if temporal vector indexing is enabled for any property.
     pub fn is_temporal_vector_index_enabled(&self) -> bool {
-        self.temporal_vector_index_state.read().is_enabled()
+        !self.temporal_vector_indexes.is_empty()
     }
 
-    /// Get a reference to the temporal vector index if enabled.
+    /// Check if temporal vector indexing is enabled for a specific property.
+    pub fn is_temporal_vector_index_enabled_for(&self, property_name: &str) -> bool {
+        self.temporal_vector_indexes.contains_key(property_name)
+    }
+
+    /// Get a reference to the temporal vector index for a specific property.
+    ///
+    /// Returns `None` if temporal vector indexing is not enabled for that property.
+    pub(crate) fn get_temporal_vector_index_for(
+        &self,
+        property_name: &str,
+    ) -> Option<Arc<TemporalVectorIndex>> {
+        self.temporal_vector_indexes
+            .get(property_name)
+            .map(|entry| Arc::clone(&entry.index))
+    }
+
+    /// Get a reference to the temporal vector index if enabled (legacy single-property API).
     ///
     /// Returns `None` if temporal vector indexing is not enabled.
+    /// For multi-property support, use `get_temporal_vector_index_for` instead.
     pub(crate) fn get_temporal_vector_index(&self) -> Option<Arc<TemporalVectorIndex>> {
         let state = self.temporal_vector_index_state.read();
         state.index.clone()
@@ -1155,32 +1207,18 @@ impl CurrentStorage {
         k: usize,
         timestamp: crate::core::temporal::Timestamp,
     ) -> Result<Vec<(crate::core::NodeId, f32)>> {
-        let state = self.temporal_vector_index_state.read();
-
-        // Get the temporal index
-        let index = state.index.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
-                    .to_string(),
-            ))
-        })?;
-
-        // Validate that the requested property matches the indexed property
-        let indexed_property = state.property_name.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Temporal vector index has no property name configured.".to_string(),
-            ))
-        })?;
-
-        if indexed_property != property_name {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError(format!(
-                    "Property '{}' does not match the temporal vector index property '{}'. \
-                     Use find_similar_as_of_in(\"{}\", ...) instead.",
-                    property_name, indexed_property, indexed_property
-                )),
-            ));
-        }
+        // Look up the temporal index for this specific property
+        let index = self
+            .get_temporal_vector_index_for(property_name)
+            .ok_or_else(|| {
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                    format!(
+                        "No temporal vector index enabled for property '{}'. \
+                     Call db.vector_index(\"{}\").temporal(...).enable() first.",
+                        property_name, property_name
+                    ),
+                ))
+            })?;
 
         index.find_similar_as_of(embedding, k, timestamp)
     }
@@ -1216,32 +1254,18 @@ impl CurrentStorage {
         reference_embedding: &[f32],
         time_range: crate::core::temporal::TimeRange,
     ) -> Result<Vec<(crate::core::temporal::Timestamp, f32)>> {
-        let state = self.temporal_vector_index_state.read();
-
-        // Get the temporal index
-        let index = state.index.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
-                    .to_string(),
-            ))
-        })?;
-
-        // Validate that the requested property matches the indexed property
-        let indexed_property = state.property_name.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Temporal vector index has no property name configured.".to_string(),
-            ))
-        })?;
-
-        if indexed_property != property_name {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError(format!(
-                    "Property '{}' does not match the temporal vector index property '{}'. \
-                     Use track_drift_in(\"{}\", ...) instead.",
-                    property_name, indexed_property, indexed_property
-                )),
-            ));
-        }
+        // Look up the temporal index for this specific property (multi-property support)
+        let index = self
+            .get_temporal_vector_index_for(property_name)
+            .ok_or_else(|| {
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                    format!(
+                        "No temporal vector index enabled for property '{}'. \
+                     Call db.vector_index(\"{}\").temporal(...).enable() first.",
+                        property_name, property_name
+                    ),
+                ))
+            })?;
 
         index.track_semantic_drift(node_id, reference_embedding, time_range)
     }
@@ -1255,30 +1279,18 @@ impl CurrentStorage {
         node_id: crate::core::NodeId,
         time_range: crate::core::temporal::TimeRange,
     ) -> Result<Vec<(crate::core::temporal::Timestamp, std::sync::Arc<[f32]>)>> {
-        let state = self.temporal_vector_index_state.read();
-
-        let index = state.index.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
-                    .to_string(),
-            ))
-        })?;
-
-        let indexed_property = state.property_name.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Temporal vector index has no property name configured.".to_string(),
-            ))
-        })?;
-
-        if indexed_property != property_name {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError(format!(
-                    "Property '{}' does not match the temporal vector index property '{}'. \
-                     Use semantic_evolution_in(\"{}\", ...) instead.",
-                    property_name, indexed_property, indexed_property
-                )),
-            ));
-        }
+        // Look up the temporal index for this specific property (multi-property support)
+        let index = self
+            .get_temporal_vector_index_for(property_name)
+            .ok_or_else(|| {
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                    format!(
+                        "No temporal vector index enabled for property '{}'. \
+                     Call db.vector_index(\"{}\").temporal(...).enable() first.",
+                        property_name, property_name
+                    ),
+                ))
+            })?;
 
         index.semantic_evolution(node_id, time_range)
     }
@@ -1294,30 +1306,18 @@ impl CurrentStorage {
         time_range: crate::core::temporal::TimeRange,
         metric: crate::index::vector::temporal::DriftMetric,
     ) -> Result<Vec<(crate::core::NodeId, f32)>> {
-        let state = self.temporal_vector_index_state.read();
-
-        let index = state.index.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
-                    .to_string(),
-            ))
-        })?;
-
-        let indexed_property = state.property_name.as_ref().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Temporal vector index has no property name configured.".to_string(),
-            ))
-        })?;
-
-        if indexed_property != property_name {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::IndexError(format!(
-                    "Property '{}' does not match the temporal vector index property '{}'. \
-                     Use find_drift_in(\"{}\", ...) instead.",
-                    property_name, indexed_property, indexed_property
-                )),
-            ));
-        }
+        // Look up the temporal index for this specific property (multi-property support)
+        let index = self
+            .get_temporal_vector_index_for(property_name)
+            .ok_or_else(|| {
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                    format!(
+                        "No temporal vector index enabled for property '{}'. \
+                     Call db.vector_index(\"{}\").temporal(...).enable() first.",
+                        property_name, property_name
+                    ),
+                ))
+            })?;
 
         index.find_semantic_drift(threshold, time_range, metric)
     }
