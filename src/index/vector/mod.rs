@@ -510,6 +510,60 @@ pub trait VectorIndex: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Adds multiple vectors in a batch operation.
+    ///
+    /// More efficient than calling `add()` repeatedly for bulk insertions.
+    /// Default implementation calls `add()` sequentially.
+    fn add_batch(&self, items: &[(NodeId, Vec<f32>)]) -> Result<()> {
+        for (id, vec) in items {
+            self.add(*id, vec)?;
+        }
+        Ok(())
+    }
+
+    /// Removes multiple vectors in a batch operation.
+    ///
+    /// Default implementation calls `remove()` sequentially.
+    fn remove_batch(&self, ids: &[NodeId]) -> Result<()> {
+        for id in ids {
+            self.remove(*id)?;
+        }
+        Ok(())
+    }
+
+    /// Saves the index to a file path.
+    ///
+    /// Returns `Err(UnsupportedOperation)` if the implementation doesn't support persistence.
+    fn save(&self, _path: &std::path::Path) -> Result<()> {
+        Err(crate::utils::Error::Vector(
+            crate::utils::error::VectorError::IndexError {
+                message: "save not supported by this index type".to_string(),
+            },
+        ))
+    }
+
+    /// Returns the approximate memory usage of this index in bytes.
+    ///
+    /// Default returns 0 (unknown).
+    fn memory_usage(&self) -> usize {
+        0
+    }
+
+    /// Returns the quantization level of this index.
+    ///
+    /// Default returns F32 (full precision).
+    fn quantization(&self) -> Quantization {
+        Quantization::F32
+    }
+
+    /// Compacts the index, reclaiming space from deleted entries.
+    ///
+    /// For indexes that support native deletes, this may be a no-op.
+    /// For indexes using soft deletes, this rebuilds the index.
+    fn compact(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -565,9 +619,6 @@ pub mod temporal;
 
 // Re-export HNSW types for convenience
 pub use hnsw::{HnswConfig, HnswIndex, HnswIndexBuilder};
-
-// Re-export new types for convenience
-pub use self::{CustomMetric, Quantization, StorageMode};
 
 // Re-export temporal types for convenience
 pub use temporal::{
