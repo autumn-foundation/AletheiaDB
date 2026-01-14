@@ -84,7 +84,12 @@ impl PredicatePushdown {
 
                     // Push filter below VectorRank (reranking doesn't change what we filter)
                     LogicalOp::Unary {
-                        op: UnaryOp::VectorRank { embedding, top_k },
+                        op:
+                            UnaryOp::VectorRank {
+                                embedding,
+                                top_k,
+                                property_key,
+                            },
                         input: vector_input,
                     } => {
                         // Push filter below vector rank
@@ -92,6 +97,7 @@ impl PredicatePushdown {
                             UnaryOp::VectorRank {
                                 embedding: embedding.clone(),
                                 top_k: *top_k,
+                                property_key: property_key.clone(),
                             },
                             LogicalOp::unary(
                                 UnaryOp::Filter(predicate.clone()),
@@ -187,6 +193,7 @@ mod tests {
                 UnaryOp::VectorRank {
                     embedding: Arc::from([0.1f32; 4].as_slice()),
                     top_k: Some(10),
+                    property_key: None,
                 },
                 LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
             ),

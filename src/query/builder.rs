@@ -143,7 +143,10 @@ impl QueryBuilder<state::Initial> {
         self.add_op(QueryOp::StartNodes(node_ids))
     }
 
-    /// Start with a vector similarity search
+    /// Start with a vector similarity search (simple version).
+    ///
+    /// Uses the default "embedding" property and Cosine distance.
+    /// For custom properties or metrics, use [`find_similar_builder()`](Self::find_similar_builder).
     #[must_use]
     pub fn find_similar(
         self,
@@ -154,6 +157,7 @@ impl QueryBuilder<state::Initial> {
             embedding: Arc::from(embedding),
             k,
             metric: DistanceMetric::Cosine,
+            property_key: None,
         })
     }
 
@@ -169,7 +173,27 @@ impl QueryBuilder<state::Initial> {
             embedding: Arc::from(embedding),
             k,
             metric,
+            property_key: None,
         })
+    }
+
+    /// Create a builder for advanced VectorSearch configuration.
+    ///
+    /// Use this when you need to specify a custom embedding property key
+    /// or distance metric. For simple cases, use [`find_similar()`](Self::find_similar).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let query = QueryBuilder::new()
+    ///     .find_similar_builder(&embedding, 10)
+    ///         .property("title_embedding")
+    ///         .metric(DistanceMetric::Euclidean)
+    ///         .finish()
+    ///     .build();
+    /// ```
+    pub fn find_similar_builder(self, embedding: &[f32], k: usize) -> FindSimilarBuilder {
+        FindSimilarBuilder::new(embedding, k, self)
     }
 
     /// Scan all nodes, optionally filtered by label
@@ -241,7 +265,10 @@ impl QueryBuilder<state::HasNodes> {
         })
     }
 
-    /// Rank current nodes by similarity to an embedding
+    /// Rank current nodes by similarity to an embedding (simple version).
+    ///
+    /// Uses the default "embedding" property. For custom properties,
+    /// use [`rank_by_similarity_builder()`](Self::rank_by_similarity_builder).
     #[must_use]
     pub fn rank_by_similarity(
         self,
@@ -251,7 +278,32 @@ impl QueryBuilder<state::HasNodes> {
         self.add_op(QueryOp::RankBySimilarity {
             embedding: Arc::from(embedding),
             top_k: Some(top_k),
+            property_key: None,
         })
+    }
+
+    /// Create a builder for advanced RankBySimilarity configuration.
+    ///
+    /// Use this when you need to specify a custom embedding property key.
+    /// For simple cases, use [`rank_by_similarity()`](Self::rank_by_similarity).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let query = QueryBuilder::new()
+    ///     .start(alice_id)
+    ///     .traverse("KNOWS")
+    ///     .rank_by_similarity_builder(&embedding, 10)
+    ///         .property("custom_embedding")
+    ///         .finish()
+    ///     .build();
+    /// ```
+    pub fn rank_by_similarity_builder(
+        self,
+        embedding: &[f32],
+        top_k: usize,
+    ) -> RankBySimilarityBuilder<state::HasNodes> {
+        RankBySimilarityBuilder::new(embedding, top_k, self)
     }
 
     /// Find nodes similar to a source node's embedding (simple version).
@@ -367,7 +419,10 @@ impl QueryBuilder<state::HasTraversalResults> {
         })
     }
 
-    /// Rank traversal results by similarity
+    /// Rank traversal results by similarity (simple version).
+    ///
+    /// Uses the default "embedding" property. For custom properties,
+    /// use [`rank_by_similarity_builder()`](Self::rank_by_similarity_builder).
     #[must_use]
     pub fn rank_by_similarity(
         self,
@@ -377,7 +432,33 @@ impl QueryBuilder<state::HasTraversalResults> {
         self.add_op(QueryOp::RankBySimilarity {
             embedding: Arc::from(embedding),
             top_k: Some(top_k),
+            property_key: None,
         })
+    }
+
+    /// Create a builder for advanced RankBySimilarity configuration.
+    ///
+    /// Use this when you need to specify a custom embedding property key.
+    /// For simple cases, use [`rank_by_similarity()`](Self::rank_by_similarity).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let query = QueryBuilder::new()
+    ///     .start(alice_id)
+    ///     .traverse("KNOWS")
+    ///     .traverse("WORKS_AT")
+    ///     .rank_by_similarity_builder(&embedding, 10)
+    ///         .property("custom_embedding")
+    ///         .finish()
+    ///     .build();
+    /// ```
+    pub fn rank_by_similarity_builder(
+        self,
+        embedding: &[f32],
+        top_k: usize,
+    ) -> RankBySimilarityBuilder<state::HasTraversalResults> {
+        RankBySimilarityBuilder::new(embedding, top_k, self)
     }
 
     /// Filter traversal results
@@ -636,6 +717,142 @@ impl<S: QueryState> SimilarToBuilder<S> {
             k: self.k,
             property_key: self.property_key,
             label_filter: self.label_filter,
+        })
+    }
+}
+
+/// Builder for configuring RankBySimilarity operations with optional parameters.
+///
+/// Created by calling [`QueryBuilder::rank_by_similarity_builder()`].
+///
+/// # Example
+///
+/// ```ignore
+/// let query = QueryBuilder::new()
+///     .start(alice_id)
+///     .traverse("KNOWS")
+///     .rank_by_similarity_builder(&embedding, 10)
+///         .property("custom_embedding")
+///         .finish()
+///     .build();
+/// ```
+#[must_use = "builders do nothing unless you call finish()"]
+pub struct RankBySimilarityBuilder<S: QueryState> {
+    embedding: Arc<[f32]>,
+    top_k: usize,
+    property_key: Option<String>,
+    query_builder: QueryBuilder<S>,
+}
+
+impl<S: QueryState> RankBySimilarityBuilder<S> {
+    fn new(embedding: &[f32], top_k: usize, query_builder: QueryBuilder<S>) -> Self {
+        RankBySimilarityBuilder {
+            embedding: Arc::from(embedding),
+            top_k,
+            property_key: None,
+            query_builder,
+        }
+    }
+
+    /// Specify which vector property to use for ranking.
+    ///
+    /// Default: "embedding"
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// .rank_by_similarity_builder(&embedding, 10)
+    ///     .property("custom_embedding")
+    ///     .finish()
+    /// ```
+    pub fn property(mut self, key: impl Into<String>) -> Self {
+        self.property_key = Some(key.into());
+        self
+    }
+
+    /// Finish building and add the RankBySimilarity operation to the query.
+    pub fn finish(self) -> QueryBuilder<state::HasVectorResults> {
+        self.query_builder.add_op(QueryOp::RankBySimilarity {
+            embedding: self.embedding,
+            top_k: Some(self.top_k),
+            property_key: self.property_key,
+        })
+    }
+}
+
+/// Builder for configuring VectorSearch (find_similar) operations with optional parameters.
+///
+/// Created by calling [`QueryBuilder::find_similar_builder()`].
+///
+/// # Example
+///
+/// ```ignore
+/// let query = QueryBuilder::new()
+///     .find_similar_builder(&embedding, 10)
+///         .property("title_embedding")
+///         .metric(DistanceMetric::Euclidean)
+///         .finish()
+///     .build();
+/// ```
+#[must_use = "builders do nothing unless you call finish()"]
+pub struct FindSimilarBuilder {
+    embedding: Arc<[f32]>,
+    k: usize,
+    metric: DistanceMetric,
+    property_key: Option<String>,
+    query_builder: QueryBuilder<state::Initial>,
+}
+
+impl FindSimilarBuilder {
+    fn new(embedding: &[f32], k: usize, query_builder: QueryBuilder<state::Initial>) -> Self {
+        FindSimilarBuilder {
+            embedding: Arc::from(embedding),
+            k,
+            metric: DistanceMetric::Cosine,
+            property_key: None,
+            query_builder,
+        }
+    }
+
+    /// Specify which vector property to search.
+    ///
+    /// Default: "embedding"
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// .find_similar_builder(&embedding, 10)
+    ///     .property("body_embedding")
+    ///     .finish()
+    /// ```
+    pub fn property(mut self, key: impl Into<String>) -> Self {
+        self.property_key = Some(key.into());
+        self
+    }
+
+    /// Specify the distance metric to use.
+    ///
+    /// Default: Cosine
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// .find_similar_builder(&embedding, 10)
+    ///     .metric(DistanceMetric::Euclidean)
+    ///     .finish()
+    /// ```
+    pub fn metric(mut self, metric: DistanceMetric) -> Self {
+        self.metric = metric;
+        self
+    }
+
+    /// Finish building and add the VectorSearch operation to the query.
+    pub fn finish(self) -> QueryBuilder<state::HasVectorResults> {
+        self.query_builder.add_op(QueryOp::VectorSearch {
+            embedding: self.embedding,
+            k: self.k,
+            metric: self.metric,
+            property_key: self.property_key,
         })
     }
 }
@@ -944,5 +1161,115 @@ mod tests {
         let query = QueryBuilder::new().start(test_node_id()).build();
 
         assert!(!query.hints.include_provenance);
+    }
+
+    // ==================== RankBySimilarity Property Tests (Issue #389) ====================
+
+    #[test]
+    fn test_rank_by_similarity_simple_uses_default_property() {
+        let embedding = test_embedding();
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .traverse("KNOWS")
+            .rank_by_similarity(&embedding, 10)
+            .build();
+
+        match &query.ops[2] {
+            QueryOp::RankBySimilarity {
+                top_k,
+                property_key,
+                ..
+            } => {
+                assert_eq!(*top_k, Some(10));
+                assert!(property_key.is_none(), "Should use default property");
+            }
+            _ => panic!("Expected RankBySimilarity operation"),
+        }
+    }
+
+    #[test]
+    fn test_rank_by_similarity_builder_with_property() {
+        let embedding = test_embedding();
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .traverse("KNOWS")
+            .rank_by_similarity_builder(&embedding, 10)
+            .property("custom_embedding")
+            .finish()
+            .build();
+
+        match &query.ops[2] {
+            QueryOp::RankBySimilarity { property_key, .. } => {
+                assert_eq!(property_key.as_deref(), Some("custom_embedding"));
+            }
+            _ => panic!("Expected RankBySimilarity operation"),
+        }
+    }
+
+    #[test]
+    fn test_rank_by_similarity_builder_fluent_chaining() {
+        let embedding = test_embedding();
+        let query = QueryBuilder::new()
+            .start(test_node_id())
+            .traverse("KNOWS")
+            .rank_by_similarity_builder(&embedding, 10)
+            .property("title_embedding")
+            .finish()
+            .filter(Predicate::gt("score", 0.8))
+            .limit(5)
+            .build();
+
+        assert_eq!(query.operation_count(), 5); // start + traverse + rank + filter + limit
+    }
+
+    // ==================== VectorSearch Property Tests (Issue #389) ====================
+
+    #[test]
+    fn test_find_similar_simple_uses_default() {
+        let embedding = test_embedding();
+        let query = QueryBuilder::new().find_similar(&embedding, 10).build();
+
+        match &query.ops[0] {
+            QueryOp::VectorSearch { property_key, .. } => {
+                assert!(property_key.is_none(), "Should use default property");
+            }
+            _ => panic!("Expected VectorSearch operation"),
+        }
+    }
+
+    #[test]
+    fn test_find_similar_builder_with_property() {
+        let embedding = test_embedding();
+        let query = QueryBuilder::new()
+            .find_similar_builder(&embedding, 10)
+            .property("body_embedding")
+            .finish()
+            .build();
+
+        match &query.ops[0] {
+            QueryOp::VectorSearch { property_key, .. } => {
+                assert_eq!(property_key.as_deref(), Some("body_embedding"));
+            }
+            _ => panic!("Expected VectorSearch operation"),
+        }
+    }
+
+    #[test]
+    fn test_find_similar_builder_with_metric() {
+        use crate::index::vector::DistanceMetric;
+
+        let embedding = test_embedding();
+        let query = QueryBuilder::new()
+            .find_similar_builder(&embedding, 10)
+            .metric(DistanceMetric::Euclidean)
+            .finish()
+            .build();
+
+        match &query.ops[0] {
+            QueryOp::VectorSearch { metric, .. } => {
+                assert_eq!(*metric, DistanceMetric::Euclidean);
+            }
+            _ => panic!("Expected VectorSearch operation"),
+        }
     }
 }

@@ -170,6 +170,8 @@ pub enum ScanOp {
         label_filter: Option<String>,
         /// Distance metric
         metric: DistanceMetric,
+        /// Property key containing the embedding (None = "embedding")
+        property_key: Option<String>,
     },
 
     /// Temporal point-in-time node lookup
@@ -235,6 +237,8 @@ pub enum UnaryOp {
         embedding: Arc<[f32]>,
         /// Optional limit on ranked results
         top_k: Option<usize>,
+        /// Property key containing the embedding (None = "embedding")
+        property_key: Option<String>,
     },
 
     /// Sort by property or score
@@ -379,6 +383,7 @@ mod tests {
             k: 10,
             label_filter: None,
             metric: DistanceMetric::Cosine,
+            property_key: None,
         });
 
         assert!(vector_scan.has_vector_ops());
@@ -387,6 +392,7 @@ mod tests {
             UnaryOp::VectorRank {
                 embedding: Arc::from([1.0f32; 384].as_slice()),
                 top_k: Some(10),
+                property_key: None,
             },
             LogicalOp::Scan(ScanOp::NodeLookup(vec![])),
         );

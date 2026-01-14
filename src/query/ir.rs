@@ -74,6 +74,8 @@ pub enum QueryOp {
         k: usize,
         /// Distance metric to use
         metric: DistanceMetric,
+        /// Property key containing the embedding (default: "embedding")
+        property_key: Option<String>,
     },
 
     /// Find nodes similar to a specific node's embedding
@@ -94,6 +96,8 @@ pub enum QueryOp {
         embedding: Arc<[f32]>,
         /// Optional limit on results (if None, ranks all)
         top_k: Option<usize>,
+        /// Property key containing the embedding (default: "embedding")
+        property_key: Option<String>,
     },
 
     // === Temporal Operations ===
