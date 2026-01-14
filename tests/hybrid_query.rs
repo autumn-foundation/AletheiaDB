@@ -39,13 +39,20 @@ use gallifreydb::{
 };
 
 // =============================================================================
+// Test Constants
+// =============================================================================
+
+/// Vector dimension used throughout tests. Must match HnswConfig dimension.
+const TEST_VECTOR_DIM: usize = 4;
+
+// =============================================================================
 // Test Helpers
 // =============================================================================
 
 /// Helper to create a test database with vector indexing enabled.
 fn create_test_db() -> GallifreyDB {
     let db = GallifreyDB::new();
-    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+    let config = HnswConfig::new(TEST_VECTOR_DIM, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
     db
@@ -57,17 +64,22 @@ fn create_temporal_test_db() -> GallifreyDB {
         anchor_interval: 3,
         max_delta_chain: 10,
     });
-    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+    let config = HnswConfig::new(TEST_VECTOR_DIM, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
     db
 }
 
 /// Generate a normalized embedding vector for testing.
+///
+/// # Normalization
+/// Vectors are normalized for cosine similarity. When using raw vectors without
+/// normalization (e.g., `&[0.5f32, 0.5, 0.0, 0.0]`), results may differ from
+/// normalized equivalents. Use this helper for consistent cosine similarity tests.
 fn make_embedding(values: &[f32]) -> Vec<f32> {
     let mut v = values.to_vec();
-    // Pad to 4 dimensions if needed
-    while v.len() < 4 {
+    // Pad to TEST_VECTOR_DIM dimensions if needed
+    while v.len() < TEST_VECTOR_DIM {
         v.push(0.0);
     }
     // Normalize for cosine similarity
@@ -350,7 +362,6 @@ mod traverse_and_rank_tests {
             .unwrap();
 
         // Create 50 neighbors with varying similarities
-        let mut neighbors = Vec::new();
         for i in 0..50 {
             let angle = (i as f32) * std::f32::consts::PI / 50.0;
             let emb = make_embedding(&[angle.cos(), angle.sin(), 0.0, 0.0]);
@@ -362,10 +373,9 @@ mod traverse_and_rank_tests {
                         .insert_vector("embedding", &emb)
                         .build(),
                 )
-                .unwrap();
+                .expect("Failed to create neighbor node");
             db.create_edge(center, node, "LINKS", PropertyMapBuilder::new().build())
-                .unwrap();
-            neighbors.push(node);
+                .expect("Failed to create edge to neighbor");
         }
 
         // Query with k=10 (should return top 10 most similar)
@@ -579,14 +589,41 @@ mod temporal_vector_tests {
 
         assert!(query.is_temporal(), "Query should have temporal context");
 
-        let results = db.execute_query(query).unwrap();
-        let rows: Vec<_> = results.collect_all().unwrap();
+        let results = db
+            .execute_query(query)
+            .expect("Failed to execute temporal query");
+        let rows: Vec<_> = results
+            .collect_all()
+            .expect("Failed to collect query results");
 
-        // At historical time, Alice only knew Bob (Carol was added later)
-        // Note: This depends on edge temporal tracking implementation
-        assert!(!rows.is_empty(), "Should have at least one result");
+        // BUG: Temporal edge traversal is NOT implemented (issue #400)
+        // https://github.com/madmax983/GallifreyDB/issues/400
+        //
+        // EXPECTED: At the historical timestamp, Alice only knew Bob.
+        //           Carol was added AFTER the timestamp, so she should NOT appear.
+        //           This test SHOULD pass with rows.len() == 1.
+        //
+        // ACTUAL: The TraversalIterator only queries CurrentStorage, ignoring
+        //         temporal context entirely. Both Bob AND Carol are returned.
+        //
+        // This test is INTENTIONALLY left failing to ensure this bug gets fixed.
+        // When issue #400 is resolved, this assertion will pass.
+        assert_eq!(
+            rows.len(),
+            1,
+            "BUG #400: At historical timestamp, Alice should only know Bob (not Carol). \
+             Temporal edge traversal is not implemented - edges are queried from current \
+             state instead of historical state. See: https://github.com/madmax983/GallifreyDB/issues/400"
+        );
 
-        println!("✓ Temporal traverse_and_rank works with time-travel");
+        // Verify Bob is the one result
+        let result_node = rows[0].entity.as_node().expect("Result should be a node");
+        assert_eq!(
+            result_node.id, bob,
+            "The single result should be Bob (connected before timestamp)"
+        );
+
+        println!("✓ Temporal traverse_and_rank correctly filters edges by timestamp");
     }
 
     /// Test between() temporal range query
@@ -1057,7 +1094,6 @@ mod large_scale_tests {
             children.push(child);
         }
 
-        let mut grandchildren = Vec::new();
         for (ci, &child) in children.iter().enumerate() {
             for gi in 0..10 {
                 let similarity = 1.0 - ((ci * 10 + gi) as f32 * 0.01);
@@ -1074,15 +1110,14 @@ mod large_scale_tests {
                             )
                             .build(),
                     )
-                    .unwrap();
+                    .expect("Failed to create grandchild node");
                 db.create_edge(
                     child,
                     grandchild,
                     "HAS_CHILD",
                     PropertyMapBuilder::new().build(),
                 )
-                .unwrap();
-                grandchildren.push(grandchild);
+                .expect("Failed to create edge to grandchild");
             }
         }
 
@@ -1206,7 +1241,6 @@ mod concurrent_tests {
             )
             .unwrap();
 
-        let mut nodes = Vec::new();
         for i in 0..20 {
             let node = db
                 .create_node(
@@ -1224,10 +1258,9 @@ mod concurrent_tests {
                         )
                         .build(),
                 )
-                .unwrap();
+                .expect("Failed to create node for parallel reads");
             db.create_edge(center, node, "LINKS", PropertyMapBuilder::new().build())
-                .unwrap();
-            nodes.push(node);
+                .expect("Failed to create edge for parallel reads");
         }
 
         // Spawn multiple reader threads
@@ -1347,10 +1380,15 @@ mod concurrent_tests {
             handle.join().expect("Thread panicked");
         }
 
-        // Verify final state
+        // Verify final state: 10 initial nodes + 10 added by writer thread = 20 total
         let query_embedding = make_embedding(&[0.5, 0.5, 0.0, 0.0]);
-        let results = traverse_and_rank(&db, center, "LINKS", &query_embedding, 100).unwrap();
-        assert!(results.len() >= 10, "Should have at least initial 10 nodes");
+        let results = traverse_and_rank(&db, center, "LINKS", &query_embedding, 100)
+            .expect("Failed to query final state");
+        assert_eq!(
+            results.len(),
+            20,
+            "Should have initial 10 nodes plus 10 added by writer thread"
+        );
 
         println!("✓ Concurrent read/write works correctly");
     }
@@ -1665,7 +1703,6 @@ mod edge_case_tests {
 
         // All neighbors have identical embeddings
         let embedding = make_embedding(&[1.0, 0.0, 0.0, 0.0]);
-        let mut nodes = Vec::new();
         for i in 0..5 {
             let node = db
                 .create_node(
@@ -1675,10 +1712,9 @@ mod edge_case_tests {
                         .insert_vector("embedding", &embedding)
                         .build(),
                 )
-                .unwrap();
+                .expect("Failed to create node with identical embedding");
             db.create_edge(center, node, "LINKS", PropertyMapBuilder::new().build())
-                .unwrap();
-            nodes.push(node);
+                .expect("Failed to create edge to identical embedding node");
         }
 
         let query_embedding = make_embedding(&[1.0, 0.0, 0.0, 0.0]);
@@ -1699,6 +1735,10 @@ mod edge_case_tests {
     }
 
     /// Test with zero vector
+    ///
+    /// Zero vectors are an edge case for cosine similarity (division by zero).
+    /// The query should not panic and should handle the edge case gracefully,
+    /// either by returning an error or by returning results with NaN/0 similarity.
     #[test]
     fn test_zero_embedding_query() {
         let db = create_test_db();
@@ -1711,7 +1751,7 @@ mod edge_case_tests {
                     .insert_vector("embedding", &[0.5f32, 0.5, 0.0, 0.0])
                     .build(),
             )
-            .unwrap();
+            .expect("Failed to create center node");
 
         let neighbor = db
             .create_node(
@@ -1721,20 +1761,29 @@ mod edge_case_tests {
                     .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
                     .build(),
             )
-            .unwrap();
+            .expect("Failed to create neighbor node");
 
         db.create_edge(center, neighbor, "LINKS", PropertyMapBuilder::new().build())
-            .unwrap();
+            .expect("Failed to create edge");
 
         // Query with zero vector (edge case for cosine similarity)
         let zero_embedding = [0.0f32, 0.0, 0.0, 0.0];
         let results = traverse_and_rank(&db, center, "LINKS", &zero_embedding, 10);
 
-        // Should handle gracefully (result depends on implementation)
-        // The important thing is it doesn't panic
-        match results {
-            Ok(r) => println!("Zero embedding query returned {} results", r.len()),
-            Err(e) => println!("Zero embedding query returned error (expected): {:?}", e),
+        // Zero vectors should be handled gracefully - query should not panic.
+        // Expected behavior: either return an error or return results with similarity 0/NaN.
+        assert!(
+            results.is_ok(),
+            "Query with zero vector should not panic or fail catastrophically"
+        );
+        if let Ok(r) = results {
+            // With a zero vector query and cosine similarity, similarities will be 0 or NaN.
+            // The function should still return the neighbor.
+            assert_eq!(
+                r.len(),
+                1,
+                "Should return the single neighbor even with zero query vector"
+            );
         }
 
         println!("✓ Zero embedding query handled gracefully");
