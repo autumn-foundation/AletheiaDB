@@ -371,10 +371,60 @@ fn bench_traverse_and_rank_dimensions(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Section 2: Temporal Vector Search
+// ============================================================================
+
+/// Benchmark find_similar_as_of with multi-depth history.
+///
+/// Tests queries at different temporal distances (recent, middle, deep)
+/// to measure anchor+delta reconstruction overhead.
+fn bench_find_similar_as_of(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_similar_as_of");
+
+    for snapshot_count in [10, 50, 100] {
+        for (query_depth_name, query_depth_pct) in [
+            ("recent", 0.1), // Last 10% of snapshots
+            ("middle", 0.5), // 50% back
+            ("deep", 0.9),   // 90% back (tests reconstruction depth)
+        ] {
+            group.bench_with_input(
+                BenchmarkId::new(
+                    format!("{}snapshots_{}", snapshot_count, query_depth_name),
+                    snapshot_count,
+                ),
+                &(snapshot_count, query_depth_pct),
+                |b, &(snap_count, depth_pct)| {
+                    let (db, timestamps) = build_temporal_graph(1000, snap_count, 384);
+                    let query_timestamp = timestamps[(snap_count as f32 * depth_pct) as usize];
+                    let query = gen_vector(384, 0);
+
+                    b.iter(|| {
+                        find_similar_as_of(
+                            black_box(&db),
+                            black_box(&query),
+                            black_box(10),
+                            black_box(query_timestamp),
+                        )
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
     targets = bench_traverse_and_rank_basic, bench_traverse_and_rank_k_values, bench_traverse_and_rank_dimensions
 );
 
-criterion_main!(benches);
+criterion_group!(
+    name = temporal_operations;
+    config = common::configure_criterion();
+    targets = bench_find_similar_as_of,
+);
+
+criterion_main!(benches, temporal_operations);
