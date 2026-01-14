@@ -240,6 +240,82 @@ fn build_temporal_graph(
     (db, timestamps)
 }
 
+/// Create graph with temporal snapshots AND edges.
+///
+/// Extended version of build_temporal_graph that also creates edges
+/// for testing chained hybrid operations (traverse -> rank -> temporal lookup).
+fn build_temporal_graph_with_edges(
+    node_count: usize,
+    snapshot_count: usize,
+    fan_out: usize,
+    dim: usize,
+) -> (GallifreyDB, Vec<i64>) {
+    let db = GallifreyDB::new();
+    let hnsw_config = HnswConfig::new(dim, DistanceMetric::Cosine);
+    let temporal_config = TemporalVectorConfig {
+        snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+        retention_policy: RetentionPolicy::KeepN(snapshot_count * 2),
+        max_snapshots: snapshot_count * 2,
+        full_snapshot_interval: 10,
+        hnsw_config,
+    };
+    db.enable_temporal_vector_index("embedding", temporal_config)
+        .unwrap();
+
+    let mut timestamps = Vec::new();
+
+    // Create snapshots
+    for snapshot_idx in 0..snapshot_count {
+        let timestamp = snapshot_idx as i64 * 1000;
+        timestamps.push(timestamp);
+
+        // Create/update nodes with evolving embeddings
+        for i in 0..node_count {
+            let vector = gen_vector(dim, snapshot_idx * node_count + i);
+
+            if snapshot_idx == 0 {
+                // Create node
+                let _ = db.create_node(
+                    "Document",
+                    PropertyMapBuilder::new()
+                        .insert("id", i as i64)
+                        .insert_vector("embedding", &vector)
+                        .build(),
+                );
+            } else {
+                // Update node (evolving embedding)
+                let node_id = NodeId::new(i as u64).unwrap();
+                db.write(|tx| {
+                    tx.update_node(
+                        node_id,
+                        PropertyMapBuilder::new()
+                            .insert_vector("embedding", &vector)
+                            .build(),
+                    )
+                })
+                .unwrap();
+            }
+        }
+    }
+
+    // Create edges (deterministic fan-out) after all nodes exist
+    for i in 0..node_count {
+        let source = NodeId::new(i as u64).unwrap();
+        for j in 0..fan_out {
+            let target_idx = (i + j + 1) % node_count;
+            let target = NodeId::new(target_idx as u64).unwrap();
+            let _ = db.create_edge(
+                source,
+                target,
+                "RELATED_TO",
+                PropertyMapBuilder::new().build(),
+            );
+        }
+    }
+
+    (db, timestamps)
+}
+
 // ============================================================================
 // Benchmark: traverse_and_rank Basic (Scale × Topology)
 // ============================================================================
@@ -465,6 +541,58 @@ fn bench_temporal_vs_current(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Section 3: Full Hybrid Queries (Composition)
+// ============================================================================
+
+/// Benchmark multi-step hybrid query compositions.
+///
+/// Tests realistic query patterns that combine multiple operations:
+/// - Traverse -> Rank -> Filter -> Temporal lookup
+/// - Multi-hop ranked traversal
+fn bench_chained_hybrid_operations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("chained_operations");
+
+    // Pattern: traverse -> rank -> filter -> temporal lookup
+    group.bench_function("traverse_rank_filter_temporal", |b| {
+        let (db, _timestamps) = build_temporal_graph_with_edges(1000, 20, 20, 384);
+        let start = NodeId::new(100).unwrap();
+        let query = gen_vector(384, 0);
+
+        b.iter(|| {
+            // 1. traverse_and_rank to get top-k neighbors
+            let ranked = traverse_and_rank(&db, start, "RELATED_TO", &query, 20).unwrap();
+
+            // 2. Filter by similarity threshold
+            let filtered: Vec<_> = ranked.into_iter().filter(|(_, sim)| *sim > 0.8).collect();
+
+            // 3. For each result, query historical state
+            for (_node_id, _) in filtered {
+                let _ = find_similar_as_of(&db, &query, 5, 1000);
+            }
+        });
+    });
+
+    // Pattern: multi-hop traversal with ranking at each step
+    group.bench_function("multi_hop_ranked_traversal", |b| {
+        let db = build_uniform_graph(1000, 20, 384);
+        let start = NodeId::new(100).unwrap();
+        let query = gen_vector(384, 0);
+
+        b.iter(|| {
+            // Hop 1: Start from node A
+            let hop1 = traverse_and_rank(&db, start, "KNOWS", &query, 10).unwrap();
+
+            // Hop 2: From best match B, traverse again
+            if let Some((best_id, _)) = hop1.first() {
+                let _ = traverse_and_rank(&db, *best_id, "KNOWS", &query, 10);
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
@@ -478,4 +606,10 @@ criterion_group!(
         bench_temporal_vs_current,
 );
 
-criterion_main!(benches, temporal_operations);
+criterion_group!(
+    name = composition;
+    config = common::configure_criterion();
+    targets = bench_chained_hybrid_operations,
+);
+
+criterion_main!(benches, temporal_operations, composition);
