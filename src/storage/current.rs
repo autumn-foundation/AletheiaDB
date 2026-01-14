@@ -1119,6 +1119,72 @@ impl CurrentStorage {
         index.find_similar_as_of(embedding, k, timestamp)
     }
 
+    /// Find k most similar nodes at a specific point in time for a specific property.
+    ///
+    /// This is the property-specific version of [`find_similar_as_of()`].
+    /// It validates that the requested property matches the property for which
+    /// the temporal vector index was enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property containing the vector embeddings
+    /// * `embedding` - Query vector to find similar vectors to
+    /// * `k` - Number of results to return
+    /// * `timestamp` - The point in time to query
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - The property name doesn't match the indexed property
+    /// - Query embedding dimensions don't match
+    /// - No snapshot exists at the given timestamp
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find similar documents as they existed in the past for a specific property
+    /// let query_embedding = vec![0.1; 384];
+    /// let timestamp = 1234567890000000;
+    /// let results = storage.find_similar_as_of_in("content_embedding", &query_embedding, 10, timestamp)?;
+    /// ```
+    pub fn find_similar_as_of_in(
+        &self,
+        property_name: &str,
+        embedding: &[f32],
+        k: usize,
+        timestamp: crate::core::temporal::Timestamp,
+    ) -> Result<Vec<(crate::core::NodeId, f32)>> {
+        let state = self.temporal_vector_index_state.read();
+
+        // Get the temporal index
+        let index = state.index.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
+                    .to_string(),
+            ))
+        })?;
+
+        // Validate that the requested property matches the indexed property
+        let indexed_property = state.property_name.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index has no property name configured.".to_string(),
+            ))
+        })?;
+
+        if indexed_property != property_name {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError(format!(
+                    "Property '{}' does not match the temporal vector index property '{}'. \
+                     Use find_similar_as_of_in(\"{}\", ...) instead.",
+                    property_name, indexed_property, indexed_property
+                )),
+            ));
+        }
+
+        index.find_similar_as_of(embedding, k, timestamp)
+    }
+
     /// Find k most similar nodes across a time range.
     ///
     /// Returns results for each snapshot within the time range, showing how

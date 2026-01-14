@@ -1329,6 +1329,53 @@ impl GallifreyDB {
         self.current.find_similar_as_of(embedding, k, timestamp)
     }
 
+    /// Find similar vectors at a specific point in time for a specific property.
+    ///
+    /// This is the property-specific version of [`find_similar_as_of()`].
+    /// It validates that the requested property matches the property for which
+    /// the temporal vector index was enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property containing the vector embeddings
+    /// * `embedding` - Query vector to find similar vectors to
+    /// * `k` - Number of results to return
+    /// * `timestamp` - The point in time to query (in microseconds since epoch)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - The property name doesn't match the indexed property
+    /// - Query embedding dimensions don't match
+    /// - No snapshot exists at the given timestamp
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find documents similar to a query at a specific point in time
+    /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
+    /// let results = db.find_similar_as_of_in(
+    ///     "content_embedding",
+    ///     &query_embedding,
+    ///     10,
+    ///     timestamp_2023
+    /// )?;
+    /// ```
+    pub fn find_similar_as_of_in(
+        &self,
+        property_name: &str,
+        embedding: &[f32],
+        k: usize,
+        timestamp: Timestamp,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span =
+            tracing::info_span!("find_similar_as_of_in", property = property_name).entered();
+        self.current
+            .find_similar_as_of_in(property_name, embedding, k, timestamp)
+    }
+
     // ========================================================================
     // Hybrid Query Planner API (VS-060)
     // ========================================================================
@@ -3539,5 +3586,116 @@ mod tests {
         // Search with wrong property name should fail
         let result = db.find_similar_in("nonexistent", node1, 1);
         assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Tests for Issue #389: Temporal property-specific queries
+    // ========================================================================
+
+    /// Test find_similar_as_of_in() with explicit property specification.
+    #[test]
+    fn test_find_similar_as_of_in_explicit_property() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Enable temporal vector index for a specific property
+        db.vector_index("content_embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1), // Snapshot every tx
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config,
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        // Create a node with an embedding
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let _node1 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("content_embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Get a timestamp after the node was created
+        let timestamp = crate::core::temporal::time::now();
+
+        // Query with property-specific temporal search
+        let query = vec![0.9f32, 0.1, 0.0, 0.0];
+        let results = db
+            .find_similar_as_of_in("content_embedding", &query, 10, timestamp)
+            .unwrap();
+
+        // Should find the node
+        assert!(!results.is_empty());
+    }
+
+    /// Test find_similar_as_of_in() with wrong property fails.
+    #[test]
+    fn test_find_similar_as_of_in_wrong_property_fails() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Enable temporal index for "embedding" property
+        db.vector_index("embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config,
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        let timestamp = crate::core::temporal::time::now();
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+
+        // Query with WRONG property name should fail
+        let result = db.find_similar_as_of_in("wrong_property", &query, 10, timestamp);
+        assert!(
+            result.is_err(),
+            "Should fail when property doesn't match temporal index"
+        );
+    }
+
+    /// Test find_similar_as_of_in() when temporal index not enabled.
+    #[test]
+    fn test_find_similar_as_of_in_no_temporal_index() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        // Only enable regular HNSW index, not temporal
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        let timestamp = crate::core::temporal::time::now();
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+
+        // Temporal query should fail when temporal index not enabled
+        let result = db.find_similar_as_of_in("embedding", &query, 10, timestamp);
+        assert!(
+            result.is_err(),
+            "Should fail when temporal index not enabled"
+        );
     }
 }
