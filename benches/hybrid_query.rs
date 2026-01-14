@@ -15,11 +15,15 @@
 mod common;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use gallifreydb::api::transaction::WriteOps;
 use gallifreydb::core::id::NodeId;
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::vector::cosine_similarity;
 use gallifreydb::db::GallifreyDB;
 use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+use gallifreydb::index::vector::temporal::{
+    RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+};
 use gallifreydb::query::hybrid::{find_similar_as_of, traverse_and_rank};
 use std::cmp::Ordering;
 
@@ -174,6 +178,66 @@ fn build_sparse_graph(node_count: usize, dim: usize) -> GallifreyDB {
     }
 
     db
+}
+
+/// Create graph with temporal snapshots.
+///
+/// Returns database instance and vector of timestamps for each snapshot.
+/// Snapshots are created by updating node embeddings over time.
+fn build_temporal_graph(
+    node_count: usize,
+    snapshot_count: usize,
+    dim: usize,
+) -> (GallifreyDB, Vec<i64>) {
+    let db = GallifreyDB::new();
+    let hnsw_config = HnswConfig::new(dim, DistanceMetric::Cosine);
+    let temporal_config = TemporalVectorConfig {
+        snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+        retention_policy: RetentionPolicy::KeepN(snapshot_count * 2),
+        max_snapshots: snapshot_count * 2,
+        full_snapshot_interval: 10,
+        hnsw_config,
+    };
+    db.enable_temporal_vector_index("embedding", temporal_config)
+        .unwrap();
+
+    let mut timestamps = Vec::new();
+
+    // Create snapshots
+    for snapshot_idx in 0..snapshot_count {
+        let timestamp = snapshot_idx as i64 * 1000;
+        timestamps.push(timestamp);
+
+        // Create/update nodes with evolving embeddings
+        for i in 0..node_count {
+            let vector = gen_vector(dim, snapshot_idx * node_count + i);
+
+            if snapshot_idx == 0 {
+                // Create node
+                let _ = db.create_node(
+                    "Document",
+                    PropertyMapBuilder::new()
+                        .insert("id", i as i64)
+                        .insert_vector("embedding", &vector)
+                        .build(),
+                );
+            } else {
+                // Update node (evolving embedding)
+                let node_id = NodeId::new(i as u64).unwrap();
+                db.write(|tx| {
+                    tx.update_node(
+                        node_id,
+                        PropertyMapBuilder::new()
+                            .insert_vector("embedding", &vector)
+                            .build(),
+                    )
+                })
+                .unwrap();
+            }
+        }
+    }
+
+    (db, timestamps)
 }
 
 // Placeholder benchmark - will be replaced with actual benchmarks in subsequent tasks
