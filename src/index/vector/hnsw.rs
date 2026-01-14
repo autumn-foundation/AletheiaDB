@@ -400,15 +400,19 @@ impl HnswIndexBuilder {
             )))
         })?;
 
-        // Reserve capacity if specified
-        if self.config.capacity > 0 {
-            index.reserve(self.config.capacity).map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Failed to reserve capacity: {}",
-                    e
-                )))
-            })?;
-        }
+        // Reserve capacity - usearch requires capacity before adding vectors
+        // Use configured capacity, or default to 1024 for reasonable initial size
+        let capacity_to_reserve = if self.config.capacity > 0 {
+            self.config.capacity
+        } else {
+            1024 // Reasonable default for initial capacity
+        };
+        index.reserve(capacity_to_reserve).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to reserve capacity: {}",
+                e
+            )))
+        })?;
 
         // Handle memory-mapped storage
         if let StorageMode::MemoryMapped { ref path } = self.config.storage {
@@ -498,8 +502,21 @@ impl VectorIndex for HnswIndex {
             key
         };
 
-        // Insert into usearch index
+        // Insert into usearch index (auto-expand capacity if needed)
         let index = self.inner.write();
+
+        // Check if we need to expand capacity
+        if index.size() >= index.capacity() {
+            // Double capacity, minimum 1024
+            let new_capacity = (index.capacity() * 2).max(1024);
+            index.reserve(new_capacity).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to expand capacity: {}",
+                    e
+                )))
+            })?;
+        }
+
         index.add(key, vector).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to add vector: {}",
