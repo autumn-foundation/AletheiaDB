@@ -20,10 +20,10 @@ use gallifreydb::core::id::NodeId;
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::vector::cosine_similarity;
 use gallifreydb::db::GallifreyDB;
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
 use gallifreydb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
 };
+use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
 use gallifreydb::query::hybrid::{find_similar_as_of, traverse_and_rank};
 use std::cmp::Ordering;
 
@@ -240,16 +240,64 @@ fn build_temporal_graph(
     (db, timestamps)
 }
 
-// Placeholder benchmark - will be replaced with actual benchmarks in subsequent tasks
-fn bench_placeholder(_c: &mut Criterion) {
-    // This is a placeholder to make the benchmark file compile.
-    // Actual benchmarks will be added in subsequent tasks.
+// ============================================================================
+// Benchmark: traverse_and_rank Basic (Scale × Topology)
+// ============================================================================
+
+/// Type alias for graph builder functions to reduce complexity.
+type GraphBuilder = Box<dyn Fn(usize, usize) -> GallifreyDB>;
+
+/// Benchmark traverse_and_rank across different scales and topologies.
+///
+/// Tests the core hybrid query operation (graph traversal + vector ranking)
+/// with 9 combinations: 3 scales (100, 1K, 10K) × 3 topologies (uniform, power-law, sparse).
+///
+/// This measures the baseline performance of hybrid queries across realistic
+/// graph structures and sizes.
+fn bench_traverse_and_rank_basic(c: &mut Criterion) {
+    let mut group = c.benchmark_group("traverse_and_rank/basic");
+
+    // Test matrix: 3 scales × 3 topologies = 9 combinations
+    let scales = vec![("100", 100), ("1K", 1000), ("10K", 10000)];
+
+    let topologies: Vec<(&str, GraphBuilder)> = vec![
+        ("uniform", Box::new(|n, d| build_uniform_graph(n, 20, d))),
+        ("power_law", Box::new(build_power_law_graph)),
+        ("sparse", Box::new(build_sparse_graph)),
+    ];
+
+    for (scale_name, node_count) in scales {
+        for (topo_name, builder) in &topologies {
+            let db = builder(node_count, 384);
+            let source = NodeId::new(0).unwrap();
+            let query_vec = gen_vector(384, 42);
+
+            group.throughput(Throughput::Elements(node_count as u64));
+            group.bench_function(
+                BenchmarkId::new(format!("{}/{}", scale_name, topo_name), node_count),
+                |b| {
+                    b.iter(|| {
+                        let results = traverse_and_rank(
+                            black_box(&db),
+                            black_box(source),
+                            black_box("KNOWS"),
+                            black_box(&query_vec),
+                            black_box(10), // k
+                        );
+                        black_box(results)
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
 }
 
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
-    targets = bench_placeholder
+    targets = bench_traverse_and_rank_basic
 );
 
 criterion_main!(benches);
