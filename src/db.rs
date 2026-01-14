@@ -1064,6 +1064,81 @@ impl GallifreyDB {
         self.current.list_vector_indexes()
     }
 
+    /// Find k most similar nodes in a specific property's vector index.
+    ///
+    /// Use this method when you have multiple vector indexes and need to
+    /// search a specific one. The query node's embedding from the specified
+    /// property is used for the search.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The indexed property to search
+    /// * `query_node_id` - The node to find similar nodes for
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Search title embeddings for similar nodes
+    /// let similar = db.find_similar_in("title_embedding", node_id, 10)?;
+    ///
+    /// // Search body embeddings (different property, potentially different results)
+    /// let similar_body = db.find_similar_in("body_embedding", node_id, 10)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No vector index is enabled for the specified property
+    /// - Query node is not found
+    /// - Query node does not have the specified vector property
+    pub fn find_similar_in(
+        &self,
+        property_name: &str,
+        query_node_id: NodeId,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar_in").entered();
+        self.current
+            .find_similar_in(property_name, query_node_id, k)
+    }
+
+    /// Search a specific property's vector index with a raw embedding.
+    ///
+    /// Use this method when searching with embeddings that don't correspond to
+    /// any existing node in the graph (e.g., query embeddings from external sources).
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The indexed property to search
+    /// * `embedding` - The query embedding vector
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Search with external embedding
+    /// let query = embed_text("search query");
+    /// let results = db.search_vectors_in("title_embedding", &query, 10)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No vector index is enabled for the specified property
+    /// - Embedding dimensions don't match the index configuration
+    pub fn search_vectors_in(
+        &self,
+        property_name: &str,
+        embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("search_vectors_in").entered();
+        self.current.search_vectors_in(property_name, embedding, k)
+    }
+
     /// Find k most similar nodes to a query node based on vector similarity.
     ///
     /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
@@ -3342,5 +3417,127 @@ mod tests {
             result.is_err(),
             "Should not allow re-enabling same property"
         );
+    }
+
+    // ========================================================================
+    // Tests for Issue #389: Query API with explicit property specification
+    // ========================================================================
+
+    /// Test find_similar_in() with explicit property specification.
+    #[test]
+    fn test_find_similar_in_explicit_property() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        // Enable two different indexes
+        db.vector_index("title_embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        db.vector_index("body_embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        // Create nodes with different embeddings for each property
+        let title_v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let title_v2 = vec![0.9f32, 0.1, 0.0, 0.0];
+        let body_v1 = vec![0.0f32, 1.0, 0.0, 0.0];
+        let body_v2 = vec![0.0f32, 0.9, 0.1, 0.0];
+
+        let node1 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("title_embedding", &title_v1)
+                    .insert_vector("body_embedding", &body_v1)
+                    .build(),
+            )
+            .unwrap();
+
+        let _node2 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("title_embedding", &title_v2)
+                    .insert_vector("body_embedding", &body_v2)
+                    .build(),
+            )
+            .unwrap();
+
+        // Search by title embedding
+        let title_results = db.find_similar_in("title_embedding", node1, 1).unwrap();
+        assert_eq!(title_results.len(), 1);
+
+        // Search by body embedding
+        let body_results = db.find_similar_in("body_embedding", node1, 1).unwrap();
+        assert_eq!(body_results.len(), 1);
+    }
+
+    /// Test search_vectors_in() with explicit property specification.
+    #[test]
+    fn test_search_vectors_in_explicit_property() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        // Create nodes
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let v2 = vec![0.9f32, 0.1, 0.0, 0.0];
+
+        db.create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &v1)
+                .build(),
+        )
+        .unwrap();
+
+        db.create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &v2)
+                .build(),
+        )
+        .unwrap();
+
+        // Search with raw embedding (not tied to a node)
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let results = db.search_vectors_in("embedding", &query, 2).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    /// Test find_similar_in() with non-existent property fails.
+    #[test]
+    fn test_find_similar_in_nonexistent_property_fails() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let node1 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Search with wrong property name should fail
+        let result = db.find_similar_in("nonexistent", node1, 1);
+        assert!(result.is_err());
     }
 }
