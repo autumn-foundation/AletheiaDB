@@ -7,6 +7,11 @@
 //! - Query optimization overhead (cache warmup, algorithmic optimizations)
 //! - Comparison baselines (hybrid vs separate operations)
 
+// Suppressing warnings for incremental development -
+// functions and imports will be used in subsequent tasks (Task 3+)
+#![allow(unused_imports)]
+#![allow(dead_code)]
+
 mod common;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -15,8 +20,35 @@ use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::vector::cosine_similarity;
 use gallifreydb::db::GallifreyDB;
 use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
-use gallifreydb::query::hybrid::{traverse_and_rank, find_similar_as_of};
+use gallifreydb::query::hybrid::{find_similar_as_of, traverse_and_rank};
 use std::cmp::Ordering;
+
+// ============================================================================
+// Data Generation Helpers
+// ============================================================================
+
+/// Generate deterministic vector for benchmarking.
+///
+/// Uses simple mathematical formula to create reproducible vectors
+/// without allocation noise during benchmark execution.
+fn gen_vector(dim: usize, seed: usize) -> Vec<f32> {
+    (0..dim)
+        .map(|i| ((i + seed) as f32 / dim as f32) * 2.0 - 1.0)
+        .collect()
+}
+
+/// Generate clustered vectors (realistic embedding distribution).
+///
+/// Vectors in the same cluster have high cosine similarity.
+/// This simulates real embedding distributions where related concepts
+/// cluster together in embedding space.
+fn gen_clustered_vector(dim: usize, cluster_id: usize, variance: f32) -> Vec<f32> {
+    let base: Vec<f32> = gen_vector(dim, cluster_id * 1000);
+    base.iter()
+        .enumerate()
+        .map(|(i, &v)| v + (i as f32 * variance).sin() * 0.1)
+        .collect()
+}
 
 // Placeholder benchmark - will be replaced with actual benchmarks in subsequent tasks
 fn bench_placeholder(_c: &mut Criterion) {
