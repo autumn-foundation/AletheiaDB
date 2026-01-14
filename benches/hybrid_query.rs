@@ -7,11 +7,6 @@
 //! - Query optimization overhead (cache warmup, algorithmic optimizations)
 //! - Comparison baselines (hybrid vs separate operations)
 
-// Suppressing warnings for incremental development -
-// functions and imports will be used in subsequent tasks (Task 3+)
-#![allow(unused_imports)]
-#![allow(dead_code)]
-
 mod common;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -180,11 +175,10 @@ fn build_sparse_graph(node_count: usize, dim: usize) -> GallifreyDB {
     db
 }
 
-/// Create graph with temporal snapshots.
+/// Helper: Create temporal database with nodes and evolving embeddings.
 ///
-/// Returns database instance and vector of timestamps for each snapshot.
-/// Snapshots are created by updating node embeddings over time.
-fn build_temporal_graph(
+/// Shared setup for temporal graph builders. Returns database and timestamps.
+fn build_temporal_graph_core(
     node_count: usize,
     snapshot_count: usize,
     dim: usize,
@@ -240,6 +234,15 @@ fn build_temporal_graph(
     (db, timestamps)
 }
 
+/// Create graph with temporal snapshots (no edges).
+fn build_temporal_graph(
+    node_count: usize,
+    snapshot_count: usize,
+    dim: usize,
+) -> (GallifreyDB, Vec<i64>) {
+    build_temporal_graph_core(node_count, snapshot_count, dim)
+}
+
 /// Create graph with temporal snapshots AND edges.
 ///
 /// Extended version of build_temporal_graph that also creates edges
@@ -250,53 +253,7 @@ fn build_temporal_graph_with_edges(
     fan_out: usize,
     dim: usize,
 ) -> (GallifreyDB, Vec<i64>) {
-    let db = GallifreyDB::new();
-    let hnsw_config = HnswConfig::new(dim, DistanceMetric::Cosine);
-    let temporal_config = TemporalVectorConfig {
-        snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
-        retention_policy: RetentionPolicy::KeepN(snapshot_count * 2),
-        max_snapshots: snapshot_count * 2,
-        full_snapshot_interval: 10,
-        hnsw_config,
-    };
-    db.enable_temporal_vector_index("embedding", temporal_config)
-        .unwrap();
-
-    let mut timestamps = Vec::new();
-
-    // Create snapshots
-    for snapshot_idx in 0..snapshot_count {
-        let timestamp = snapshot_idx as i64 * 1000;
-        timestamps.push(timestamp);
-
-        // Create/update nodes with evolving embeddings
-        for i in 0..node_count {
-            let vector = gen_vector(dim, snapshot_idx * node_count + i);
-
-            if snapshot_idx == 0 {
-                // Create node
-                let _ = db.create_node(
-                    "Document",
-                    PropertyMapBuilder::new()
-                        .insert("id", i as i64)
-                        .insert_vector("embedding", &vector)
-                        .build(),
-                );
-            } else {
-                // Update node (evolving embedding)
-                let node_id = NodeId::new(i as u64).unwrap();
-                db.write(|tx| {
-                    tx.update_node(
-                        node_id,
-                        PropertyMapBuilder::new()
-                            .insert_vector("embedding", &vector)
-                            .build(),
-                    )
-                })
-                .unwrap();
-            }
-        }
-    }
+    let (db, timestamps) = build_temporal_graph_core(node_count, snapshot_count, dim);
 
     // Create edges (deterministic fan-out) after all nodes exist
     for i in 0..node_count {
@@ -584,6 +541,7 @@ fn bench_chained_hybrid_operations(c: &mut Criterion) {
             let hop1 = traverse_and_rank(&db, start, "KNOWS", &query, 10).unwrap();
 
             // Hop 2: From best match B, traverse again
+            // Note: hop1 is guaranteed non-empty with uniform graph (fan_out=20)
             if let Some((best_id, _)) = hop1.first() {
                 let _ = traverse_and_rank(&db, *best_id, "KNOWS", &query, 10);
             }
@@ -685,17 +643,12 @@ fn bench_hybrid_vs_sequential(c: &mut Criterion) {
     // Sequential approach (separate operations)
     group.bench_function("sequential_traverse_then_rank", |b| {
         b.iter(|| {
-            // Step 1: Get all neighbors via graph traversal
+            // Get edges, resolve targets, load embeddings, compute similarities (chained)
             let edge_ids = db.get_outgoing_edges_with_label(start, "KNOWS");
-            let neighbors: Vec<NodeId> = edge_ids
+            let mut scored: Vec<(NodeId, f32)> = edge_ids
                 .iter()
                 .filter_map(|&eid| db.get_edge(eid).ok().map(|e| e.target))
-                .collect();
-
-            // Step 2: Load embeddings and compute similarities
-            let mut scored: Vec<(NodeId, f32)> = neighbors
-                .iter()
-                .filter_map(|&nid| {
+                .filter_map(|nid| {
                     let node = db.get_node(nid).ok()?;
                     let emb = node.get_property("embedding")?.as_vector()?;
                     let sim = cosine_similarity(&query, emb).ok()?;
@@ -703,7 +656,7 @@ fn bench_hybrid_vs_sequential(c: &mut Criterion) {
                 })
                 .collect();
 
-            // Step 3: Sort and take top-k
+            // Sort and take top-k
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
             scored.truncate(10);
             scored
