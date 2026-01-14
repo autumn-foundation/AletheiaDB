@@ -593,6 +593,42 @@ fn bench_chained_hybrid_operations(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Section 4: Query Optimization Overhead
+// ============================================================================
+
+/// Benchmark cold vs warm cache performance.
+///
+/// Measures the impact of cache hits on query performance.
+/// Cold: fresh DB each iteration. Warm: repeated queries on same data.
+fn bench_cache_warmup_effects(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cache_warmup");
+
+    // Cold cache: first query after DB creation
+    group.bench_function("cold_cache_traverse_rank", |b| {
+        b.iter_batched(
+            || build_uniform_graph(1000, 20, 384), // Fresh DB each iteration
+            |db| {
+                let start = NodeId::new(100).unwrap();
+                let query = gen_vector(384, 0);
+                traverse_and_rank(&db, start, "KNOWS", &query, 10)
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // Warm cache: repeated queries on same data
+    group.bench_function("warm_cache_traverse_rank", |b| {
+        let db = build_uniform_graph(1000, 20, 384);
+        let start = NodeId::new(100).unwrap();
+        let query = gen_vector(384, 0);
+
+        b.iter(|| traverse_and_rank(&db, start, "KNOWS", &query, 10));
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
@@ -612,4 +648,15 @@ criterion_group!(
     targets = bench_chained_hybrid_operations,
 );
 
-criterion_main!(benches, temporal_operations, composition);
+criterion_group!(
+    name = optimization_overhead;
+    config = common::configure_criterion();
+    targets = bench_cache_warmup_effects,
+);
+
+criterion_main!(
+    benches,
+    temporal_operations,
+    composition,
+    optimization_overhead
+);
