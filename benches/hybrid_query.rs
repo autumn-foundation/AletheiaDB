@@ -89,6 +89,57 @@ fn build_uniform_graph(node_count: usize, fan_out: usize, dim: usize) -> Gallifr
     db
 }
 
+/// Build power-law graph: hubs, medium, and sparse nodes.
+///
+/// Simulates realistic social networks with power-law degree distribution:
+/// - 5% hubs (100 edges each)
+/// - 20% medium nodes (30 edges each)
+/// - 75% regular nodes (5 edges each)
+///
+/// Uses clustered embeddings to simulate semantic similarity within communities.
+fn build_power_law_graph(node_count: usize, dim: usize) -> GallifreyDB {
+    let db = GallifreyDB::new();
+    let config = HnswConfig::new(dim, DistanceMetric::Cosine);
+    db.enable_vector_index("embedding", config).unwrap();
+
+    // Create nodes with clustered embeddings (10 clusters)
+    let num_clusters = 10;
+    for i in 0..node_count {
+        let cluster_id = i % num_clusters;
+        let vector = gen_clustered_vector(dim, cluster_id, 0.1);
+        let _ = db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert_vector("embedding", &vector)
+                .build(),
+        );
+    }
+
+    // Create edges with power-law distribution
+    for i in 0..node_count {
+        let source = NodeId::new(i as u64).unwrap();
+
+        // Determine degree based on power-law distribution
+        let degree = if i < node_count / 20 {
+            100 // 5% hubs
+        } else if i < node_count / 4 {
+            30 // 20% medium nodes
+        } else {
+            5 // 75% regular nodes
+        };
+
+        // Create edges to random targets
+        for j in 0..degree {
+            let target_idx = (i + j * 17 + 1) % node_count; // Pseudo-random but deterministic
+            let target = NodeId::new(target_idx as u64).unwrap();
+            let _ = db.create_edge(source, target, "KNOWS", PropertyMapBuilder::new().build());
+        }
+    }
+
+    db
+}
+
 // Placeholder benchmark - will be replaced with actual benchmarks in subsequent tasks
 fn bench_placeholder(_c: &mut Criterion) {
     // This is a placeholder to make the benchmark file compile.
