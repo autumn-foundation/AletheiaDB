@@ -338,10 +338,43 @@ fn bench_traverse_and_rank_k_values(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Benchmark: traverse_and_rank Dimension Variations
+// ============================================================================
+
+/// Benchmark traverse_and_rank with different vector dimensions.
+///
+/// Tests dim=[384, 768, 1536] to show similarity computation overhead.
+/// Expected: Linear scaling with dimension size.
+fn bench_traverse_and_rank_dimensions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("traverse_and_rank/dimensions");
+    group.throughput(Throughput::Elements(1));
+
+    for dim in [384, 768, 1536] {
+        let db = build_uniform_graph(1000, 20, dim);
+        let start = NodeId::new(500).unwrap();
+        let query = gen_vector(dim, 0);
+
+        group.bench_with_input(BenchmarkId::new("dim", dim), &dim, |b, _| {
+            b.iter(|| {
+                traverse_and_rank(
+                    black_box(&db),
+                    black_box(start),
+                    black_box("KNOWS"),
+                    black_box(&query),
+                    black_box(10),
+                )
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
-    targets = bench_traverse_and_rank_basic, bench_traverse_and_rank_k_values
+    targets = bench_traverse_and_rank_basic, bench_traverse_and_rank_k_values, bench_traverse_and_rank_dimensions
 );
 
 criterion_main!(benches);
