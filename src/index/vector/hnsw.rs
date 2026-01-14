@@ -695,7 +695,33 @@ impl VectorIndex for HnswIndex {
                     "Failed to save index: {}",
                     e
                 )))
+            })?;
+
+        // Save mappings to companion file
+        let mappings_path = path.with_extension("usearch.mappings");
+        let mut mappings = Vec::new();
+        for entry in self.id_mapping.iter() {
+            mappings.push((*entry.key(), *entry.value()));
+        }
+
+        let mappings_data: Vec<u8> = mappings
+            .iter()
+            .flat_map(|(node_id, key)| {
+                let mut bytes = Vec::with_capacity(16);
+                bytes.extend_from_slice(&node_id.as_u64().to_le_bytes());
+                bytes.extend_from_slice(&key.to_le_bytes());
+                bytes
             })
+            .collect();
+
+        std::fs::write(&mappings_path, &mappings_data).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to save mappings: {}",
+                e
+            )))
+        })?;
+
+        Ok(())
     }
 
     fn memory_usage(&self) -> usize {
@@ -767,12 +793,39 @@ impl HnswIndex {
                 )))
             })?;
 
+        // Load mappings from companion file
+        let id_mapping = Arc::new(DashMap::new());
+        let reverse_mapping = Arc::new(DashMap::new());
+        let mut max_key = 0u64;
+
+        let mappings_path = path.with_extension("usearch.mappings");
+        if mappings_path.exists() {
+            let mappings_data = std::fs::read(&mappings_path).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to read mappings: {}",
+                    e
+                )))
+            })?;
+
+            // Parse mappings: each entry is 16 bytes (8 for NodeId, 8 for key)
+            for chunk in mappings_data.chunks_exact(16) {
+                let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+                let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+
+                if let Ok(node_id) = NodeId::new(node_id_raw) {
+                    id_mapping.insert(node_id, key);
+                    reverse_mapping.insert(key, node_id);
+                    max_key = max_key.max(key);
+                }
+            }
+        }
+
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
             config,
-            id_mapping: Arc::new(DashMap::new()),
-            reverse_mapping: Arc::new(DashMap::new()),
-            next_key: AtomicU64::new(0),
+            id_mapping,
+            reverse_mapping,
+            next_key: AtomicU64::new(max_key + 1),
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
         })
@@ -799,6 +852,32 @@ impl HnswIndex {
         let dimensions = index.dimensions();
         let connectivity = index.connectivity();
 
+        // Load mappings from companion file
+        let id_mapping = Arc::new(DashMap::new());
+        let reverse_mapping = Arc::new(DashMap::new());
+        let mut max_key = 0u64;
+
+        let mappings_path = path.with_extension("usearch.mappings");
+        if mappings_path.exists() {
+            let mappings_data = std::fs::read(&mappings_path).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to read mappings: {}",
+                    e
+                )))
+            })?;
+
+            for chunk in mappings_data.chunks_exact(16) {
+                let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+                let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+
+                if let Ok(node_id) = NodeId::new(node_id_raw) {
+                    id_mapping.insert(node_id, key);
+                    reverse_mapping.insert(key, node_id);
+                    max_key = max_key.max(key);
+                }
+            }
+        }
+
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
             config: HnswConfig {
@@ -809,9 +888,9 @@ impl HnswIndex {
                 },
                 ..Default::default()
             },
-            id_mapping: Arc::new(DashMap::new()),
-            reverse_mapping: Arc::new(DashMap::new()),
-            next_key: AtomicU64::new(0),
+            id_mapping,
+            reverse_mapping,
+            next_key: AtomicU64::new(max_key + 1),
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
         })
