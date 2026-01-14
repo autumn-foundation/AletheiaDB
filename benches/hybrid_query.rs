@@ -654,9 +654,75 @@ criterion_group!(
     targets = bench_cache_warmup_effects,
 );
 
+// ============================================================================
+// Section 5: Comparison Baselines (Hybrid vs Separate)
+// ============================================================================
+
+/// Compare hybrid API vs running operations sequentially.
+///
+/// Measures whether the integrated hybrid API provides performance
+/// benefits over manual composition of separate operations.
+fn bench_hybrid_vs_sequential(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hybrid_vs_sequential");
+
+    let db = build_uniform_graph(1000, 20, 384);
+    let start = NodeId::new(100).unwrap();
+    let query = gen_vector(384, 0);
+
+    // Hybrid approach (integrated)
+    group.bench_function("hybrid_traverse_and_rank", |b| {
+        b.iter(|| {
+            traverse_and_rank(
+                black_box(&db),
+                black_box(start),
+                black_box("KNOWS"),
+                black_box(&query),
+                black_box(10),
+            )
+        });
+    });
+
+    // Sequential approach (separate operations)
+    group.bench_function("sequential_traverse_then_rank", |b| {
+        b.iter(|| {
+            // Step 1: Get all neighbors via graph traversal
+            let edge_ids = db.get_outgoing_edges_with_label(start, "KNOWS");
+            let neighbors: Vec<NodeId> = edge_ids
+                .iter()
+                .filter_map(|&eid| db.get_edge(eid).ok().map(|e| e.target))
+                .collect();
+
+            // Step 2: Load embeddings and compute similarities
+            let mut scored: Vec<(NodeId, f32)> = neighbors
+                .iter()
+                .filter_map(|&nid| {
+                    let node = db.get_node(nid).ok()?;
+                    let emb = node.get_property("embedding")?.as_vector()?;
+                    let sim = cosine_similarity(&query, emb).ok()?;
+                    Some((nid, sim))
+                })
+                .collect();
+
+            // Step 3: Sort and take top-k
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            scored.truncate(10);
+            scored
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    name = comparison_baselines;
+    config = common::configure_criterion();
+    targets = bench_hybrid_vs_sequential,
+);
+
 criterion_main!(
     benches,
     temporal_operations,
     composition,
-    optimization_overhead
+    optimization_overhead,
+    comparison_baselines
 );
