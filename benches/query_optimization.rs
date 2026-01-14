@@ -149,6 +149,7 @@ fn bench_cost_estimation(c: &mut Criterion) {
             direction: gallifreydb::query::ir::Direction::Outgoing,
             label: Some("KNOWS".to_string()),
             depth: 2,
+            temporal_context: None,
         }),
         predicate: gallifreydb::query::ir::Predicate::eq("active", true),
     };

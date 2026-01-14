@@ -144,6 +144,7 @@ impl QueryExecutor {
                 direction,
                 label,
                 depth,
+                temporal_context,
             } => {
                 let input_iter = self.execute_op(input)?;
                 Ok(Box::new(iterators::TraversalIterator::new(
@@ -152,6 +153,8 @@ impl QueryExecutor {
                     label.clone(),
                     *depth,
                     Arc::clone(&self.current),
+                    Arc::clone(&self.historical),
+                    *temporal_context,
                 )))
             }
 
@@ -513,6 +516,7 @@ mod tests {
                 direction: crate::query::ir::Direction::Outgoing,
                 label: Some("KNOWS".to_string()),
                 depth: 1,
+                temporal_context: None,
             },
             estimated_cost: Default::default(),
             temporal_context: None,
@@ -695,6 +699,7 @@ mod tests {
                         direction: crate::query::ir::Direction::Outgoing,
                         label: Some("KNOWS".to_string()),
                         depth: 1,
+                        temporal_context: None,
                     }),
                     predicate: crate::query::Predicate::eq("name", "Bob"),
                 }),
