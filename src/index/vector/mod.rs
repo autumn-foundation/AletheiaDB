@@ -116,7 +116,7 @@ pub enum Quantization {
 ///
 /// - InMemory: All data in RAM (default, fastest queries)
 /// - MemoryMapped: Data on disk, lazily loaded (saves RAM, slightly slower)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum StorageMode {
     /// Store index entirely in memory (default)
     #[default]
@@ -138,12 +138,28 @@ pub struct CustomMetric {
     pub distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync>,
 }
 
+impl Clone for CustomMetric {
+    fn clone(&self) -> Self {
+        CustomMetric {
+            name: self.name.clone(),
+            distance_fn: Arc::clone(&self.distance_fn),
+        }
+    }
+}
+
 impl std::fmt::Debug for CustomMetric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CustomMetric")
             .field("name", &self.name)
             .field("distance_fn", &"<function>")
             .finish()
+    }
+}
+
+impl PartialEq for CustomMetric {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare by name only; function pointers cannot be meaningfully compared
+        self.name == other.name
     }
 }
 
@@ -537,9 +553,9 @@ pub trait VectorIndex: Send + Sync {
     /// Returns `Err(UnsupportedOperation)` if the implementation doesn't support persistence.
     fn save(&self, _path: &std::path::Path) -> Result<()> {
         Err(crate::utils::Error::Vector(
-            crate::utils::error::VectorError::IndexError {
-                message: "save not supported by this index type".to_string(),
-            },
+            crate::utils::error::VectorError::IndexError(
+                "save not supported by this index type".to_string(),
+            ),
         ))
     }
 
