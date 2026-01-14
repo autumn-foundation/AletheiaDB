@@ -294,10 +294,54 @@ fn bench_traverse_and_rank_basic(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Benchmark: traverse_and_rank K-Value Variations
+// ============================================================================
+
+/// Benchmark traverse_and_rank with different k values.
+///
+/// Tests how the number of results requested (k) affects performance.
+/// Uses a fixed 10K node power-law graph (realistic social network topology)
+/// with dimension 384 (standard embedding size).
+///
+/// K values tested: 1, 5, 10, 25, 50, 100
+/// This helps identify:
+/// - Sorting overhead at different result sizes
+/// - Memory allocation patterns for result vectors
+/// - HNSW search efficiency at various k values
+fn bench_traverse_and_rank_k_values(c: &mut Criterion) {
+    let mut group = c.benchmark_group("traverse_and_rank/k_values");
+
+    // Fixed setup: 10K nodes, power-law topology
+    let db = build_power_law_graph(10000, 384);
+    let source = NodeId::new(0).unwrap();
+    let query_vec = gen_vector(384, 42);
+
+    // Test different k values
+    let k_values = vec![1, 5, 10, 25, 50, 100];
+
+    for k in k_values {
+        group.bench_function(BenchmarkId::new("k", k), |b| {
+            b.iter(|| {
+                let results = traverse_and_rank(
+                    black_box(&db),
+                    black_box(source),
+                    black_box("KNOWS"),
+                    black_box(&query_vec),
+                    black_box(k),
+                );
+                black_box(results)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
-    targets = bench_traverse_and_rank_basic
+    targets = bench_traverse_and_rank_basic, bench_traverse_and_rank_k_values
 );
 
 criterion_main!(benches);
