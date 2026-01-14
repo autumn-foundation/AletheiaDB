@@ -32,7 +32,10 @@ fn test_native_delete_removes_from_index() {
 
     // node2 should NOT appear in results (native delete, not soft delete)
     for (id, _) in &results {
-        assert_ne!(*id, node2, "Deleted node should not appear in search results");
+        assert_ne!(
+            *id, node2,
+            "Deleted node should not appear in search results"
+        );
     }
 }
 
@@ -83,6 +86,10 @@ fn test_batch_delete() {
     // Verify deleted nodes don't appear in search
     let results = index.search(&[25.0, 0.0, 0.0, 0.0], 100).unwrap();
     for (id, _) in &results {
-        assert!(id.as_u64() > 50, "Deleted node {} found in results", id.as_u64());
+        assert!(
+            id.as_u64() > 50,
+            "Deleted node {} found in results",
+            id.as_u64()
+        );
     }
 }

@@ -1,7 +1,9 @@
 //! Tests for memory-mapped index persistence.
 
 use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, StorageMode, VectorIndex};
+use gallifreydb::index::vector::{
+    DistanceMetric, HnswConfig, HnswIndex, HnswIndexBuilder, StorageMode, VectorIndex,
+};
 use tempfile::TempDir;
 
 /// Test save and load roundtrip.
@@ -43,7 +45,9 @@ fn test_mmap_index_query() {
 
     // Create memory-mapped index
     let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
-        .storage(StorageMode::MemoryMapped { path: index_path.clone() })
+        .storage(StorageMode::MemoryMapped {
+            path: index_path.clone(),
+        })
         .build()
         .unwrap();
 
@@ -74,8 +78,12 @@ fn test_open_mmap_index() {
             .build()
             .unwrap();
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]).unwrap();
+        index
+            .add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        index
+            .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+            .unwrap();
 
         index.save(&index_path).unwrap();
     }

@@ -88,13 +88,13 @@
 use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
-use crate::utils::{error::VectorError, Error, Result};
+use crate::utils::{Error, Result, error::VectorError};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 /// Maximum number of results that can be requested in a search.
@@ -564,11 +564,13 @@ impl VectorIndex for HnswIndex {
 
         // Perform search
         let index = self.inner.read();
-        let matches = index.search(query, k_capped).map_err(|e| {
-            Error::Vector(VectorError::IndexError(format!("Search failed: {}", e)))
-        })?;
+        let matches = index
+            .search(query, k_capped)
+            .map_err(|e| Error::Vector(VectorError::IndexError(format!("Search failed: {}", e))))?;
 
-        self.stats.searches_performed.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .searches_performed
+            .fetch_add(1, Ordering::Relaxed);
 
         // Convert results to (NodeId, similarity) format
         let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
@@ -631,14 +633,18 @@ impl VectorIndex for HnswIndex {
             }
         };
 
-        let matches = index.filtered_search(query, k_capped, filter).map_err(|e| {
-            Error::Vector(VectorError::IndexError(format!(
-                "Filtered search failed: {}",
-                e
-            )))
-        })?;
+        let matches = index
+            .filtered_search(query, k_capped, filter)
+            .map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Filtered search failed: {}",
+                    e
+                )))
+            })?;
 
-        self.stats.searches_performed.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .searches_performed
+            .fetch_add(1, Ordering::Relaxed);
 
         // Convert results
         let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
@@ -984,9 +990,10 @@ mod tests {
 
     #[test]
     fn test_hnsw_config_custom_metric() {
-        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_custom_metric("weighted", |a, b| {
-            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
-        });
+        let config = HnswConfig::new(4, DistanceMetric::Cosine)
+            .with_custom_metric("weighted", |a, b| {
+                a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+            });
 
         assert!(config.custom_metric.is_some());
         assert_eq!(config.custom_metric.as_ref().unwrap().name, "weighted");

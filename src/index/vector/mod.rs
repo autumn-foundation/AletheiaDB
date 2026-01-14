@@ -135,6 +135,7 @@ pub struct CustomMetric {
     /// Human-readable name for the metric
     pub name: String,
     /// The distance function: takes two vectors, returns distance (lower = more similar)
+    #[allow(clippy::type_complexity)]
     pub distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync>,
 }
 
@@ -621,9 +622,15 @@ mod tests {
         assert_eq!(DistanceMetric::Haversine.to_u8(), 3);
         assert_eq!(DistanceMetric::Hamming.to_u8(), 4);
         assert_eq!(DistanceMetric::Tanimoto.to_u8(), 5);
-        assert_eq!(DistanceMetric::from_u8(3).unwrap(), DistanceMetric::Haversine);
+        assert_eq!(
+            DistanceMetric::from_u8(3).unwrap(),
+            DistanceMetric::Haversine
+        );
         assert_eq!(DistanceMetric::from_u8(4).unwrap(), DistanceMetric::Hamming);
-        assert_eq!(DistanceMetric::from_u8(5).unwrap(), DistanceMetric::Tanimoto);
+        assert_eq!(
+            DistanceMetric::from_u8(5).unwrap(),
+            DistanceMetric::Tanimoto
+        );
     }
 }
 

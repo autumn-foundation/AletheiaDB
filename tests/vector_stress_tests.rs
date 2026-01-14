@@ -12,7 +12,7 @@ fn stress_concurrent_operations() {
         HnswIndexBuilder::new(64, DistanceMetric::Cosine)
             .initial_capacity(10000)
             .build()
-            .unwrap()
+            .unwrap(),
     );
 
     let num_threads = 8;
@@ -95,7 +95,9 @@ fn stress_search_throughput() {
     // Build index with 10k vectors
     for i in 0..10000 {
         let node = NodeId::new(i as u64 + 1).unwrap();
-        let vector: Vec<f32> = (0..128).map(|j| ((i * 17 + j * 31) % 1000) as f32 / 1000.0).collect();
+        let vector: Vec<f32> = (0..128)
+            .map(|j| ((i * 17 + j * 31) % 1000) as f32 / 1000.0)
+            .collect();
         index.add(node, &vector).unwrap();
     }
 
@@ -103,7 +105,9 @@ fn stress_search_throughput() {
     let start = std::time::Instant::now();
 
     for i in 0..1000 {
-        let query: Vec<f32> = (0..128).map(|j| ((i * 13 + j * 29) % 1000) as f32 / 1000.0).collect();
+        let query: Vec<f32> = (0..128)
+            .map(|j| ((i * 13 + j * 29) % 1000) as f32 / 1000.0)
+            .collect();
         let results = index.search(&query, 10).unwrap();
         assert!(!results.is_empty());
     }
