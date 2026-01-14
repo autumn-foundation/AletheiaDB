@@ -140,6 +140,42 @@ fn build_power_law_graph(node_count: usize, dim: usize) -> GallifreyDB {
     db
 }
 
+/// Build sparse graph: most nodes have 2-5 edges.
+///
+/// This represents minimalist graphs where connections are selective,
+/// such as expert networks or curated knowledge bases.
+fn build_sparse_graph(node_count: usize, dim: usize) -> GallifreyDB {
+    let db = GallifreyDB::new();
+    let config = HnswConfig::new(dim, DistanceMetric::Cosine);
+    db.enable_vector_index("embedding", config).unwrap();
+
+    // Create nodes
+    for i in 0..node_count {
+        let vector = gen_vector(dim, i);
+        let _ = db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert_vector("embedding", &vector)
+                .build(),
+        );
+    }
+
+    // Create sparse edges (2-5 per node)
+    for i in 0..node_count {
+        let source = NodeId::new(i as u64).unwrap();
+        let edge_count = 2 + (i % 4); // 2-5 edges
+
+        for j in 0..edge_count {
+            let target_idx = (i + j + 1) % node_count;
+            let target = NodeId::new(target_idx as u64).unwrap();
+            let _ = db.create_edge(source, target, "KNOWS", PropertyMapBuilder::new().build());
+        }
+    }
+
+    db
+}
+
 // Placeholder benchmark - will be replaced with actual benchmarks in subsequent tasks
 fn bench_placeholder(_c: &mut Criterion) {
     // This is a placeholder to make the benchmark file compile.
