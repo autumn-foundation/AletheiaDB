@@ -23,7 +23,7 @@
 //!
 //! - **Native deletes**: Vectors are truly removed from the index
 //! - **Quantization**: F32 (full), F16 (half), I8 (quarter precision)
-//! - **Memory-mapped indexes**: Serve large indexes from disk
+//! - **Memory-mapped indexes**: Serve large indexes from disk (read-only)
 //! - **Custom distance metrics**: User-defined similarity functions
 //! - **New distance metrics**: Haversine, Hamming, Tanimoto
 //!
@@ -89,6 +89,7 @@ use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
+use crc32fast::Hasher;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::io::{Read, Write};
@@ -96,6 +97,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+
+/// Magic bytes for mapping file identification
+const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
+/// Current mapping file format version
+const MAPPING_VERSION: u8 = 1;
 
 /// Maximum number of results that can be requested in a search.
 ///
@@ -393,7 +399,7 @@ impl HnswIndexBuilder {
         };
 
         // Create the index
-        let index = Index::new(&options).map_err(|e| {
+        let mut index = Index::new(&options).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to create usearch index: {}",
                 e
@@ -413,6 +419,27 @@ impl HnswIndexBuilder {
                 e
             )))
         })?;
+
+        // Apply custom metric if configured
+        if let Some(ref custom) = self.config.custom_metric {
+            let dims = self.config.dimensions;
+            let distance_fn = Arc::clone(&custom.distance_fn);
+
+            // Create a wrapper that converts usearch's raw pointer API to our safe slice API
+            // SAFETY: usearch guarantees that:
+            // 1. Both pointers are valid and point to `dims` contiguous f32 values
+            // 2. The pointers remain valid for the duration of the function call
+            // 3. The data is properly aligned for f32
+            let metric_wrapper: Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> =
+                Box::new(move |a: *const f32, b: *const f32| {
+                    // SAFETY: usearch guarantees pointers are valid for `dims` elements
+                    let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
+                    let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+                    distance_fn(slice_a, slice_b)
+                });
+
+            index.change_metric(metric_wrapper);
+        }
 
         // Handle memory-mapped storage
         if let StorageMode::MemoryMapped { ref path } = self.config.storage {
@@ -452,6 +479,7 @@ impl HnswIndexBuilder {
             next_key: AtomicU64::new(0),
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
+            is_mmap: false,
         })
     }
 }
@@ -465,6 +493,11 @@ impl HnswIndexBuilder {
 ///
 /// Unlike the previous hnsw_rs implementation, usearch supports native deletes.
 /// Removed vectors are truly removed from the index, not just soft-deleted.
+///
+/// # Memory-Mapped Indexes
+///
+/// Indexes opened via `open_mmap()` are read-only. Attempting to call `add()`
+/// or `remove()` on a memory-mapped index will return an error.
 pub struct HnswIndex {
     /// Underlying usearch index
     inner: Arc<RwLock<Index>>,
@@ -480,10 +513,19 @@ pub struct HnswIndex {
     stats: Arc<IndexStats>,
     /// Maximum k for DoS protection
     max_k: usize,
+    /// Whether this index is memory-mapped (read-only)
+    is_mmap: bool,
 }
 
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
+        // Check if index is read-only (memory-mapped)
+        if self.is_mmap {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot modify memory-mapped index (read-only)".to_string(),
+            )));
+        }
+
         // Validate vector
         validate_vector(vector)?;
 
@@ -508,16 +550,31 @@ impl VectorIndex for HnswIndex {
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 // New node: allocate key with overflow protection
+                // Check BEFORE incrementing to avoid leaving next_key in invalid state
                 const MAX_VALID_KEY: u64 = u64::MAX - 1000;
-                let key = self.next_key.fetch_add(1, Ordering::SeqCst);
-                if key > MAX_VALID_KEY {
-                    return Err(Error::Vector(VectorError::IndexError(
-                        "Maximum number of vectors exceeded (key overflow protection)".to_string(),
-                    )));
+                loop {
+                    let current = self.next_key.load(Ordering::SeqCst);
+                    if current > MAX_VALID_KEY {
+                        return Err(Error::Vector(VectorError::IndexError(
+                            "Maximum number of vectors exceeded (key overflow protection)"
+                                .to_string(),
+                        )));
+                    }
+                    // Try to atomically increment; retry if another thread beat us
+                    match self.next_key.compare_exchange(
+                        current,
+                        current + 1,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(key) => {
+                            entry.insert(key);
+                            self.reverse_mapping.insert(key, id);
+                            break key;
+                        }
+                        Err(_) => continue, // Retry with new current value
+                    }
                 }
-                entry.insert(key);
-                self.reverse_mapping.insert(key, id);
-                key
             }
         };
 
@@ -548,6 +605,13 @@ impl VectorIndex for HnswIndex {
     }
 
     fn remove(&self, id: NodeId) -> Result<()> {
+        // Check if index is read-only (memory-mapped)
+        if self.is_mmap {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot modify memory-mapped index (read-only)".to_string(),
+            )));
+        }
+
         // Find the key for this NodeId
         if let Some((_, key)) = self.id_mapping.remove(&id) {
             self.reverse_mapping.remove(&key);
@@ -598,7 +662,22 @@ impl VectorIndex for HnswIndex {
             if let Some(node_id_ref) = self.reverse_mapping.get(key) {
                 let node_id = *node_id_ref.value();
 
-                // Convert distance to similarity based on metric
+                // Convert distance to similarity based on metric.
+                // usearch returns distances where lower = more similar (except for some metrics).
+                // We convert to similarity where higher = more similar for consistent API.
+                //
+                // - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
+                //   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
+                // - Euclidean: usearch returns squared L2 distance, range [0, inf)
+                //   Converting: similarity = -distance, so closer vectors have higher similarity
+                // - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
+                //   Converting: similarity = -distance = dot_product, higher is more similar
+                // - Haversine: usearch returns great-circle distance, range [0, pi]
+                //   Converting: similarity = -distance, closer points have higher similarity
+                // - Hamming: usearch returns bit differences count, range [0, dims]
+                //   Converting: similarity = -distance, fewer differences = more similar
+                // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
+                //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
                 let similarity = match self.config.metric {
                     DistanceMetric::Cosine => 1.0 - distance,
                     DistanceMetric::Euclidean => -distance,
@@ -665,7 +744,7 @@ impl VectorIndex for HnswIndex {
             .searches_performed
             .fetch_add(1, Ordering::Relaxed);
 
-        // Convert results
+        // Convert results (same conversion logic as search() - see comments there)
         let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
 
         for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
@@ -728,13 +807,15 @@ impl VectorIndex for HnswIndex {
                 )))
             })?;
 
-        // Save mappings to companion file
+        // Save mappings to companion file with integrity checks
+        // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
         let mappings_path = path.with_extension("usearch.mappings");
         let mut mappings = Vec::new();
         for entry in self.id_mapping.iter() {
             mappings.push((*entry.key(), *entry.value()));
         }
 
+        let count = mappings.len() as u64;
         let mappings_data: Vec<u8> = mappings
             .iter()
             .flat_map(|(node_id, key)| {
@@ -745,7 +826,20 @@ impl VectorIndex for HnswIndex {
             })
             .collect();
 
-        std::fs::write(&mappings_path, &mappings_data).map_err(|e| {
+        // Build file with header and checksum
+        let mut file_data = Vec::with_capacity(4 + 1 + 8 + mappings_data.len() + 4);
+        file_data.extend_from_slice(MAPPING_MAGIC);
+        file_data.push(MAPPING_VERSION);
+        file_data.extend_from_slice(&count.to_le_bytes());
+        file_data.extend_from_slice(&mappings_data);
+
+        // Calculate CRC32 over all data (header + mappings)
+        let mut hasher = Hasher::new();
+        hasher.update(&file_data);
+        let crc = hasher.finalize();
+        file_data.extend_from_slice(&crc.to_le_bytes());
+
+        std::fs::write(&mappings_path, &file_data).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
                 "Failed to save mappings: {}",
                 e
@@ -767,6 +861,95 @@ impl VectorIndex for HnswIndex {
         // usearch native deletes don't require compaction
         Ok(())
     }
+}
+
+/// Load and verify mappings from a companion file.
+/// Returns (id_mapping, reverse_mapping, max_key) or error if integrity check fails.
+/// Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
+#[allow(clippy::type_complexity)]
+fn load_mappings_with_integrity(
+    mappings_path: &Path,
+) -> Result<(DashMap<NodeId, u64>, DashMap<u64, NodeId>, u64)> {
+    let id_mapping = DashMap::new();
+    let reverse_mapping = DashMap::new();
+    let mut max_key = 0u64;
+
+    if !mappings_path.exists() {
+        return Ok((id_mapping, reverse_mapping, max_key));
+    }
+
+    let file_data = std::fs::read(mappings_path).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to read mappings: {}",
+            e
+        )))
+    })?;
+
+    // Minimum size: magic(4) + version(1) + count(8) + crc(4) = 17 bytes
+    if file_data.len() < 17 {
+        return Err(Error::Vector(VectorError::IndexError(
+            "Mapping file too small or corrupted".to_string(),
+        )));
+    }
+
+    // Verify magic bytes
+    if &file_data[0..4] != MAPPING_MAGIC {
+        return Err(Error::Vector(VectorError::IndexError(
+            "Invalid mapping file: bad magic bytes".to_string(),
+        )));
+    }
+
+    // Check version
+    let version = file_data[4];
+    if version != MAPPING_VERSION {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Unsupported mapping file version: {} (expected {})",
+            version, MAPPING_VERSION
+        ))));
+    }
+
+    // Extract and verify CRC32
+    let crc_offset = file_data.len() - 4;
+    let stored_crc = u32::from_le_bytes(file_data[crc_offset..].try_into().unwrap());
+    let mut hasher = Hasher::new();
+    hasher.update(&file_data[..crc_offset]);
+    let computed_crc = hasher.finalize();
+
+    if stored_crc != computed_crc {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Mapping file corrupted: CRC mismatch (stored: {}, computed: {})",
+            stored_crc, computed_crc
+        ))));
+    }
+
+    // Parse count
+    let count = u64::from_le_bytes(file_data[5..13].try_into().unwrap()) as usize;
+
+    // Verify data size
+    let expected_size = 4 + 1 + 8 + (count * 16) + 4;
+    if file_data.len() != expected_size {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Mapping file size mismatch: expected {} bytes, got {}",
+            expected_size,
+            file_data.len()
+        ))));
+    }
+
+    // Parse mappings
+    let data_start = 13;
+    let data_end = crc_offset;
+    for chunk in file_data[data_start..data_end].chunks_exact(16) {
+        let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+        let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+
+        if let Ok(node_id) = NodeId::new(node_id_raw) {
+            id_mapping.insert(node_id, key);
+            reverse_mapping.insert(key, node_id);
+            max_key = max_key.max(key);
+        }
+    }
+
+    Ok((id_mapping, reverse_mapping, max_key))
 }
 
 impl HnswIndex {
@@ -831,41 +1014,19 @@ impl HnswIndex {
                 )))
             })?;
 
-        // Load mappings from companion file
-        let id_mapping = Arc::new(DashMap::new());
-        let reverse_mapping = Arc::new(DashMap::new());
-        let mut max_key = 0u64;
-
+        // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
-        if mappings_path.exists() {
-            let mappings_data = std::fs::read(&mappings_path).map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Failed to read mappings: {}",
-                    e
-                )))
-            })?;
-
-            // Parse mappings: each entry is 16 bytes (8 for NodeId, 8 for key)
-            for chunk in mappings_data.chunks_exact(16) {
-                let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-                let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
-
-                if let Ok(node_id) = NodeId::new(node_id_raw) {
-                    id_mapping.insert(node_id, key);
-                    reverse_mapping.insert(key, node_id);
-                    max_key = max_key.max(key);
-                }
-            }
-        }
+        let (id_mapping, reverse_mapping, max_key) = load_mappings_with_integrity(&mappings_path)?;
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
             config,
-            id_mapping,
-            reverse_mapping,
+            id_mapping: Arc::new(id_mapping),
+            reverse_mapping: Arc::new(reverse_mapping),
             next_key: AtomicU64::new(max_key + 1),
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
+            is_mmap: false,
         })
     }
 
@@ -894,31 +1055,9 @@ impl HnswIndex {
         let dimensions = index.dimensions();
         let connectivity = index.connectivity();
 
-        // Load mappings from companion file
-        let id_mapping = Arc::new(DashMap::new());
-        let reverse_mapping = Arc::new(DashMap::new());
-        let mut max_key = 0u64;
-
+        // Load mappings from companion file with integrity verification
         let mappings_path = path.with_extension("usearch.mappings");
-        if mappings_path.exists() {
-            let mappings_data = std::fs::read(&mappings_path).map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Failed to read mappings: {}",
-                    e
-                )))
-            })?;
-
-            for chunk in mappings_data.chunks_exact(16) {
-                let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-                let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
-
-                if let Ok(node_id) = NodeId::new(node_id_raw) {
-                    id_mapping.insert(node_id, key);
-                    reverse_mapping.insert(key, node_id);
-                    max_key = max_key.max(key);
-                }
-            }
-        }
+        let (id_mapping, reverse_mapping, max_key) = load_mappings_with_integrity(&mappings_path)?;
 
         Ok(HnswIndex {
             inner: Arc::new(RwLock::new(index)),
@@ -930,18 +1069,37 @@ impl HnswIndex {
                 },
                 ..Default::default()
             },
-            id_mapping,
-            reverse_mapping,
+            id_mapping: Arc::new(id_mapping),
+            reverse_mapping: Arc::new(reverse_mapping),
             next_key: AtomicU64::new(max_key + 1),
             stats: Arc::new(IndexStats::default()),
             max_k: MAX_K,
+            is_mmap: true,
         })
     }
 }
 
-// SAFETY: HnswIndex is safe to send across threads because:
-// 1. usearch::Index is thread-safe for concurrent operations
-// 2. All our fields use thread-safe wrappers (Arc, RwLock, DashMap, atomics)
+// SAFETY: HnswIndex is safe to send across threads.
+//
+// Why these manual impls are needed:
+// usearch::Index contains raw pointers internally and doesn't automatically implement
+// Send/Sync. However, usearch documents that Index is thread-safe for concurrent
+// reads and writes (it uses internal locks for thread safety).
+//
+// Our wrapper ensures safety through:
+// 1. `inner: Arc<RwLock<Index>>` - The RwLock provides exclusive access for writes
+//    and shared access for reads, even though usearch has internal synchronization.
+//    This double-locking is intentional: usearch's internal locks may not match
+//    Rust's Send/Sync requirements, so we add our own synchronization layer.
+// 2. `id_mapping: Arc<DashMap<NodeId, u64>>` - DashMap is explicitly Send+Sync
+// 3. `reverse_mapping: Arc<DashMap<u64, NodeId>>` - DashMap is explicitly Send+Sync
+// 4. `next_key: AtomicU64` - All atomics are Send+Sync
+// 5. `stats: Arc<IndexStats>` - Contains only AtomicU64 fields
+// 6. Remaining fields (config, max_k, is_mmap) contain only Send+Sync types
+//
+// References:
+// - usearch thread safety: https://unum-cloud.github.io/usearch/cpp/index.html
+// - The library uses internal mutex/rwlock for graph modifications
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
 

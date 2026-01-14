@@ -445,3 +445,161 @@ fn test_search_with_filter_hamming() {
         assert!(id.as_u64() % 2 == 0);
     }
 }
+
+// ============================================================================
+// Memory-mapped index write protection
+// ============================================================================
+
+#[test]
+fn test_mmap_index_rejects_add() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("mmap_readonly.usearch");
+
+    // Create and save an index
+    {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        let node = NodeId::new(1).unwrap();
+        index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.save(&index_path).unwrap();
+    }
+
+    // Open as mmap and try to add (should fail)
+    let mmap_index = HnswIndex::open_mmap(&index_path).unwrap();
+    let result = mmap_index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0]);
+
+    assert!(result.is_err());
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(err_str.contains("read-only") || err_str.contains("memory-mapped"));
+}
+
+#[test]
+fn test_mmap_index_rejects_remove() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("mmap_readonly2.usearch");
+
+    // Create and save an index
+    {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        let node = NodeId::new(1).unwrap();
+        index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.save(&index_path).unwrap();
+    }
+
+    // Open as mmap and try to remove (should fail)
+    let mmap_index = HnswIndex::open_mmap(&index_path).unwrap();
+    let result = mmap_index.remove(NodeId::new(1).unwrap());
+
+    assert!(result.is_err());
+    let err_str = format!("{:?}", result.unwrap_err());
+    assert!(err_str.contains("read-only") || err_str.contains("memory-mapped"));
+}
+
+// ============================================================================
+// Mapping file integrity checks
+// ============================================================================
+
+#[test]
+fn test_mapping_file_has_magic_header() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("magic_header.usearch");
+    let mappings_path = dir.path().join("magic_header.usearch.mappings");
+
+    let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+        .build()
+        .unwrap();
+
+    let node = NodeId::new(1).unwrap();
+    index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    index.save(&index_path).unwrap();
+
+    // Verify mappings file starts with magic bytes "GMAP"
+    let data = std::fs::read(&mappings_path).unwrap();
+    assert!(data.len() >= 4);
+    assert_eq!(&data[0..4], b"GMAP");
+}
+
+#[test]
+fn test_load_rejects_corrupted_mapping_crc() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("corrupted_crc.usearch");
+    let mappings_path = dir.path().join("corrupted_crc.usearch.mappings");
+
+    // Create and save an index
+    {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        let node = NodeId::new(1).unwrap();
+        index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.save(&index_path).unwrap();
+    }
+
+    // Corrupt the CRC (last 4 bytes)
+    let mut data = std::fs::read(&mappings_path).unwrap();
+    let len = data.len();
+    data[len - 1] ^= 0xFF; // Flip bits in CRC
+    std::fs::write(&mappings_path, &data).unwrap();
+
+    // Load should fail with CRC error
+    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+    let result = HnswIndex::load(&index_path, config);
+
+    match result {
+        Ok(_) => panic!("Expected error for corrupted CRC"),
+        Err(e) => {
+            let err_str = format!("{:?}", e);
+            assert!(
+                err_str.contains("CRC") || err_str.contains("corrupted"),
+                "Unexpected error: {}",
+                err_str
+            );
+        }
+    }
+}
+
+#[test]
+fn test_load_rejects_bad_magic_bytes() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("bad_magic.usearch");
+    let mappings_path = dir.path().join("bad_magic.usearch.mappings");
+
+    // Create and save an index
+    {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        let node = NodeId::new(1).unwrap();
+        index.add(node, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        index.save(&index_path).unwrap();
+    }
+
+    // Corrupt the magic bytes
+    let mut data = std::fs::read(&mappings_path).unwrap();
+    data[0] = b'X';
+    data[1] = b'Y';
+    std::fs::write(&mappings_path, &data).unwrap();
+
+    // Load should fail with magic error
+    let config = HnswConfig::new(4, DistanceMetric::Cosine);
+    let result = HnswIndex::load(&index_path, config);
+
+    match result {
+        Ok(_) => panic!("Expected error for bad magic bytes"),
+        Err(e) => {
+            let err_str = format!("{:?}", e);
+            assert!(
+                err_str.contains("magic") || err_str.contains("Invalid"),
+                "Unexpected error: {}",
+                err_str
+            );
+        }
+    }
+}
