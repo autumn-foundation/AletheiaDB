@@ -366,7 +366,7 @@ impl QueryPlanner {
 
             LogicalOp::Unary { op, input } => {
                 let physical_input = self.to_physical_op(input, temporal)?;
-                self.unary_to_physical(op, physical_input)
+                self.unary_to_physical(op, physical_input, temporal)
             }
 
             LogicalOp::Binary { op, left, right } => {
@@ -521,7 +521,12 @@ impl QueryPlanner {
     }
 
     /// Convert a unary operation to physical
-    fn unary_to_physical(&self, op: &UnaryOp, input: PhysicalOp) -> Result<PhysicalOp> {
+    fn unary_to_physical(
+        &self,
+        op: &UnaryOp,
+        input: PhysicalOp,
+        temporal: &Option<TemporalContext>,
+    ) -> Result<PhysicalOp> {
         match op {
             UnaryOp::Filter(predicate) => Ok(PhysicalOp::Filter {
                 input: Box::new(input),
@@ -549,12 +554,17 @@ impl QueryPlanner {
                 direction,
                 label,
                 depth,
-            } => Ok(PhysicalOp::IndexedTraversal {
-                input: Box::new(input),
-                direction: *direction,
-                label: label.clone(),
-                depth: depth.max_depth().unwrap_or(10),
-            }),
+            } => {
+                // Extract temporal context for edge filtering during traversal
+                let temporal_ctx = temporal.as_ref().and_then(|ctx| ctx.as_of);
+                Ok(PhysicalOp::IndexedTraversal {
+                    input: Box::new(input),
+                    direction: *direction,
+                    label: label.clone(),
+                    depth: depth.max_depth().unwrap_or(10),
+                    temporal_context: temporal_ctx,
+                })
+            }
 
             UnaryOp::VectorRank { embedding, top_k } => {
                 // Validate that vector index is enabled for reranking

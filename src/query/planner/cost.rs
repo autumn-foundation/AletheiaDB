@@ -583,6 +583,7 @@ mod tests {
             direction: crate::query::ir::Direction::Outgoing,
             label: None,
             depth: 2,
+            temporal_context: None,
         };
 
         let cost = model.estimate(&op, &stats);

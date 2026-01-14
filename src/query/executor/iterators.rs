@@ -387,6 +387,10 @@ pub struct TraversalIterator {
     label: Option<String>,
     depth: usize,
     current: Arc<CurrentStorage>,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    /// Optional temporal context (valid_time, transaction_time) for edge filtering.
+    /// When present, only edges that existed at the specified point in time are traversed.
+    temporal_context: Option<(Timestamp, Timestamp)>,
     // BFS state - reset for each input node (see doc comment above)
     frontier: VecDeque<(NodeId, Vec<EntityId>, usize)>,
     visited: HashSet<NodeId>,
@@ -400,6 +404,8 @@ impl TraversalIterator {
         label: Option<String>,
         depth: usize,
         current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_context: Option<(Timestamp, Timestamp)>,
     ) -> Self {
         TraversalIterator {
             input,
@@ -407,13 +413,40 @@ impl TraversalIterator {
             label,
             depth,
             current,
+            historical,
+            temporal_context,
             frontier: VecDeque::new(),
             visited: HashSet::new(),
             input_exhausted: false,
         }
     }
 
+    /// Check if an edge existed at the specified temporal context using a pre-acquired lock guard.
+    /// Returns true if no temporal context is set (current state query).
+    #[inline]
+    fn edge_visible_at_time(
+        &self,
+        edge_id: crate::core::EdgeId,
+        historical_guard: &Option<parking_lot::RwLockReadGuard<'_, HistoricalStorage>>,
+    ) -> bool {
+        match self.temporal_context {
+            Some((valid_time, tx_time)) => {
+                // Use the pre-acquired guard to avoid per-edge lock acquisition
+                historical_guard
+                    .as_ref()
+                    .expect("historical_guard must be Some when temporal_context is Some")
+                    .find_edge_version_at_time(edge_id, valid_time, tx_time)
+                    .is_some()
+            }
+            None => true, // No temporal context, use current state
+        }
+    }
+
     fn get_neighbors(&self, node_id: NodeId) -> Vec<(NodeId, crate::core::EdgeId)> {
+        // Acquire historical lock ONCE for all edge checks in this call.
+        // This avoids the performance regression of acquiring per-edge locks.
+        let historical_guard = self.temporal_context.map(|_| self.historical.read());
+
         match self.direction {
             Direction::Outgoing => {
                 let edges = if let Some(ref label) = self.label {
@@ -425,6 +458,9 @@ impl TraversalIterator {
                 edges
                     .into_iter()
                     .filter_map(|edge_id| {
+                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                            return None;
+                        }
                         self.current
                             .get_edge(edge_id)
                             .ok()
@@ -442,6 +478,9 @@ impl TraversalIterator {
                 edges
                     .into_iter()
                     .filter_map(|edge_id| {
+                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                            return None;
+                        }
                         self.current
                             .get_edge(edge_id)
                             .ok()
@@ -459,6 +498,9 @@ impl TraversalIterator {
                 };
 
                 for edge_id in out_edges {
+                    if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                        continue;
+                    }
                     if let Ok(e) = self.current.get_edge(edge_id) {
                         neighbors.push((e.target, edge_id));
                     }
@@ -471,6 +513,9 @@ impl TraversalIterator {
                 };
 
                 for edge_id in in_edges {
+                    if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                        continue;
+                    }
                     if let Ok(e) = self.current.get_edge(edge_id) {
                         neighbors.push((e.source, edge_id));
                     }

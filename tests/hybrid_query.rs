@@ -596,24 +596,13 @@ mod temporal_vector_tests {
             .collect_all()
             .expect("Failed to collect query results");
 
-        // BUG: Temporal edge traversal is NOT implemented (issue #400)
-        // https://github.com/madmax983/GallifreyDB/issues/400
-        //
-        // EXPECTED: At the historical timestamp, Alice only knew Bob.
-        //           Carol was added AFTER the timestamp, so she should NOT appear.
-        //           This test SHOULD pass with rows.len() == 1.
-        //
-        // ACTUAL: The TraversalIterator only queries CurrentStorage, ignoring
-        //         temporal context entirely. Both Bob AND Carol are returned.
-        //
-        // This test is INTENTIONALLY left failing to ensure this bug gets fixed.
-        // When issue #400 is resolved, this assertion will pass.
+        // At the historical timestamp, Alice only knew Bob.
+        // Carol was added AFTER the timestamp, so she should NOT appear.
+        // Issue #400 fixed: Temporal edge traversal is now implemented.
         assert_eq!(
             rows.len(),
             1,
-            "BUG #400: At historical timestamp, Alice should only know Bob (not Carol). \
-             Temporal edge traversal is not implemented - edges are queried from current \
-             state instead of historical state. See: https://github.com/madmax983/GallifreyDB/issues/400"
+            "At historical timestamp, Alice should only know Bob (not Carol)"
         );
 
         // Verify Bob is the one result

@@ -314,6 +314,9 @@ pub enum PhysicalOp {
         label: Option<String>,
         /// Maximum depth
         depth: usize,
+        /// Optional temporal context (valid_time, transaction_time) for edge filtering.
+        /// When present, only edges that existed at the specified point in time are traversed.
+        temporal_context: Option<(Timestamp, Timestamp)>,
     },
 
     // === Join Operators ===
@@ -559,12 +562,19 @@ impl PhysicalOp {
                 direction,
                 label,
                 depth,
+                temporal_context,
             } => {
+                let temporal_str = if let Some((vt, tt)) = temporal_context {
+                    format!(", as_of: ({}, {})", vt, tt)
+                } else {
+                    String::new()
+                };
                 format!(
-                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {})\n{}",
+                    "{prefix}{name} (dir: {:?}, label: {:?}, depth: {}{})\n{}",
                     direction,
                     label,
                     depth,
+                    temporal_str,
                     input.explain_indent(indent + 1)
                 )
             }
@@ -777,7 +787,8 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
-                depth: 1
+                depth: 1,
+                temporal_context: None,
             }
             .name(),
             "IndexedTraversal"
@@ -961,7 +972,8 @@ mod tests {
                 input: Box::new(PhysicalOp::Empty),
                 direction: Direction::Outgoing,
                 label: None,
-                depth: 1
+                depth: 1,
+                temporal_context: None,
             }
             .is_leaf()
         );
@@ -1241,6 +1253,7 @@ mod tests {
             direction: Direction::Outgoing,
             label: Some("KNOWS".to_string()),
             depth: 2,
+            temporal_context: None,
         };
 
         let explain = plan.explain();
@@ -1577,6 +1590,7 @@ mod tests {
                     direction: Direction::Outgoing,
                     label: Some("KNOWS".to_string()),
                     depth: 2,
+                    temporal_context: None,
                 }),
                 predicate: Predicate::eq("age", 25i64),
             },
