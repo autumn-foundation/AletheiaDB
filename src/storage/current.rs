@@ -1185,6 +1185,67 @@ impl CurrentStorage {
         index.find_similar_as_of(embedding, k, timestamp)
     }
 
+    /// Track semantic drift for a node over time in a specific property's temporal index.
+    ///
+    /// This method tracks how a node's embedding has changed relative to a reference
+    /// embedding over time. It validates that the requested property matches the
+    /// property for which the temporal vector index was enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property containing the vector embeddings
+    /// * `node_id` - The node to track drift for
+    /// * `reference_embedding` - Reference vector to measure drift against
+    /// * `time_range` - The time range to search for drift
+    ///
+    /// # Returns
+    ///
+    /// A vector of (timestamp, drift_score) pairs showing how the node's embedding
+    /// drifted from the reference at each snapshot time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - The property name doesn't match the indexed property
+    /// - Reference embedding dimensions don't match
+    pub fn track_drift_in(
+        &self,
+        property_name: &str,
+        node_id: crate::core::NodeId,
+        reference_embedding: &[f32],
+        time_range: crate::core::temporal::TimeRange,
+    ) -> Result<Vec<(crate::core::temporal::Timestamp, f32)>> {
+        let state = self.temporal_vector_index_state.read();
+
+        // Get the temporal index
+        let index = state.index.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
+                    .to_string(),
+            ))
+        })?;
+
+        // Validate that the requested property matches the indexed property
+        let indexed_property = state.property_name.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index has no property name configured.".to_string(),
+            ))
+        })?;
+
+        if indexed_property != property_name {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError(format!(
+                    "Property '{}' does not match the temporal vector index property '{}'. \
+                     Use track_drift_in(\"{}\", ...) instead.",
+                    property_name, indexed_property, indexed_property
+                )),
+            ));
+        }
+
+        index.track_semantic_drift(node_id, reference_embedding, time_range)
+    }
+
     /// Find k most similar nodes across a time range.
     ///
     /// Returns results for each snapshot within the time range, showing how

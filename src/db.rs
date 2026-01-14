@@ -1376,6 +1376,64 @@ impl GallifreyDB {
             .find_similar_as_of_in(property_name, embedding, k, timestamp)
     }
 
+    /// Track semantic drift for a node over time in a specific property's temporal index.
+    ///
+    /// This method tracks how a node's embedding has changed relative to a reference
+    /// embedding over time. It validates that the requested property matches the
+    /// property for which the temporal vector index was enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property containing the vector embeddings
+    /// * `node_id` - The node to track drift for
+    /// * `reference_embedding` - Reference vector to measure drift against
+    /// * `time_range` - The time range to search for drift
+    ///
+    /// # Returns
+    ///
+    /// A vector of (timestamp, drift_score) pairs showing how the node's embedding
+    /// drifted from the reference at each snapshot time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - The property name doesn't match the indexed property
+    /// - Reference embedding dimensions don't match
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::temporal::TimeRange;
+    ///
+    /// // Track how a document's embedding changed from its original version
+    /// let time_range = TimeRange::new(0, i64::MAX).unwrap();
+    /// let drift = db.track_drift_in(
+    ///     "content_embedding",
+    ///     node_id,
+    ///     &original_embedding,
+    ///     time_range
+    /// )?;
+    ///
+    /// for (timestamp, distance) in drift {
+    ///     println!("At {}: drift = {:.3}", timestamp, distance);
+    /// }
+    /// ```
+    pub fn track_drift_in(
+        &self,
+        property_name: &str,
+        node_id: NodeId,
+        reference_embedding: &[f32],
+        time_range: crate::core::temporal::TimeRange,
+    ) -> Result<Vec<(Timestamp, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span =
+            tracing::info_span!("track_drift_in", property = property_name, node = ?node_id)
+                .entered();
+        self.current
+            .track_drift_in(property_name, node_id, reference_embedding, time_range)
+    }
+
     // ========================================================================
     // Hybrid Query Planner API (VS-060)
     // ========================================================================
@@ -3693,6 +3751,118 @@ mod tests {
 
         // Temporal query should fail when temporal index not enabled
         let result = db.find_similar_as_of_in("embedding", &query, 10, timestamp);
+        assert!(
+            result.is_err(),
+            "Should fail when temporal index not enabled"
+        );
+    }
+
+    /// Test track_drift_in() with explicit property name.
+    #[test]
+    fn test_track_drift_in_explicit_property() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Enable temporal vector index for a specific property
+        db.vector_index("content_embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1), // Snapshot every tx
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config,
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        // Create a node with an embedding
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let node_id = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("content_embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Track drift over time using property-specific method
+        // Even with just one snapshot, the API should work (may return empty or single result)
+        let reference = vec![1.0f32, 0.0, 0.0, 0.0];
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let result = db.track_drift_in("content_embedding", node_id, &reference, time_range);
+
+        // Should succeed (not error) - method exists and property validation passes
+        assert!(
+            result.is_ok(),
+            "track_drift_in should succeed with correct property"
+        );
+    }
+
+    /// Test track_drift_in() with wrong property fails.
+    #[test]
+    fn test_track_drift_in_wrong_property_fails() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Enable temporal index for "embedding" property
+        db.vector_index("embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config,
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        let node_id = NodeId::new(1).unwrap();
+        let reference = vec![1.0f32, 0.0, 0.0, 0.0];
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+
+        // Query with WRONG property name should fail
+        let result = db.track_drift_in("wrong_property", node_id, &reference, time_range);
+        assert!(
+            result.is_err(),
+            "Should fail when property doesn't match temporal index"
+        );
+    }
+
+    /// Test track_drift_in() when temporal index not enabled.
+    #[test]
+    fn test_track_drift_in_no_temporal_index() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        // Only enable regular HNSW index, not temporal
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        let node_id = NodeId::new(1).unwrap();
+        let reference = vec![1.0f32, 0.0, 0.0, 0.0];
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+
+        // Temporal query should fail when temporal index not enabled
+        let result = db.track_drift_in("embedding", node_id, &reference, time_range);
         assert!(
             result.is_err(),
             "Should fail when temporal index not enabled"
