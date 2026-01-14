@@ -28,7 +28,7 @@ fn calculate_recall(baseline: &[(NodeId, f32)], test: &[(NodeId, f32)]) -> f64 {
     }
 }
 
-/// Test f16 quantization recall >= 95%.
+/// Test f16 quantization recall >= 90%.
 #[test]
 fn test_f16_quantization_recall() {
     let dims = 128;
@@ -84,7 +84,7 @@ fn test_f16_quantization_recall() {
     assert!(f16_memory > 0, "F16 index should report non-zero memory");
 }
 
-/// Test i8 quantization recall >= 90%.
+/// Test i8 quantization recall >= 80%.
 #[test]
 fn test_i8_quantization_recall() {
     let dims = 128;

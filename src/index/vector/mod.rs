@@ -195,6 +195,9 @@ impl DistanceMetric {
     /// - 0 = Cosine
     /// - 1 = Euclidean
     /// - 2 = DotProduct
+    /// - 3 = Haversine
+    /// - 4 = Hamming
+    /// - 5 = Tanimoto
     ///
     /// # Example
     ///
@@ -204,6 +207,9 @@ impl DistanceMetric {
     /// assert_eq!(DistanceMetric::Cosine.to_u8(), 0);
     /// assert_eq!(DistanceMetric::Euclidean.to_u8(), 1);
     /// assert_eq!(DistanceMetric::DotProduct.to_u8(), 2);
+    /// assert_eq!(DistanceMetric::Haversine.to_u8(), 3);
+    /// assert_eq!(DistanceMetric::Hamming.to_u8(), 4);
+    /// assert_eq!(DistanceMetric::Tanimoto.to_u8(), 5);
     /// ```
     pub fn to_u8(self) -> u8 {
         match self {
@@ -220,7 +226,7 @@ impl DistanceMetric {
     ///
     /// # Errors
     ///
-    /// Returns an error if the byte value is not a valid metric encoding.
+    /// Returns an error if the byte value is not a valid metric encoding (>= 6).
     ///
     /// # Example
     ///
@@ -230,7 +236,10 @@ impl DistanceMetric {
     /// assert_eq!(DistanceMetric::from_u8(0).unwrap(), DistanceMetric::Cosine);
     /// assert_eq!(DistanceMetric::from_u8(1).unwrap(), DistanceMetric::Euclidean);
     /// assert_eq!(DistanceMetric::from_u8(2).unwrap(), DistanceMetric::DotProduct);
-    /// assert!(DistanceMetric::from_u8(3).is_err());
+    /// assert_eq!(DistanceMetric::from_u8(3).unwrap(), DistanceMetric::Haversine);
+    /// assert_eq!(DistanceMetric::from_u8(4).unwrap(), DistanceMetric::Hamming);
+    /// assert_eq!(DistanceMetric::from_u8(5).unwrap(), DistanceMetric::Tanimoto);
+    /// assert!(DistanceMetric::from_u8(6).is_err());
     /// ```
     pub fn from_u8(value: u8) -> Result<Self> {
         match value {
@@ -502,6 +511,9 @@ pub trait VectorIndex: Send + Sync {
     ///     DistanceMetric::Cosine => println!("Using cosine similarity"),
     ///     DistanceMetric::Euclidean => println!("Using Euclidean distance"),
     ///     DistanceMetric::DotProduct => println!("Using dot product"),
+    ///     DistanceMetric::Haversine => println!("Using Haversine distance"),
+    ///     DistanceMetric::Hamming => println!("Using Hamming distance"),
+    ///     DistanceMetric::Tanimoto => println!("Using Tanimoto similarity"),
     /// }
     /// # }
     /// ```

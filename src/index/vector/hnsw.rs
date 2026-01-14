@@ -418,7 +418,11 @@ impl HnswIndexBuilder {
         if let StorageMode::MemoryMapped { ref path } = self.config.storage {
             // Save initial empty index to create the file
             index
-                .save(path.to_str().unwrap_or("index.usearch"))
+                .save(path.to_str().ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Path contains invalid UTF-8".to_string(),
+                    ))
+                })?)
                 .map_err(|e| {
                     Error::Vector(VectorError::IndexError(format!(
                         "Failed to create memory-mapped index: {}",
@@ -427,7 +431,11 @@ impl HnswIndexBuilder {
                 })?;
             // Switch to view mode (memory-mapped)
             index
-                .view(path.to_str().unwrap_or("index.usearch"))
+                .view(path.to_str().ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Path contains invalid UTF-8".to_string(),
+                    ))
+                })?)
                 .map_err(|e| {
                     Error::Vector(VectorError::IndexError(format!(
                         "Failed to memory-map index: {}",
@@ -488,18 +496,29 @@ impl VectorIndex for HnswIndex {
         }
 
         // Get or create key for this NodeId
-        let key = if let Some(entry) = self.id_mapping.get(&id) {
-            // If re-adding, remove old entry first (usearch supports this)
-            let existing_key = *entry.value();
-            let index = self.inner.write();
-            let _ = index.remove(existing_key); // Ignore if not found
-            drop(index);
-            existing_key
-        } else {
-            let key = self.next_key.fetch_add(1, Ordering::SeqCst);
-            self.id_mapping.insert(id, key);
-            self.reverse_mapping.insert(key, id);
-            key
+        // Use entry API for atomic check-and-update to prevent race conditions
+        let key = match self.id_mapping.entry(id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                // Re-adding existing node: remove old vector from usearch
+                let existing_key = *entry.get();
+                let index = self.inner.write();
+                let _ = index.remove(existing_key); // Ignore if not found
+                drop(index);
+                existing_key
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                // New node: allocate key with overflow protection
+                const MAX_VALID_KEY: u64 = u64::MAX - 1000;
+                let key = self.next_key.fetch_add(1, Ordering::SeqCst);
+                if key > MAX_VALID_KEY {
+                    return Err(Error::Vector(VectorError::IndexError(
+                        "Maximum number of vectors exceeded (key overflow protection)".to_string(),
+                    )));
+                }
+                entry.insert(key);
+                self.reverse_mapping.insert(key, id);
+                key
+            }
         };
 
         // Insert into usearch index (auto-expand capacity if needed)
@@ -656,7 +675,9 @@ impl VectorIndex for HnswIndex {
                     DistanceMetric::Cosine => 1.0 - distance,
                     DistanceMetric::Euclidean => -distance,
                     DistanceMetric::DotProduct => -distance,
-                    _ => -distance,
+                    DistanceMetric::Haversine => -distance,
+                    DistanceMetric::Hamming => -distance,
+                    DistanceMetric::Tanimoto => 1.0 - distance,
                 };
                 results.push((node_id, similarity));
             }
@@ -695,7 +716,11 @@ impl VectorIndex for HnswIndex {
     fn save(&self, path: &Path) -> Result<()> {
         let index = self.inner.read();
         index
-            .save(path.to_str().unwrap_or("index.usearch"))
+            .save(path.to_str().ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Path contains invalid UTF-8".to_string(),
+                ))
+            })?)
             .map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to save index: {}",
@@ -757,8 +782,11 @@ impl HnswIndex {
     }
 
     /// Gets the current ef_search value.
+    ///
+    /// Note: Returns the runtime value which may differ from config if
+    /// `set_ef_search` was called.
     pub fn get_ef_search(&self) -> usize {
-        self.config.ef_search
+        self.inner.read().expansion_search()
     }
 
     /// Returns the configuration used to create this index.
@@ -791,7 +819,11 @@ impl HnswIndex {
         })?;
 
         index
-            .load(path.to_str().unwrap_or("index.usearch"))
+            .load(path.to_str().ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Path contains invalid UTF-8".to_string(),
+                ))
+            })?)
             .map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to load index: {}",
@@ -847,7 +879,11 @@ impl HnswIndex {
         })?;
 
         index
-            .view(path.to_str().unwrap_or("index.usearch"))
+            .view(path.to_str().ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Path contains invalid UTF-8".to_string(),
+                ))
+            })?)
             .map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to memory-map index: {}",
