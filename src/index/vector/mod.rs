@@ -92,6 +92,77 @@
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::utils::Result;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Quantization level for vector storage.
+///
+/// Lower precision reduces memory usage but may impact recall slightly.
+/// - F32: Full precision (default), no recall impact
+/// - F16: Half precision, ~2x memory savings, <1% recall impact typical
+/// - I8: Quarter precision, ~4x memory savings, 1-3% recall impact typical
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Quantization {
+    /// 32-bit floating point (default, full precision)
+    #[default]
+    F32,
+    /// 16-bit floating point (half precision, ~2x memory savings)
+    F16,
+    /// 8-bit signed integer (quarter precision, ~4x memory savings)
+    I8,
+}
+
+/// Storage mode for the vector index.
+///
+/// - InMemory: All data in RAM (default, fastest queries)
+/// - MemoryMapped: Data on disk, lazily loaded (saves RAM, slightly slower)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum StorageMode {
+    /// Store index entirely in memory (default)
+    #[default]
+    InMemory,
+    /// Memory-map index from disk path
+    MemoryMapped {
+        /// Path to the index file
+        path: PathBuf,
+    },
+}
+
+/// Custom distance metric function.
+///
+/// Allows user-defined similarity functions for specialized use cases.
+pub struct CustomMetric {
+    /// Human-readable name for the metric
+    pub name: String,
+    /// The distance function: takes two vectors, returns distance (lower = more similar)
+    #[allow(clippy::type_complexity)]
+    pub distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync>,
+}
+
+impl Clone for CustomMetric {
+    fn clone(&self) -> Self {
+        CustomMetric {
+            name: self.name.clone(),
+            distance_fn: Arc::clone(&self.distance_fn),
+        }
+    }
+}
+
+impl std::fmt::Debug for CustomMetric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomMetric")
+            .field("name", &self.name)
+            .field("distance_fn", &"<function>")
+            .finish()
+    }
+}
+
+impl PartialEq for CustomMetric {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare by name only; function pointers cannot be meaningfully compared
+        self.name == other.name
+    }
+}
 
 /// Type alias for temporal search results: Vec<(timestamp, Vec<(node_id, similarity)>)>
 pub type TemporalSearchResults = Vec<(Timestamp, Vec<(NodeId, f32)>)>;
@@ -110,6 +181,12 @@ pub enum DistanceMetric {
     Euclidean,
     /// Dot product: inner product of vectors, range (-∞, ∞)
     DotProduct,
+    /// Haversine: great circle distance for geographic coordinates
+    Haversine,
+    /// Hamming: bit-level distance for binary vectors
+    Hamming,
+    /// Tanimoto: bit-level Jaccard similarity for chemical fingerprints
+    Tanimoto,
 }
 impl DistanceMetric {
     /// Encode distance metric as a byte for serialization.
@@ -118,6 +195,9 @@ impl DistanceMetric {
     /// - 0 = Cosine
     /// - 1 = Euclidean
     /// - 2 = DotProduct
+    /// - 3 = Haversine
+    /// - 4 = Hamming
+    /// - 5 = Tanimoto
     ///
     /// # Example
     ///
@@ -127,12 +207,18 @@ impl DistanceMetric {
     /// assert_eq!(DistanceMetric::Cosine.to_u8(), 0);
     /// assert_eq!(DistanceMetric::Euclidean.to_u8(), 1);
     /// assert_eq!(DistanceMetric::DotProduct.to_u8(), 2);
+    /// assert_eq!(DistanceMetric::Haversine.to_u8(), 3);
+    /// assert_eq!(DistanceMetric::Hamming.to_u8(), 4);
+    /// assert_eq!(DistanceMetric::Tanimoto.to_u8(), 5);
     /// ```
     pub fn to_u8(self) -> u8 {
         match self {
             DistanceMetric::Cosine => 0,
             DistanceMetric::Euclidean => 1,
             DistanceMetric::DotProduct => 2,
+            DistanceMetric::Haversine => 3,
+            DistanceMetric::Hamming => 4,
+            DistanceMetric::Tanimoto => 5,
         }
     }
 
@@ -140,7 +226,7 @@ impl DistanceMetric {
     ///
     /// # Errors
     ///
-    /// Returns an error if the byte value is not a valid metric encoding.
+    /// Returns an error if the byte value is not a valid metric encoding (>= 6).
     ///
     /// # Example
     ///
@@ -150,13 +236,19 @@ impl DistanceMetric {
     /// assert_eq!(DistanceMetric::from_u8(0).unwrap(), DistanceMetric::Cosine);
     /// assert_eq!(DistanceMetric::from_u8(1).unwrap(), DistanceMetric::Euclidean);
     /// assert_eq!(DistanceMetric::from_u8(2).unwrap(), DistanceMetric::DotProduct);
-    /// assert!(DistanceMetric::from_u8(3).is_err());
+    /// assert_eq!(DistanceMetric::from_u8(3).unwrap(), DistanceMetric::Haversine);
+    /// assert_eq!(DistanceMetric::from_u8(4).unwrap(), DistanceMetric::Hamming);
+    /// assert_eq!(DistanceMetric::from_u8(5).unwrap(), DistanceMetric::Tanimoto);
+    /// assert!(DistanceMetric::from_u8(6).is_err());
     /// ```
     pub fn from_u8(value: u8) -> Result<Self> {
         match value {
             0 => Ok(DistanceMetric::Cosine),
             1 => Ok(DistanceMetric::Euclidean),
             2 => Ok(DistanceMetric::DotProduct),
+            3 => Ok(DistanceMetric::Haversine),
+            4 => Ok(DistanceMetric::Hamming),
+            5 => Ok(DistanceMetric::Tanimoto),
             _ => Err(crate::utils::error::StorageError::CorruptedData(format!(
                 "Invalid distance metric encoding: {}",
                 value
@@ -419,6 +511,9 @@ pub trait VectorIndex: Send + Sync {
     ///     DistanceMetric::Cosine => println!("Using cosine similarity"),
     ///     DistanceMetric::Euclidean => println!("Using Euclidean distance"),
     ///     DistanceMetric::DotProduct => println!("Using dot product"),
+    ///     DistanceMetric::Haversine => println!("Using Haversine distance"),
+    ///     DistanceMetric::Hamming => println!("Using Hamming distance"),
+    ///     DistanceMetric::Tanimoto => println!("Using Tanimoto similarity"),
     /// }
     /// # }
     /// ```
@@ -444,6 +539,60 @@ pub trait VectorIndex: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Adds multiple vectors in a batch operation.
+    ///
+    /// More efficient than calling `add()` repeatedly for bulk insertions.
+    /// Default implementation calls `add()` sequentially.
+    fn add_batch(&self, items: &[(NodeId, Vec<f32>)]) -> Result<()> {
+        for (id, vec) in items {
+            self.add(*id, vec)?;
+        }
+        Ok(())
+    }
+
+    /// Removes multiple vectors in a batch operation.
+    ///
+    /// Default implementation calls `remove()` sequentially.
+    fn remove_batch(&self, ids: &[NodeId]) -> Result<()> {
+        for id in ids {
+            self.remove(*id)?;
+        }
+        Ok(())
+    }
+
+    /// Saves the index to a file path.
+    ///
+    /// Returns `Err(UnsupportedOperation)` if the implementation doesn't support persistence.
+    fn save(&self, _path: &std::path::Path) -> Result<()> {
+        Err(crate::utils::Error::Vector(
+            crate::utils::error::VectorError::IndexError(
+                "save not supported by this index type".to_string(),
+            ),
+        ))
+    }
+
+    /// Returns the approximate memory usage of this index in bytes.
+    ///
+    /// Default returns 0 (unknown).
+    fn memory_usage(&self) -> usize {
+        0
+    }
+
+    /// Returns the quantization level of this index.
+    ///
+    /// Default returns F32 (full precision).
+    fn quantization(&self) -> Quantization {
+        Quantization::F32
+    }
+
+    /// Compacts the index, reclaiming space from deleted entries.
+    ///
+    /// For indexes that support native deletes, this may be a no-op.
+    /// For indexes using soft deletes, this rebuilds the index.
+    fn compact(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -467,6 +616,33 @@ mod tests {
         assert_eq!(format!("{:?}", metric), "Cosine");
         assert_eq!(metric, DistanceMetric::Cosine);
         assert_ne!(metric, DistanceMetric::Euclidean);
+    }
+
+    #[test]
+    fn test_quantization_default() {
+        assert_eq!(Quantization::default(), Quantization::F32);
+    }
+
+    #[test]
+    fn test_storage_mode_default() {
+        assert!(matches!(StorageMode::default(), StorageMode::InMemory));
+    }
+
+    #[test]
+    fn test_distance_metric_new_variants() {
+        // Test new variants serialize/deserialize correctly
+        assert_eq!(DistanceMetric::Haversine.to_u8(), 3);
+        assert_eq!(DistanceMetric::Hamming.to_u8(), 4);
+        assert_eq!(DistanceMetric::Tanimoto.to_u8(), 5);
+        assert_eq!(
+            DistanceMetric::from_u8(3).unwrap(),
+            DistanceMetric::Haversine
+        );
+        assert_eq!(DistanceMetric::from_u8(4).unwrap(), DistanceMetric::Hamming);
+        assert_eq!(
+            DistanceMetric::from_u8(5).unwrap(),
+            DistanceMetric::Tanimoto
+        );
     }
 }
 

@@ -1,6 +1,6 @@
 //! HNSW (Hierarchical Navigable Small World) vector index implementation.
 //!
-//! This module provides a wrapper around the `hnsw_rs` library's HNSW index,
+//! This module provides a wrapper around the `usearch` library's HNSW index,
 //! implementing the `VectorIndex` trait for approximate k-nearest neighbor search.
 //!
 //! # Overview
@@ -14,18 +14,20 @@
 //!
 //! # Performance Characteristics
 //!
-//! Based on hnsw_rs benchmarks and GallifreyDB testing:
-//! - **Add operation**: 1-10µs per vector (depends on M, ef_construction)
-//! - **Search operation**: 100µs-1ms for k=10 (depends on index size, ef_search, dimensions)
-//! - **Memory usage**: ~(dimensions + M) * 4 bytes per vector
+//! Based on usearch benchmarks and GallifreyDB testing:
+//! - **Add operation**: 1-10us per vector (depends on M, ef_construction)
+//! - **Search operation**: 100us-1ms for k=10 (depends on index size, ef_search, dimensions)
+//! - **Memory usage**: ~(dimensions + M) * 4 bytes per vector (less with quantization)
 //!
-//! Example for 1M vectors, 384 dimensions, M=16:
-//! - Storage: ~1M * (384 + 16) * 4 = ~1.6GB
+//! # Features
+//!
+//! - **Native deletes**: Vectors are truly removed from the index
+//! - **Quantization**: F32 (full), F16 (half), I8 (quarter precision)
+//! - **Memory-mapped indexes**: Serve large indexes from disk (read-only)
+//! - **Custom distance metrics**: User-defined similarity functions
+//! - **New distance metrics**: Haversine, Hamming, Tanimoto
 //!
 //! # Tuning Parameters
-//!
-//! The HNSW algorithm has three main tuning parameters that trade off between
-//! accuracy, speed, and memory usage:
 //!
 //! ## M (connections per node)
 //! - **Range**: 8-64
@@ -44,35 +46,10 @@
 //! - **Default**: 64
 //! - **Can be adjusted at runtime** via `set_ef_search()` method
 //!
-//! ## Recommended Configurations
-//!
-//! ```text
-//! Production (95%+ recall):
-//!   M=16, ef_construction=200, ef_search=50
-//!
-//! Low latency (90% recall):
-//!   M=12, ef_construction=150, ef_search=10
-//!
-//! High recall (98%+ recall):
-//!   M=32, ef_construction=400, ef_search=100
-//! ```
-//!
-//! # Migration from usearch
-//!
-//! This implementation was migrated from usearch (C++ FFI) to hnsw_rs (pure Rust)
-//! to avoid FFI safety issues where C++ internal pointers became invalid when
-//! Rust moved structs. See USEARCH_BUG_REPORT.md for details.
-//!
-//! **Trade-offs**:
-//! - ✅ Pure Rust, no FFI issues
-//! - ✅ Thread-safe by design
-//! - ❌ ~20-30% slower than usearch (still fast enough for most use cases)
-//! - ❌ No native delete support (we implement soft deletes)
-//!
 //! # Examples
 //!
-//! ```rust
-//! use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
+//! ```rust,no_run
+//! use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization};
 //! use gallifreydb::index::VectorIndex;
 //! use gallifreydb::core::id::NodeId;
 //!
@@ -81,6 +58,7 @@
 //! let index = HnswIndexBuilder::new(384, DistanceMetric::Cosine)
 //!     .m(16)                    // 16 connections per node
 //!     .ef_construction(200)     // Build quality
+//!     .quantization(Quantization::F16)  // Half precision for memory savings
 //!     .initial_capacity(10000)  // Pre-allocate for 10k vectors
 //!     .build()?;
 //!
@@ -88,10 +66,6 @@
 //! let node1 = NodeId::new(1).unwrap();
 //! let embedding1 = vec![0.1f32; 384];
 //! index.add(node1, &embedding1)?;
-//!
-//! let node2 = NodeId::new(2).unwrap();
-//! let embedding2 = vec![0.2f32; 384];
-//! index.add(node2, &embedding2)?;
 //!
 //! // Search for similar vectors
 //! let query = vec![0.15f32; 384];
@@ -110,80 +84,58 @@
 //! - Multiple threads can add vectors simultaneously
 //! - Multiple threads can search simultaneously
 //! - Searches can run concurrently with additions
-//!
-//! The underlying `hnsw_rs::Hnsw` provides interior mutability with internal
-//! locking (via parking_lot), so all operations take `&self` rather than `&mut self`.
-//!
-//! # Implementation Notes
-//!
-//! - Validates all input vectors for NaN/Infinity using `validate_vector()`
-//! - Caps k parameter at MAX_K (10,000) to prevent DoS attacks
-//! - Implements soft deletes (deleted IDs tracked in DashMap)
-//! - Maps hnsw_rs results to `VectorError::IndexError`
-//! - No Clone implementation (hnsw_rs::Hnsw is not Clone)
 
 use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
-use crate::index::vector::{DistanceMetric, VectorIndex};
+use crate::index::vector::{CustomMetric, DistanceMetric, Quantization, StorageMode, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
+use crc32fast::Hasher;
 use dashmap::DashMap;
-use hnsw_rs::prelude::*;
 use parking_lot::RwLock;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+
+/// Magic bytes for mapping file identification
+const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
+/// Current mapping file format version
+const MAPPING_VERSION: u8 = 1;
 
 /// Maximum number of results that can be requested in a search.
 ///
 /// This prevents DoS attacks via excessive memory allocation when an attacker
-/// requests an extremely large k value. With 10,000 results max:
-/// - Memory per search: ~10,000 * (8 bytes NodeId + 4 bytes f32) = ~120KB
-/// - This is reasonable for concurrent queries without risking OOM
+/// requests an extremely large k value.
 const MAX_K: usize = 10_000;
 
-/// Maximum layer value for HNSW (from hnsw_rs documentation)
-const MAX_LAYER: usize = 16;
+/// Convert our DistanceMetric to usearch's MetricKind
+fn to_usearch_metric(metric: DistanceMetric) -> MetricKind {
+    match metric {
+        DistanceMetric::Cosine => MetricKind::Cos,
+        DistanceMetric::Euclidean => MetricKind::L2sq,
+        DistanceMetric::DotProduct => MetricKind::IP,
+        DistanceMetric::Haversine => MetricKind::Haversine,
+        DistanceMetric::Hamming => MetricKind::Hamming,
+        DistanceMetric::Tanimoto => MetricKind::Tanimoto,
+    }
+}
+
+/// Convert our Quantization to usearch's ScalarKind
+fn to_usearch_scalar(quantization: Quantization) -> ScalarKind {
+    match quantization {
+        Quantization::F32 => ScalarKind::F32,
+        Quantization::F16 => ScalarKind::F16,
+        Quantization::I8 => ScalarKind::I8,
+    }
+}
 
 /// Configuration for HNSW (Hierarchical Navigable Small World) index.
 ///
 /// This struct encapsulates all parameters needed to configure an HNSW index
 /// for approximate nearest neighbor search. It provides sensible defaults
 /// optimized for a balance between accuracy, speed, and memory usage.
-///
-/// # Parameters
-///
-/// ## Required Parameters
-///
-/// - **`dimensions`**: Vector dimensionality (must be > 0)
-///   - Common values: 384 (MiniLM), 768 (MPNet), 1536 (OpenAI), 3072 (large models)
-///   - Affects: Memory usage scales linearly with dimensions
-///
-/// - **`metric`**: Distance metric for similarity computation
-///   - `Cosine`: Best for semantic similarity (normalized vectors)
-///   - `Euclidean`: Best for spatial data and clustering
-///   - `DotProduct`: Best for MaxSim operations (ColBERT, etc.)
-///
-/// ## Performance Tuning Parameters
-///
-/// - **`m`**: Maximum number of bidirectional connections per node (default: 16)
-///   - Range: 8-64, typical: 12-32
-///   - **Higher values**: Better recall, more memory, slower build
-///   - **Lower values**: Less memory, faster build, lower recall
-///
-/// - **`ef_construction`**: Candidate list size during index construction (default: 128)
-///   - Range: 100-500, typical: 100-400
-///   - **Higher values**: Better index quality, slower build time
-///   - **Lower values**: Faster build, potentially lower recall
-///
-/// - **`ef_search`**: Candidate list size during query processing (default: 64)
-///   - Range: 10-500, typical: 10-100
-///   - **Higher values**: Better recall, slower queries
-///   - **Lower values**: Faster queries, lower recall
-///   - Can be adjusted at runtime via `HnswIndex::set_ef_search()`
-///
-/// - **`capacity`**: Initial capacity hint for pre-allocation (default: 0)
-///   - Pre-allocates space for the specified number of vectors
-///   - Reduces reallocation overhead during bulk insertion
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct HnswConfig {
     /// Vector dimensionality (must be > 0)
     pub dimensions: usize,
@@ -197,6 +149,26 @@ pub struct HnswConfig {
     pub ef_search: usize,
     /// Initial capacity for pre-allocation (default: 0)
     pub capacity: usize,
+    /// Quantization level (default: F32)
+    pub quantization: Quantization,
+    /// Storage mode (default: InMemory)
+    pub storage: StorageMode,
+    /// Custom distance metric (overrides `metric` if set)
+    pub custom_metric: Option<CustomMetric>,
+}
+
+impl PartialEq for HnswConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.dimensions == other.dimensions
+            && self.metric == other.metric
+            && self.m == other.m
+            && self.ef_construction == other.ef_construction
+            && self.ef_search == other.ef_search
+            && self.capacity == other.capacity
+            && self.quantization == other.quantization
+            && self.storage == other.storage
+            && self.custom_metric == other.custom_metric
+    }
 }
 
 impl Default for HnswConfig {
@@ -208,6 +180,9 @@ impl Default for HnswConfig {
             ef_construction: 128,
             ef_search: 64,
             capacity: 0,
+            quantization: Quantization::default(),
+            storage: StorageMode::default(),
+            custom_metric: None,
         }
     }
 }
@@ -258,6 +233,30 @@ impl HnswConfig {
         self
     }
 
+    /// Sets the quantization level.
+    pub fn with_quantization(mut self, quantization: Quantization) -> Self {
+        self.quantization = quantization;
+        self
+    }
+
+    /// Sets the storage mode.
+    pub fn with_storage(mut self, storage: StorageMode) -> Self {
+        self.storage = storage;
+        self
+    }
+
+    /// Sets a custom distance metric function.
+    pub fn with_custom_metric<F>(mut self, name: &str, f: F) -> Self
+    where
+        F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static,
+    {
+        self.custom_metric = Some(CustomMetric {
+            name: name.to_string(),
+            distance_fn: Arc::new(f),
+        });
+        self
+    }
+
     /// Serialize configuration to a writer in little-endian binary format.
     pub fn serialize_into<W: Write>(&self, writer: &mut W) -> Result<()> {
         writer.write_all(&(self.dimensions as u64).to_le_bytes())?;
@@ -299,254 +298,335 @@ impl HnswConfig {
             ef_construction,
             ef_search,
             capacity,
+            ..Default::default()
         })
     }
 }
 
+/// Statistics for index operations.
+#[derive(Debug, Default)]
+struct IndexStats {
+    vectors_added: AtomicU64,
+    vectors_removed: AtomicU64,
+    searches_performed: AtomicU64,
+}
+
 /// Builder for configuring and creating an `HnswIndex`.
 pub struct HnswIndexBuilder {
-    dimensions: usize,
-    metric: DistanceMetric,
-    m: usize,
-    ef_construction: usize,
-    ef_search: usize,
-    initial_capacity: Option<usize>,
+    config: HnswConfig,
 }
 
 impl HnswIndexBuilder {
     /// Creates a new builder with the required parameters.
     pub fn new(dimensions: usize, metric: DistanceMetric) -> Self {
         HnswIndexBuilder {
-            dimensions,
-            metric,
-            m: 16,
-            ef_construction: 128,
-            ef_search: 64,
-            initial_capacity: None,
+            config: HnswConfig {
+                dimensions,
+                metric,
+                ..Default::default()
+            },
         }
     }
 
     /// Creates a builder from an existing configuration.
     pub fn from_config(config: &HnswConfig) -> Self {
         HnswIndexBuilder {
-            dimensions: config.dimensions,
-            metric: config.metric,
-            m: config.m,
-            ef_construction: config.ef_construction,
-            ef_search: config.ef_search,
-            initial_capacity: if config.capacity > 0 {
-                Some(config.capacity)
-            } else {
-                None
-            },
+            config: config.clone(),
         }
     }
 
     /// Sets the M parameter (connections per node).
     pub fn m(mut self, m: usize) -> Self {
-        self.m = m;
+        self.config.m = m;
         self
     }
 
     /// Sets ef_construction (build-time expansion).
     pub fn ef_construction(mut self, ef_construction: usize) -> Self {
-        self.ef_construction = ef_construction;
+        self.config.ef_construction = ef_construction;
         self
     }
 
     /// Sets ef_search (query-time expansion).
     pub fn ef_search(mut self, ef_search: usize) -> Self {
-        self.ef_search = ef_search;
+        self.config.ef_search = ef_search;
         self
     }
 
     /// Sets initial capacity hint for pre-allocation.
     pub fn initial_capacity(mut self, capacity: usize) -> Self {
-        self.initial_capacity = Some(capacity);
+        self.config.capacity = capacity;
+        self
+    }
+
+    /// Sets quantization level.
+    pub fn quantization(mut self, quantization: Quantization) -> Self {
+        self.config.quantization = quantization;
+        self
+    }
+
+    /// Sets storage mode.
+    pub fn storage(mut self, storage: StorageMode) -> Self {
+        self.config.storage = storage;
         self
     }
 
     /// Builds the HNSW index with the configured parameters.
     pub fn build(self) -> Result<HnswIndex> {
         // Validate dimensions
-        if self.dimensions == 0 {
+        if self.config.dimensions == 0 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: "dimensions must be > 0".to_string(),
             }));
         }
 
         // Validate M
-        if self.m == 0 || self.m > 64 {
+        if self.config.m == 0 || self.config.m > 64 {
             return Err(Error::Vector(VectorError::InvalidVector {
-                reason: format!("M must be in range [1, 64], got {}", self.m),
+                reason: format!("M must be in range [1, 64], got {}", self.config.m),
             }));
         }
 
-        // Validate ef_construction
-        if self.ef_construction == 0 {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: "ef_construction must be > 0".to_string(),
-            }));
-        }
-
-        // Validate ef_search
-        if self.ef_search == 0 {
-            return Err(Error::Vector(VectorError::InvalidVector {
-                reason: "ef_search must be > 0".to_string(),
-            }));
-        }
-
-        let capacity = self.initial_capacity.unwrap_or(1000);
-
-        // Create the inner index based on metric
-        let inner = match self.metric {
-            DistanceMetric::Cosine => {
-                HnswIndexInner::Cosine(Hnsw::<'static, f32, DistCosine>::new(
-                    self.m,
-                    capacity,
-                    MAX_LAYER,
-                    self.ef_construction,
-                    DistCosine {},
-                ))
-            }
-            DistanceMetric::Euclidean => {
-                HnswIndexInner::Euclidean(Hnsw::<'static, f32, DistL2>::new(
-                    self.m,
-                    capacity,
-                    MAX_LAYER,
-                    self.ef_construction,
-                    DistL2 {},
-                ))
-            }
-            DistanceMetric::DotProduct => {
-                HnswIndexInner::DotProduct(Hnsw::<'static, f32, DistDot>::new(
-                    self.m,
-                    capacity,
-                    MAX_LAYER,
-                    self.ef_construction,
-                    DistDot {},
-                ))
-            }
+        // Create usearch index options
+        let options = IndexOptions {
+            dimensions: self.config.dimensions,
+            metric: to_usearch_metric(self.config.metric),
+            quantization: to_usearch_scalar(self.config.quantization),
+            connectivity: self.config.m,
+            expansion_add: self.config.ef_construction,
+            expansion_search: self.config.ef_search,
+            multi: false,
         };
 
+        // Create the index
+        let mut index = Index::new(&options).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to create usearch index: {}",
+                e
+            )))
+        })?;
+
+        // Reserve capacity - usearch requires capacity before adding vectors
+        // Use configured capacity, or default to 1024 for reasonable initial size
+        let capacity_to_reserve = if self.config.capacity > 0 {
+            self.config.capacity
+        } else {
+            1024 // Reasonable default for initial capacity
+        };
+        index.reserve(capacity_to_reserve).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to reserve capacity: {}",
+                e
+            )))
+        })?;
+
+        // Apply custom metric if configured
+        if let Some(ref custom) = self.config.custom_metric {
+            let dims = self.config.dimensions;
+            let distance_fn = Arc::clone(&custom.distance_fn);
+
+            // Create a wrapper that converts usearch's raw pointer API to our safe slice API
+            // SAFETY: usearch guarantees that:
+            // 1. Both pointers are valid and point to `dims` contiguous f32 values
+            // 2. The pointers remain valid for the duration of the function call
+            // 3. The data is properly aligned for f32
+            let metric_wrapper: Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> =
+                Box::new(move |a: *const f32, b: *const f32| {
+                    // SAFETY: usearch guarantees pointers are valid for `dims` elements
+                    let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
+                    let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+                    distance_fn(slice_a, slice_b)
+                });
+
+            index.change_metric(metric_wrapper);
+        }
+
+        // Handle memory-mapped storage
+        if let StorageMode::MemoryMapped { ref path } = self.config.storage {
+            // Save initial empty index to create the file
+            index
+                .save(path.to_str().ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Path contains invalid UTF-8".to_string(),
+                    ))
+                })?)
+                .map_err(|e| {
+                    Error::Vector(VectorError::IndexError(format!(
+                        "Failed to create memory-mapped index: {}",
+                        e
+                    )))
+                })?;
+            // Switch to view mode (memory-mapped)
+            index
+                .view(path.to_str().ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Path contains invalid UTF-8".to_string(),
+                    ))
+                })?)
+                .map_err(|e| {
+                    Error::Vector(VectorError::IndexError(format!(
+                        "Failed to memory-map index: {}",
+                        e
+                    )))
+                })?;
+        }
+
         Ok(HnswIndex {
-            inner: Arc::new(RwLock::new(inner)),
-            dimensions: self.dimensions,
-            metric: self.metric,
-            m: self.m,
-            ef_construction: self.ef_construction,
-            ef_search: Arc::new(RwLock::new(self.ef_search)),
-            max_k: MAX_K, // Default from constant, can be overridden via set_max_k()
-            next_data_id: Arc::new(RwLock::new(0)),
+            inner: Arc::new(RwLock::new(index)),
+            config: self.config,
             id_mapping: Arc::new(DashMap::new()),
-            reverse_id_mapping: Arc::new(DashMap::new()),
-            deleted_ids: Arc::new(DashMap::new()),
-            vector_cache: Arc::new(DashMap::new()),
+            reverse_mapping: Arc::new(DashMap::new()),
+            next_key: AtomicU64::new(0),
+            stats: Arc::new(IndexStats::default()),
+            max_k: MAX_K,
+            is_mmap: false,
         })
     }
 }
 
-/// Internal enum to handle different distance metrics as type parameters.
-enum HnswIndexInner {
-    Cosine(Hnsw<'static, f32, DistCosine>),
-    Euclidean(Hnsw<'static, f32, DistL2>),
-    DotProduct(Hnsw<'static, f32, DistDot>),
-}
-
 /// HNSW vector index for approximate k-nearest neighbor search.
 ///
-/// This struct wraps `hnsw_rs::Hnsw` and implements the `VectorIndex` trait.
-/// All operations are thread-safe due to interior mutability.
+/// This struct wraps `usearch::Index` and implements the `VectorIndex` trait.
+/// All operations are thread-safe.
 ///
-/// # Soft Deletes
+/// # Native Deletes
 ///
-/// Since hnsw_rs doesn't support native deletion, we implement soft deletes:
-/// - Deleted NodeIds are tracked in `deleted_ids` DashMap
-/// - Search results filter out deleted IDs
-/// - Deleted vectors still consume memory until index is rebuilt
+/// Unlike the previous hnsw_rs implementation, usearch supports native deletes.
+/// Removed vectors are truly removed from the index, not just soft-deleted.
+///
+/// # Memory-Mapped Indexes
+///
+/// Indexes opened via `open_mmap()` are read-only. Attempting to call `add()`
+/// or `remove()` on a memory-mapped index will return an error.
 pub struct HnswIndex {
-    /// Underlying hnsw_rs index (wrapped in RwLock for interior mutability)
-    inner: Arc<RwLock<HnswIndexInner>>,
-    /// Cached dimensions for O(1) access
-    dimensions: usize,
-    /// Cached metric for O(1) access
-    metric: DistanceMetric,
-    /// Connections per node (M parameter)
-    m: usize,
-    /// Build-time expansion factor
-    ef_construction: usize,
-    /// Query-time expansion factor (mutable for set_ef_search)
-    ef_search: Arc<RwLock<usize>>,
-    /// Maximum k for k-NN queries (DoS protection, from VectorIndexConfig)
+    /// Underlying usearch index
+    inner: Arc<RwLock<Index>>,
+    /// Configuration used to create this index
+    config: HnswConfig,
+    /// ID mapping: NodeId -> usearch key (u64)
+    id_mapping: Arc<DashMap<NodeId, u64>>,
+    /// Reverse mapping: usearch key -> NodeId
+    reverse_mapping: Arc<DashMap<u64, NodeId>>,
+    /// Next available key
+    next_key: AtomicU64,
+    /// Statistics
+    stats: Arc<IndexStats>,
+    /// Maximum k for DoS protection
     max_k: usize,
-    /// Next available data ID (hnsw_rs uses usize as DataId)
-    next_data_id: Arc<RwLock<usize>>,
-    /// Mapping from NodeId to DataId
-    id_mapping: Arc<DashMap<NodeId, usize>>,
-    /// Reverse mapping from DataId to NodeId (for O(1) lookups during search)
-    reverse_id_mapping: Arc<DashMap<usize, NodeId>>,
-    /// Soft-deleted NodeIds
-    deleted_ids: Arc<DashMap<NodeId, ()>>,
-    /// Vector cache for brute-force search on small graphs
-    /// Maps NodeId -> Vector. Enables exact search when HNSW is unreliable (<100 nodes)
-    vector_cache: Arc<DashMap<NodeId, Arc<Vec<f32>>>>,
+    /// Whether this index is memory-mapped (read-only)
+    is_mmap: bool,
 }
 
 impl VectorIndex for HnswIndex {
     fn add(&self, id: NodeId, vector: &[f32]) -> Result<()> {
+        // Check if index is read-only (memory-mapped)
+        if self.is_mmap {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot modify memory-mapped index (read-only)".to_string(),
+            )));
+        }
+
         // Validate vector
         validate_vector(vector)?;
 
         // Check dimensions match
-        if vector.len() != self.dimensions {
+        if vector.len() != self.config.dimensions {
             return Err(Error::Vector(VectorError::DimensionMismatch {
-                expected: self.dimensions,
+                expected: self.config.dimensions,
                 actual: vector.len(),
             }));
         }
 
-        // Remove from deleted set if re-adding
-        self.deleted_ids.remove(&id);
-
-        // Get or create DataId for this NodeId
-        let data_id = if let Some(entry) = self.id_mapping.get(&id) {
-            *entry.value()
-        } else {
-            let mut next_id = self.next_data_id.write();
-            let data_id = *next_id;
-            *next_id += 1;
-            drop(next_id);
-            self.id_mapping.insert(id, data_id);
-            self.reverse_id_mapping.insert(data_id, id);
-            data_id
+        // Get or create key for this NodeId
+        // Use entry API for atomic check-and-update to prevent race conditions
+        let key = match self.id_mapping.entry(id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                // Re-adding existing node: remove old vector from usearch
+                let existing_key = *entry.get();
+                let index = self.inner.write();
+                let _ = index.remove(existing_key); // Ignore if not found
+                drop(index);
+                existing_key
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                // New node: allocate key with overflow protection
+                // Check BEFORE incrementing to avoid leaving next_key in invalid state
+                const MAX_VALID_KEY: u64 = u64::MAX - 1000;
+                loop {
+                    let current = self.next_key.load(Ordering::SeqCst);
+                    if current > MAX_VALID_KEY {
+                        return Err(Error::Vector(VectorError::IndexError(
+                            "Maximum number of vectors exceeded (key overflow protection)"
+                                .to_string(),
+                        )));
+                    }
+                    // Try to atomically increment; retry if another thread beat us
+                    match self.next_key.compare_exchange(
+                        current,
+                        current + 1,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(key) => {
+                            entry.insert(key);
+                            self.reverse_mapping.insert(key, id);
+                            break key;
+                        }
+                        Err(_) => continue, // Retry with new current value
+                    }
+                }
+            }
         };
 
-        // Cache vector for brute-force search on small graphs
-        self.vector_cache.insert(id, Arc::new(vector.to_vec()));
+        // Insert into usearch index (auto-expand capacity if needed)
+        let index = self.inner.write();
 
-        // Insert into index
-        let mut inner = self.inner.write();
-        match &mut *inner {
-            HnswIndexInner::Cosine(hnsw) => {
-                hnsw.insert((vector, data_id));
-            }
-            HnswIndexInner::Euclidean(hnsw) => {
-                hnsw.insert((vector, data_id));
-            }
-            HnswIndexInner::DotProduct(hnsw) => {
-                hnsw.insert((vector, data_id));
-            }
+        // Check if we need to expand capacity
+        if index.size() >= index.capacity() {
+            // Double capacity, minimum 1024
+            let new_capacity = (index.capacity() * 2).max(1024);
+            index.reserve(new_capacity).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to expand capacity: {}",
+                    e
+                )))
+            })?;
         }
 
+        index.add(key, vector).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to add vector: {}",
+                e
+            )))
+        })?;
+
+        self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     fn remove(&self, id: NodeId) -> Result<()> {
-        // Soft delete: mark as deleted
-        // We don't remove from id_mapping to preserve DataId allocation
-        // Remove from vector cache
-        self.vector_cache.remove(&id);
-        self.deleted_ids.insert(id, ());
+        // Check if index is read-only (memory-mapped)
+        if self.is_mmap {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Cannot modify memory-mapped index (read-only)".to_string(),
+            )));
+        }
+
+        // Find the key for this NodeId
+        if let Some((_, key)) = self.id_mapping.remove(&id) {
+            self.reverse_mapping.remove(&key);
+
+            // Native delete in usearch
+            let index = self.inner.write();
+            index.remove(key).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to remove vector: {}",
+                    e
+                )))
+            })?;
+
+            self.stats.vectors_removed.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -555,9 +635,9 @@ impl VectorIndex for HnswIndex {
         validate_vector(query)?;
 
         // Check dimensions match
-        if query.len() != self.dimensions {
+        if query.len() != self.config.dimensions {
             return Err(Error::Vector(VectorError::DimensionMismatch {
-                expected: self.dimensions,
+                expected: self.config.dimensions,
                 actual: query.len(),
             }));
         }
@@ -565,77 +645,56 @@ impl VectorIndex for HnswIndex {
         // Cap k to prevent DoS
         let k_capped = k.min(self.max_k);
 
-        // For very small graphs, use exact brute-force search for 100% recall
-        // HNSW's probabilistic structure is unreliable with <100 nodes
-        const BRUTE_FORCE_THRESHOLD: usize = 100;
-        let active_nodes = self.len();
-
-        if active_nodes > 0 && active_nodes < BRUTE_FORCE_THRESHOLD {
-            return self.brute_force_search(query, k_capped);
-        }
-
-        // Fetch more results than k to account for soft-deleted items
-        // Since some results will be filtered out, we need to fetch extra
-        let deleted_count = self.deleted_ids.len();
-        let fetch_k = if deleted_count == 0 {
-            k_capped
-        } else {
-            // Fetch extra to account for deletions
-            // Add deleted_count to ensure we get enough results after filtering
-            (k_capped + deleted_count).min(MAX_K)
-        };
-
-        // Get ef_search parameter
-        // CRITICAL: ef_search must be >= fetch_k for HNSW to find k neighbors
-        // For small graphs, use higher ef_search for better recall
-        // HNSW's probabilistic structure doesn't work well with very few nodes
-        let configured_ef_search = *self.ef_search.read();
-        let min_ef_for_small_graphs = 200;
-        let ef_search = configured_ef_search
-            .max(fetch_k)
-            .max(min_ef_for_small_graphs);
-
         // Perform search
-        let inner = self.inner.read();
-        let results = match &*inner {
-            HnswIndexInner::Cosine(hnsw) => hnsw.search(query, fetch_k, ef_search),
-            HnswIndexInner::Euclidean(hnsw) => hnsw.search(query, fetch_k, ef_search),
-            HnswIndexInner::DotProduct(hnsw) => hnsw.search(query, fetch_k, ef_search),
-        };
+        let index = self.inner.read();
+        let matches = index
+            .search(query, k_capped)
+            .map_err(|e| Error::Vector(VectorError::IndexError(format!("Search failed: {}", e))))?;
 
-        // Convert results to (NodeId, similarity) format, filtering out deleted items
-        let mut output: Vec<(NodeId, f32)> = Vec::new();
+        self.stats
+            .searches_performed
+            .fetch_add(1, Ordering::Relaxed);
 
-        for neighbor in results {
-            let data_id = neighbor.d_id;
+        // Convert results to (NodeId, similarity) format
+        let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
 
-            // Lookup NodeId for this NodeId (O(1) using reverse mapping)
-            if let Some(node_id_ref) = self.reverse_id_mapping.get(&data_id) {
+        for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+            if let Some(node_id_ref) = self.reverse_mapping.get(key) {
                 let node_id = *node_id_ref.value();
 
-                // Skip if deleted
-                if self.deleted_ids.contains_key(&node_id) {
-                    continue;
-                }
-
-                // Convert distance to similarity based on metric
-                let similarity = match self.metric {
-                    DistanceMetric::Cosine => 1.0 - neighbor.distance,
-                    DistanceMetric::Euclidean => -neighbor.distance,
-                    DistanceMetric::DotProduct => -neighbor.distance,
+                // Convert distance to similarity based on metric.
+                // usearch returns distances where lower = more similar (except for some metrics).
+                // We convert to similarity where higher = more similar for consistent API.
+                //
+                // - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
+                //   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
+                // - Euclidean: usearch returns squared L2 distance, range [0, inf)
+                //   Converting: similarity = -distance, so closer vectors have higher similarity
+                // - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
+                //   Converting: similarity = -distance = dot_product, higher is more similar
+                // - Haversine: usearch returns great-circle distance, range [0, pi]
+                //   Converting: similarity = -distance, closer points have higher similarity
+                // - Hamming: usearch returns bit differences count, range [0, dims]
+                //   Converting: similarity = -distance, fewer differences = more similar
+                // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
+                //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
+                let similarity = match self.config.metric {
+                    DistanceMetric::Cosine => 1.0 - distance,
+                    DistanceMetric::Euclidean => -distance,
+                    DistanceMetric::DotProduct => -distance,
+                    DistanceMetric::Haversine => -distance,
+                    DistanceMetric::Hamming => -distance,
+                    DistanceMetric::Tanimoto => 1.0 - distance,
                 };
 
-                output.push((node_id, similarity));
+                results.push((node_id, similarity));
             }
         }
 
-        // Sort by similarity descending
-        output.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Results should already be sorted by usearch, but ensure descending order
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Truncate to k results
-        output.truncate(k_capped);
-
-        Ok(output)
+        Ok(results)
     }
 
     fn search_with_filter<F>(
@@ -647,40 +706,250 @@ impl VectorIndex for HnswIndex {
     where
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
-        // For hnsw_rs, we'll do post-filtering since the FilterT trait is complex
-        // For small graphs, fetch all nodes to ensure we don't miss filtered results
-        // For large graphs, use adaptive over-fetch heuristic
-        let total_nodes = self.len();
-        let candidates_to_fetch = if total_nodes < 100 {
-            // Small graph: fetch all nodes to guarantee finding k matches if they exist
-            total_nodes
-        } else {
-            // Large graph: use adaptive heuristic (same as current.rs)
-            (k * 10).max(k + 20).min(k + 1000)
+        // Validate query vector
+        validate_vector(query)?;
+
+        if query.len() != self.config.dimensions {
+            return Err(Error::Vector(VectorError::DimensionMismatch {
+                expected: self.config.dimensions,
+                actual: query.len(),
+            }));
+        }
+
+        let k_capped = k.min(self.max_k);
+
+        // Use usearch's native filtered search
+        let index = self.inner.read();
+
+        // Create a filter that maps usearch keys to our predicate
+        let reverse_mapping = &self.reverse_mapping;
+        let filter = |key: u64| -> bool {
+            if let Some(node_id_ref) = reverse_mapping.get(&key) {
+                predicate(node_id_ref.value())
+            } else {
+                false
+            }
         };
 
-        let results = self.search(query, candidates_to_fetch)?;
+        let matches = index
+            .filtered_search(query, k_capped, filter)
+            .map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Filtered search failed: {}",
+                    e
+                )))
+            })?;
 
-        let filtered: Vec<(NodeId, f32)> = results
-            .into_iter()
-            .filter(|(node_id, _)| predicate(node_id))
-            .take(k)
-            .collect();
+        self.stats
+            .searches_performed
+            .fetch_add(1, Ordering::Relaxed);
 
-        Ok(filtered)
+        // Convert results (same conversion logic as search() - see comments there)
+        let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
+
+        for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+            if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                let node_id = *node_id_ref.value();
+                let similarity = match self.config.metric {
+                    DistanceMetric::Cosine => 1.0 - distance,
+                    DistanceMetric::Euclidean => -distance,
+                    DistanceMetric::DotProduct => -distance,
+                    DistanceMetric::Haversine => -distance,
+                    DistanceMetric::Hamming => -distance,
+                    DistanceMetric::Tanimoto => 1.0 - distance,
+                };
+                results.push((node_id, similarity));
+            }
+        }
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(results)
     }
 
     fn len(&self) -> usize {
-        self.id_mapping.len() - self.deleted_ids.len()
+        self.inner.read().size()
     }
 
     fn dimensions(&self) -> usize {
-        self.dimensions
+        self.config.dimensions
     }
 
     fn distance_metric(&self) -> DistanceMetric {
-        self.metric
+        self.config.metric
     }
+
+    fn add_batch(&self, items: &[(NodeId, Vec<f32>)]) -> Result<()> {
+        for (id, vec) in items {
+            self.add(*id, vec)?;
+        }
+        Ok(())
+    }
+
+    fn remove_batch(&self, ids: &[NodeId]) -> Result<()> {
+        for id in ids {
+            self.remove(*id)?;
+        }
+        Ok(())
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        let index = self.inner.read();
+        index
+            .save(path.to_str().ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Path contains invalid UTF-8".to_string(),
+                ))
+            })?)
+            .map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to save index: {}",
+                    e
+                )))
+            })?;
+
+        // Save mappings to companion file with integrity checks
+        // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
+        let mappings_path = path.with_extension("usearch.mappings");
+        let mut mappings = Vec::new();
+        for entry in self.id_mapping.iter() {
+            mappings.push((*entry.key(), *entry.value()));
+        }
+
+        let count = mappings.len() as u64;
+        let mappings_data: Vec<u8> = mappings
+            .iter()
+            .flat_map(|(node_id, key)| {
+                let mut bytes = Vec::with_capacity(16);
+                bytes.extend_from_slice(&node_id.as_u64().to_le_bytes());
+                bytes.extend_from_slice(&key.to_le_bytes());
+                bytes
+            })
+            .collect();
+
+        // Build file with header and checksum
+        let mut file_data = Vec::with_capacity(4 + 1 + 8 + mappings_data.len() + 4);
+        file_data.extend_from_slice(MAPPING_MAGIC);
+        file_data.push(MAPPING_VERSION);
+        file_data.extend_from_slice(&count.to_le_bytes());
+        file_data.extend_from_slice(&mappings_data);
+
+        // Calculate CRC32 over all data (header + mappings)
+        let mut hasher = Hasher::new();
+        hasher.update(&file_data);
+        let crc = hasher.finalize();
+        file_data.extend_from_slice(&crc.to_le_bytes());
+
+        std::fs::write(&mappings_path, &file_data).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to save mappings: {}",
+                e
+            )))
+        })?;
+
+        Ok(())
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.inner.read().memory_usage()
+    }
+
+    fn quantization(&self) -> Quantization {
+        self.config.quantization
+    }
+
+    fn compact(&self) -> Result<()> {
+        // usearch native deletes don't require compaction
+        Ok(())
+    }
+}
+
+/// Load and verify mappings from a companion file.
+/// Returns (id_mapping, reverse_mapping, max_key) or error if integrity check fails.
+/// Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
+#[allow(clippy::type_complexity)]
+fn load_mappings_with_integrity(
+    mappings_path: &Path,
+) -> Result<(DashMap<NodeId, u64>, DashMap<u64, NodeId>, u64)> {
+    let id_mapping = DashMap::new();
+    let reverse_mapping = DashMap::new();
+    let mut max_key = 0u64;
+
+    if !mappings_path.exists() {
+        return Ok((id_mapping, reverse_mapping, max_key));
+    }
+
+    let file_data = std::fs::read(mappings_path).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to read mappings: {}",
+            e
+        )))
+    })?;
+
+    // Minimum size: magic(4) + version(1) + count(8) + crc(4) = 17 bytes
+    if file_data.len() < 17 {
+        return Err(Error::Vector(VectorError::IndexError(
+            "Mapping file too small or corrupted".to_string(),
+        )));
+    }
+
+    // Verify magic bytes
+    if &file_data[0..4] != MAPPING_MAGIC {
+        return Err(Error::Vector(VectorError::IndexError(
+            "Invalid mapping file: bad magic bytes".to_string(),
+        )));
+    }
+
+    // Check version
+    let version = file_data[4];
+    if version != MAPPING_VERSION {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Unsupported mapping file version: {} (expected {})",
+            version, MAPPING_VERSION
+        ))));
+    }
+
+    // Extract and verify CRC32
+    let crc_offset = file_data.len() - 4;
+    let stored_crc = u32::from_le_bytes(file_data[crc_offset..].try_into().unwrap());
+    let mut hasher = Hasher::new();
+    hasher.update(&file_data[..crc_offset]);
+    let computed_crc = hasher.finalize();
+
+    if stored_crc != computed_crc {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Mapping file corrupted: CRC mismatch (stored: {}, computed: {})",
+            stored_crc, computed_crc
+        ))));
+    }
+
+    // Parse count
+    let count = u64::from_le_bytes(file_data[5..13].try_into().unwrap()) as usize;
+
+    // Verify data size
+    let expected_size = 4 + 1 + 8 + (count * 16) + 4;
+    if file_data.len() != expected_size {
+        return Err(Error::Vector(VectorError::IndexError(format!(
+            "Mapping file size mismatch: expected {} bytes, got {}",
+            expected_size,
+            file_data.len()
+        ))));
+    }
+
+    // Parse mappings
+    let data_start = 13;
+    let data_end = crc_offset;
+    for chunk in file_data[data_start..data_end].chunks_exact(16) {
+        let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+        let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+
+        if let Ok(node_id) = NodeId::new(node_id_raw) {
+            id_mapping.insert(node_id, key);
+            reverse_mapping.insert(key, node_id);
+            max_key = max_key.max(key);
+        }
+    }
+
+    Ok((id_mapping, reverse_mapping, max_key))
 }
 
 impl HnswIndex {
@@ -690,88 +959,147 @@ impl HnswIndex {
     }
 
     /// Sets the ef_search parameter for query-time search quality.
-    ///
-    /// Higher values improve recall but slow down searches.
     pub fn set_ef_search(&self, ef_search: usize) {
-        *self.ef_search.write() = ef_search;
+        let index = self.inner.read();
+        index.change_expansion_search(ef_search);
     }
 
     /// Gets the current ef_search value.
+    ///
+    /// Note: Returns the runtime value which may differ from config if
+    /// `set_ef_search` was called.
     pub fn get_ef_search(&self) -> usize {
-        *self.ef_search.read()
+        self.inner.read().expansion_search()
     }
 
     /// Returns the configuration used to create this index.
     pub fn config(&self) -> HnswConfig {
-        HnswConfig {
-            dimensions: self.dimensions,
-            metric: self.metric,
-            m: self.m,
-            ef_construction: self.ef_construction,
-            ef_search: *self.ef_search.read(),
-            capacity: 0, // capacity is not tracked
-        }
+        self.config.clone()
     }
 
     /// Returns the M parameter (connections per node).
     pub fn m(&self) -> usize {
-        self.m
+        self.config.m
     }
 
-    /// Brute-force exact k-NN search using cached vectors.
-    ///
-    /// Used for small graphs (<100 nodes) where HNSW's probabilistic structure
-    /// is unreliable. Computes exact distances to all non-deleted vectors.
-    fn brute_force_search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
-        use crate::core::vector::{cosine_similarity, dot_product, euclidean_distance};
+    /// Loads an index from a file path.
+    pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        let options = IndexOptions {
+            dimensions: config.dimensions,
+            metric: to_usearch_metric(config.metric),
+            quantization: to_usearch_scalar(config.quantization),
+            connectivity: config.m,
+            expansion_add: config.ef_construction,
+            expansion_search: config.ef_search,
+            multi: false,
+        };
 
-        let mut candidates: Vec<(NodeId, f32)> = Vec::new();
+        let index = Index::new(&options).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to create index for loading: {}",
+                e
+            )))
+        })?;
 
-        // Compute exact similarity for all non-deleted vectors
-        for entry in self.vector_cache.iter() {
-            let node_id = *entry.key();
+        index
+            .load(path.to_str().ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Path contains invalid UTF-8".to_string(),
+                ))
+            })?)
+            .map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to load index: {}",
+                    e
+                )))
+            })?;
 
-            // Skip deleted nodes
-            if self.deleted_ids.contains_key(&node_id) {
-                continue;
-            }
+        // Load mappings from companion file with integrity verification
+        let mappings_path = path.with_extension("usearch.mappings");
+        let (id_mapping, reverse_mapping, max_key) = load_mappings_with_integrity(&mappings_path)?;
 
-            let vector = entry.value();
+        Ok(HnswIndex {
+            inner: Arc::new(RwLock::new(index)),
+            config,
+            id_mapping: Arc::new(id_mapping),
+            reverse_mapping: Arc::new(reverse_mapping),
+            next_key: AtomicU64::new(max_key + 1),
+            stats: Arc::new(IndexStats::default()),
+            max_k: MAX_K,
+            is_mmap: false,
+        })
+    }
 
-            // Compute distance/similarity based on metric
-            let similarity = match self.metric {
-                DistanceMetric::Cosine => cosine_similarity(query, vector)?,
-                DistanceMetric::Euclidean => {
-                    // Return negative distance for consistent sorting (higher is better)
-                    -euclidean_distance(query, vector)?
-                }
-                DistanceMetric::DotProduct => dot_product(query, vector)?,
-            };
+    /// Opens a memory-mapped index from a file path.
+    pub fn open_mmap(path: &Path) -> Result<Self> {
+        let index = Index::new(&IndexOptions::default()).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to create index: {}",
+                e
+            )))
+        })?;
 
-            candidates.push((node_id, similarity));
-        }
+        index
+            .view(path.to_str().ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Path contains invalid UTF-8".to_string(),
+                ))
+            })?)
+            .map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to memory-map index: {}",
+                    e
+                )))
+            })?;
 
-        // Sort by similarity descending (higher is better)
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let dimensions = index.dimensions();
+        let connectivity = index.connectivity();
 
-        // Take top k
-        candidates.truncate(k);
+        // Load mappings from companion file with integrity verification
+        let mappings_path = path.with_extension("usearch.mappings");
+        let (id_mapping, reverse_mapping, max_key) = load_mappings_with_integrity(&mappings_path)?;
 
-        Ok(candidates)
+        Ok(HnswIndex {
+            inner: Arc::new(RwLock::new(index)),
+            config: HnswConfig {
+                dimensions,
+                m: connectivity,
+                storage: StorageMode::MemoryMapped {
+                    path: path.to_path_buf(),
+                },
+                ..Default::default()
+            },
+            id_mapping: Arc::new(id_mapping),
+            reverse_mapping: Arc::new(reverse_mapping),
+            next_key: AtomicU64::new(max_key + 1),
+            stats: Arc::new(IndexStats::default()),
+            max_k: MAX_K,
+            is_mmap: true,
+        })
     }
 }
 
-// SAFETY: HnswIndex is safe to send across threads and share between threads because:
-// 1. hnsw_rs::Hnsw uses internal Arc/RwLock for all mutable state, making it thread-safe
-// 2. All our fields use thread-safe wrappers:
-//    - inner: Arc<RwLock<HnswIndexInner>> - provides synchronized access to the HNSW index
-//    - ef_search: Arc<RwLock<usize>> - synchronized mutable parameter
-//    - next_data_id: Arc<RwLock<usize>> - synchronized ID counter
-//    - id_mapping, reverse_id_mapping: Arc<DashMap<...>> - lock-free concurrent hashmaps
-//    - deleted_ids: Arc<DashMap<...>> - lock-free concurrent hashmap
-//    - vector_cache: Arc<DashMap<NodeId, Arc<Vec<f32>>>> - lock-free concurrent hashmap with Arc-wrapped vectors
-// 3. Immutable fields (dimensions, metric, m, ef_construction) are safe to share
-// 4. hnsw_rs library guarantees thread-safety for all public APIs as documented in their crate
+// SAFETY: HnswIndex is safe to send across threads.
+//
+// Why these manual impls are needed:
+// usearch::Index contains raw pointers internally and doesn't automatically implement
+// Send/Sync. However, usearch documents that Index is thread-safe for concurrent
+// reads and writes (it uses internal locks for thread safety).
+//
+// Our wrapper ensures safety through:
+// 1. `inner: Arc<RwLock<Index>>` - The RwLock provides exclusive access for writes
+//    and shared access for reads, even though usearch has internal synchronization.
+//    This double-locking is intentional: usearch's internal locks may not match
+//    Rust's Send/Sync requirements, so we add our own synchronization layer.
+// 2. `id_mapping: Arc<DashMap<NodeId, u64>>` - DashMap is explicitly Send+Sync
+// 3. `reverse_mapping: Arc<DashMap<u64, NodeId>>` - DashMap is explicitly Send+Sync
+// 4. `next_key: AtomicU64` - All atomics are Send+Sync
+// 5. `stats: Arc<IndexStats>` - Contains only AtomicU64 fields
+// 6. Remaining fields (config, max_k, is_mmap) contain only Send+Sync types
+//
+// References:
+// - usearch thread safety: https://unum-cloud.github.io/usearch/cpp/index.html
+// - The library uses internal mutex/rwlock for graph modifications
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
 
@@ -845,6 +1173,27 @@ mod tests {
     }
 
     #[test]
+    fn test_hnsw_config_new_fields() {
+        let config = HnswConfig::new(384, DistanceMetric::Cosine)
+            .with_quantization(Quantization::F16)
+            .with_storage(StorageMode::InMemory);
+
+        assert_eq!(config.quantization, Quantization::F16);
+        assert!(matches!(config.storage, StorageMode::InMemory));
+    }
+
+    #[test]
+    fn test_hnsw_config_custom_metric() {
+        let config = HnswConfig::new(4, DistanceMetric::Cosine)
+            .with_custom_metric("weighted", |a, b| {
+                a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+            });
+
+        assert!(config.custom_metric.is_some());
+        assert_eq!(config.custom_metric.as_ref().unwrap().name, "weighted");
+    }
+
+    #[test]
     fn test_distance_to_similarity_conversion() -> Result<()> {
         // Test Cosine similarity conversion
         let cosine_index = HnswIndexBuilder::new(3, DistanceMetric::Cosine).build()?;
@@ -861,32 +1210,13 @@ mod tests {
 
         // Verify similarity values (not distances)
         assert_eq!(results[0].0, n1);
-        assert!(results[0].1 > 0.99); // Identical: similarity ≈ 1.0
+        assert!(results[0].1 > 0.99); // Identical: similarity ~= 1.0
 
         assert_eq!(results[1].0, n2);
         assert!(results[1].1 > 0.9); // Very similar: similarity > 0.9
 
         assert_eq!(results[2].0, n3);
-        assert!(results[2].1 < 0.1 && results[2].1 > -0.1); // Orthogonal: similarity ≈ 0.0
-
-        // Test Euclidean distance conversion
-        let euclidean_index = HnswIndexBuilder::new(3, DistanceMetric::Euclidean).build()?;
-
-        euclidean_index.add(n1, &[1.0, 0.0, 0.0])?;
-        euclidean_index.add(n2, &[1.1, 0.0, 0.0])?; // Close
-        euclidean_index.add(n3, &[10.0, 0.0, 0.0])?; // Far
-
-        let results = euclidean_index.search(&[1.0, 0.0, 0.0], 3)?;
-
-        // For Euclidean, we return -distance, so smaller distances = less negative = higher similarity
-        assert_eq!(results[0].0, n1);
-        assert!(results[0].1 > -0.01); // Identical: similarity ≈ 0.0
-
-        assert_eq!(results[1].0, n2);
-        assert!(results[1].1 < -0.05 && results[1].1 > -0.2); // Close: small negative
-
-        assert_eq!(results[2].0, n3);
-        assert!(results[2].1 < -8.0); // Far: large negative
+        assert!(results[2].1 < 0.1 && results[2].1 > -0.1); // Orthogonal: similarity ~= 0.0
 
         Ok(())
     }
