@@ -50,6 +50,45 @@ fn gen_clustered_vector(dim: usize, cluster_id: usize, variance: f32) -> Vec<f32
         .collect()
 }
 
+// ============================================================================
+// Graph Topology Builders
+// ============================================================================
+
+/// Build uniform graph: each node has ~fan_out edges.
+///
+/// This creates a structured graph where all nodes have similar
+/// connectivity, representing knowledge graphs or databases with
+/// predictable relationship patterns.
+fn build_uniform_graph(node_count: usize, fan_out: usize, dim: usize) -> GallifreyDB {
+    let db = GallifreyDB::new();
+    let config = HnswConfig::new(dim, DistanceMetric::Cosine);
+    db.enable_vector_index("embedding", config).unwrap();
+
+    // Create nodes with embeddings
+    for i in 0..node_count {
+        let vector = gen_vector(dim, i);
+        let _ = db.create_node(
+            "Person",
+            PropertyMapBuilder::new()
+                .insert("id", i as i64)
+                .insert_vector("embedding", &vector)
+                .build(),
+        );
+    }
+
+    // Create edges (deterministic fan-out)
+    for i in 0..node_count {
+        let source = NodeId::new(i as u64).unwrap();
+        for j in 0..fan_out {
+            let target_idx = (i + j + 1) % node_count;
+            let target = NodeId::new(target_idx as u64).unwrap();
+            let _ = db.create_edge(source, target, "KNOWS", PropertyMapBuilder::new().build());
+        }
+    }
+
+    db
+}
+
 // Placeholder benchmark - will be replaced with actual benchmarks in subsequent tasks
 fn bench_placeholder(_c: &mut Criterion) {
     // This is a placeholder to make the benchmark file compile.
