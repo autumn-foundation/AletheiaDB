@@ -713,10 +713,55 @@ fn bench_hybrid_vs_sequential(c: &mut Criterion) {
     group.finish();
 }
 
+/// Compare hybrid vs naive "load everything into memory" approach.
+///
+/// Hybrid uses streaming with min-heap (O(N log k)).
+/// Naive loads all neighbors, computes all similarities, sorts all (O(N log N)).
+fn bench_hybrid_vs_naive_composition(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hybrid_vs_naive");
+
+    let db = build_uniform_graph(1000, 20, 384);
+    let start = NodeId::new(100).unwrap();
+    let query = gen_vector(384, 0);
+
+    // Hybrid: streaming approach with min-heap
+    group.bench_function("hybrid_streaming", |b| {
+        b.iter(|| traverse_and_rank(&db, start, "KNOWS", &query, 10));
+    });
+
+    // Naive: load all neighbors + all embeddings, then rank
+    group.bench_function("naive_load_all_rank", |b| {
+        b.iter(|| {
+            let edge_ids = db.get_outgoing_edges_with_label(start, "KNOWS");
+
+            // Load ALL neighbors into Vec
+            let mut all_scored: Vec<(NodeId, f32)> = Vec::new();
+
+            for &eid in &edge_ids {
+                let edge = db.get_edge(eid).unwrap();
+                if let Ok(node) = db.get_node(edge.target)
+                    && let Some(emb) = node.get_property("embedding").and_then(|p| p.as_vector())
+                    && let Ok(sim) = cosine_similarity(&query, emb)
+                {
+                    all_scored.push((edge.target, sim));
+                }
+            }
+
+            // Sort entire result set (no heap optimization)
+            all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            all_scored.truncate(10);
+            all_scored
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = comparison_baselines;
     config = common::configure_criterion();
     targets = bench_hybrid_vs_sequential,
+        bench_hybrid_vs_naive_composition,
 );
 
 criterion_main!(
