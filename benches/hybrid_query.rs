@@ -415,6 +415,56 @@ fn bench_find_similar_as_of(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Benchmark: Temporal vs Current Query Comparison
+// ============================================================================
+
+/// Benchmark temporal query vs current-state query overhead.
+///
+/// Compares find_similar_as_of (temporal) vs find_similar_by_embedding (current).
+/// Shows cost of temporal reconstruction.
+///
+/// This benchmark helps quantify the overhead of temporal queries when querying
+/// at the "current" timestamp. The difference reveals:
+/// - Snapshot lookup overhead
+/// - Temporal index navigation cost
+/// - Memory overhead from temporal data structures
+fn bench_temporal_vs_current(c: &mut Criterion) {
+    let mut group = c.benchmark_group("temporal_vs_current");
+    group.throughput(Throughput::Elements(1));
+
+    let (temporal_db, timestamps) = build_temporal_graph(1000, 50, 384);
+    let query = gen_vector(384, 0);
+    let current_timestamp = *timestamps.last().unwrap();
+
+    // Also build a non-temporal graph for true current-state comparison
+    let current_db = build_uniform_graph(1000, 20, 384);
+
+    // Temporal query (with reconstruction overhead)
+    group.bench_function("temporal_query", |b| {
+        b.iter(|| {
+            find_similar_as_of(
+                black_box(&temporal_db),
+                black_box(&query),
+                black_box(10),
+                black_box(current_timestamp),
+            )
+        });
+    });
+
+    // Current-state query on temporal DB (uses current storage path)
+    group.bench_function("current_on_temporal_db", |b| {
+        b.iter(|| temporal_db.find_similar_by_embedding(black_box(&query), black_box(10)));
+    });
+
+    // Current-state query on non-temporal DB (baseline)
+    group.bench_function("current_query", |b| {
+        b.iter(|| current_db.find_similar_by_embedding(black_box(&query), black_box(10)));
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
@@ -425,6 +475,7 @@ criterion_group!(
     name = temporal_operations;
     config = common::configure_criterion();
     targets = bench_find_similar_as_of,
+        bench_temporal_vs_current,
 );
 
 criterion_main!(benches, temporal_operations);
