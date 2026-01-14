@@ -1246,6 +1246,82 @@ impl CurrentStorage {
         index.track_semantic_drift(node_id, reference_embedding, time_range)
     }
 
+    /// Get the semantic evolution of a node's embedding over time in a specific property.
+    ///
+    /// Returns the actual embedding vectors at each snapshot timestamp.
+    pub fn semantic_evolution_in(
+        &self,
+        property_name: &str,
+        node_id: crate::core::NodeId,
+        time_range: crate::core::temporal::TimeRange,
+    ) -> Result<Vec<(crate::core::temporal::Timestamp, std::sync::Arc<[f32]>)>> {
+        let state = self.temporal_vector_index_state.read();
+
+        let index = state.index.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
+                    .to_string(),
+            ))
+        })?;
+
+        let indexed_property = state.property_name.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index has no property name configured.".to_string(),
+            ))
+        })?;
+
+        if indexed_property != property_name {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError(format!(
+                    "Property '{}' does not match the temporal vector index property '{}'. \
+                     Use semantic_evolution_in(\"{}\", ...) instead.",
+                    property_name, indexed_property, indexed_property
+                )),
+            ));
+        }
+
+        index.semantic_evolution(node_id, time_range)
+    }
+
+    /// Find all nodes with semantic drift above a threshold in a specific property.
+    ///
+    /// Scans all nodes and identifies those whose embeddings have changed
+    /// by more than the specified threshold over the time range.
+    pub fn find_drift_in(
+        &self,
+        property_name: &str,
+        threshold: f32,
+        time_range: crate::core::temporal::TimeRange,
+        metric: crate::index::vector::temporal::DriftMetric,
+    ) -> Result<Vec<(crate::core::NodeId, f32)>> {
+        let state = self.temporal_vector_index_state.read();
+
+        let index = state.index.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index is not enabled. Call enable_temporal_vector_index() first."
+                    .to_string(),
+            ))
+        })?;
+
+        let indexed_property = state.property_name.as_ref().ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "Temporal vector index has no property name configured.".to_string(),
+            ))
+        })?;
+
+        if indexed_property != property_name {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::IndexError(format!(
+                    "Property '{}' does not match the temporal vector index property '{}'. \
+                     Use find_drift_in(\"{}\", ...) instead.",
+                    property_name, indexed_property, indexed_property
+                )),
+            ));
+        }
+
+        index.find_semantic_drift(threshold, time_range, metric)
+    }
+
     /// Find k most similar nodes across a time range.
     ///
     /// Returns results for each snapshot within the time range, showing how
