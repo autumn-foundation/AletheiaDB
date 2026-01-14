@@ -472,6 +472,131 @@ for (timestamp, snapshot_results) in results {
 - Large DB (1M vectors, 100 snapshots): ~100GB
   - 10 full + 90 deltas (~10% changes): ~25GB + ~75GB
 
+## Hybrid Query API
+
+GallifreyDB provides a unified hybrid query API that combines **graph traversal**, **vector similarity**, and **bi-temporal queries** into a single fluent interface. This enables queries like "Who did Alice know in 2023 that was similar to Bob?"
+
+### Quick Start
+
+```rust
+use gallifreydb::query::hybrid::{traverse_and_rank, find_similar_as_of};
+use gallifreydb::query::QueryBuilder;
+use gallifreydb::query::ir::Predicate;
+
+// Simple: Graph + Vector hybrid
+let results = traverse_and_rank(&db, alice_id, "KNOWS", &bob_embedding, 10)?;
+
+// Simple: Temporal + Vector
+let results = find_similar_as_of(&db, &query_embedding, 10, timestamp)?;
+
+// Complex: Full hybrid with fluent builder
+let results = db.query()
+    .as_of(valid_time, tx_time)
+    .start(alice_id)
+    .traverse("KNOWS")
+    .rank_by_similarity(&bob_embedding, 10)
+    .filter(Predicate::gt("score", 0.8))
+    .with_provenance()
+    .execute(&db)?;
+```
+
+### Three-Layer API
+
+| Layer | Use Case | Example |
+|-------|----------|---------|
+| **Direct Functions** | Simple patterns | `traverse_and_rank(&db, node, "KNOWS", &emb, k)` |
+| **Query Builder** | Complex compositions | `db.query().start(n).traverse("X").rank_by_similarity(&e, k)` |
+| **Convenience Methods** | Quick access | `db.traverse_and_rank(node, "KNOWS", &emb, k)` |
+
+### Query Builder State Machine
+
+The builder uses phantom types for compile-time safety:
+
+```rust
+// Valid: Source → Traverse → Rank
+let q = db.query()
+    .start(node_id)           // Initial → HasNodes
+    .traverse("KNOWS")        // HasNodes → HasTraversalResults
+    .rank_by_similarity(&e, 10)  // → HasVectorResults
+    .execute(&db)?;
+
+// Invalid: Won't compile - no source before traverse
+let q = db.query().traverse("KNOWS"); // ERROR: traverse not available in Initial state
+```
+
+### Available Operations
+
+**Source Operations** (Initial state):
+- `start(NodeId)` / `start_from(Vec<NodeId>)` - Start from node(s)
+- `scan(Option<&str>)` / `scan_label(&str)` - Scan nodes
+- `find_similar(&[f32], k)` - Vector k-NN search
+
+**Graph Operations** (HasNodes/HasTraversalResults):
+- `traverse("LABEL")` / `traverse_all()` - Single-hop traversal
+- `traverse_n("LABEL", depth)` - Multi-hop exact
+- `traverse_in("LABEL")` / `traverse_both("LABEL")` - Direction variants
+
+**Vector Operations**:
+- `rank_by_similarity(&[f32], k)` - Rank results by similarity
+- `similar_to(NodeId, k)` - Node-based k-NN search
+
+**Temporal Operations** (any state):
+- `as_of(valid_time, tx_time)` - Point-in-time query
+- `between(start, end)` - Time range query
+
+**Filter/Control** (any state):
+- `filter(Predicate)` - Property filtering
+- `with_label(&str)` - Label filtering
+- `limit(n)` / `skip(n)` - Pagination
+- `with_provenance()` - Include metadata
+- `parallel()` - Enable parallel execution
+
+### Predicates
+
+```rust
+Predicate::eq("name", "Alice")     // Equality
+Predicate::gt("age", 18)           // Comparison
+Predicate::exists("email")         // Property exists
+Predicate::contains("bio", "rust") // String contains
+
+// Combine predicates
+let p = Predicate::eq("status", "active")
+    .and(Predicate::gt("score", 0.5));
+```
+
+### Query Results
+
+```rust
+let results = query.execute(&db)?;
+for row in results {
+    let row = row?;
+    match row.entity {
+        EntityResult::Node(node) => println!("Node: {:?}", node),
+        EntityResult::NodeId(id) => println!("ID: {:?}", id),
+        _ => {}
+    }
+    if let Some(score) = row.score {
+        println!("  Similarity: {:.3}", score);
+    }
+}
+```
+
+### Performance Targets
+
+| Query Type | Target Latency |
+|------------|----------------|
+| Single node lookup | <1µs |
+| 3-hop traversal | <100µs |
+| k-NN search (k=10, 1M vectors) | <10ms |
+| Graph+Vector hybrid | <20ms |
+| Full hybrid (temporal) | <30ms |
+
+### Documentation
+
+- **[Design Document](docs/VECTOR_SEARCH_DESIGN.md)** - Complete Phase 4 documentation
+- **[ADR-0019: Hybrid Query Planner](docs/adr/0019-hybrid-query-planner.md)** - Architecture decisions
+- **[Hybrid Query Guide](docs/guides/hybrid-query-guide.md)** - Comprehensive user guide
+
 ## Embedding Generation (Optional)
 
 GallifreyDB provides **optional** embedding providers via feature flags. Embedding generation is separate from the database - generate embeddings first, then store them.

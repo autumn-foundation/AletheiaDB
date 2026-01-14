@@ -1,8 +1,8 @@
 # Vector Search Integration Design
 
-> **Status**: Phase 3 Complete (VS-047)
+> **Status**: Phase 4 Complete (VS-072)
 > **Created**: 2024-12-30
-> **Updated**: 2026-01-08
+> **Updated**: 2026-01-14
 > **Goal**: Position GallifreyDB as SUPERRAG - Graph + Vector + Bi-temporal
 >
 > ## Implementation Progress
@@ -12,7 +12,7 @@
 > | Phase 1 | ✅ Complete (PR #138) | Vector storage foundation (`PropertyValue::Vector`, similarity functions) |
 > | Phase 2 | ✅ Complete (Milestone M2) | HNSW index integration, benchmarks, tests, documentation |
 > | Phase 3 | ✅ Complete (Issue #67) | Temporal vector-historical integration, provenance tracking |
-> | Phase 4 | 🔲 Planned | Hybrid query engine |
+> | Phase 4 | ✅ Complete (Issue #85) | Hybrid query engine with unified API |
 > | Phase 5 | 🔲 Planned | Persistence & performance optimization |
 
 ## Executive Summary
@@ -638,30 +638,327 @@ for i in 0..20 {
    - `AtomicUsize` for transaction counter
    - `DashMap` for soft deletes (concurrent access)
 
-### Phase 4: Hybrid Query Engine
-**Estimated effort**: 2-3 days
+### Phase 4: Hybrid Query Engine ✅ Complete
 
-**Goals**:
-- Graph + Vector queries
-- Vector + Temporal queries
-- Full hybrid: Graph + Vector + Temporal
-- Query planner for optimal execution
+**Issue**: #85 (VS-072) - Phase 4 Documentation
+**Completed**: 2026-01-14
+**Implementation**: Pull-Based Iterator Query Planner with Cost-Based Optimization
 
-**Example queries**:
+**Goals Achieved**:
+- ✅ Graph + Vector queries via `traverse_and_rank()`
+- ✅ Vector + Temporal queries via `find_similar_as_of()`
+- ✅ Full hybrid: Graph + Vector + Temporal
+- ✅ Type-safe fluent query builder API
+- ✅ Cost-based query optimization
+- ✅ Comprehensive benchmarks across topologies
+
+**Architecture**:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      Query Builder API                        │
+│  QueryBuilder<S> with compile-time state tracking             │
+└──────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│                  Query IR (Intermediate Rep)                  │
+│  QueryOp: StartNode | Traverse | VectorSearch | RankBy | ... │
+└──────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│                     Logical Planner                           │
+│  - Operation validation       - Tree construction             │
+│  - Temporal context binding   - Cardinality estimation        │
+└──────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │   Optimization Rules          │
+              │ - Predicate pushdown          │
+              │ - Limit pushdown              │
+              │ - Vector operation reordering │
+              └───────────────┬───────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│                    Physical Planner                           │
+│  LogicalOp → PhysicalOp (cost-based operator selection)       │
+└──────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│                     Query Executor                            │
+│  Pull-based iterators: NodeLookup | HnswSearch | Traverse... │
+└──────────────────────────────────────────────────────────────┘
+```
+
+#### Three-Layer API Design
+
+The hybrid query API provides three complementary access patterns:
+
+**Layer 1: Direct Functions** (simple patterns)
 ```rust
+use gallifreydb::query::hybrid::{traverse_and_rank, find_similar_as_of};
+
+// Graph + Vector: Find neighbors ranked by similarity
+let results = traverse_and_rank(&db, alice_id, "KNOWS", &query_embedding, 10)?;
+
+// Temporal + Vector: Point-in-time semantic search
+let results = find_similar_as_of(&db, &query_embedding, 10, timestamp)?;
+```
+
+**Layer 2: Fluent Query Builder** (complex compositions)
+```rust
+use gallifreydb::query::QueryBuilder;
+use gallifreydb::query::ir::Predicate;
+
 // Graph + Vector: "Who does Alice know that's similar to Bob?"
-db.traverse(alice_id, "KNOWS")
-  .rank_by_similarity(bob_embedding, 10)
+let results = db.query()
+    .start(alice_id)
+    .traverse("KNOWS")
+    .rank_by_similarity(&bob_embedding, 10)
+    .execute(&db)?;
 
 // Vector + Temporal: "What was similar to this concept in 2023?"
-db.as_of(timestamp_2023)
-  .find_similar(concept_embedding, 10)
+let results = db.query()
+    .as_of(valid_time_2023, tx_time_2023)
+    .find_similar(&concept_embedding, 10)
+    .execute(&db)?;
 
-// Full hybrid: "Who did Alice know in 2023 that was similar to Bob?"
-db.as_of(timestamp_2023)
-  .traverse(alice_id, "KNOWS")
-  .rank_by_similarity(bob_embedding, 10)
+// Full Hybrid: "Who did Alice know in 2023 that was similar to Bob?"
+let results = db.query()
+    .as_of(valid_time_2023, tx_time_2023)
+    .start(alice_id)
+    .traverse("KNOWS")
+    .rank_by_similarity(&bob_embedding, 10)
+    .filter(Predicate::gt("score", 0.8))
+    .limit(5)
+    .with_provenance()
+    .execute(&db)?;
 ```
+
+**Layer 3: Database Convenience Methods** (quick access)
+```rust
+// Direct convenience methods on GallifreyDB
+let similar = db.traverse_and_rank(alice_id, "KNOWS", &embedding, 10)?;
+let temporal_similar = db.find_similar_at_time(&embedding, 10, valid_time, tx_time)?;
+```
+
+#### Query Builder State Machine
+
+The builder uses phantom types for compile-time safety:
+
+```
+Initial ──┬─ start(NodeId) ──────────────┬─► HasNodes
+          │                              │
+          ├─ start_from(Vec<NodeId>) ────┤
+          │                              │
+          ├─ scan(label) ────────────────┤
+          │                              │
+          └─ find_similar(&emb, k) ──────┴─► HasVectorResults
+
+HasNodes ──┬─ traverse("LABEL") ─────────┬─► HasTraversalResults
+           │                             │
+           ├─ traverse_n("LABEL", depth) ┤
+           │                             │
+           ├─ traverse_in("LABEL") ──────┤
+           │                             │
+           ├─ traverse_both("LABEL") ────┤
+           │                             │
+           ├─ rank_by_similarity(&e, k) ─┴─► HasVectorResults
+           │
+           └─ similar_to(node, k) ───────────► HasVectorResults
+
+HasTraversalResults ─┬─ traverse("LABEL") ───► HasTraversalResults
+                     │
+                     └─ rank_by_similarity() ─► HasVectorResults
+
+HasVectorResults ────┬─ traverse("LABEL") ───► HasTraversalResults
+                     │
+                     └─ filter() ────────────► HasVectorResults
+
+Any State: as_of() | between() | limit() | skip() | with_hint() |
+           parallel() | with_provenance() | build() | execute()
+```
+
+**Invalid queries fail at compile time**:
+```rust
+// ERROR: Cannot traverse without a node source
+let query = QueryBuilder::new().traverse("KNOWS"); // Won't compile
+
+// ERROR: Cannot call rank_by_similarity on Initial state
+let query = QueryBuilder::new().rank_by_similarity(&emb, 10); // Won't compile
+```
+
+#### Query Operations (IR)
+
+| Operation | Description | State Transition |
+|-----------|-------------|------------------|
+| `StartNode(id)` | Start from single node | Initial → HasNodes |
+| `StartNodes(ids)` | Start from multiple nodes | Initial → HasNodes |
+| `ScanNodes { label }` | Scan all nodes (±filter) | Initial → HasNodes |
+| `VectorSearch { embedding, k, metric }` | k-NN search | Initial → HasVectorResults |
+| `TraverseOut { label, depth }` | Outgoing edges | HasNodes → HasTraversalResults |
+| `TraverseIn { label, depth }` | Incoming edges | HasNodes → HasTraversalResults |
+| `TraverseBoth { label, depth }` | Both directions | HasNodes → HasTraversalResults |
+| `RankBySimilarity { embedding, top_k }` | Rank by similarity | Any → HasVectorResults |
+| `SimilarTo { source_node, k, ... }` | Node-based k-NN | HasNodes → HasVectorResults |
+| `Filter(predicate)` | Property filter | Same state |
+| `FilterLabel(label)` | Label filter | Same state |
+| `Limit(n)` | Result limit | Same state |
+| `Skip(n)` | Result offset | Same state |
+
+**Traversal Depth Options**:
+```rust
+TraversalDepth::Exact(1)         // Exactly 1 hop
+TraversalDepth::Exact(3)         // Exactly 3 hops
+TraversalDepth::Max(5)           // 0..=5 hops
+TraversalDepth::Range { min: 2, max: 4 }  // 2..=4 hops
+TraversalDepth::Variable         // Unbounded (use with caution)
+```
+
+**Predicates for Filtering**:
+```rust
+Predicate::eq("name", "Alice")     // name == "Alice"
+Predicate::ne("status", "deleted") // status != "deleted"
+Predicate::gt("age", 18)           // age > 18
+Predicate::lt("score", 0.5)        // score < 0.5
+Predicate::exists("email")         // has email property
+Predicate::contains("bio", "rust") // bio contains "rust"
+
+// Logical combinations
+Predicate::eq("a", 1).and(Predicate::gt("b", 2))
+Predicate::eq("x", 1).or(Predicate::eq("y", 2))
+!Predicate::exists("deleted_at")   // NOT exists
+```
+
+#### Physical Operators
+
+| Operator | Description | Complexity | Target Latency |
+|----------|-------------|------------|----------------|
+| `NodeLookup` | O(1) DashMap lookup | O(1) | <1µs |
+| `NodeScan` | Full scan ± label filter | O(N) | Variable |
+| `HnswSearch` | k-NN via HNSW index | O(log N) | <10ms (1M vectors) |
+| `IndexedTraversal` | CSR adjacency traversal | O(E) | <1µs/hop |
+| `TemporalNodeLookup` | Point-in-time reconstruction | O(D) | <10ms |
+| `VectorRerank` | Compute similarities, sort | O(N log k) | Variable |
+| `Filter` | Predicate evaluation | O(1)/row | <0.1µs |
+| `Limit` | Truncate result stream | O(1) | Negligible |
+
+#### Cost Model
+
+The planner uses calibrated cost weights for operator selection:
+
+| Operator | CPU Cost | Memory Cost | Notes |
+|----------|----------|-------------|-------|
+| NodeLookup | 0.5µs | Minimal | O(1) DashMap |
+| Traversal | 1.0µs/hop | Proportional to fan-out | CSR-optimized |
+| HnswSearch | 0.3µs × k | Index memory | Sub-linear scaling |
+| Filter | 0.1µs/row | None | Predicate eval |
+| TemporalReconstruct | 10µs/delta | Delta chain memory | Anchor+delta |
+| VectorRerank | 0.5µs × N | O(k) heap | Min-heap top-k |
+
+#### Optimization Rules
+
+**Predicate Pushdown**: Move filters closer to data sources
+```
+Filter(Scan(Person)) → Scan(Person, filter=predicate)
+```
+
+**Limit Pushdown**: Propagate LIMIT through compatible operators
+```
+Limit(Sort(Scan(...))) → Sort(Scan(..., limit=N))
+```
+
+**Vector Operation Reordering**: Execute vector searches early when beneficial
+```
+Traverse(VectorSearch(...)) → May reorder based on selectivity
+```
+
+#### Performance Characteristics
+
+**Benchmark Results** (from `benches/hybrid_query.rs`):
+
+| Operation | Scale | Topology | Latency |
+|-----------|-------|----------|---------|
+| `traverse_and_rank` k=10 | 1K nodes | Uniform (20 edges/node) | ~15-25µs |
+| `traverse_and_rank` k=10 | 10K nodes | Power-law | ~50-100µs |
+| `traverse_and_rank` k=10 | 10K nodes | Sparse (2-5 edges) | ~10-20µs |
+| `find_similar_as_of` k=10 | 1K nodes | 50 snapshots | ~100-200µs |
+| Multi-hop ranked traversal | 1K nodes | Uniform | ~40-80µs |
+| Full hybrid (temporal) | 1K nodes | 20 snapshots | ~150-300µs |
+
+**Scaling Characteristics**:
+- k-value: Near-linear scaling (min-heap maintains O(N log k))
+- Dimensions: Linear scaling with vector dimension
+- Temporal depth: Sublinear with anchor caching
+
+**Hybrid vs Sequential Comparison**:
+| Approach | Description | Relative Performance |
+|----------|-------------|---------------------|
+| Hybrid `traverse_and_rank` | Integrated operation | 1.0x (baseline) |
+| Sequential traverse then rank | Separate operations | ~1.1-1.3x slower |
+| Naive load-all-rank | No heap optimization | ~1.5-2x slower |
+
+#### Query Results
+
+```rust
+pub struct QueryRow {
+    pub entity: EntityResult,           // Node, Edge, or ID-only
+    pub score: Option<f32>,             // Vector similarity score
+    pub path: Option<Vec<EntityId>>,    // Traversal path
+    pub timestamp: Option<Timestamp>,   // Temporal context
+}
+
+pub enum EntityResult {
+    Node(Node),       // Full node with properties
+    Edge(Edge),       // Full edge data
+    NodeId(NodeId),   // ID-only (efficiency)
+    EdgeId(EdgeId),   // ID-only
+}
+
+// Iterate results
+let results = query.execute(&db)?;
+for row in results {
+    let row = row?;
+    println!("Found: {:?}, score: {:?}", row.entity, row.score);
+}
+```
+
+#### Files Implemented
+
+```
+src/query/
+├── mod.rs              # Module exports and documentation
+├── ir.rs               # QueryOp, Predicate, TraversalDepth
+├── plan.rs             # LogicalPlan, LogicalOp, TemporalContext
+├── builder.rs          # QueryBuilder<S> with type-state pattern
+├── hybrid.rs           # traverse_and_rank, find_similar_as_of
+├── planner/
+│   ├── mod.rs          # QueryPlanner orchestration
+│   ├── physical.rs     # PhysicalPlan, PhysicalOp
+│   ├── cost.rs         # Cost model with calibrated weights
+│   ├── stats.rs        # Statistics collection (lazy, cached)
+│   └── rules/
+│       ├── mod.rs      # OptimizationRule trait
+│       ├── predicate_pushdown.rs
+│       └── limit_pushdown.rs
+└── executor/
+    ├── mod.rs          # QueryExecutor
+    ├── iterators.rs    # Pull-based iterator implementations
+    └── results.rs      # QueryRow, QueryResults
+```
+
+**Test Coverage**:
+- 38 unit tests in `src/query/hybrid.rs`
+- Integration tests in `tests/hybrid_query.rs`
+- Comprehensive benchmarks in `benches/hybrid_query.rs`
+
+**Documentation**:
+- [ADR-0019: Hybrid Query Planner](docs/adr/0019-hybrid-query-planner.md)
+- [ADR-0021: Hybrid Query Execution Engine](docs/adr/0021-hybrid-query-execution.md)
+- [Hybrid Query User Guide](docs/guides/hybrid-query-guide.md)
 
 ### Phase 5: Persistence & Performance
 **Estimated effort**: 2-3 days
