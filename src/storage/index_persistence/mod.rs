@@ -25,6 +25,7 @@
 
 mod error;
 pub mod formats;
+pub mod strings;
 
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;

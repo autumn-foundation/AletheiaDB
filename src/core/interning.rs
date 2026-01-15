@@ -268,6 +268,26 @@ impl StringInterner {
         self.id_to_string.clear();
         self.next_id.store(0, Ordering::Relaxed);
     }
+
+    /// Get all interned strings in ID order.
+    ///
+    /// Returns a vector of strings sorted by their InternedString IDs.
+    /// This is useful for persistence where we need to save and restore
+    /// the interner state.
+    pub fn get_all_strings(&self) -> Vec<String> {
+        let count = self.len();
+        let mut strings = vec![String::new(); count];
+
+        // Collect all (id, string) pairs
+        for entry in self.id_to_string.iter() {
+            let id = entry.key().as_u32() as usize;
+            if id < count {
+                strings[id] = entry.value().to_string();
+            }
+        }
+
+        strings
+    }
 }
 
 impl Default for StringInterner {
