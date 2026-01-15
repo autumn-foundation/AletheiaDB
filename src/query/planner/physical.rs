@@ -263,6 +263,9 @@ pub enum PhysicalOp {
         k: usize,
         /// Optional label filter
         label_filter: Option<String>,
+        /// Property key for multi-property vector indexes.
+        /// If None, uses the default/first indexed property.
+        property_key: Option<String>,
     },
 
     /// Temporal node lookup (historical)
@@ -285,6 +288,9 @@ pub enum PhysicalOp {
         k: usize,
         /// Timestamp for the historical query
         timestamp: Timestamp,
+        /// Property key for multi-property temporal vector indexes.
+        /// If None, uses the default/first indexed property.
+        property_key: Option<String>,
     },
 
     /// Find nodes similar to a specific node by extracting its embedding
@@ -373,6 +379,9 @@ pub enum PhysicalOp {
         embedding: Arc<[f32]>,
         /// Number of top results to keep
         k: usize,
+        /// Property key for multi-property vector indexes.
+        /// If None, uses the default/first indexed property.
+        property_key: Option<String>,
     },
 
     /// Sort by key
@@ -756,7 +765,8 @@ mod tests {
             PhysicalOp::HnswSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                label_filter: None
+                label_filter: None,
+                property_key: None,
             }
             .name(),
             "HnswSearch"
@@ -775,7 +785,8 @@ mod tests {
             PhysicalOp::TemporalVectorSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                timestamp: 1000
+                timestamp: 1000,
+                property_key: None,
             }
             .name(),
             "TemporalVectorSearch"
@@ -843,7 +854,8 @@ mod tests {
             PhysicalOp::VectorRerank {
                 input: Box::new(PhysicalOp::Empty),
                 embedding: Arc::from([0.1f32; 4].as_slice()),
-                k: 10
+                k: 10,
+                property_key: None,
             }
             .name(),
             "VectorRerank"
@@ -941,7 +953,8 @@ mod tests {
             PhysicalOp::HnswSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                label_filter: None
+                label_filter: None,
+                property_key: None,
             }
             .is_leaf()
         );
@@ -958,7 +971,8 @@ mod tests {
             PhysicalOp::TemporalVectorSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                timestamp: 1000
+                timestamp: 1000,
+                property_key: None,
             }
             .is_leaf()
         );
@@ -988,7 +1002,8 @@ mod tests {
             !PhysicalOp::VectorRerank {
                 input: Box::new(PhysicalOp::Empty),
                 embedding: Arc::from([0.1f32; 4].as_slice()),
-                k: 10
+                k: 10,
+                property_key: None,
             }
             .is_leaf()
         );
@@ -1054,7 +1069,8 @@ mod tests {
             PhysicalOp::HnswSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                label_filter: None
+                label_filter: None,
+                property_key: None,
             }
             .depth(),
             1
@@ -1073,7 +1089,8 @@ mod tests {
             PhysicalOp::TemporalVectorSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                timestamp: 1000
+                timestamp: 1000,
+                property_key: None,
             }
             .depth(),
             1
@@ -1222,6 +1239,7 @@ mod tests {
             embedding: Arc::from([0.1f32; 4].as_slice()),
             k: 10,
             label_filter: Some("Document".to_string()),
+            property_key: None,
         };
 
         let explain = plan.explain();
@@ -1269,6 +1287,7 @@ mod tests {
             input: Box::new(PhysicalOp::Empty),
             embedding: Arc::from([0.1f32; 4].as_slice()),
             k: 5,
+            property_key: None,
         };
 
         let explain = plan.explain();
@@ -1384,6 +1403,7 @@ mod tests {
             embedding: Arc::from([0.1f32; 4].as_slice()),
             k: 10,
             timestamp: 42000,
+            property_key: None,
         };
 
         let explain = plan.explain();
@@ -1443,6 +1463,7 @@ mod tests {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
                 timestamp: 1000,
+                property_key: None,
             }
             .name(),
             "TemporalVectorSearch"
@@ -1691,6 +1712,7 @@ mod tests {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
                 label_filter: Some("Document".to_string()),
+                property_key: None,
             },
             estimated_cost: Cost {
                 cpu: 15.5,

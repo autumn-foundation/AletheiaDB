@@ -130,11 +130,13 @@ impl QueryPlanner {
                 embedding,
                 k,
                 metric,
+                property_key,
             } => Ok(LogicalOp::Scan(ScanOp::VectorSearch {
                 embedding: embedding.clone(),
                 k: *k,
                 label_filter: None,
                 metric: *metric,
+                property_key: property_key.clone(),
             })),
 
             // Graph operations - require input
@@ -187,7 +189,11 @@ impl QueryPlanner {
             }
 
             // Vector operations
-            QueryOp::RankBySimilarity { embedding, top_k } => {
+            QueryOp::RankBySimilarity {
+                embedding,
+                top_k,
+                property_key,
+            } => {
                 let input = current.ok_or_else(|| {
                     Error::Query(QueryError::SyntaxError {
                         message: "RankBySimilarity requires a source".to_string(),
@@ -197,6 +203,7 @@ impl QueryPlanner {
                     UnaryOp::VectorRank {
                         embedding: embedding.clone(),
                         top_k: *top_k,
+                        property_key: property_key.clone(),
                     },
                     input,
                 ))
@@ -420,19 +427,20 @@ impl QueryPlanner {
                 k,
                 label_filter,
                 metric: _,
+                property_key,
             } => {
-                // Validate that vector index is enabled
-                if !self.storage.is_vector_index_enabled() {
-                    let property_name = self
-                        .storage
-                        .get_indexed_property_name()
-                        .unwrap_or_else(|| "embedding".to_string());
+                // Use specified property or default to "embedding"
+                let effective_property = property_key.as_deref().unwrap_or("embedding").to_string();
+
+                // Validate that vector index is enabled for the property
+                if !self.storage.has_vector_index(&effective_property) {
                     return Err(Error::Query(QueryError::IndexNotFound {
                         index_type: "vector".to_string(),
-                        property_name,
-                        hint: Some(
-                            "Call db.enable_vector_index(\"embedding\", config) first".to_string(),
-                        ),
+                        property_name: effective_property,
+                        hint: Some(format!(
+                            "Call db.enable_vector_index(\"{}\", config) first",
+                            property_key.as_deref().unwrap_or("embedding")
+                        )),
                     }));
                 }
 
@@ -441,12 +449,14 @@ impl QueryPlanner {
                         embedding: embedding.clone(),
                         k: *k,
                         timestamp: tx_time,
+                        property_key: property_key.clone(),
                     });
                 }
                 Ok(PhysicalOp::HnswSearch {
                     embedding: embedding.clone(),
                     k: *k,
                     label_filter: label_filter.clone(),
+                    property_key: property_key.clone(),
                 })
             }
 
@@ -486,10 +496,12 @@ impl QueryPlanner {
                     }));
                 }
 
+                // TODO: Add property_key to ScanOp::TemporalVectorSearch for full multi-property support
                 Ok(PhysicalOp::TemporalVectorSearch {
                     embedding: embedding.clone(),
                     k: *k,
                     timestamp: *timestamp,
+                    property_key: None, // Uses default property for legacy TemporalVectorSearch scan
                 })
             }
             ScanOp::SimilarToNode {
@@ -566,19 +578,23 @@ impl QueryPlanner {
                 })
             }
 
-            UnaryOp::VectorRank { embedding, top_k } => {
+            UnaryOp::VectorRank {
+                embedding,
+                top_k,
+                property_key,
+            } => {
+                // Use specified property or default to "embedding"
+                let effective_property = property_key.as_deref().unwrap_or("embedding").to_string();
+
                 // Validate that vector index is enabled for reranking
-                if !self.storage.is_vector_index_enabled() {
-                    let property_name = self
-                        .storage
-                        .get_indexed_property_name()
-                        .unwrap_or_else(|| "embedding".to_string());
+                if !self.storage.has_vector_index(&effective_property) {
                     return Err(Error::Query(QueryError::IndexNotFound {
                         index_type: "vector".to_string(),
-                        property_name,
-                        hint: Some(
-                            "Call db.enable_vector_index(\"embedding\", config) first".to_string(),
-                        ),
+                        property_name: effective_property,
+                        hint: Some(format!(
+                            "Call db.enable_vector_index(\"{}\", config) first",
+                            property_key.as_deref().unwrap_or("embedding")
+                        )),
                     }));
                 }
 
@@ -586,6 +602,7 @@ impl QueryPlanner {
                     input: Box::new(input),
                     embedding: embedding.clone(),
                     k: top_k.unwrap_or(10),
+                    property_key: property_key.clone(),
                 })
             }
 
@@ -1100,6 +1117,7 @@ mod tests {
             ops: vec![QueryOp::RankBySimilarity {
                 embedding: Arc::from(embedding.as_slice()),
                 top_k: Some(10),
+                property_key: None,
             }],
             temporal_context: None,
             hints: QueryHints::default(),
@@ -1354,6 +1372,7 @@ mod tests {
                 embedding: Arc::from(embedding.as_slice()),
                 k: 10,
                 metric: crate::index::vector::DistanceMetric::Cosine,
+                property_key: None,
             }],
             temporal_context: None,
             hints: QueryHints::default(),

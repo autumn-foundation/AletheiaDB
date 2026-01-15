@@ -222,9 +222,10 @@ use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
 
 let db = GallifreyDB::new();
 
-// Enable vector indexing
-let config = HnswConfig::new(384, DistanceMetric::Cosine);
-db.enable_vector_index("embedding", config)?;
+// Enable vector indexing using the builder pattern
+db.vector_index("embedding")
+    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    .enable()?;
 
 // Store node with embedding - automatically indexed!
 let node_id = db.create_node("Document",
@@ -236,6 +237,64 @@ let node_id = db.create_node("Document",
 
 // Find similar nodes
 let similar = db.find_similar(node_id, 10)?;
+```
+
+### Multi-Property Vector Indexes
+
+GallifreyDB supports multiple vector properties per database, each with independent HNSW indexes. See **[ADR-0022](docs/adr/0022-multi-property-vector-index.md)** for architecture details.
+
+```rust
+// Enable multiple vector indexes for different properties
+db.vector_index("title_embedding")
+    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    .enable()?;
+
+db.vector_index("content_embedding")
+    .hnsw(HnswConfig::new(768, DistanceMetric::Cosine))
+    .enable()?;
+
+db.vector_index("image_embedding")
+    .hnsw(HnswConfig::new(512, DistanceMetric::Euclidean))
+    .enable()?;
+
+// Store node with multiple embeddings
+let node_id = db.create_node("Document",
+    PropertyMapBuilder::new()
+        .insert_vector("title_embedding", &title_emb)
+        .insert_vector("content_embedding", &content_emb)
+        .insert_vector("image_embedding", &image_emb)
+        .build()
+)?;
+
+// Query specific properties
+let by_title = db.find_similar_in("title_embedding", &query, 10)?;
+let by_content = db.find_similar_in("content_embedding", &query, 10)?;
+
+// Rank existing results by similarity to a different property
+let reranked = db.rank_by_similarity_in("content_embedding", node_ids, &query, 10)?;
+```
+
+#### QueryBuilder Property Support
+
+The fluent QueryBuilder API supports property-specific vector operations:
+
+```rust
+// Builder pattern for property-specific queries
+let results = db.query()
+    .find_similar_builder(&embedding, 10)
+    .property("content_embedding")
+    .metric(DistanceMetric::Cosine)
+    .finish()
+    .execute(&db)?;
+
+// Traverse then rank by specific property
+let results = db.query()
+    .start(alice_id)
+    .traverse("KNOWS")
+    .rank_by_similarity_builder(&embedding, 10)
+    .property("content_embedding")
+    .finish()
+    .execute(&db)?;
 ```
 
 ### Key Features
@@ -445,6 +504,43 @@ let time_range = TimeRange::new(timestamp_2023, timestamp_2024);
 let results = temporal_index.find_similar_in_range(
     &query_embedding,
     10,
+    time_range,
+)?;
+```
+
+**Property-Specific Temporal Queries:**
+
+For multi-property temporal indexes, use the `_in` suffix methods:
+
+```rust
+// Query a specific property's temporal index
+let results = db.find_similar_as_of_in(
+    "content_embedding",  // Property name
+    &query_embedding,
+    10,
+    timestamp_2023,
+)?;
+
+// Track drift for a specific property
+let drift = db.track_drift_in(
+    "content_embedding",
+    node_id,
+    &reference_embedding,
+    time_range,
+)?;
+
+// Find nodes that drifted in a specific property
+let drifted = db.find_drift_in(
+    "content_embedding",
+    0.3,  // threshold
+    time_range,
+    DriftMetric::Cosine,
+)?;
+
+// Get semantic evolution for a specific property
+let evolution = db.semantic_evolution_in(
+    "content_embedding",
+    node_id,
     time_range,
 )?;
 

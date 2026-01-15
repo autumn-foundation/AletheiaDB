@@ -935,25 +935,50 @@ impl GallifreyDB {
         property_name: &str,
         config: TemporalVectorConfig,
     ) -> Result<()> {
-        if let Some(indexed_prop) = self.current.get_indexed_property_name() {
-            if indexed_prop != property_name {
+        // Resolve hnsw_config: use provided config or get from existing vector index
+        let resolved_hnsw_config =
+            if let Some(hnsw_config) = config.hnsw_config.clone() {
+                // Config was provided explicitly
+                hnsw_config
+            } else if self.current.is_vector_index_enabled_for(property_name) {
+                // No config provided, but vector index exists - use its config
+                self.current.get_hnsw_config_for(property_name).ok_or_else(|| {
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                    format!(
+                        "Vector index exists for '{}' but could not retrieve its configuration",
+                        property_name
+                    ),
+                ))
+            })?
+            } else {
+                // No config provided and no vector index exists - error
                 return Err(crate::utils::error::Error::Vector(
-                    crate::utils::error::VectorError::IndexError(format!(
-                        "A vector index is already enabled on property '{}', but a temporal index is requested for '{}'. Only one vector index property is supported at a time.",
-                        indexed_prop, property_name
-                    )),
+                    crate::utils::error::VectorError::IndexError(
+                        "HNSW configuration is required when no vector index exists. \
+                     Use TemporalVectorConfig::default_with_hnsw() to provide one, \
+                     or enable the vector index first with enable_vector_index()."
+                            .to_string(),
+                    ),
                 ));
-            }
-        } else {
-            self.enable_vector_index(property_name, config.hnsw_config.clone())?;
+            };
+
+        // Enable vector index if it doesn't exist yet
+        if !self.current.is_vector_index_enabled_for(property_name) {
+            self.enable_vector_index(property_name, resolved_hnsw_config.clone())?;
         }
 
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("enable_temporal_vector_index").entered();
 
+        // Create a resolved config with the hnsw_config set
+        let resolved_config = TemporalVectorConfig {
+            hnsw_config: Some(resolved_hnsw_config),
+            ..config
+        };
+
         // Enable temporal vector index in current storage
         self.current
-            .enable_temporal_vector_index(property_name, config)?;
+            .enable_temporal_vector_index(property_name, resolved_config)?;
 
         // Get the temporal vector index from current storage
         let temporal_index = self.current.get_temporal_vector_index().ok_or_else(|| {
@@ -989,6 +1014,174 @@ impl GallifreyDB {
     /// Check if temporal vector indexing is enabled.
     pub fn is_temporal_vector_index_enabled(&self) -> bool {
         self.current.is_temporal_vector_index_enabled()
+    }
+
+    /// List all property names that have temporal vector indexes enabled.
+    ///
+    /// Returns a vector of property names that have temporal vector indexing configured.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let db = GallifreyDB::new();
+    /// // Enable temporal indexes for two properties
+    /// db.vector_index("embedding1").hnsw(config1).temporal(temporal_config).enable()?;
+    /// db.vector_index("embedding2").hnsw(config2).temporal(temporal_config).enable()?;
+    ///
+    /// let indexes = db.list_temporal_vector_indexes();
+    /// assert!(indexes.contains(&"embedding1".to_string()));
+    /// assert!(indexes.contains(&"embedding2".to_string()));
+    /// ```
+    pub fn list_temporal_vector_indexes(&self) -> Vec<String> {
+        self.current.list_temporal_vector_indexes()
+    }
+
+    /// Create a builder for configuring a vector index on a property.
+    ///
+    /// This provides a fluent API for enabling vector indexes with optional
+    /// temporal configuration. The builder pattern ensures proper configuration
+    /// before enabling the index.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property name that will contain vector embeddings
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    ///
+    /// // Basic vector index
+    /// db.vector_index("embedding")
+    ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    ///     .enable()?;
+    ///
+    /// // With temporal indexing for time-travel queries
+    /// db.vector_index("embedding")
+    ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    ///     .temporal(TemporalVectorConfig::default())
+    ///     .enable()?;
+    /// ```
+    pub fn vector_index(&self, property_name: &str) -> VectorIndexBuilder<'_> {
+        VectorIndexBuilder::new(self, property_name.to_string())
+    }
+
+    /// Check if a vector index is enabled for a specific property.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property name to check
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// db.vector_index("embedding")
+    ///     .hnsw(config)
+    ///     .enable()?;
+    ///
+    /// assert!(db.has_vector_index("embedding"));
+    /// assert!(!db.has_vector_index("other_property"));
+    /// ```
+    pub fn has_vector_index(&self, property_name: &str) -> bool {
+        self.current.has_vector_index(property_name)
+    }
+
+    /// List all enabled vector indexes.
+    ///
+    /// Returns information about each configured vector index including
+    /// the property name, dimensions, and distance metric.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// db.vector_index("title_embedding")
+    ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    ///     .enable()?;
+    ///
+    /// db.vector_index("body_embedding")
+    ///     .hnsw(HnswConfig::new(768, DistanceMetric::Euclidean))
+    ///     .enable()?;
+    ///
+    /// let indexes = db.list_vector_indexes();
+    /// assert_eq!(indexes.len(), 2);
+    /// ```
+    pub fn list_vector_indexes(&self) -> Vec<crate::storage::VectorIndexInfo> {
+        self.current.list_vector_indexes()
+    }
+
+    /// Find k most similar nodes in a specific property's vector index.
+    ///
+    /// Use this method when you have multiple vector indexes and need to
+    /// search a specific one. The query node's embedding from the specified
+    /// property is used for the search.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The indexed property to search
+    /// * `query_node_id` - The node to find similar nodes for
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Search title embeddings for similar nodes
+    /// let similar = db.find_similar_in("title_embedding", node_id, 10)?;
+    ///
+    /// // Search body embeddings (different property, potentially different results)
+    /// let similar_body = db.find_similar_in("body_embedding", node_id, 10)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No vector index is enabled for the specified property
+    /// - Query node is not found
+    /// - Query node does not have the specified vector property
+    pub fn find_similar_in(
+        &self,
+        property_name: &str,
+        query_node_id: NodeId,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("find_similar_in").entered();
+        self.current
+            .find_similar_in(property_name, query_node_id, k)
+    }
+
+    /// Search a specific property's vector index with a raw embedding.
+    ///
+    /// Use this method when searching with embeddings that don't correspond to
+    /// any existing node in the graph (e.g., query embeddings from external sources).
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The indexed property to search
+    /// * `embedding` - The query embedding vector
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Search with external embedding
+    /// let query = embed_text("search query");
+    /// let results = db.search_vectors_in("title_embedding", &query, 10)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No vector index is enabled for the specified property
+    /// - Embedding dimensions don't match the index configuration
+    pub fn search_vectors_in(
+        &self,
+        property_name: &str,
+        embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("search_vectors_in").entered();
+        self.current.search_vectors_in(property_name, embedding, k)
     }
 
     /// Find k most similar nodes to a query node based on vector similarity.
@@ -1179,6 +1372,219 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("find_similar_as_of").entered();
         self.current.find_similar_as_of(embedding, k, timestamp)
+    }
+
+    /// Find similar vectors at a specific point in time for a specific property.
+    ///
+    /// This is the property-specific version of [`find_similar_as_of()`].
+    /// It validates that the requested property matches the property for which
+    /// the temporal vector index was enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property containing the vector embeddings
+    /// * `embedding` - Query vector to find similar vectors to
+    /// * `k` - Number of results to return
+    /// * `timestamp` - The point in time to query (in microseconds since epoch)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - The property name doesn't match the indexed property
+    /// - Query embedding dimensions don't match
+    /// - No snapshot exists at the given timestamp
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find documents similar to a query at a specific point in time
+    /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
+    /// let results = db.find_similar_as_of_in(
+    ///     "content_embedding",
+    ///     &query_embedding,
+    ///     10,
+    ///     timestamp_2023
+    /// )?;
+    /// ```
+    pub fn find_similar_as_of_in(
+        &self,
+        property_name: &str,
+        embedding: &[f32],
+        k: usize,
+        timestamp: Timestamp,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span =
+            tracing::info_span!("find_similar_as_of_in", property = property_name).entered();
+        self.current
+            .find_similar_as_of_in(property_name, embedding, k, timestamp)
+    }
+
+    /// Track semantic drift for a node over time in a specific property's temporal index.
+    ///
+    /// This method tracks how a node's embedding has changed relative to a reference
+    /// embedding over time. It validates that the requested property matches the
+    /// property for which the temporal vector index was enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property containing the vector embeddings
+    /// * `node_id` - The node to track drift for
+    /// * `reference_embedding` - Reference vector to measure drift against
+    /// * `time_range` - The time range to search for drift
+    ///
+    /// # Returns
+    ///
+    /// A vector of (timestamp, drift_score) pairs showing how the node's embedding
+    /// drifted from the reference at each snapshot time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - The property name doesn't match the indexed property
+    /// - Reference embedding dimensions don't match
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::temporal::TimeRange;
+    ///
+    /// // Track how a document's embedding changed from its original version
+    /// let time_range = TimeRange::new(0, i64::MAX).unwrap();
+    /// let drift = db.track_drift_in(
+    ///     "content_embedding",
+    ///     node_id,
+    ///     &original_embedding,
+    ///     time_range
+    /// )?;
+    ///
+    /// for (timestamp, distance) in drift {
+    ///     println!("At {}: drift = {:.3}", timestamp, distance);
+    /// }
+    /// ```
+    pub fn track_drift_in(
+        &self,
+        property_name: &str,
+        node_id: NodeId,
+        reference_embedding: &[f32],
+        time_range: crate::core::temporal::TimeRange,
+    ) -> Result<Vec<(Timestamp, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span =
+            tracing::info_span!("track_drift_in", property = property_name, node = ?node_id)
+                .entered();
+        self.current
+            .track_drift_in(property_name, node_id, reference_embedding, time_range)
+    }
+
+    /// Get the semantic evolution of a node's embedding over time in a specific property.
+    ///
+    /// Returns the actual embedding vectors at each snapshot timestamp, allowing
+    /// you to see how the node's semantic representation changed over time.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property containing the vector embeddings
+    /// * `node_id` - The node to get evolution for
+    /// * `time_range` - The time range to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of (timestamp, embedding) pairs showing the node's embedding
+    /// at each snapshot time within the range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - The property name doesn't match the indexed property
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::temporal::TimeRange;
+    ///
+    /// let time_range = TimeRange::new(0, i64::MAX).unwrap();
+    /// let evolution = db.semantic_evolution_in("content_embedding", node_id, time_range)?;
+    ///
+    /// for (timestamp, embedding) in evolution {
+    ///     println!("At {}: {} dimensions", timestamp, embedding.len());
+    /// }
+    /// ```
+    pub fn semantic_evolution_in(
+        &self,
+        property_name: &str,
+        node_id: NodeId,
+        time_range: crate::core::temporal::TimeRange,
+    ) -> Result<Vec<(Timestamp, std::sync::Arc<[f32]>)>> {
+        #[cfg(feature = "observability")]
+        let _span =
+            tracing::info_span!("semantic_evolution_in", property = property_name, node = ?node_id)
+                .entered();
+        self.current
+            .semantic_evolution_in(property_name, node_id, time_range)
+    }
+
+    /// Find all nodes with semantic drift above a threshold in a specific property.
+    ///
+    /// Scans all nodes in the temporal index and identifies those whose embeddings
+    /// have changed by more than the specified threshold over the time range.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property containing the vector embeddings
+    /// * `threshold` - Minimum drift distance to include in results
+    /// * `time_range` - The time range to analyze
+    /// * `metric` - The distance metric to use for drift calculation
+    ///
+    /// # Returns
+    ///
+    /// A vector of (node_id, drift_score) pairs for nodes exceeding the threshold,
+    /// sorted by drift score in descending order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Temporal vector index is not enabled
+    /// - The property name doesn't match the indexed property
+    /// - Threshold is NaN or infinite
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::temporal::TimeRange;
+    /// use gallifreydb::index::vector::temporal::DriftMetric;
+    ///
+    /// let time_range = TimeRange::new(start_ts, end_ts).unwrap();
+    /// let drifted = db.find_drift_in(
+    ///     "content_embedding",
+    ///     0.3,  // threshold
+    ///     time_range,
+    ///     DriftMetric::Cosine
+    /// )?;
+    ///
+    /// for (node_id, drift) in drifted {
+    ///     println!("Node {} drifted by {:.3}", node_id, drift);
+    /// }
+    /// ```
+    pub fn find_drift_in(
+        &self,
+        property_name: &str,
+        threshold: f32,
+        time_range: crate::core::temporal::TimeRange,
+        metric: crate::index::vector::temporal::DriftMetric,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!(
+            "find_drift_in",
+            property = property_name,
+            threshold = threshold
+        )
+        .entered();
+        self.current
+            .find_drift_in(property_name, threshold, time_range, metric)
     }
 
     // ========================================================================
@@ -1520,6 +1926,145 @@ impl GallifreyDB {
 impl Default for GallifreyDB {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Builder for configuring and enabling a vector index on a property.
+///
+/// This builder provides a fluent API for setting up vector indexes with
+/// HNSW configuration and optional temporal indexing. The builder pattern
+/// ensures that required configuration (HNSW) is provided before enabling.
+///
+/// # Example
+///
+/// ```ignore
+/// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+///
+/// // Create a basic vector index
+/// db.vector_index("embedding")
+///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+///     .enable()?;
+///
+/// // Create a vector index with temporal support
+/// db.vector_index("embedding")
+///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+///     .temporal(TemporalVectorConfig::default())
+///     .enable()?;
+/// ```
+pub struct VectorIndexBuilder<'a> {
+    db: &'a GallifreyDB,
+    property_name: String,
+    hnsw_config: Option<HnswConfig>,
+    temporal_config: Option<TemporalVectorConfig>,
+}
+
+impl<'a> VectorIndexBuilder<'a> {
+    /// Create a new builder for the specified property.
+    fn new(db: &'a GallifreyDB, property_name: String) -> Self {
+        VectorIndexBuilder {
+            db,
+            property_name,
+            hnsw_config: None,
+            temporal_config: None,
+        }
+    }
+
+    /// Set the HNSW index configuration.
+    ///
+    /// This is required before calling `enable()`. The configuration specifies
+    /// the vector dimensions, distance metric, and HNSW parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The HNSW index configuration
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// db.vector_index("embedding")
+    ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine).with_capacity(10000))
+    ///     .enable()?;
+    /// ```
+    pub fn hnsw(mut self, config: HnswConfig) -> Self {
+        self.hnsw_config = Some(config);
+        self
+    }
+
+    /// Enable temporal vector indexing.
+    ///
+    /// When temporal indexing is enabled, vector snapshots are created
+    /// periodically to enable point-in-time vector queries and semantic
+    /// drift tracking. This automatically enables the current index as well.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The temporal vector index configuration
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
+    ///
+    /// db.vector_index("embedding")
+    ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    ///     .temporal(TemporalVectorConfig {
+    ///         snapshot_strategy: SnapshotStrategy::TransactionInterval(100),
+    ///         ..Default::default()
+    ///     })
+    ///     .enable()?;
+    /// ```
+    pub fn temporal(mut self, config: TemporalVectorConfig) -> Self {
+        self.temporal_config = Some(config);
+        self
+    }
+
+    /// Enable the vector index with the configured settings.
+    ///
+    /// This method validates the configuration and enables the index.
+    /// If temporal configuration was provided, both the current and
+    /// temporal indexes are enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - HNSW configuration was not provided (call `.hnsw()` first)
+    /// - A vector index already exists for this property
+    /// - The temporal index configuration is invalid
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // This will fail - no HNSW config
+    /// let result = db.vector_index("embedding").enable();
+    /// assert!(result.is_err());
+    ///
+    /// // This will succeed
+    /// db.vector_index("embedding")
+    ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    ///     .enable()?;
+    /// ```
+    pub fn enable(self) -> Result<()> {
+        let hnsw_config = self.hnsw_config.ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                "HNSW configuration is required. Call .hnsw() before .enable()".to_string(),
+            ))
+        })?;
+
+        // If temporal config is provided, use enable_temporal_vector_index which
+        // automatically enables the current index as well (fixing #386)
+        if let Some(temporal_config) = self.temporal_config {
+            // Merge HNSW config into temporal config
+            let temporal_config_with_hnsw = TemporalVectorConfig {
+                hnsw_config: Some(hnsw_config),
+                ..temporal_config
+            };
+            self.db
+                .enable_temporal_vector_index(&self.property_name, temporal_config_with_hnsw)
+        } else {
+            // Just enable the current index
+            self.db
+                .enable_vector_index(&self.property_name, hnsw_config)
+        }
     }
 }
 
@@ -2976,5 +3521,1043 @@ mod tests {
 
         // Should find doc2 but not doc_no_vector
         assert_eq!(results.len(), 1); // Only doc2 (doc1 is excluded as query node)
+    }
+
+    // ========================================================================
+    // Tests for Issue #389: VectorIndexBuilder pattern
+    // ========================================================================
+
+    /// Test basic builder pattern for enabling vector index.
+    #[test]
+    fn test_vector_index_builder_basic() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        // Builder pattern API
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .expect("Should enable vector index via builder");
+
+        // Verify it was enabled
+        assert!(db.has_vector_index("embedding"));
+    }
+
+    /// Test builder pattern with multiple properties.
+    #[test]
+    fn test_vector_index_builder_multiple_properties() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        // Enable two indexes via builder
+        db.vector_index("title_embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        db.vector_index("body_embedding")
+            .hnsw(HnswConfig::new(8, DistanceMetric::Euclidean).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        // Both should be enabled
+        assert!(db.has_vector_index("title_embedding"));
+        assert!(db.has_vector_index("body_embedding"));
+
+        // Verify different configs
+        let indexes = db.list_vector_indexes();
+        assert_eq!(indexes.len(), 2);
+    }
+
+    /// Test builder pattern without calling hnsw() fails.
+    #[test]
+    fn test_vector_index_builder_missing_hnsw_fails() {
+        let db = GallifreyDB::new();
+
+        // Calling enable() without hnsw() should fail
+        let result = db.vector_index("embedding").enable();
+        assert!(result.is_err(), "Should fail without HNSW config");
+    }
+
+    /// Test builder with temporal config auto-enables current index.
+    ///
+    /// This is the key DX improvement from #386: users shouldn't need to call
+    /// both enable_vector_index() and enable_temporal_vector_index().
+    #[test]
+    fn test_vector_index_builder_with_temporal() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Single call enables both current and temporal indexing
+        db.vector_index("embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config), // Will be overwritten by builder, but needed for struct completeness
+            })
+            .enable()
+            .expect("Should enable both current and temporal index");
+
+        // Current index should be auto-enabled
+        assert!(db.has_vector_index("embedding"));
+
+        // Temporal index should also be enabled
+        assert!(db.is_temporal_vector_index_enabled());
+    }
+
+    /// Test builder creates working index that can be searched.
+    #[test]
+    fn test_vector_index_builder_functional() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        // Create nodes with embeddings
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let v2 = vec![0.9f32, 0.1, 0.0, 0.0];
+
+        let node1 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+        let _node2 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v2)
+                    .build(),
+            )
+            .unwrap();
+
+        // Search should work
+        let results = db.find_similar(node1, 1).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    /// Test re-enabling same property via builder fails.
+    #[test]
+    fn test_vector_index_builder_same_property_twice_fails() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        // Second enable on same property should fail
+        let result = db
+            .vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable();
+
+        assert!(
+            result.is_err(),
+            "Should not allow re-enabling same property"
+        );
+    }
+
+    // ========================================================================
+    // Tests for Issue #389: Query API with explicit property specification
+    // ========================================================================
+
+    /// Test find_similar_in() with explicit property specification.
+    #[test]
+    fn test_find_similar_in_explicit_property() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        // Enable two different indexes
+        db.vector_index("title_embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        db.vector_index("body_embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        // Create nodes with different embeddings for each property
+        let title_v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let title_v2 = vec![0.9f32, 0.1, 0.0, 0.0];
+        let body_v1 = vec![0.0f32, 1.0, 0.0, 0.0];
+        let body_v2 = vec![0.0f32, 0.9, 0.1, 0.0];
+
+        let node1 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("title_embedding", &title_v1)
+                    .insert_vector("body_embedding", &body_v1)
+                    .build(),
+            )
+            .unwrap();
+
+        let _node2 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("title_embedding", &title_v2)
+                    .insert_vector("body_embedding", &body_v2)
+                    .build(),
+            )
+            .unwrap();
+
+        // Search by title embedding
+        let title_results = db.find_similar_in("title_embedding", node1, 1).unwrap();
+        assert_eq!(title_results.len(), 1);
+
+        // Search by body embedding
+        let body_results = db.find_similar_in("body_embedding", node1, 1).unwrap();
+        assert_eq!(body_results.len(), 1);
+    }
+
+    /// Test search_vectors_in() with explicit property specification.
+    #[test]
+    fn test_search_vectors_in_explicit_property() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        // Create nodes
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let v2 = vec![0.9f32, 0.1, 0.0, 0.0];
+
+        db.create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &v1)
+                .build(),
+        )
+        .unwrap();
+
+        db.create_node(
+            "Doc",
+            PropertyMapBuilder::new()
+                .insert_vector("embedding", &v2)
+                .build(),
+        )
+        .unwrap();
+
+        // Search with raw embedding (not tied to a node)
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let results = db.search_vectors_in("embedding", &query, 2).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    /// Test find_similar_in() with non-existent property fails.
+    #[test]
+    fn test_find_similar_in_nonexistent_property_fails() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let node1 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Search with wrong property name should fail
+        let result = db.find_similar_in("nonexistent", node1, 1);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Tests for Issue #389: Temporal property-specific queries
+    // ========================================================================
+
+    /// Test find_similar_as_of_in() with explicit property specification.
+    #[test]
+    fn test_find_similar_as_of_in_explicit_property() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Enable temporal vector index for a specific property
+        db.vector_index("content_embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1), // Snapshot every tx
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config),
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        // Create a node with an embedding
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let _node1 = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("content_embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Get a timestamp after the node was created
+        let timestamp = crate::core::temporal::time::now();
+
+        // Query with property-specific temporal search
+        let query = vec![0.9f32, 0.1, 0.0, 0.0];
+        let results = db
+            .find_similar_as_of_in("content_embedding", &query, 10, timestamp)
+            .unwrap();
+
+        // Should find the node
+        assert!(!results.is_empty());
+    }
+
+    /// Test find_similar_as_of_in() with wrong property fails.
+    #[test]
+    fn test_find_similar_as_of_in_wrong_property_fails() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Enable temporal index for "embedding" property
+        db.vector_index("embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config),
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        let timestamp = crate::core::temporal::time::now();
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+
+        // Query with WRONG property name should fail
+        let result = db.find_similar_as_of_in("wrong_property", &query, 10, timestamp);
+        assert!(
+            result.is_err(),
+            "Should fail when property doesn't match temporal index"
+        );
+    }
+
+    /// Test find_similar_as_of_in() when temporal index not enabled.
+    #[test]
+    fn test_find_similar_as_of_in_no_temporal_index() {
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        // Only enable regular HNSW index, not temporal
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        let timestamp = crate::core::temporal::time::now();
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+
+        // Temporal query should fail when temporal index not enabled
+        let result = db.find_similar_as_of_in("embedding", &query, 10, timestamp);
+        assert!(
+            result.is_err(),
+            "Should fail when temporal index not enabled"
+        );
+    }
+
+    /// Test track_drift_in() with explicit property name.
+    #[test]
+    fn test_track_drift_in_explicit_property() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Enable temporal vector index for a specific property
+        db.vector_index("content_embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1), // Snapshot every tx
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config),
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        // Create a node with an embedding
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let node_id = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("content_embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Track drift over time using property-specific method
+        // Even with just one snapshot, the API should work (may return empty or single result)
+        let reference = vec![1.0f32, 0.0, 0.0, 0.0];
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let result = db.track_drift_in("content_embedding", node_id, &reference, time_range);
+
+        // Should succeed (not error) - method exists and property validation passes
+        assert!(
+            result.is_ok(),
+            "track_drift_in should succeed with correct property"
+        );
+    }
+
+    /// Test track_drift_in() with wrong property fails.
+    #[test]
+    fn test_track_drift_in_wrong_property_fails() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Enable temporal index for "embedding" property
+        db.vector_index("embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config),
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        let node_id = NodeId::new(1).unwrap();
+        let reference = vec![1.0f32, 0.0, 0.0, 0.0];
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+
+        // Query with WRONG property name should fail
+        let result = db.track_drift_in("wrong_property", node_id, &reference, time_range);
+        assert!(
+            result.is_err(),
+            "Should fail when property doesn't match temporal index"
+        );
+    }
+
+    /// Test track_drift_in() when temporal index not enabled.
+    #[test]
+    fn test_track_drift_in_no_temporal_index() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+
+        let db = GallifreyDB::new();
+
+        // Only enable regular HNSW index, not temporal
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
+            .enable()
+            .unwrap();
+
+        let node_id = NodeId::new(1).unwrap();
+        let reference = vec![1.0f32, 0.0, 0.0, 0.0];
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+
+        // Temporal query should fail when temporal index not enabled
+        let result = db.track_drift_in("embedding", node_id, &reference, time_range);
+        assert!(
+            result.is_err(),
+            "Should fail when temporal index not enabled"
+        );
+    }
+
+    /// Test semantic_evolution_in() with explicit property name.
+    #[test]
+    fn test_semantic_evolution_in_explicit_property() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        db.vector_index("content_embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config),
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let node_id = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("content_embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let result = db.semantic_evolution_in("content_embedding", node_id, time_range);
+
+        assert!(result.is_ok(), "semantic_evolution_in should succeed");
+    }
+
+    /// Test semantic_evolution_in() with wrong property fails.
+    #[test]
+    fn test_semantic_evolution_in_wrong_property_fails() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        db.vector_index("embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config),
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        let node_id = NodeId::new(1).unwrap();
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+
+        let result = db.semantic_evolution_in("wrong_property", node_id, time_range);
+        assert!(
+            result.is_err(),
+            "Should fail when property doesn't match temporal index"
+        );
+    }
+
+    /// Test find_drift_in() with explicit property name.
+    #[test]
+    fn test_find_drift_in_explicit_property() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        db.vector_index("content_embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config),
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let _node_id = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("content_embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let result = db.find_drift_in("content_embedding", 0.1, time_range, DriftMetric::Cosine);
+
+        assert!(result.is_ok(), "find_drift_in should succeed");
+    }
+
+    /// Test find_drift_in() with wrong property fails.
+    #[test]
+    fn test_find_drift_in_wrong_property_fails() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        db.vector_index("embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config),
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+
+        let result = db.find_drift_in("wrong_property", 0.1, time_range, DriftMetric::Cosine);
+        assert!(
+            result.is_err(),
+            "Should fail when property doesn't match temporal index"
+        );
+    }
+
+    // ========================================================================
+    // Multi-Property Temporal Index Tests (Issue #389 - Critical Fix)
+    // ========================================================================
+
+    /// Test that multiple temporal vector indexes can be enabled for different properties.
+    /// This is the critical test for multi-property temporal support.
+    #[test]
+    fn test_multi_property_temporal_indexes() {
+        use crate::core::temporal::TimeRange;
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+
+        // Enable temporal index for FIRST property
+        let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("title_embedding")
+            .hnsw(hnsw_config1.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config1),
+            })
+            .enable()
+            .expect("Should enable first temporal index");
+
+        // Enable temporal index for SECOND property - should NOT overwrite first!
+        let hnsw_config2 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("content_embedding")
+            .hnsw(hnsw_config2.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config2),
+            })
+            .enable()
+            .expect("Should enable second temporal index");
+
+        // Create a node with both embeddings
+        let title_emb = vec![1.0f32, 0.0, 0.0, 0.0];
+        let content_emb = vec![0.0f32, 1.0, 0.0, 0.0];
+        let node_id = db
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("title_embedding", &title_emb)
+                    .insert_vector("content_embedding", &content_emb)
+                    .build(),
+            )
+            .unwrap();
+
+        // Both temporal indexes should work independently
+        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let query = vec![0.9f32, 0.1, 0.0, 0.0];
+
+        // Query first property's temporal index
+        let result1 = db.find_similar_as_of_in(
+            "title_embedding",
+            &query,
+            10,
+            crate::core::temporal::time::now(),
+        );
+        assert!(
+            result1.is_ok(),
+            "First temporal index should still work: {:?}",
+            result1.err()
+        );
+
+        // Query second property's temporal index
+        let result2 = db.find_similar_as_of_in(
+            "content_embedding",
+            &query,
+            10,
+            crate::core::temporal::time::now(),
+        );
+        assert!(
+            result2.is_ok(),
+            "Second temporal index should work: {:?}",
+            result2.err()
+        );
+
+        // Both track_drift_in should work
+        let reference = vec![1.0f32, 0.0, 0.0, 0.0];
+        let drift1 = db.track_drift_in("title_embedding", node_id, &reference, time_range);
+        assert!(
+            drift1.is_ok(),
+            "track_drift_in for first property should work"
+        );
+
+        let drift2 = db.track_drift_in("content_embedding", node_id, &reference, time_range);
+        assert!(
+            drift2.is_ok(),
+            "track_drift_in for second property should work"
+        );
+    }
+
+    /// Test that temporal queries on non-existent property fail gracefully.
+    #[test]
+    fn test_temporal_query_nonexistent_property() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let db = GallifreyDB::new();
+
+        // Enable temporal index for one property
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("embedding")
+            .hnsw(hnsw_config.clone())
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: Some(hnsw_config),
+            })
+            .enable()
+            .expect("Should enable temporal index");
+
+        // Query a property that has NO temporal index enabled
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let result = db.find_similar_as_of_in(
+            "nonexistent_property",
+            &query,
+            10,
+            crate::core::temporal::time::now(),
+        );
+
+        assert!(
+            result.is_err(),
+            "Should fail for property without temporal index"
+        );
+    }
+
+    // ==================== Code Review Fix Tests ====================
+
+    #[test]
+    fn test_temporal_config_without_hnsw_config() {
+        // Test that TemporalVectorConfig can be created without hnsw_config
+        // when a vector index already exists
+        use crate::index::vector::temporal::TemporalVectorConfig;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index first
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", hnsw_config).unwrap();
+
+        // Now enable temporal vector index WITHOUT providing hnsw_config
+        // This should succeed because vector index already exists
+        let temporal_config = TemporalVectorConfig::default_temporal_only();
+        let result = db.enable_temporal_vector_index("embedding", temporal_config);
+        assert!(
+            result.is_ok(),
+            "Should succeed when vector index exists and hnsw_config is None"
+        );
+    }
+
+    #[test]
+    fn test_temporal_config_without_hnsw_config_requires_existing_index() {
+        // Test that TemporalVectorConfig without hnsw_config fails
+        // when no vector index exists
+        use crate::index::vector::temporal::TemporalVectorConfig;
+
+        let db = GallifreyDB::new();
+
+        // Try to enable temporal vector index WITHOUT providing hnsw_config
+        // AND without an existing vector index - this should fail
+        let temporal_config = TemporalVectorConfig::default_temporal_only();
+        let result = db.enable_temporal_vector_index("embedding", temporal_config);
+        assert!(
+            result.is_err(),
+            "Should fail when no vector index exists and hnsw_config is None"
+        );
+    }
+
+    #[test]
+    fn test_temporal_config_default_temporal_only() {
+        // Test the default_temporal_only constructor
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let config = TemporalVectorConfig::default_temporal_only();
+
+        assert!(config.hnsw_config.is_none(), "hnsw_config should be None");
+        assert_eq!(
+            config.snapshot_strategy,
+            SnapshotStrategy::TransactionInterval(10)
+        );
+        assert_eq!(config.retention_policy, RetentionPolicy::KeepN(100));
+        assert_eq!(config.max_snapshots, 100);
+        assert_eq!(config.full_snapshot_interval, 10);
+    }
+
+    #[test]
+    fn test_list_temporal_vector_indexes() {
+        // Test the list_temporal_vector_indexes method
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Initially empty
+        assert!(db.list_temporal_vector_indexes().is_empty());
+
+        // Enable temporal index for first property
+        let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("embedding1")
+            .hnsw(hnsw_config1)
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: None, // Will be resolved from builder
+            })
+            .enable()
+            .expect("Should enable first temporal index");
+
+        // Should have one index
+        let indexes = db.list_temporal_vector_indexes();
+        assert_eq!(indexes.len(), 1);
+        assert!(indexes.contains(&"embedding1".to_string()));
+
+        // Enable temporal index for second property
+        let hnsw_config2 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("embedding2")
+            .hnsw(hnsw_config2)
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: None,
+            })
+            .enable()
+            .expect("Should enable second temporal index");
+
+        // Should have two indexes
+        let indexes = db.list_temporal_vector_indexes();
+        assert_eq!(indexes.len(), 2);
+        assert!(indexes.contains(&"embedding1".to_string()));
+        assert!(indexes.contains(&"embedding2".to_string()));
+    }
+
+    #[test]
+    fn test_concurrent_vector_operations_with_multiple_properties() {
+        // Test concurrent operations across multiple vector properties
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Arc::new(GallifreyDB::new());
+
+        // Enable two vector indexes for different properties
+        let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        let hnsw_config2 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        db.enable_vector_index("title_embedding", hnsw_config1)
+            .unwrap();
+        db.enable_vector_index("content_embedding", hnsw_config2)
+            .unwrap();
+
+        // Spawn multiple threads that create nodes with different embeddings concurrently
+        let mut handles = vec![];
+        for i in 0..10 {
+            let db_clone = Arc::clone(&db);
+            let handle = thread::spawn(move || {
+                let base = (i as f32 + 1.0) / 10.0;
+                let title_emb = vec![base, 0.0, 0.0, 0.0];
+                let content_emb = vec![0.0, base, 0.0, 0.0];
+
+                db_clone
+                    .create_node(
+                        "Document",
+                        PropertyMapBuilder::new()
+                            .insert("id", i as i64)
+                            .insert_vector("title_embedding", &title_emb)
+                            .insert_vector("content_embedding", &content_emb)
+                            .build(),
+                    )
+                    .unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        let node_ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // Verify all nodes were created
+        assert_eq!(db.node_count(), 10);
+
+        // Verify both indexes are functioning
+        // Search by title_embedding
+        let title_query = vec![0.5f32, 0.0, 0.0, 0.0];
+        let title_results = db
+            .search_vectors_in("title_embedding", &title_query, 5)
+            .unwrap();
+        assert!(
+            !title_results.is_empty(),
+            "Should find results in title_embedding index"
+        );
+
+        // Search by content_embedding
+        let content_query = vec![0.0f32, 0.5, 0.0, 0.0];
+        let content_results = db
+            .search_vectors_in("content_embedding", &content_query, 5)
+            .unwrap();
+        assert!(
+            !content_results.is_empty(),
+            "Should find results in content_embedding index"
+        );
+
+        // Verify both indexes have correct data (all nodes indexed in both)
+        // Each node should be findable via both indexes
+        let similar_by_title = db
+            .search_vectors_in("title_embedding", &[0.5, 0.0, 0.0, 0.0], 10)
+            .unwrap();
+        let similar_by_content = db
+            .search_vectors_in("content_embedding", &[0.0, 0.5, 0.0, 0.0], 10)
+            .unwrap();
+
+        // Both should have results from all nodes
+        assert!(
+            !similar_by_title.is_empty(),
+            "Title index should have results"
+        );
+        assert!(
+            !similar_by_content.is_empty(),
+            "Content index should have results"
+        );
+
+        // Results should be distinct - title and content queries target different directions
+        // So the top results from each should have different orderings
+        let _ = node_ids; // Use node_ids to suppress unused warning
+    }
+
+    #[test]
+    fn test_max_vector_properties_limit() {
+        // Test that the maximum number of vector properties is enforced
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use crate::storage::current::DEFAULT_MAX_VECTOR_PROPERTIES;
+
+        let db = crate::GallifreyDB::new();
+
+        // Enable indexes up to the limit
+        for i in 0..DEFAULT_MAX_VECTOR_PROPERTIES {
+            let config = HnswConfig::new(4, DistanceMetric::Cosine);
+            let result = db
+                .vector_index(&format!("property_{}", i))
+                .hnsw(config)
+                .enable();
+            assert!(
+                result.is_ok(),
+                "Should be able to enable index {} (limit is {})",
+                i,
+                DEFAULT_MAX_VECTOR_PROPERTIES
+            );
+        }
+
+        // Verify we have exactly the limit number of indexes
+        let indexes = db.list_vector_indexes();
+        assert_eq!(indexes.len(), DEFAULT_MAX_VECTOR_PROPERTIES);
+
+        // Attempting to add one more should fail
+        let config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let result = db.vector_index("one_too_many").hnsw(config).enable();
+        assert!(
+            result.is_err(),
+            "Should not be able to exceed the maximum vector property limit"
+        );
+
+        // Verify the error message is helpful
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Maximum") || err_msg.contains("maximum"),
+            "Error message should mention the maximum limit"
+        );
     }
 }

@@ -128,6 +128,40 @@ Add semantic similarity:
     .finish()
 ```
 
+### Multi-Property Vector Queries
+
+Query specific vector properties when you have multiple embeddings per node:
+
+```rust
+// Find similar using a specific property
+db.query()
+    .find_similar_builder(&query_embedding, 10)
+    .property("content_embedding")  // Query content embeddings
+    .metric(DistanceMetric::Cosine)
+    .finish()
+    .execute(&db)?;
+
+// Traverse then rank by a specific property
+db.query()
+    .start(alice_id)
+    .traverse("KNOWS")
+    .rank_by_similarity_builder(&query_embedding, 10)
+    .property("expertise_embedding")  // Rank by expertise similarity
+    .finish()
+    .execute(&db)?;
+
+// Chain operations with different properties
+db.query()
+    .find_similar_builder(&title_embedding, 50)
+    .property("title_embedding")
+    .finish()
+    .traverse("RELATED_TO")
+    .rank_by_similarity_builder(&content_embedding, 10)
+    .property("content_embedding")  // Rerank by content
+    .finish()
+    .execute(&db)?;
+```
+
 ### Temporal Operations
 
 Add time-travel capabilities:

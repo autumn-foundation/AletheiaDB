@@ -11,7 +11,7 @@ fn create_test_index() -> Result<TemporalVectorIndex> {
         retention_policy: RetentionPolicy::KeepN(100),
         max_snapshots: 100,
         full_snapshot_interval: 10,
-        hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
     };
     TemporalVectorIndex::new(config)
 }
@@ -22,7 +22,7 @@ fn create_test_index_with_snapshots() -> Result<TemporalVectorIndex> {
         retention_policy: RetentionPolicy::KeepN(10),
         max_snapshots: 10,
         full_snapshot_interval: 10,
-        hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
     };
     TemporalVectorIndex::new(config)
 }
@@ -155,7 +155,7 @@ fn test_prune_snapshots() -> Result<()> {
         retention_policy: RetentionPolicy::KeepN(2), // Keep only 2 snapshots
         max_snapshots: 10,
         full_snapshot_interval: 10,
-        hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
+        hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
     };
     let index = TemporalVectorIndex::new(config)?;
 

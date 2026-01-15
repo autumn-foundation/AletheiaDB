@@ -565,6 +565,7 @@ mod tests {
             embedding: Arc::from([0.1f32; 4].as_slice()),
             k: 10,
             label_filter: None,
+            property_key: None,
         };
 
         let cost = model.estimate(&op, &stats);
@@ -604,6 +605,7 @@ mod tests {
             embedding: Arc::from([0.1f32; 4].as_slice()),
             k: 10,
             label_filter: None,
+            property_key: None,
         };
         assert_eq!(model.estimate_cardinality(&search, &stats), 10);
 

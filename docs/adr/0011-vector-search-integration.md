@@ -12,9 +12,14 @@
 |-------|--------|-----|
 | Phase 1: Vector Storage | ✅ Complete | #138 |
 | Phase 2: HNSW Index Integration | ✅ Complete | #169 |
-| Phase 3: Temporal Vector Support | 🔲 Planned | - |
-| Phase 4: Hybrid Query Engine | 🔲 Planned | - |
+| Phase 3: Temporal Vector Support | ✅ Complete | #403 |
+| Phase 4: Hybrid Query Engine | ✅ Complete | VS-065 |
 | Phase 5: Persistence & Performance | 🔲 Planned | - |
+
+**Related ADRs:**
+- [ADR-0018](0018-temporal-vector-historical-integration.md) - Temporal snapshot integration
+- [ADR-0019](0019-hybrid-query-planner.md) - Hybrid query planner design
+- [ADR-0022](0022-multi-property-vector-index.md) - Multi-property vector index support
 
 ## Context
 

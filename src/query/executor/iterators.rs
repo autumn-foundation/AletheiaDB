@@ -774,15 +774,23 @@ pub struct VectorRerankIterator {
 }
 
 impl VectorRerankIterator {
+    /// Create a new VectorRerankIterator.
+    ///
+    /// # Arguments
+    /// * `input` - The input iterator to rerank
+    /// * `embedding` - The target embedding for similarity comparison
+    /// * `k` - Maximum number of results to keep
+    /// * `current` - Reference to current storage
+    /// * `property_key` - Optional property to use for reranking. If None, uses default.
     pub fn new(
         input: Box<dyn ResultIterator>,
         embedding: Arc<[f32]>,
         k: usize,
         current: Arc<CurrentStorage>,
+        property_key: Option<String>,
     ) -> Self {
-        // Get the vector property name from the current storage
-        // If no vector index is configured, we'll return an error on first next() call
-        let vector_property = current.get_vector_property_name();
+        // Use explicit property if provided, otherwise get default from storage
+        let vector_property = property_key.or_else(|| current.get_vector_property_name());
 
         VectorRerankIterator {
             sorted: None,
@@ -1711,7 +1719,7 @@ mod tests {
         let input = MockIterator::from_nodes(nodes);
         let query = Arc::from(vec![1.0f32, 0.0, 0.0, 0.0]);
 
-        let mut rerank = VectorRerankIterator::new(Box::new(input), query, 10, current);
+        let mut rerank = VectorRerankIterator::new(Box::new(input), query, 10, current, None);
 
         // Should return error because no vector index is configured
         let result = rerank.next();
@@ -1727,7 +1735,7 @@ mod tests {
         let input = MockIterator::from_nodes(nodes);
         let query = Arc::from(vec![1.0f32, 0.0, 0.0, 0.0]);
 
-        let rerank = VectorRerankIterator::new(Box::new(input), query, 5, current);
+        let rerank = VectorRerankIterator::new(Box::new(input), query, 5, current, None);
 
         // Before initialization, size_hint upper bound is k
         let (lower, upper) = rerank.size_hint();

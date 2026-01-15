@@ -89,7 +89,12 @@ impl LimitPushdown {
 
             // VectorRank: can use limit hint for top-k optimization
             LogicalOp::Unary {
-                op: UnaryOp::VectorRank { embedding, top_k },
+                op:
+                    UnaryOp::VectorRank {
+                        embedding,
+                        top_k,
+                        property_key,
+                    },
                 input,
             } => {
                 let (optimized_input, input_changed) = self.push_down(input, None)?;
@@ -108,6 +113,7 @@ impl LimitPushdown {
                         UnaryOp::VectorRank {
                             embedding: embedding.clone(),
                             top_k: new_top_k,
+                            property_key: property_key.clone(),
                         },
                         optimized_input,
                     ),
@@ -234,6 +240,7 @@ mod tests {
                 UnaryOp::VectorRank {
                     embedding: Arc::from([0.1f32; 4].as_slice()),
                     top_k: Some(10),
+                    property_key: None,
                 },
                 LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
             ),
