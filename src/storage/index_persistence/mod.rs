@@ -29,6 +29,7 @@ pub mod graph;
 pub mod manifest;
 pub mod strings;
 pub mod temporal;
+pub mod vector;
 
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
