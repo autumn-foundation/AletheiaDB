@@ -110,7 +110,7 @@ pub fn new_vector_mappings() -> VectorMappingsData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::index_persistence::formats::PersistedSnapshotType;
+    use crate::storage::index_persistence::formats::{PersistedSnapshotType, VectorMapping};
     use tempfile::tempdir;
 
     #[test]

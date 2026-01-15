@@ -22,9 +22,51 @@
 //! 1. String interner (others depend on string indices)
 //! 2. Manifest (tells us what indexes exist)
 //! 3. Graph, Temporal, Vector (parallel)
+//!
+//! # Usage
+//!
+//! ```ignore
+//! use gallifreydb::storage::index_persistence::{
+//!     IndexPersistenceManager, PersistenceConfig
+//! };
+//!
+//! let manager = IndexPersistenceManager::new("data");
+//! manager.ensure_directories()?;
+//!
+//! // Save
+//! manager.save_string_interner()?;
+//! let manifest = IndexManifest::new(100);
+//! manager.save_manifest(&manifest)?;
+//!
+//! // Load (respects load order)
+//! if manager.indexes_exist() {
+//!     let manifest = manager.load_manifest_and_strings()?;
+//!     // String interner is now restored
+//!     // Ready to load other indexes
+//! }
+//! ```
+//!
+//! # Format Details
+//!
+//! All index files use bitcode serialization with magic bytes and version validation:
+//!
+//! - **Manifest** (`GIDX`): Index registry, LSN tracking, timestamps
+//! - **String Interner** (`GSTR`): Ordered string list for ID restoration
+//! - **Graph** (`GGRP`): Nodes, edges, CSR adjacency, properties
+//! - **Temporal** (`GTMP`): Version chains, anchors, deltas
+//! - **Vector** (`GVEC`): Metadata, ID mappings, HNSW snapshots
+//!
+//! # Versioning
+//!
+//! Current format version: 1
+//!
+//! Backward compatibility:
+//! - Same major version: guaranteed compatible
+//! - Newer minor version: older code can read newer files
+//! - Unsupported version: returns `UnsupportedVersion` error
 
-mod error;
 pub mod api;
+mod error;
 pub mod formats;
 pub mod graph;
 pub mod loader;
@@ -33,7 +75,9 @@ pub mod strings;
 pub mod temporal;
 pub mod vector;
 
-pub use api::{IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus};
+pub use api::{
+    IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus,
+};
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;

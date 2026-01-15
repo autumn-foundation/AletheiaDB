@@ -115,6 +115,9 @@ mod tests {
 
         // Should fail
         let result = load_string_interner(&path);
-        assert!(matches!(result, Err(IndexPersistenceError::InvalidMagic { .. })));
+        assert!(matches!(
+            result,
+            Err(IndexPersistenceError::InvalidMagic { .. })
+        ));
     }
 }

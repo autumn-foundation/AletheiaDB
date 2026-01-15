@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use gallifreydb::PropertyMapBuilder;
 use gallifreydb::core::GLOBAL_INTERNER;
 use gallifreydb::storage::index_persistence::formats::{
     IndexManifest, PersistedEdge, PersistedNode, PersistedPropertyMap,
@@ -14,9 +15,8 @@ use gallifreydb::storage::index_persistence::vector::{
     new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
 };
 use gallifreydb::storage::index_persistence::{
-    formats::PersistedHnswConfig, IndexPersistenceManager,
+    IndexPersistenceManager, formats::PersistedHnswConfig,
 };
-use gallifreydb::PropertyMapBuilder;
 use tempfile::tempdir;
 
 /// Test full persistence cycle: save → clear → load → verify.

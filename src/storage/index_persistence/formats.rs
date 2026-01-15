@@ -377,7 +377,7 @@ pub enum PersistedSnapshotType {
 // ============================================================================
 
 /// Persistence policies for all index types.
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Default, Encode, Decode)]
 #[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config-toml", serde(default))]
 pub struct PersistencePolicies {
@@ -389,17 +389,6 @@ pub struct PersistencePolicies {
     pub temporal: TemporalPersistencePolicy,
     /// String interner persistence policy
     pub strings: StringPersistencePolicy,
-}
-
-impl Default for PersistencePolicies {
-    fn default() -> Self {
-        Self {
-            vector: VectorPersistencePolicy::default(),
-            graph: GraphPersistencePolicy::default(),
-            temporal: TemporalPersistencePolicy::default(),
-            strings: StringPersistencePolicy::default(),
-        }
-    }
 }
 
 /// Vector index persistence policy.

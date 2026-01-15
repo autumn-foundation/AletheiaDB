@@ -4,13 +4,11 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 use crate::core::GLOBAL_INTERNER;
+use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 
 use super::error::{IndexPersistenceError, Result};
-use super::formats::{
-    GraphIndexData, PersistedPropertyMap, PersistedPropertyValue,
-};
+use super::formats::{GraphIndexData, PersistedPropertyMap, PersistedPropertyValue};
 use super::{GRAPH_MAGIC, MANIFEST_VERSION};
 
 /// Convert PropertyValue to PersistedPropertyValue.
@@ -125,6 +123,7 @@ pub fn new_graph_index_data() -> GraphIndexData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::index_persistence::formats::PersistedNode;
     use tempfile::tempdir;
 
     #[test]
@@ -134,7 +133,7 @@ mod tests {
             PropertyValue::Null,
             PropertyValue::Bool(true),
             PropertyValue::Int(42),
-            PropertyValue::Float(3.14),
+            PropertyValue::Float(2.71), // e approximation, not PI
             PropertyValue::String(Arc::from("test")),
             PropertyValue::Bytes(Arc::from(vec![1u8, 2, 3].as_slice())),
             PropertyValue::Vector(Arc::from(vec![1.0f32, 2.0, 3.0].as_slice())),
