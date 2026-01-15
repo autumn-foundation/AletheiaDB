@@ -179,6 +179,13 @@ impl CurrentStorage {
         self.vector_index_state.read().property_name.clone()
     }
 
+    /// Get the HNSW configuration of the current vector index, if enabled.
+    ///
+    /// Returns `None` if no vector index is enabled.
+    pub fn get_hnsw_config(&self) -> Option<HnswConfig> {
+        self.vector_index_state.read().config.clone()
+    }
+
     /// Get vector index configuration for checkpoint persistence.
     ///
     /// Returns the current vector index configuration if enabled, or disabled
@@ -798,6 +805,16 @@ impl CurrentStorage {
     /// Check if temporal vector indexing is enabled.
     pub fn is_temporal_vector_index_enabled(&self) -> bool {
         self.temporal_vector_index_state.read().is_enabled()
+    }
+
+    /// Lists all property names with temporal vector indexes enabled.
+    ///
+    /// Returns an empty vector if no temporal vector indexes are enabled.
+    /// Currently returns at most one property since only single temporal
+    /// vector index is supported.
+    pub fn list_temporal_vector_indexes(&self) -> Vec<String> {
+        let state = self.temporal_vector_index_state.read();
+        state.property_name.clone().into_iter().collect()
     }
 
     /// Get a reference to the temporal vector index if enabled.
