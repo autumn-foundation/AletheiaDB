@@ -15,6 +15,16 @@ use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
 use crate::utils::error::{Result, StorageError};
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
+
+/// Maximum number of vector-indexed properties allowed per database.
+///
+/// This limit prevents resource exhaustion from enabling too many vector indexes,
+/// as each index consumes significant memory (1.5-2x the raw vector data size
+/// due to HNSW graph overhead).
+///
+/// Override via configuration if your use case requires more properties.
+pub const DEFAULT_MAX_VECTOR_PROPERTIES: usize = 10;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -197,7 +207,22 @@ impl CurrentStorage {
     ///
     /// # Errors
     ///
-    /// Returns an error if this specific property already has a vector index enabled.
+    /// Returns an error if:
+    /// - This specific property already has a vector index enabled
+    /// - The maximum number of indexed properties ([`DEFAULT_MAX_VECTOR_PROPERTIES`]) is reached
+    ///
+    /// # Memory Usage
+    ///
+    /// Each vector index consumes approximately **1.5-2x** the raw vector data size due to
+    /// HNSW graph overhead (neighbor lists, layer structure). For example:
+    ///
+    /// | Vectors | Dimensions | Raw Size | Index Size |
+    /// |---------|------------|----------|------------|
+    /// | 100K    | 384        | ~150 MB  | ~225-300 MB |
+    /// | 1M      | 768        | ~3 GB    | ~4.5-6 GB   |
+    /// | 1M      | 1536       | ~6 GB    | ~9-12 GB    |
+    ///
+    /// Plan capacity accordingly when enabling multiple property indexes.
     ///
     /// # Example
     ///
@@ -208,25 +233,37 @@ impl CurrentStorage {
     /// storage.enable_vector_index("body_embedding", config_1536)?;
     /// ```
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
-        // Check if this specific property is already indexed
-        if self.vector_indexes.contains_key(property_name) {
+        // Check property limit before attempting to add
+        if self.vector_indexes.len() >= DEFAULT_MAX_VECTOR_PROPERTIES {
             return Err(crate::utils::error::Error::Vector(
                 crate::utils::error::VectorError::IndexError(format!(
-                    "Vector index already enabled for property '{}'",
-                    property_name
+                    "Maximum number of vector-indexed properties ({}) reached. \
+                     Cannot enable index for property '{}'",
+                    DEFAULT_MAX_VECTOR_PROPERTIES, property_name
                 )),
             ));
         }
 
-        // Create the HNSW index
-        let index = HnswIndex::new(config.clone())?;
-        let entry = VectorIndexEntry {
-            index: Arc::new(index),
-            config: config.clone(),
-        };
-
-        // Add to multi-property map
-        self.vector_indexes.insert(property_name.to_string(), entry);
+        // Use atomic entry() API to avoid TOCTOU race condition
+        match self.vector_indexes.entry(property_name.to_string()) {
+            Entry::Occupied(_) => {
+                return Err(crate::utils::error::Error::Vector(
+                    crate::utils::error::VectorError::IndexError(format!(
+                        "Vector index already enabled for property '{}'",
+                        property_name
+                    )),
+                ));
+            }
+            Entry::Vacant(vacant) => {
+                // Create the HNSW index
+                let index = HnswIndex::new(config.clone())?;
+                let entry = VectorIndexEntry {
+                    index: Arc::new(index),
+                    config: config.clone(),
+                };
+                vacant.insert(entry);
+            }
+        }
 
         // Update legacy single-property state for backward compatibility
         // Only stores property name/config for legacy API methods; actual index is in DashMap

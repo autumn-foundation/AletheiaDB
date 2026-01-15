@@ -4516,4 +4516,48 @@ mod tests {
         // So the top results from each should have different orderings
         let _ = node_ids; // Use node_ids to suppress unused warning
     }
+
+    #[test]
+    fn test_max_vector_properties_limit() {
+        // Test that the maximum number of vector properties is enforced
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use crate::storage::current::DEFAULT_MAX_VECTOR_PROPERTIES;
+
+        let db = crate::GallifreyDB::new();
+
+        // Enable indexes up to the limit
+        for i in 0..DEFAULT_MAX_VECTOR_PROPERTIES {
+            let config = HnswConfig::new(4, DistanceMetric::Cosine);
+            let result = db
+                .vector_index(&format!("property_{}", i))
+                .hnsw(config)
+                .enable();
+            assert!(
+                result.is_ok(),
+                "Should be able to enable index {} (limit is {})",
+                i,
+                DEFAULT_MAX_VECTOR_PROPERTIES
+            );
+        }
+
+        // Verify we have exactly the limit number of indexes
+        let indexes = db.list_vector_indexes();
+        assert_eq!(indexes.len(), DEFAULT_MAX_VECTOR_PROPERTIES);
+
+        // Attempting to add one more should fail
+        let config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let result = db.vector_index("one_too_many").hnsw(config).enable();
+        assert!(
+            result.is_err(),
+            "Should not be able to exceed the maximum vector property limit"
+        );
+
+        // Verify the error message is helpful
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Maximum") || err_msg.contains("maximum"),
+            "Error message should mention the maximum limit"
+        );
+    }
 }
