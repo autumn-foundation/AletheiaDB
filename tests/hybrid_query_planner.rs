@@ -1178,7 +1178,7 @@ fn test_temporal_vector_query() {
         retention_policy: RetentionPolicy::KeepN(100),
         max_snapshots: 100,
         full_snapshot_interval: 5,
-        hnsw_config,
+        hnsw_config: Some(hnsw_config),
     };
     db.enable_temporal_vector_index("embedding", temporal_config)
         .expect("Failed to enable temporal vector index");

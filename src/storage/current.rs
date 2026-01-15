@@ -299,6 +299,21 @@ impl CurrentStorage {
         self.vector_indexes.contains_key(property_name)
     }
 
+    /// Get the HNSW configuration for a specific property's vector index.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property name to get configuration for
+    ///
+    /// # Returns
+    ///
+    /// `Some(HnswConfig)` if a vector index exists for this property, `None` otherwise.
+    pub fn get_hnsw_config_for(&self, property_name: &str) -> Option<HnswConfig> {
+        self.vector_indexes
+            .get(property_name)
+            .map(|entry| entry.config.clone())
+    }
+
     /// Get vector index configuration for checkpoint persistence.
     ///
     /// Returns the current vector index configuration if enabled, or disabled
@@ -1206,6 +1221,16 @@ impl CurrentStorage {
     /// Check if temporal vector indexing is enabled for a specific property.
     pub fn is_temporal_vector_index_enabled_for(&self, property_name: &str) -> bool {
         self.temporal_vector_indexes.contains_key(property_name)
+    }
+
+    /// List all property names that have temporal vector indexes enabled.
+    ///
+    /// Returns a vector of property names that have temporal vector indexing configured.
+    pub fn list_temporal_vector_indexes(&self) -> Vec<String> {
+        self.temporal_vector_indexes
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     /// Get a reference to the temporal vector index for a specific property.

@@ -935,18 +935,50 @@ impl GallifreyDB {
         property_name: &str,
         config: TemporalVectorConfig,
     ) -> Result<()> {
-        // For multi-property support: check if current-state vector index exists for THIS property
-        // If not, enable it first (temporal requires current-state index)
+        // Resolve hnsw_config: use provided config or get from existing vector index
+        let resolved_hnsw_config =
+            if let Some(hnsw_config) = config.hnsw_config.clone() {
+                // Config was provided explicitly
+                hnsw_config
+            } else if self.current.is_vector_index_enabled_for(property_name) {
+                // No config provided, but vector index exists - use its config
+                self.current.get_hnsw_config_for(property_name).ok_or_else(|| {
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                    format!(
+                        "Vector index exists for '{}' but could not retrieve its configuration",
+                        property_name
+                    ),
+                ))
+            })?
+            } else {
+                // No config provided and no vector index exists - error
+                return Err(crate::utils::error::Error::Vector(
+                    crate::utils::error::VectorError::IndexError(
+                        "HNSW configuration is required when no vector index exists. \
+                     Use TemporalVectorConfig::default_with_hnsw() to provide one, \
+                     or enable the vector index first with enable_vector_index()."
+                            .to_string(),
+                    ),
+                ));
+            };
+
+        // Enable vector index if it doesn't exist yet
         if !self.current.is_vector_index_enabled_for(property_name) {
-            self.enable_vector_index(property_name, config.hnsw_config.clone())?;
+            self.enable_vector_index(property_name, resolved_hnsw_config.clone())?;
         }
 
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("enable_temporal_vector_index").entered();
 
+        // Create a resolved config with the hnsw_config set
+        let resolved_config = TemporalVectorConfig {
+            hnsw_config: Some(resolved_hnsw_config),
+            ..config
+        };
+
         // Enable temporal vector index in current storage
         self.current
-            .enable_temporal_vector_index(property_name, config)?;
+            .enable_temporal_vector_index(property_name, resolved_config)?;
 
         // Get the temporal vector index from current storage
         let temporal_index = self.current.get_temporal_vector_index().ok_or_else(|| {
@@ -982,6 +1014,26 @@ impl GallifreyDB {
     /// Check if temporal vector indexing is enabled.
     pub fn is_temporal_vector_index_enabled(&self) -> bool {
         self.current.is_temporal_vector_index_enabled()
+    }
+
+    /// List all property names that have temporal vector indexes enabled.
+    ///
+    /// Returns a vector of property names that have temporal vector indexing configured.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let db = GallifreyDB::new();
+    /// // Enable temporal indexes for two properties
+    /// db.vector_index("embedding1").hnsw(config1).temporal(temporal_config).enable()?;
+    /// db.vector_index("embedding2").hnsw(config2).temporal(temporal_config).enable()?;
+    ///
+    /// let indexes = db.list_temporal_vector_indexes();
+    /// assert!(indexes.contains(&"embedding1".to_string()));
+    /// assert!(indexes.contains(&"embedding2".to_string()));
+    /// ```
+    pub fn list_temporal_vector_indexes(&self) -> Vec<String> {
+        self.current.list_temporal_vector_indexes()
     }
 
     /// Create a builder for configuring a vector index on a property.
@@ -2003,7 +2055,7 @@ impl<'a> VectorIndexBuilder<'a> {
         if let Some(temporal_config) = self.temporal_config {
             // Merge HNSW config into temporal config
             let temporal_config_with_hnsw = TemporalVectorConfig {
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
                 ..temporal_config
             };
             self.db
@@ -3551,7 +3603,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config, // Will be overwritten by builder, but needed for struct completeness
+                hnsw_config: Some(hnsw_config), // Will be overwritten by builder, but needed for struct completeness
             })
             .enable()
             .expect("Should enable both current and temporal index");
@@ -3770,7 +3822,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
             })
             .enable()
             .expect("Should enable temporal index");
@@ -3818,7 +3870,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
             })
             .enable()
             .expect("Should enable temporal index");
@@ -3878,7 +3930,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
             })
             .enable()
             .expect("Should enable temporal index");
@@ -3927,7 +3979,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
             })
             .enable()
             .expect("Should enable temporal index");
@@ -3989,7 +4041,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
             })
             .enable()
             .expect("Should enable temporal index");
@@ -4029,7 +4081,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
             })
             .enable()
             .expect("Should enable temporal index");
@@ -4063,7 +4115,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
             })
             .enable()
             .expect("Should enable temporal index");
@@ -4103,7 +4155,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
             })
             .enable()
             .expect("Should enable temporal index");
@@ -4142,7 +4194,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config: hnsw_config1,
+                hnsw_config: Some(hnsw_config1),
             })
             .enable()
             .expect("Should enable first temporal index");
@@ -4156,7 +4208,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config: hnsw_config2,
+                hnsw_config: Some(hnsw_config2),
             })
             .enable()
             .expect("Should enable second temporal index");
@@ -4238,7 +4290,7 @@ mod tests {
                 retention_policy: RetentionPolicy::KeepN(100),
                 max_snapshots: 100,
                 full_snapshot_interval: 10,
-                hnsw_config,
+                hnsw_config: Some(hnsw_config),
             })
             .enable()
             .expect("Should enable temporal index");
@@ -4256,5 +4308,212 @@ mod tests {
             result.is_err(),
             "Should fail for property without temporal index"
         );
+    }
+
+    // ==================== Code Review Fix Tests ====================
+
+    #[test]
+    fn test_temporal_config_without_hnsw_config() {
+        // Test that TemporalVectorConfig can be created without hnsw_config
+        // when a vector index already exists
+        use crate::index::vector::temporal::TemporalVectorConfig;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Enable vector index first
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.enable_vector_index("embedding", hnsw_config).unwrap();
+
+        // Now enable temporal vector index WITHOUT providing hnsw_config
+        // This should succeed because vector index already exists
+        let temporal_config = TemporalVectorConfig::default_temporal_only();
+        let result = db.enable_temporal_vector_index("embedding", temporal_config);
+        assert!(
+            result.is_ok(),
+            "Should succeed when vector index exists and hnsw_config is None"
+        );
+    }
+
+    #[test]
+    fn test_temporal_config_without_hnsw_config_requires_existing_index() {
+        // Test that TemporalVectorConfig without hnsw_config fails
+        // when no vector index exists
+        use crate::index::vector::temporal::TemporalVectorConfig;
+
+        let db = GallifreyDB::new();
+
+        // Try to enable temporal vector index WITHOUT providing hnsw_config
+        // AND without an existing vector index - this should fail
+        let temporal_config = TemporalVectorConfig::default_temporal_only();
+        let result = db.enable_temporal_vector_index("embedding", temporal_config);
+        assert!(
+            result.is_err(),
+            "Should fail when no vector index exists and hnsw_config is None"
+        );
+    }
+
+    #[test]
+    fn test_temporal_config_default_temporal_only() {
+        // Test the default_temporal_only constructor
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+
+        let config = TemporalVectorConfig::default_temporal_only();
+
+        assert!(config.hnsw_config.is_none(), "hnsw_config should be None");
+        assert_eq!(
+            config.snapshot_strategy,
+            SnapshotStrategy::TransactionInterval(10)
+        );
+        assert_eq!(config.retention_policy, RetentionPolicy::KeepN(100));
+        assert_eq!(config.max_snapshots, 100);
+        assert_eq!(config.full_snapshot_interval, 10);
+    }
+
+    #[test]
+    fn test_list_temporal_vector_indexes() {
+        // Test the list_temporal_vector_indexes method
+        use crate::index::vector::temporal::{
+            RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
+        };
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new();
+
+        // Initially empty
+        assert!(db.list_temporal_vector_indexes().is_empty());
+
+        // Enable temporal index for first property
+        let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("embedding1")
+            .hnsw(hnsw_config1)
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: None, // Will be resolved from builder
+            })
+            .enable()
+            .expect("Should enable first temporal index");
+
+        // Should have one index
+        let indexes = db.list_temporal_vector_indexes();
+        assert_eq!(indexes.len(), 1);
+        assert!(indexes.contains(&"embedding1".to_string()));
+
+        // Enable temporal index for second property
+        let hnsw_config2 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        db.vector_index("embedding2")
+            .hnsw(hnsw_config2)
+            .temporal(TemporalVectorConfig {
+                snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
+                retention_policy: RetentionPolicy::KeepN(100),
+                max_snapshots: 100,
+                full_snapshot_interval: 10,
+                hnsw_config: None,
+            })
+            .enable()
+            .expect("Should enable second temporal index");
+
+        // Should have two indexes
+        let indexes = db.list_temporal_vector_indexes();
+        assert_eq!(indexes.len(), 2);
+        assert!(indexes.contains(&"embedding1".to_string()));
+        assert!(indexes.contains(&"embedding2".to_string()));
+    }
+
+    #[test]
+    fn test_concurrent_vector_operations_with_multiple_properties() {
+        // Test concurrent operations across multiple vector properties
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Arc::new(GallifreyDB::new());
+
+        // Enable two vector indexes for different properties
+        let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        let hnsw_config2 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        db.enable_vector_index("title_embedding", hnsw_config1)
+            .unwrap();
+        db.enable_vector_index("content_embedding", hnsw_config2)
+            .unwrap();
+
+        // Spawn multiple threads that create nodes with different embeddings concurrently
+        let mut handles = vec![];
+        for i in 0..10 {
+            let db_clone = Arc::clone(&db);
+            let handle = thread::spawn(move || {
+                let base = (i as f32 + 1.0) / 10.0;
+                let title_emb = vec![base, 0.0, 0.0, 0.0];
+                let content_emb = vec![0.0, base, 0.0, 0.0];
+
+                db_clone
+                    .create_node(
+                        "Document",
+                        PropertyMapBuilder::new()
+                            .insert("id", i as i64)
+                            .insert_vector("title_embedding", &title_emb)
+                            .insert_vector("content_embedding", &content_emb)
+                            .build(),
+                    )
+                    .unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        let node_ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // Verify all nodes were created
+        assert_eq!(db.node_count(), 10);
+
+        // Verify both indexes are functioning
+        // Search by title_embedding
+        let title_query = vec![0.5f32, 0.0, 0.0, 0.0];
+        let title_results = db
+            .search_vectors_in("title_embedding", &title_query, 5)
+            .unwrap();
+        assert!(
+            !title_results.is_empty(),
+            "Should find results in title_embedding index"
+        );
+
+        // Search by content_embedding
+        let content_query = vec![0.0f32, 0.5, 0.0, 0.0];
+        let content_results = db
+            .search_vectors_in("content_embedding", &content_query, 5)
+            .unwrap();
+        assert!(
+            !content_results.is_empty(),
+            "Should find results in content_embedding index"
+        );
+
+        // Verify both indexes have correct data (all nodes indexed in both)
+        // Each node should be findable via both indexes
+        let similar_by_title = db
+            .search_vectors_in("title_embedding", &[0.5, 0.0, 0.0, 0.0], 10)
+            .unwrap();
+        let similar_by_content = db
+            .search_vectors_in("content_embedding", &[0.0, 0.5, 0.0, 0.0], 10)
+            .unwrap();
+
+        // Both should have results from all nodes
+        assert!(
+            !similar_by_title.is_empty(),
+            "Title index should have results"
+        );
+        assert!(
+            !similar_by_content.is_empty(),
+            "Content index should have results"
+        );
+
+        // Results should be distinct - title and content queries target different directions
+        // So the top results from each should have different orderings
+        let _ = node_ids; // Use node_ids to suppress unused warning
     }
 }

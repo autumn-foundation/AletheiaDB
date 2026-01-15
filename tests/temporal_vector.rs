@@ -24,7 +24,7 @@ fn create_test_index() -> Result<TemporalVectorIndex> {
         retention_policy: RetentionPolicy::KeepN(10),
         max_snapshots: 100,
         full_snapshot_interval: 10,
-        hnsw_config,
+        hnsw_config: Some(hnsw_config),
     };
     TemporalVectorIndex::new(config)
 }
@@ -139,7 +139,7 @@ fn test_snapshot_pruning_with_keep_n() -> Result<()> {
         retention_policy: RetentionPolicy::KeepN(3),
         max_snapshots: 100,
         full_snapshot_interval: 10,
-        hnsw_config,
+        hnsw_config: Some(hnsw_config),
     };
     let index = TemporalVectorIndex::new(config)?;
 
@@ -168,7 +168,7 @@ fn test_snapshot_pruning_with_keep_duration() -> Result<()> {
         retention_policy: RetentionPolicy::KeepDuration(Duration::from_secs(10)),
         max_snapshots: 100,
         full_snapshot_interval: 10,
-        hnsw_config,
+        hnsw_config: Some(hnsw_config),
     };
     let index = TemporalVectorIndex::new(config)?;
 
@@ -219,7 +219,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
         retention_policy: RetentionPolicy::KeepN(10),
         max_snapshots: 100,
         full_snapshot_interval: 10,
-        hnsw_config: hnsw_config.clone(),
+        hnsw_config: Some(hnsw_config.clone()),
     };
 
     let base_time = 1_000_000_000; // 1 second in microseconds
@@ -240,7 +240,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
         retention_policy: RetentionPolicy::KeepN(10),
         max_snapshots: 100,
         full_snapshot_interval: 10,
-        hnsw_config,
+        hnsw_config: Some(hnsw_config),
     };
     let change_threshold_index = TemporalVectorIndex::new_at(config, 1000)?;
 

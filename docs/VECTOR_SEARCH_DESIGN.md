@@ -570,7 +570,7 @@ let config = TemporalVectorConfig {
     retention_policy: RetentionPolicy::KeepN(100),
     max_snapshots: 100,
     full_snapshot_interval: 10,
-    hnsw_config,
+    hnsw_config: Some(hnsw_config),
 };
 
 let index = TemporalVectorIndex::new(config)?;
