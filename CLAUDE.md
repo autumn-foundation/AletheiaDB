@@ -506,6 +506,43 @@ let results = temporal_index.find_similar_in_range(
     10,
     time_range,
 )?;
+```
+
+**Property-Specific Temporal Queries:**
+
+For multi-property temporal indexes, use the `_in` suffix methods:
+
+```rust
+// Query a specific property's temporal index
+let results = db.find_similar_as_of_in(
+    "content_embedding",  // Property name
+    &query_embedding,
+    10,
+    timestamp_2023,
+)?;
+
+// Track drift for a specific property
+let drift = db.track_drift_in(
+    "content_embedding",
+    node_id,
+    &reference_embedding,
+    time_range,
+)?;
+
+// Find nodes that drifted in a specific property
+let drifted = db.find_drift_in(
+    "content_embedding",
+    0.3,  // threshold
+    time_range,
+    DriftMetric::Cosine,
+)?;
+
+// Get semantic evolution for a specific property
+let evolution = db.semantic_evolution_in(
+    "content_embedding",
+    node_id,
+    time_range,
+)?;
 
 // Iterate over results from each snapshot in range
 for (timestamp, snapshot_results) in results {

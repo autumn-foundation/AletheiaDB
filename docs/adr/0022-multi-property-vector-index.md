@@ -165,15 +165,21 @@ struct TaggedVector {
 
 ```
 CurrentStorage
-├── vector_indexes: DashMap<String, HnswIndex>
-│   ├── "embedding" → HnswIndex (384 dims, Cosine)
-│   ├── "content_embedding" → HnswIndex (768 dims, Cosine)
-│   └── "image_embedding" → HnswIndex (512 dims, Euclidean)
+├── vector_indexes: DashMap<String, VectorIndexEntry>
+│   ├── "embedding" → VectorIndexEntry { index: HnswIndex, config: HnswConfig(384, Cosine) }
+│   ├── "content_embedding" → VectorIndexEntry { index: HnswIndex, config: HnswConfig(768, Cosine) }
+│   └── "image_embedding" → VectorIndexEntry { index: HnswIndex, config: HnswConfig(512, Euclidean) }
 │
-└── temporal_vector_index_state: RwLock<TemporalVectorIndexState>
-    ├── index: Option<TemporalVectorIndex>
-    └── property_name: Option<String>  // e.g., "content_embedding"
+├── temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>
+│   ├── "embedding" → TemporalVectorIndexEntry { index: TemporalVectorIndex, config: TemporalVectorConfig }
+│   └── ... (one entry per enabled temporal property)
+│
+└── temporal_vector_index_state: RwLock<TemporalVectorIndexState>  // For backwards compatibility
+    ├── index: Option<Arc<TemporalVectorIndex>>  // Points to first enabled temporal index
+    └── property_name: Option<String>
 ```
+
+**Note:** The `temporal_vector_index_state` maintains backwards compatibility with the original single-property API while `temporal_vector_indexes` DashMap provides true multi-property temporal support.
 
 ### API Method Naming Convention
 
@@ -192,6 +198,40 @@ All temporal methods require property validation:
 - `track_drift_in(property, node_id, reference, time_range)`
 - `semantic_evolution_in(property, node_id, time_range)`
 - `find_drift_in(property, threshold, time_range, metric)`
+
+### Query Engine Integration
+
+The QueryBuilder and executor pipeline support multi-property through `property_key` fields:
+
+**Physical Operators:**
+```rust
+// PhysicalOp variants with property_key
+HnswSearch {
+    embedding: Arc<[f32]>,
+    k: usize,
+    label_filter: Option<String>,
+    property_key: Option<String>,  // New: specifies which property to search
+}
+
+TemporalVectorSearch {
+    embedding: Arc<[f32]>,
+    k: usize,
+    timestamp: Timestamp,
+    property_key: Option<String>,  // New: specifies temporal property
+}
+
+VectorRerank {
+    input: Box<PhysicalOp>,
+    embedding: Arc<[f32]>,
+    k: usize,
+    property_key: Option<String>,  // New: specifies reranking property
+}
+```
+
+**Executor Behavior:**
+- When `property_key` is `Some(prop)`, uses property-specific search methods
+- When `property_key` is `None`, falls back to default "embedding" property
+- Dimension validation occurs at search time against the specific property's config
 
 ## References
 

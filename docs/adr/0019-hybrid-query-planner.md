@@ -169,9 +169,27 @@ A future PR should migrate all historical storage access to `parking_lot::RwLock
 | `HnswSearch` | k-NN via HNSW index | <10ms (1M vectors) |
 | `IndexedTraversal` | CSR adjacency traversal | <1µs/hop |
 | `TemporalNodeLookup` | Point-in-time reconstruction | <10ms |
+| `TemporalVectorSearch` | k-NN at point-in-time | <15ms |
 | `VectorRerank` | Compute similarities, sort | O(n log k) |
 | `Filter` | Predicate evaluation | <0.1µs/row |
 | `Limit` | Truncate result stream | O(1) |
+
+### Multi-Property Vector Support
+
+Vector operators (`HnswSearch`, `TemporalVectorSearch`, `VectorRerank`) support property-specific queries via `property_key: Option<String>`:
+
+```rust
+PhysicalOp::HnswSearch {
+    embedding: Arc<[f32]>,
+    k: usize,
+    label_filter: Option<String>,
+    property_key: Option<String>,  // Multi-property support (ADR-0022)
+}
+```
+
+When `property_key` is `Some`, the executor uses property-specific search methods. When `None`, it falls back to the default "embedding" property for backwards compatibility.
+
+See [ADR-0022](0022-multi-property-vector-index.md) for complete multi-property architecture.
 
 ## Consequences
 

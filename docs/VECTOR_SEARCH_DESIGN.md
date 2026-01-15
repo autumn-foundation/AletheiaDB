@@ -13,6 +13,7 @@
 > | Phase 2 | ✅ Complete (Milestone M2) | HNSW index integration, benchmarks, tests, documentation |
 > | Phase 3 | ✅ Complete (Issue #67) | Temporal vector-historical integration, provenance tracking |
 > | Phase 4 | ✅ Complete (Issue #85) | Hybrid query engine with unified API |
+> | Phase 4.1 | ✅ Complete (Issue #389) | Multi-property vector index support (ADR-0022) |
 > | Phase 5 | 🔲 Planned | Persistence & performance optimization |
 
 ## Executive Summary
@@ -162,6 +163,41 @@ pub trait HybridOps: GraphOps + VectorOps + TemporalOps {
     ) -> Result<Vec<(Timestamp, Arc<[f32]>)>>;
 }
 ```
+
+### Decision 5: Multi-Property Vector Index Support
+
+**Implemented in**: Issue #389, ADR-0022
+
+Support multiple vector properties per database, each with independent HNSW indexes:
+
+```rust
+// Storage: DashMap for concurrent multi-property access
+struct CurrentStorage {
+    vector_indexes: DashMap<String, VectorIndexEntry>,
+    temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>,
+}
+
+// API: Property-specific methods use `_in` suffix
+db.find_similar_in("content_embedding", node_id, 10)?;
+db.find_similar_by_embedding_in("title_embedding", &query, 10)?;
+db.rank_by_similarity_in("content_embedding", node_ids, &query, 10)?;
+
+// QueryBuilder: Property selection via builder pattern
+db.query()
+    .find_similar_builder(&embedding, 10)
+    .property("content_embedding")
+    .finish()
+    .execute(&db)?;
+```
+
+**Key Decisions**:
+- Use `DashMap<String, VectorIndexEntry>` for lock-free concurrent property access
+- Property-specific methods use `_in` suffix for explicit property selection
+- Default methods (no suffix) use "embedding" property for backwards compatibility
+- Physical operators include `property_key: Option<String>` for multi-property execution
+- Temporal indexes also support multi-property via same DashMap pattern
+
+See [ADR-0022](docs/adr/0022-multi-property-vector-index.md) for complete architecture details.
 
 ## Implementation Plan
 
