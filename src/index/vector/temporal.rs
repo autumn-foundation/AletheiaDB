@@ -46,7 +46,7 @@
 //!     retention_policy: RetentionPolicy::KeepN(100),
 //!     max_snapshots: 100,
 //!     full_snapshot_interval: 10,
-//!     hnsw_config: Some(hnsw_config),
+//!     hnsw_config,
 //! };
 //!
 //! // Create temporal index
@@ -135,7 +135,7 @@ impl Default for RetentionPolicy {
 ///     retention_policy: RetentionPolicy::KeepN(50),
 ///     max_snapshots: 100,
 ///     full_snapshot_interval: 10,
-///     hnsw_config: Some(HnswConfig::new(384, DistanceMetric::Cosine),
+///     hnsw_config: HnswConfig::new(384, DistanceMetric::Cosine),
 /// };
 /// ```
 /// Maximum number of retries when creating a snapshot due to races (default: 3)
@@ -191,15 +191,8 @@ pub struct TemporalVectorConfig {
     /// Lower values increase memory but improve query speed.
     pub full_snapshot_interval: usize,
 
-    /// Base HNSW configuration for all indexes (current + snapshots).
-    ///
-    /// This is optional when:
-    /// - A vector index is already enabled (the existing config will be used)
-    /// - You want to configure only temporal settings
-    ///
-    /// This is required when:
-    /// - No vector index exists yet (needed to create the HNSW index)
-    pub hnsw_config: Option<HnswConfig>,
+    /// Base HNSW configuration for all indexes (current + snapshots)
+    pub hnsw_config: HnswConfig,
 }
 
 impl TemporalVectorConfig {
@@ -246,31 +239,7 @@ impl TemporalVectorConfig {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(hnsw_config),
-        }
-    }
-
-    /// Creates a default configuration without HNSW config.
-    ///
-    /// Use this when a vector index is already enabled and you only want to
-    /// configure temporal settings. The existing HNSW configuration will be used.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use gallifreydb::index::vector::temporal::TemporalVectorConfig;
-    ///
-    /// // When vector index is already enabled:
-    /// let config = TemporalVectorConfig::default_temporal_only();
-    /// // Then call db.enable_temporal_vector_index("embedding", config)
-    /// ```
-    pub fn default_temporal_only() -> Self {
-        TemporalVectorConfig {
-            snapshot_strategy: SnapshotStrategy::TransactionInterval(10),
-            retention_policy: RetentionPolicy::KeepN(100),
-            max_snapshots: 100,
-            full_snapshot_interval: 10,
-            hnsw_config: None,
+            hnsw_config,
         }
     }
 
@@ -281,7 +250,7 @@ impl TemporalVectorConfig {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(hnsw_config),
+            hnsw_config,
         }
     }
 
@@ -292,7 +261,7 @@ impl TemporalVectorConfig {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(hnsw_config),
+            hnsw_config,
         }
     }
 }
@@ -957,17 +926,8 @@ impl TemporalVectorIndex {
         // Validate configuration before creating index
         config.validate()?;
 
-        // Get HNSW config - must be present at this point
-        let hnsw_config = config.hnsw_config.clone().ok_or_else(|| {
-            VectorError::IndexError(
-                "HNSW configuration is required to create TemporalVectorIndex. \
-                 This is an internal error - the caller should ensure hnsw_config is set."
-                    .to_string(),
-            )
-        })?;
-
         // Create current HNSW index
-        let current = Arc::new(HnswIndex::new(hnsw_config)?);
+        let current = Arc::new(HnswIndex::new(config.hnsw_config.clone())?);
 
         // Create vector storage
         let vectors = Arc::new(DashMap::new());
@@ -1077,10 +1037,7 @@ impl TemporalVectorIndex {
 
     /// Builds a FULL snapshot of the current vectors.
     fn build_full_snapshot(&self) -> Result<(SnapshotIndex, VectorSnapshot)> {
-        let hnsw_config = self.config.hnsw_config.clone().ok_or_else(|| {
-            VectorError::IndexError("HNSW config missing in build_full_snapshot".to_string())
-        })?;
-        let snapshot = HnswIndex::new(hnsw_config)?;
+        let snapshot = HnswIndex::new(self.config.hnsw_config.clone())?;
         let mut vector_snapshot = HashMap::with_capacity(self.vectors.len());
 
         for entry in self.vectors.iter() {
@@ -1125,9 +1082,7 @@ impl TemporalVectorIndex {
         }
 
         // Create small HNSW for added/updated vectors
-        let added_config = self.config.hnsw_config.clone().ok_or_else(|| {
-            VectorError::IndexError("HNSW config missing in build_delta_snapshot".to_string())
-        })?;
+        let added_config = self.config.hnsw_config.clone();
         let added = HnswIndex::new(added_config)?;
 
         // Build delta vector snapshot - only store changed vectors
@@ -2196,7 +2151,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         TemporalVectorIndex::new(config)
     }
@@ -2241,7 +2196,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2265,7 +2220,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, base_time)?;
 
@@ -2290,7 +2245,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2328,7 +2283,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 3,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2353,7 +2308,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2377,7 +2332,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2429,7 +2384,7 @@ mod tests {
             config.snapshot_strategy,
             SnapshotStrategy::TransactionInterval(10)
         ));
-        assert_eq!(config.hnsw_config, Some(hnsw_config));
+        assert_eq!(config.hnsw_config, hnsw_config);
     }
 
     #[test]
@@ -2443,7 +2398,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2463,7 +2418,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2492,7 +2447,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(3),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2527,7 +2482,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(10),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2558,7 +2513,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepDuration(Duration::from_secs(5)),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2616,7 +2571,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2653,7 +2608,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2683,7 +2638,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2707,7 +2662,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2741,7 +2696,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2777,7 +2732,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2801,7 +2756,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2830,7 +2785,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(3),
             max_snapshots: 3,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2862,7 +2817,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -2896,7 +2851,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -2957,7 +2912,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -3020,7 +2975,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -3056,7 +3011,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -3081,7 +3036,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -3113,7 +3068,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -3149,7 +3104,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new(config)?;
 
@@ -3193,7 +3148,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3247,7 +3202,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3289,7 +3244,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3337,7 +3292,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = Arc::new(TemporalVectorIndex::new_at(config, 1000)?);
 
@@ -3391,7 +3346,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = Arc::new(TemporalVectorIndex::new_at(config, 1000)?);
         let timestamp = Arc::new(AtomicU64::new(1000));
@@ -3445,7 +3400,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(3),
             max_snapshots: 3,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3500,7 +3455,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3545,7 +3500,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3591,7 +3546,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10, // Set to MAX_DELTA_CHAIN_DEPTH
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3629,7 +3584,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 5, // Create full snapshot every 5 snapshots
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3667,7 +3622,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 3,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3709,7 +3664,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(5), // Aggressive pruning
             max_snapshots: 5,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = Arc::new(TemporalVectorIndex::new_at(config, 1000)?);
 
@@ -3767,7 +3722,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3800,7 +3755,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10, // Set to MAX_DELTA_CHAIN_DEPTH to ensure delta snapshots
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3853,7 +3808,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3913,7 +3868,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -3983,7 +3938,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -4039,7 +3994,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10, // Valid config
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -4088,7 +4043,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepAll,
             max_snapshots: 100,
             full_snapshot_interval: 10, // Valid config
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -4184,7 +4139,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 100, // Exceeds MAX_DELTA_CHAIN_DEPTH (10)
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
 
         let result = TemporalVectorIndex::new(config);
@@ -4209,7 +4164,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 0, // Invalid
             full_snapshot_interval: 10,
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
 
         let result = TemporalVectorIndex::new(config);
@@ -4231,7 +4186,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(100),
             max_snapshots: 100,
             full_snapshot_interval: 10, // Valid: equals MAX_DELTA_CHAIN_DEPTH
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
 
         let result = TemporalVectorIndex::new(config);
@@ -4327,7 +4282,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(50),
             max_snapshots: 50,
             full_snapshot_interval: 10, // Full snapshot every 10 transactions
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
@@ -4381,7 +4336,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(50),
             max_snapshots: 50,
             full_snapshot_interval: 100, // Would normally never create full snapshots
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
 
         // This should fail due to validation (full_snapshot_interval > MAX_DELTA_CHAIN_DEPTH)
@@ -4394,7 +4349,7 @@ mod tests {
             retention_policy: RetentionPolicy::KeepN(50),
             max_snapshots: 50,
             full_snapshot_interval: 10, // Valid
-            hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
+            hnsw_config: HnswConfig::new(4, DistanceMetric::Cosine),
         };
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 

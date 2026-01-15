@@ -190,7 +190,7 @@ fn build_temporal_graph_core(
         retention_policy: RetentionPolicy::KeepN(snapshot_count * 2),
         max_snapshots: snapshot_count * 2,
         full_snapshot_interval: 10,
-        hnsw_config: Some(hnsw_config),
+        hnsw_config,
     };
     db.enable_temporal_vector_index("embedding", temporal_config)
         .unwrap();

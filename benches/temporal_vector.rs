@@ -26,7 +26,7 @@ fn create_temporal_index(dimensions: usize) -> TemporalVectorIndex {
         retention_policy: RetentionPolicy::KeepN(100),
         max_snapshots: 100,
         full_snapshot_interval: 10,
-        hnsw_config: Some(hnsw_config),
+        hnsw_config,
     };
     TemporalVectorIndex::new(config).unwrap()
 }
@@ -61,7 +61,7 @@ fn bench_snapshot_creation(c: &mut Criterion) {
                     retention_policy: RetentionPolicy::KeepN(10),
                     max_snapshots: 100,
                     full_snapshot_interval: 10,
-                    hnsw_config: Some(hnsw_config),
+                    hnsw_config,
                 };
                 let index = TemporalVectorIndex::new(config).unwrap();
 
@@ -185,7 +185,7 @@ fn bench_snapshot_pruning(c: &mut Criterion) {
                             retention_policy: RetentionPolicy::KeepN(snapshot_count / 2),
                             max_snapshots: snapshot_count * 2,
                             full_snapshot_interval: 10,
-                            hnsw_config: Some(hnsw_config),
+                            hnsw_config,
                         };
                         let index = TemporalVectorIndex::new(config).unwrap();
 

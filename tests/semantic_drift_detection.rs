@@ -25,7 +25,7 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
         retention_policy: RetentionPolicy::KeepAll,
         max_snapshots: 200,
         full_snapshot_interval: 10,
-        hnsw_config: Some(HnswConfig::new(384, DistanceMetric::Cosine)),
+        hnsw_config: HnswConfig::new(384, DistanceMetric::Cosine),
     };
     let index = TemporalVectorIndex::new(config)?;
     let mut ts = 1000i64;
@@ -201,7 +201,7 @@ fn test_semantic_drift_with_multiple_snapshots() -> Result<()> {
         retention_policy: RetentionPolicy::KeepAll,
         max_snapshots: 100,
         full_snapshot_interval: 10,
-        hnsw_config: Some(HnswConfig::new(128, DistanceMetric::Cosine)),
+        hnsw_config: HnswConfig::new(128, DistanceMetric::Cosine),
     };
     let index = TemporalVectorIndex::new(config)?;
     let mut ts = 1000i64;
@@ -268,7 +268,7 @@ fn test_semantic_drift_different_metrics() -> Result<()> {
         retention_policy: RetentionPolicy::KeepAll,
         max_snapshots: 100,
         full_snapshot_interval: 10,
-        hnsw_config: Some(HnswConfig::new(64, DistanceMetric::Cosine)),
+        hnsw_config: HnswConfig::new(64, DistanceMetric::Cosine),
     };
     let index = TemporalVectorIndex::new(config)?;
     let mut ts = 1000i64;
