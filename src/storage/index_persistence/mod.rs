@@ -26,6 +26,7 @@
 mod error;
 pub mod formats;
 pub mod graph;
+pub mod loader;
 pub mod manifest;
 pub mod strings;
 pub mod temporal;
@@ -33,6 +34,7 @@ pub mod vector;
 
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
+pub use loader::IndexPersistenceManager;
 
 /// Current manifest format version.
 pub const MANIFEST_VERSION: u16 = 1;
