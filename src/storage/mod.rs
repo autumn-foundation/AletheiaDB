@@ -9,6 +9,7 @@
 
 pub mod current;
 pub mod historical;
+pub mod index_persistence;
 pub mod observer;
 pub mod persistence;
 pub mod version;
