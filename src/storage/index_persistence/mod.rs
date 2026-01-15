@@ -24,6 +24,7 @@
 //! 3. Graph, Temporal, Vector (parallel)
 
 mod error;
+pub mod api;
 pub mod formats;
 pub mod graph;
 pub mod loader;
@@ -32,6 +33,7 @@ pub mod strings;
 pub mod temporal;
 pub mod vector;
 
+pub use api::{IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus};
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;
