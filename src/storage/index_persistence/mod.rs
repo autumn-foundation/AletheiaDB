@@ -24,8 +24,10 @@
 //! 3. Graph, Temporal, Vector (parallel)
 
 mod error;
+pub mod formats;
 
 pub use error::{IndexPersistenceError, Result};
+pub use formats::*;
 
 /// Current manifest format version.
 pub const MANIFEST_VERSION: u16 = 1;
