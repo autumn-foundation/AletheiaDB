@@ -449,12 +449,14 @@ impl QueryPlanner {
                         embedding: embedding.clone(),
                         k: *k,
                         timestamp: tx_time,
+                        property_key: property_key.clone(),
                     });
                 }
                 Ok(PhysicalOp::HnswSearch {
                     embedding: embedding.clone(),
                     k: *k,
                     label_filter: label_filter.clone(),
+                    property_key: property_key.clone(),
                 })
             }
 
@@ -494,10 +496,12 @@ impl QueryPlanner {
                     }));
                 }
 
+                // TODO: Add property_key to ScanOp::TemporalVectorSearch for full multi-property support
                 Ok(PhysicalOp::TemporalVectorSearch {
                     embedding: embedding.clone(),
                     k: *k,
                     timestamp: *timestamp,
+                    property_key: None, // Uses default property for legacy TemporalVectorSearch scan
                 })
             }
             ScanOp::SimilarToNode {
@@ -598,6 +602,7 @@ impl QueryPlanner {
                     input: Box::new(input),
                     embedding: embedding.clone(),
                     k: top_k.unwrap_or(10),
+                    property_key: property_key.clone(),
                 })
             }
 

@@ -100,12 +100,23 @@ impl QueryExecutor {
                 embedding,
                 k,
                 label_filter,
+                property_key,
             } => {
-                let results = if let Some(label) = label_filter {
-                    self.current
-                        .find_similar_by_embedding_with_label(embedding, label, *k)?
-                } else {
-                    self.current.find_similar_by_embedding(embedding, *k)?
+                let results = match (property_key, label_filter) {
+                    // Property-specific with label filter
+                    (Some(prop), Some(label)) => self
+                        .current
+                        .find_similar_by_embedding_in_with_label(prop, embedding, label, *k)?,
+                    // Property-specific without label filter
+                    (Some(prop), None) => self
+                        .current
+                        .find_similar_by_embedding_in(prop, embedding, *k)?,
+                    // Default property with label filter
+                    (None, Some(label)) => self
+                        .current
+                        .find_similar_by_embedding_with_label(embedding, label, *k)?,
+                    // Default property without label filter
+                    (None, None) => self.current.find_similar_by_embedding(embedding, *k)?,
                 };
 
                 Ok(Box::new(iterators::VectorResultIterator::new(
@@ -170,6 +181,7 @@ impl QueryExecutor {
                 input,
                 embedding,
                 k,
+                property_key,
             } => {
                 let input_iter = self.execute_op(input)?;
                 Ok(Box::new(iterators::VectorRerankIterator::new(
@@ -177,6 +189,7 @@ impl QueryExecutor {
                     embedding.clone(),
                     *k,
                     Arc::clone(&self.current),
+                    property_key.clone(),
                 )))
             }
 
@@ -467,6 +480,7 @@ mod tests {
                 embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
                 k: 2,
                 label_filter: None,
+                property_key: None,
             },
             estimated_cost: Default::default(),
             temporal_context: None,
@@ -490,6 +504,7 @@ mod tests {
                 embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
                 k: 2,
                 label_filter: Some("Person".to_string()),
+                property_key: None,
             },
             estimated_cost: Default::default(),
             temporal_context: None,
@@ -570,6 +585,7 @@ mod tests {
                 }),
                 embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
                 k: 2,
+                property_key: None,
             },
             estimated_cost: Default::default(),
             temporal_context: None,
@@ -1106,5 +1122,138 @@ mod tests {
             2,
             "Should return only 2 results when database has fewer nodes than k"
         );
+    }
+
+    // ==================== Multi-Property Vector Index Tests ====================
+
+    /// Helper to create storage with multiple vector properties
+    fn create_multi_property_vector_storage() -> (
+        Arc<CurrentStorage>,
+        Arc<RwLock<HistoricalStorage>>,
+        NodeId,
+        NodeId,
+    ) {
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
+            AnchorConfig::default(),
+        )));
+
+        // Enable TWO different vector indexes with different dimensions
+        current
+            .enable_vector_index(
+                "title_embedding",
+                HnswConfig::new(4, DistanceMetric::Cosine),
+            )
+            .expect("Should enable first vector index");
+        current
+            .enable_vector_index(
+                "content_embedding",
+                HnswConfig::new(8, DistanceMetric::Cosine),
+            )
+            .expect("Should enable second vector index");
+
+        // Create test nodes with DIFFERENT embeddings for each property
+        // Node 1: title_embedding is similar to [1,0,0,0], content_embedding is different
+        let doc1_props = PropertyMapBuilder::new()
+            .insert("title", "Rust Programming")
+            .insert_vector("title_embedding", &[1.0f32, 0.0, 0.0, 0.0])
+            .insert_vector(
+                "content_embedding",
+                &[0.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            )
+            .build();
+        let doc1 = current.create_node("Document", doc1_props).unwrap();
+
+        // Node 2: title_embedding is different, content_embedding is similar to [0,0,0,0,1,0,0,0]
+        let doc2_props = PropertyMapBuilder::new()
+            .insert("title", "Python Basics")
+            .insert_vector("title_embedding", &[0.0f32, 1.0, 0.0, 0.0])
+            .insert_vector(
+                "content_embedding",
+                &[0.0f32, 0.0, 0.0, 0.0, 0.9, 0.1, 0.0, 0.0],
+            )
+            .build();
+        let doc2 = current.create_node("Document", doc2_props).unwrap();
+
+        (current, historical, doc1, doc2)
+    }
+
+    /// Test that HnswSearch uses property_key to query the correct index.
+    ///
+    /// This test verifies that when querying "title_embedding" vs "content_embedding",
+    /// we get different results because the embeddings are different.
+    #[test]
+    fn test_hnsw_search_multi_property() {
+        let (current, historical, doc1, _doc2) = create_multi_property_vector_storage();
+        let executor = QueryExecutor::new(current, historical);
+
+        // Query title_embedding with vector similar to doc1's title_embedding
+        let plan = PhysicalPlan {
+            root: PhysicalOp::HnswSearch {
+                embedding: vec![1.0f32, 0.0, 0.0, 0.0].into(),
+                k: 1,
+                label_filter: None,
+                property_key: Some("title_embedding".to_string()),
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert_eq!(rows.len(), 1);
+        // The top result should be doc1 because its title_embedding is [1,0,0,0]
+        match &rows[0].entity {
+            EntityResult::NodeId(id) => {
+                assert_eq!(*id, doc1, "Should return doc1 for title_embedding query")
+            }
+            EntityResult::Node(node) => assert_eq!(
+                node.id, doc1,
+                "Should return doc1 for title_embedding query"
+            ),
+            _ => panic!("Expected Node or NodeId result"),
+        }
+    }
+
+    /// Test that VectorRerank uses property_key to rerank by the correct property.
+    #[test]
+    fn test_vector_rerank_multi_property() {
+        let (current, historical, doc1, doc2) = create_multi_property_vector_storage();
+        let executor = QueryExecutor::new(current, historical);
+
+        // Start with both nodes, rerank by content_embedding similarity
+        // Query embedding is similar to doc2's content_embedding
+        let plan = PhysicalPlan {
+            root: PhysicalOp::VectorRerank {
+                input: Box::new(PhysicalOp::NodeLookup {
+                    node_ids: vec![doc1, doc2],
+                }),
+                embedding: vec![0.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0].into(),
+                k: 2,
+                property_key: Some("content_embedding".to_string()),
+            },
+            estimated_cost: Default::default(),
+            temporal_context: None,
+            parallel: false,
+            include_provenance: false,
+        };
+
+        let results = executor.execute(plan).expect("Execution failed");
+        let rows: Vec<_> = results.collect_all().expect("Collection failed");
+
+        assert_eq!(rows.len(), 2);
+        // doc1 should be first because its content_embedding [0,0,0,0,1,0,0,0] is most similar
+        match &rows[0].entity {
+            EntityResult::NodeId(id) => {
+                assert_eq!(*id, doc1, "doc1 should rank first by content_embedding")
+            }
+            EntityResult::Node(node) => {
+                assert_eq!(node.id, doc1, "doc1 should rank first by content_embedding")
+            }
+            _ => panic!("Expected Node or NodeId result"),
+        }
     }
 }

@@ -849,6 +849,110 @@ impl CurrentStorage {
         Ok(results)
     }
 
+    /// Find k most similar nodes to a raw embedding in a specific property's index.
+    ///
+    /// This is the property-specific version of `find_similar_by_embedding()`.
+    /// Use this when you have multiple vector indexes and need to search a specific one.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property with the vector index to search
+    /// * `embedding` - The query embedding vector
+    /// * `k` - Maximum number of results to return
+    ///
+    /// # Returns
+    ///
+    /// A list of (NodeId, similarity_score) pairs sorted by similarity (highest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No vector index is enabled for the specified property
+    /// - Embedding dimensions don't match the indexed property
+    pub fn find_similar_by_embedding_in(
+        &self,
+        property_name: &str,
+        embedding: &[f32],
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        let entry = self.vector_indexes.get(property_name).ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                format!(
+                    "No vector index enabled for property '{}'. Call enable_vector_index() first.",
+                    property_name
+                ),
+            ))
+        })?;
+
+        // Validate embedding dimensions
+        let expected_dims = entry.value().config.dimensions;
+        if embedding.len() != expected_dims {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::DimensionMismatch {
+                    expected: expected_dims,
+                    actual: embedding.len(),
+                },
+            ));
+        }
+
+        let results = entry.value().index.search(embedding, k)?;
+        Ok(results)
+    }
+
+    /// Find k most similar nodes with a label to a raw embedding in a specific property's index.
+    ///
+    /// This is the property-specific version of `find_similar_by_embedding_with_label()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `property_name` - The property with the vector index to search
+    /// * `embedding` - The query embedding vector
+    /// * `label` - Only return nodes with this label
+    /// * `k` - Maximum number of results to return
+    pub fn find_similar_by_embedding_in_with_label(
+        &self,
+        property_name: &str,
+        embedding: &[f32],
+        label: &str,
+        k: usize,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        let entry = self.vector_indexes.get(property_name).ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                format!(
+                    "No vector index enabled for property '{}'. Call enable_vector_index() first.",
+                    property_name
+                ),
+            ))
+        })?;
+
+        // Validate embedding dimensions
+        let expected_dims = entry.value().config.dimensions;
+        if embedding.len() != expected_dims {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::DimensionMismatch {
+                    expected: expected_dims,
+                    actual: embedding.len(),
+                },
+            ));
+        }
+
+        let label_id = GLOBAL_INTERNER.intern(label)?;
+        let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
+
+        let mut results =
+            entry
+                .value()
+                .index
+                .search_with_filter(embedding, candidates_to_fetch, |node_id| {
+                    self.indexes
+                        .get_node(*node_id)
+                        .is_some_and(|n| n.label == label_id)
+                })?;
+
+        results.truncate(k);
+        Ok(results)
+    }
+
     // ========================================================================
     // Multi-Property Vector Search Methods (Issue #389)
     // ========================================================================
