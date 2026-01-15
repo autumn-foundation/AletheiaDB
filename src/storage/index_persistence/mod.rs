@@ -25,6 +25,7 @@
 
 mod error;
 pub mod formats;
+pub mod manifest;
 pub mod strings;
 
 pub use error::{IndexPersistenceError, Result};
