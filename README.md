@@ -14,8 +14,12 @@ GallifreyDB tracks both **valid time** (when facts were true in reality) and **t
 - **Hybrid Storage**: Separate current state (fast path) from historical data (temporal path)
 - **Anchor+Delta Compression**: 5-6X storage reduction while maintaining query performance
 - **ACID Transactions**: Full snapshot isolation with write conflict detection
-- **Write-Ahead Log (WAL)**: Crash recovery with versioned binary format (v2)
-- **Vector Search**: HNSW indexing for k-NN semantic search with temporal versioning
+- **Write-Ahead Log (WAL)**: Striped lock-free ring buffer architecture, ~100K+ writes/sec (GroupCommit)
+- **Index Persistence**: Fast cold starts (6-30x faster) with Zstd compression and memory-mapped loading
+- **Vector Search**: HNSW indexing for k-NN semantic search with full temporal versioning
+- **Multi-Property Vector Indexes**: Multiple independent vector properties per database
+- **Hybrid Query API**: Combine graph traversal + vector similarity + bi-temporal queries
+- **Semantic Drift Tracking**: Detect how embeddings evolve over time for knowledge evolution analysis
 - **Production Observability**: Distributed tracing, metrics, and profiling (optional)
 - **High Performance**: Sub-microsecond traversals (~22ns node lookup, ~23ns edge traversal)
 - **LLM-Friendly API**: Natural query patterns for reasoning about temporal knowledge
@@ -86,6 +90,16 @@ See `justfile` for all available commands.
 
 GallifreyDB uses Cargo feature flags for optional functionality:
 
+### Default Features
+```toml
+[dependencies]
+gallifreydb = "0.1"  # Includes config-toml by default
+```
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `config-toml` | TOML configuration file support | ✅ Yes |
+
 ### Observability Features
 ```toml
 [dependencies]
@@ -125,11 +139,14 @@ GallifreyDB is designed for high performance with minimal temporal overhead. Vie
 
 ### Current Performance
 
-| Metric | Target | Actual |
-|--------|--------|--------|
+| Operation | Target | Actual |
+|-----------|--------|--------|
 | Current-state node lookup | <1µs | ~22ns ✅ |
 | Current-state edge traversal | <1µs | ~23ns ✅ |
 | 3-hop traversal | <100µs | ~20ns per hop ✅ |
+| k-NN search (k=10, 1M vectors) | <10ms | ~4-8ms ✅ |
+| Graph+Vector hybrid query | <20ms | ~15ms ✅ |
+| Time-travel reconstruction | <10ms | TBD |
 
 **Note**: Time-travel query benchmarks are being improved to measure realistic historical reconstruction scenarios.
 
@@ -137,7 +154,7 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 
 ## Project Status
 
-**Current Phase**: Core Complete, Vector Search (Phase 1-2) Complete, Observability Active
+**Current Phase**: Vector Search Complete (Phases 1-4), Core Features Complete ✅
 
 ### Core Features (Complete ✅)
 - [x] Core ID types (NodeId, EdgeId, VersionId)
@@ -150,12 +167,14 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 - [x] Historical storage with anchor+delta compression
 - [x] ACID transactions with snapshot isolation
 - [x] Write conflict detection
-- [x] Write-Ahead Log (WAL) v2 with versioned binary format
-- [x] Persistence layer with recovery and migration
+- [x] Write-Ahead Log (WAL) with striped lock-free ring buffers
+- [x] Index persistence with Zstd compression and memory-mapped loading
 - [x] Time-travel queries (as_of, get_node_at_time)
 - [x] Public API with read/write transactions
 
-### Vector Search (Phase 1-2 Complete ✅)
+### Vector Search (Phases 1-4 Complete ✅)
+
+#### Phase 1-2: Storage + HNSW Indexing
 - [x] Vector type with validation (VS-001 to VS-010)
 - [x] Similarity functions: cosine, Euclidean, dot product
 - [x] Vector normalization utilities
@@ -165,7 +184,24 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 - [x] HNSW indexing for k-NN search
 - [x] Auto-indexing on create/update with rollback
 - [x] Vector similarity search API
+- [x] Multi-property vector indexes (VS-072)
 - [x] Optional embedding providers (OpenAI, HuggingFace, Ollama, ONNX)
+
+#### Phase 3: Temporal Vector Integration
+- [x] Temporal vector indexes with snapshot/delta architecture
+- [x] Pre-anchor hooks for provenance tracking
+- [x] Post-commit observers for extensibility
+- [x] Semantic drift tracking (detect embedding evolution)
+- [x] Point-in-time and range vector queries
+- [x] Full/delta snapshot strategies with retention policies
+
+#### Phase 4: Hybrid Query API
+- [x] Query builder with type-safe state machine
+- [x] Graph + Vector hybrid queries (traverse then rank)
+- [x] Temporal + Vector queries (semantic time-travel)
+- [x] Full hybrid queries (graph + vector + temporal)
+- [x] Predicate filtering and property-specific operations
+- [x] Direct functions, builder API, and convenience methods
 
 ### Observability (Complete ✅)
 - [x] Structured logging with `tracing`
@@ -176,13 +212,12 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 - [x] Error categorization metrics
 
 ### In Progress / Planned
-- [ ] Vector Search Phase 3: Temporal vector queries (semantic time-travel)
-- [ ] Vector Search Phase 4: Hybrid graph+vector queries
 - [ ] Vector Search Phase 5: Streaming and incremental updates
 - [ ] Custom Honeycomb client wrapper ([#271](https://github.com/madmax983/GallifreyDB/issues/271))
 - [ ] Comprehensive Prometheus metrics suite ([#272](https://github.com/madmax983/GallifreyDB/issues/272))
 - [ ] MCP Server for Claude integration
 - [ ] GraphQL/REST API layer
+- [ ] Distributed deployment (sharding, replication)
 
 **Test Coverage**: 671+ tests passing, 86%+ line coverage (enforced: 85% minimum)
 
@@ -195,6 +230,7 @@ GallifreyDB uses a hybrid storage architecture:
 │              Query Engine                            │
 │  - Temporal Query Planner                           │
 │  - Graph Traversal Engine                           │
+│  - Hybrid Query Optimizer                           │
 └─────────────────────────────────────────────────────┘
                         │
         ┌───────────────┴───────────────┐
@@ -203,7 +239,8 @@ GallifreyDB uses a hybrid storage architecture:
 │ Current Storage │          │ Historical Storage │
 │ - Live Graph    │          │ - Anchor+Delta     │
 │ - Hot Indexes   │          │ - Compressed       │
-│ - Fast Path     │          │ - Time Indexes     │
+│ - Vector HNSW   │          │ - Time Indexes     │
+│ - Fast Path     │          │ - Vector Snapshots │
 └─────────────────┘          └────────────────────┘
 ```
 
@@ -213,8 +250,9 @@ GallifreyDB uses a hybrid storage architecture:
 - Copy-on-write properties with Arc for deduplication
 - String interning for memory efficiency
 - Lock-free concurrent access (DashMap)
+- Hybrid pre-anchor hooks + post-commit observers for temporal vector integration
 
-See [CLAUDE.md](CLAUDE.md) for complete architecture and coding guidelines.
+See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture documentation.
 
 ## Usage Examples
 
@@ -267,6 +305,127 @@ if let Some(old_alice) = historical_alice {
 }
 ```
 
+### Vector Search with HNSW
+
+```rust
+use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+
+let db = GallifreyDB::new();
+
+// Enable vector indexing
+db.vector_index("embedding")
+    .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    .enable()?;
+
+// Store node with embedding - automatically indexed!
+let doc_id = db.create_node("Document",
+    PropertyMapBuilder::new()
+        .insert("title", "Introduction to Rust")
+        .insert_vector("embedding", &embedding)
+        .build()
+)?;
+
+// Find similar nodes
+let similar = db.find_similar(doc_id, 10)?;
+```
+
+### Hybrid Queries (Graph + Vector + Temporal)
+
+```rust
+use gallifreydb::query::QueryBuilder;
+use gallifreydb::query::ir::Predicate;
+
+// Simple: Graph + Vector hybrid
+let results = db.traverse_and_rank(alice_id, "KNOWS", &query_embedding, 10)?;
+
+// Complex: Full hybrid with builder
+let results = db.query()
+    .as_of(valid_time, tx_time)        // Temporal: point-in-time
+    .start(alice_id)                   // Graph: start node
+    .traverse("KNOWS")                 // Graph: traverse edges
+    .rank_by_similarity(&embedding, 10) // Vector: rank by similarity
+    .filter(Predicate::gt("score", 0.8)) // Filter: high similarity only
+    .with_provenance()                 // Include metadata
+    .execute(&db)?;
+
+// Property-specific vector queries
+let results = db.query()
+    .find_similar_builder(&embedding, 10)
+    .property("content_embedding")  // Query specific property
+    .metric(DistanceMetric::Cosine)
+    .finish()
+    .execute(&db)?;
+```
+
+See **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** for complete API reference.
+
+### Semantic Drift Tracking
+
+```rust
+use gallifreydb::index::vector::temporal::DriftMetric;
+use gallifreydb::core::temporal::TimeRange;
+
+// Find all nodes with significant semantic drift
+let time_range = TimeRange::new(timestamp_2023, timestamp_2024);
+let drifted_nodes = db.find_drift_in(
+    "embedding",              // Property name
+    0.3,                      // Cosine distance threshold
+    time_range,
+    DriftMetric::Cosine,
+)?;
+
+for (node_id, drift_score) in drifted_nodes {
+    println!("Node {} drifted by {:.3}", node_id, drift_score);
+}
+```
+
+### Index Persistence (Fast Cold Starts)
+
+```rust
+use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+use gallifreydb::storage::index_persistence::PersistenceConfig;
+
+// Enable index persistence for 6-30x faster startup
+let config = GallifreyDBConfig::builder()
+    .persistence(PersistenceConfig {
+        enabled: true,
+        data_dir: "data/my-database".into(),
+        load_on_startup: true,  // Load indexes on startup
+        use_mmap: true,         // Memory-map large indexes
+        ..Default::default()
+    })
+    .build();
+
+let db = GallifreyDB::with_unified_config(config);
+
+// Indexes automatically persist in background
+// On restart: 2-5s cold start vs 30-60s WAL replay (1M nodes)
+```
+
+See **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** for complete guide.
+
+### Configuration
+
+```rust
+use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+use gallifreydb::storage::wal::DurabilityMode;
+
+// Load from TOML file
+let config = GallifreyDBConfig::from_toml_file("config/production.toml")?;
+let db = GallifreyDB::with_unified_config(config);
+
+// Or programmatic configuration
+let config = GallifreyDBConfig::builder()
+    .wal(WalConfigBuilder::new()
+        .num_stripes(64).unwrap()  // High concurrency
+        .durability_mode(DurabilityMode::group_commit_default())
+        .build())
+    .build();
+```
+
+See **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for all configuration options and presets.
+
 ### Transactions
 
 ```rust
@@ -285,7 +444,7 @@ db.write(|tx| {
 })?;
 ```
 
-### Vector Embeddings (Optional)
+### Embedding Generation (Optional)
 
 GallifreyDB includes an optional embedding generation system for semantic search:
 
@@ -393,34 +552,37 @@ export PROMETHEUS_BIND_ADDR="127.0.0.1:9090"
 cargo run --example observability_demo --all-features
 ```
 
-## Performance
-
-| Operation | Target | Achieved |
-|-----------|--------|----------|
-| Current-state node lookup | <1µs | ~22ns |
-| Current-state edge traversal | <1µs | ~23ns |
-| Time-travel reconstruction | <10ms | ~20ns |
-| Storage overhead | <2X | On target |
-| Write throughput | >100k edges/s | 7-12µs per write |
-
-Run benchmarks with `just bench` to verify on your hardware.
-
 ## Documentation
 
 ### Core Documentation
-- **[CLAUDE.md](CLAUDE.md)** - Architecture principles and development guidelines
+- **[CLAUDE.md](CLAUDE.md)** - Quick reference for AI assistants and contributors
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Architecture principles, design patterns, system design
+- **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** - Configuration options, presets, tuning guide
+- **[docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md)** - Complete development workflow
+- **[docs/CODING_STANDARDS.md](docs/CODING_STANDARDS.md)** - Rust coding standards and best practices
 - **[TESTING.md](TESTING.md)** - Testing, coverage, and profiling guide
 - **[WORKTREE_WORKFLOW.md](WORKTREE_WORKFLOW.md)** - Parallel development workflow with git worktrees
-- **[justfile](justfile)** - Available development commands
 
 ### Feature Documentation
 - **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture (Phases 1-5)
 - **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide (optional providers)
-- **[docs/WAL.md](docs/WAL.md)** - Write-Ahead Log format and migration guide
-- **[docs/CODING_STANDARDS.md](docs/CODING_STANDARDS.md)** - Rust coding standards and best practices
+- **[docs/WAL.md](docs/WAL.md)** - Write-Ahead Log format and architecture
 
-### Architecture Decision Records
+### User Guides
+- **[docs/guides/vector-search-integration.md](docs/guides/vector-search-integration.md)** - Complete vector search API
+- **[docs/guides/vector-search-performance.md](docs/guides/vector-search-performance.md)** - Performance tuning
+- **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** - Hybrid query API reference
+- **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** - Index persistence details
+
+### Architecture Decision Records (ADRs)
 - **[docs/adr/0016-embedding-providers.md](docs/adr/0016-embedding-providers.md)** - Embedding provider architecture
+- **[docs/adr/0018-temporal-vector-historical-integration.md](docs/adr/0018-temporal-vector-historical-integration.md)** - Temporal vector integration
+- **[docs/adr/0019-hybrid-query-planner.md](docs/adr/0019-hybrid-query-planner.md)** - Hybrid query architecture
+- **[docs/adr/0020-concurrent-wal-architecture.md](docs/adr/0020-concurrent-wal-architecture.md)** - Concurrent WAL design
+- **[docs/adr/0022-multi-property-vector-index.md](docs/adr/0022-multi-property-vector-index.md)** - Multi-property vector indexes
+- **[docs/adr/0023-index-persistence-layer.md](docs/adr/0023-index-persistence-layer.md)** - Index persistence architecture
+
+See `docs/adr/` for all architectural decisions.
 
 ### Examples
 - `examples/observability_demo.rs` - Production observability features
@@ -435,6 +597,8 @@ Enable LLMs to:
 - Track how relationships evolved over time
 - Detect contradictions through provenance
 - Reason about causality and change
+- Track semantic drift in knowledge over time
+- Combine graph structure, semantic similarity, and temporal queries
 
 ### Knowledge Graph Evolution
 
@@ -443,6 +607,15 @@ Track how your knowledge graph changes:
 - Historical analysis and trend detection
 - Rollback capabilities
 - Provenance tracking
+- Semantic evolution analysis
+
+### Retrieval-Augmented Generation (RAG)
+
+Advanced RAG patterns:
+- Multi-property semantic search (title, content, image embeddings)
+- Hybrid graph+vector queries (traverse then rank by similarity)
+- Temporal RAG (retrieve knowledge as it existed at specific times)
+- Semantic drift detection (identify when knowledge changed)
 
 ## Contributing
 
@@ -456,9 +629,11 @@ Track how your knowledge graph changes:
 All contributions must:
 - Pass all tests
 - Maintain ≥85% code coverage (line, function, and region)
-- Follow coding guidelines in CLAUDE.md
+- Follow coding guidelines in [docs/CODING_STANDARDS.md](docs/CODING_STANDARDS.md)
 - Include appropriate documentation
 - Never commit directly to trunk (use worktrees and PRs)
+
+See **[docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md)** for complete workflow documentation.
 
 ## Testing
 
