@@ -316,3 +316,152 @@ fn test_db_persist_indexes_mvp() {
         println!("✓ Database persisted indexes successfully (MVP Phase 1)");
     }
 }
+
+/// Test full persistence lifecycle: save, shutdown, restart, load.
+///
+/// This test verifies the complete workflow:
+/// 1. Create database with data
+/// 2. Persist indexes and shutdown
+/// 3. Start new database instance
+/// 4. Verify all data was restored correctly
+#[test]
+fn test_full_persistence_lifecycle() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+
+    let node1_id;
+    let node2_id;
+    let edge_id;
+
+    // Phase 1: Create database, add data, persist
+    {
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        // Add nodes with properties
+        node1_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .insert("city", "Seattle")
+                    .build(),
+            )
+            .unwrap();
+
+        node2_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Bob")
+                    .insert("age", 25i64)
+                    .insert("city", "Portland")
+                    .build(),
+            )
+            .unwrap();
+
+        // Add edge with properties
+        edge_id = db
+            .create_edge(
+                node1_id,
+                node2_id,
+                "KNOWS",
+                PropertyMapBuilder::new()
+                    .insert("since", 2020i64)
+                    .insert("strength", "strong")
+                    .build(),
+            )
+            .unwrap();
+
+        // Verify data exists
+        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.edge_count(), 1);
+
+        // Persist indexes
+        db.persist_indexes().unwrap();
+
+        // Explicit drop to simulate shutdown
+        drop(db);
+    }
+
+    // Phase 2: Restart database and verify data was restored
+    {
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        // Verify counts
+        assert_eq!(db.node_count(), 2, "Should have restored 2 nodes from disk");
+        assert_eq!(db.edge_count(), 1, "Should have restored 1 edge from disk");
+
+        // Verify node 1 with all properties
+        let node1 = db.get_node(node1_id).unwrap();
+        assert_eq!(
+            node1.properties.get("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(
+            node1.properties.get("age").and_then(|v| v.as_int()),
+            Some(30)
+        );
+        assert_eq!(
+            node1.properties.get("city").and_then(|v| v.as_str()),
+            Some("Seattle")
+        );
+
+        // Verify node 2 with all properties
+        let node2 = db.get_node(node2_id).unwrap();
+        assert_eq!(
+            node2.properties.get("name").and_then(|v| v.as_str()),
+            Some("Bob")
+        );
+        assert_eq!(
+            node2.properties.get("age").and_then(|v| v.as_int()),
+            Some(25)
+        );
+        assert_eq!(
+            node2.properties.get("city").and_then(|v| v.as_str()),
+            Some("Portland")
+        );
+
+        // Verify edge with properties
+        let edge = db.get_edge(edge_id).unwrap();
+        assert_eq!(edge.source, node1_id);
+        assert_eq!(edge.target, node2_id);
+        assert_eq!(
+            edge.properties.get("since").and_then(|v| v.as_int()),
+            Some(2020)
+        );
+        assert_eq!(
+            edge.properties.get("strength").and_then(|v| v.as_str()),
+            Some("strong")
+        );
+
+        // Verify graph structure (adjacency)
+        let outgoing = db.get_outgoing_edges(node1_id);
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0], edge_id);
+
+        let incoming = db.get_incoming_edges(node2_id);
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0], edge_id);
+
+        println!("✓ Full persistence lifecycle test passed");
+    }
+}
