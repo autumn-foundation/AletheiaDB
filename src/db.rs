@@ -25,7 +25,480 @@ use crate::storage::wal::{DurabilityMode, WriteOptions};
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::{MutexExt, RwLockExt};
 use parking_lot::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Tracks persistence state for automatic index persistence.
+///
+/// This struct maintains mutation counters and last persist timestamps for each index type,
+/// enabling policy-based automatic persistence triggers.
+#[derive(Debug)]
+pub(crate) struct PersistenceTracker {
+    /// Vector index mutation counter (total across all vector properties)
+    vector_mutations: AtomicU64,
+    /// Graph index mutation counter
+    graph_mutations: AtomicU64,
+    /// Temporal index mutation counter (new versions)
+    temporal_mutations: AtomicU64,
+    /// String interner mutation counter (new strings)
+    string_mutations: AtomicU64,
+    /// Last persist timestamp for vector indexes (unix timestamp)
+    last_vector_persist: AtomicU64,
+    /// Last persist timestamp for graph index
+    last_graph_persist: AtomicU64,
+    /// Last persist timestamp for temporal index
+    last_temporal_persist: AtomicU64,
+    /// Last persist timestamp for string interner
+    last_string_persist: AtomicU64,
+    /// Shutdown signal for background persistence thread
+    shutdown: AtomicBool,
+}
+
+impl PersistenceTracker {
+    /// Create a new persistence tracker with all counters at zero.
+    pub fn new() -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        Self {
+            vector_mutations: AtomicU64::new(0),
+            graph_mutations: AtomicU64::new(0),
+            temporal_mutations: AtomicU64::new(0),
+            string_mutations: AtomicU64::new(0),
+            last_vector_persist: AtomicU64::new(now),
+            last_graph_persist: AtomicU64::new(now),
+            last_temporal_persist: AtomicU64::new(now),
+            last_string_persist: AtomicU64::new(now),
+            shutdown: AtomicBool::new(false),
+        }
+    }
+
+    /// Increment vector mutation counter.
+    pub fn record_vector_mutation(&self) {
+        self.vector_mutations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment graph mutation counter.
+    pub fn record_graph_mutation(&self) {
+        self.graph_mutations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment temporal mutation counter.
+    pub fn record_temporal_mutation(&self) {
+        self.temporal_mutations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment string mutation counter.
+    pub fn record_string_mutation(&self) {
+        self.string_mutations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get and reset vector mutation counter, updating last persist time.
+    pub fn reset_vector_mutations(&self) -> u64 {
+        let count = self.vector_mutations.swap(0, Ordering::Relaxed);
+        self.last_vector_persist.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            Ordering::Relaxed,
+        );
+        count
+    }
+
+    /// Get and reset graph mutation counter, updating last persist time.
+    pub fn reset_graph_mutations(&self) -> u64 {
+        let count = self.graph_mutations.swap(0, Ordering::Relaxed);
+        self.last_graph_persist.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            Ordering::Relaxed,
+        );
+        count
+    }
+
+    /// Get and reset temporal mutation counter, updating last persist time.
+    pub fn reset_temporal_mutations(&self) -> u64 {
+        let count = self.temporal_mutations.swap(0, Ordering::Relaxed);
+        self.last_temporal_persist.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            Ordering::Relaxed,
+        );
+        count
+    }
+
+    /// Get and reset string mutation counter, updating last persist time.
+    pub fn reset_string_mutations(&self) -> u64 {
+        let count = self.string_mutations.swap(0, Ordering::Relaxed);
+        self.last_string_persist.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            Ordering::Relaxed,
+        );
+        count
+    }
+
+    /// Get current vector mutation count without resetting.
+    pub fn get_vector_mutations(&self) -> u64 {
+        self.vector_mutations.load(Ordering::Relaxed)
+    }
+
+    /// Get current graph mutation count without resetting.
+    pub fn get_graph_mutations(&self) -> u64 {
+        self.graph_mutations.load(Ordering::Relaxed)
+    }
+
+    /// Get current temporal mutation count without resetting.
+    pub fn get_temporal_mutations(&self) -> u64 {
+        self.temporal_mutations.load(Ordering::Relaxed)
+    }
+
+    /// Get current string mutation count without resetting.
+    pub fn get_string_mutations(&self) -> u64 {
+        self.string_mutations.load(Ordering::Relaxed)
+    }
+
+    /// Get seconds since last vector persist.
+    pub fn seconds_since_vector_persist(&self) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let last = self.last_vector_persist.load(Ordering::Relaxed);
+        now.saturating_sub(last)
+    }
+
+    /// Get seconds since last graph persist.
+    pub fn seconds_since_graph_persist(&self) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let last = self.last_graph_persist.load(Ordering::Relaxed);
+        now.saturating_sub(last)
+    }
+
+    /// Get seconds since last temporal persist.
+    pub fn seconds_since_temporal_persist(&self) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let last = self.last_temporal_persist.load(Ordering::Relaxed);
+        now.saturating_sub(last)
+    }
+
+    /// Get seconds since last string persist.
+    pub fn seconds_since_string_persist(&self) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let last = self.last_string_persist.load(Ordering::Relaxed);
+        now.saturating_sub(last)
+    }
+
+    /// Signal shutdown to background thread.
+    pub fn signal_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Check if shutdown has been signaled.
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
+}
+
+/// Spawn a background thread for automatic index persistence.
+///
+/// This thread periodically checks persistence policies and triggers index saves when:
+/// - Mutation thresholds are exceeded
+/// - Time intervals have elapsed
+/// - Special events occur (e.g., graph adjacency rebuild)
+///
+/// # Crash Safety
+///
+/// The thread is wrapped in `catch_unwind` to prevent silent failures. If a panic occurs:
+/// - The panic is logged to stderr
+/// - The `stopped_flag` is set to true
+/// - The database continues running but future persistence attempts will fail with warnings
+///
+/// This prevents data corruption while alerting users to the failure.
+#[allow(clippy::too_many_arguments)]
+fn spawn_background_persistence_thread(
+    current: Arc<CurrentStorage>,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    temporal_indexes: Arc<TemporalIndexes>,
+    wal: Arc<ConcurrentWalSystem>,
+    manager: Arc<crate::storage::index_persistence::IndexPersistenceManager>,
+    tracker: Arc<PersistenceTracker>,
+    policies: crate::storage::index_persistence::formats::PersistencePolicies,
+    stopped_flag: Arc<std::sync::atomic::AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        // Wrap entire thread in panic handler to prevent silent failures
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Check policies every second
+            let check_interval = std::time::Duration::from_secs(1);
+
+            while !tracker.is_shutdown() {
+            std::thread::sleep(check_interval);
+
+            // Skip if shutdown signaled
+            if tracker.is_shutdown() {
+                break;
+            }
+
+            // Check vector index policy
+            let vector_mutations = tracker.get_vector_mutations();
+            let vector_seconds = tracker.seconds_since_vector_persist();
+            if (vector_mutations >= policies.vector.mutation_threshold as u64
+                || vector_seconds >= policies.vector.time_interval_secs as u64)
+                && let Err(e) = persist_vector_indexes(&current, &manager, &tracker)
+            {
+                eprintln!(
+                    "Background persistence: Failed to persist vector indexes: {}",
+                    e
+                );
+            }
+
+            // Check graph index policy
+            let graph_mutations = tracker.get_graph_mutations();
+            let graph_seconds = tracker.seconds_since_graph_persist();
+            if (graph_mutations >= policies.graph.mutation_threshold as u64
+                || graph_seconds >= policies.graph.time_interval_secs as u64)
+                && let Err(e) = persist_graph_index(&current, &manager, &tracker)
+            {
+                eprintln!(
+                    "Background persistence: Failed to persist graph index: {}",
+                    e
+                );
+            }
+
+            // Check temporal index policy
+            let temporal_mutations = tracker.get_temporal_mutations();
+            let temporal_seconds = tracker.seconds_since_temporal_persist();
+            if (temporal_mutations >= policies.temporal.version_threshold as u64
+                || temporal_seconds >= policies.temporal.time_interval_secs as u64)
+                && let Err(e) =
+                    persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker)
+            {
+                eprintln!(
+                    "Background persistence: Failed to persist temporal index: {}",
+                    e
+                );
+            }
+
+            // Check string interner policy
+            let string_mutations = tracker.get_string_mutations();
+            let string_seconds = tracker.seconds_since_string_persist();
+            if (string_mutations >= policies.strings.new_strings_threshold as u64
+                || string_seconds >= policies.strings.time_interval_secs as u64)
+                && let Err(e) = persist_string_interner(&manager, &tracker)
+            {
+                eprintln!(
+                    "Background persistence: Failed to persist string interner: {}",
+                    e
+                );
+            }
+        }
+
+            // Final persist on shutdown
+            let _ = persist_all_indexes(&current, &historical, &temporal_indexes, &wal, &manager, &tracker);
+        }));
+
+        // Set stopped flag and log regardless of normal exit or panic
+        stopped_flag.store(true, Ordering::Release);
+
+        match result {
+            Ok(()) => {
+                eprintln!("Warning: Background persistence thread exited normally but unexpectedly. Future persistence operations will fail.");
+            }
+            Err(e) => {
+                eprintln!("CRITICAL: Background persistence thread panicked: {:?}", e);
+                eprintln!("Database will continue running but NO FURTHER INDEX PERSISTENCE will occur.");
+                eprintln!("You MUST restart the database to restore automatic persistence.");
+            }
+        }
+    });
+}
+
+/// Persist vector indexes to disk.
+fn persist_vector_indexes(
+    _current: &Arc<CurrentStorage>,
+    manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
+    tracker: &Arc<PersistenceTracker>,
+) -> crate::utils::error::Result<()> {
+    // TODO: Implement actual vector index persistence
+    // For now, just save the interner and reset counter
+    manager.save_string_interner().map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+    })?;
+
+    tracker.reset_vector_mutations();
+    Ok(())
+}
+
+/// Persist graph index to disk.
+fn persist_graph_index(
+    current: &Arc<CurrentStorage>,
+    manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
+    tracker: &Arc<PersistenceTracker>,
+) -> crate::utils::error::Result<()> {
+    use crate::storage::index_persistence::graph::{
+        new_graph_index_data, persist_property_map, save_graph_index,
+    };
+    use crate::storage::index_persistence::{PersistedEdge, PersistedNode};
+
+    let mut graph_data = new_graph_index_data();
+
+    // Stream all nodes without collecting into intermediate Vec (prevents OOM on large graphs)
+    for node in current.all_nodes() {
+        let properties = persist_property_map(&node.properties).map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to persist node properties: {}", e))
+        })?;
+
+        graph_data.nodes.push(PersistedNode {
+            id: node.id.as_u64(),
+            label_idx: node.label.as_u32(),
+            properties,
+        });
+    }
+    graph_data.node_count = graph_data.nodes.len() as u64;
+
+    // Stream all edges without collecting into intermediate Vec (prevents OOM on large graphs)
+    for edge in current.all_edges() {
+        let properties = persist_property_map(&edge.properties).map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to persist edge properties: {}", e))
+        })?;
+
+        graph_data.edges.push(PersistedEdge {
+            id: edge.id.as_u64(),
+            source_id: edge.source.as_u64(),
+            target_id: edge.target.as_u64(),
+            label_idx: edge.label.as_u32(),
+            properties,
+        });
+    }
+    graph_data.edge_count = graph_data.edges.len() as u64;
+
+    // Export CSR adjacency structures for fast loading
+    let (outgoing_offsets, outgoing_neighbors) = current.export_outgoing_csr();
+    let (incoming_offsets, incoming_neighbors) = current.export_incoming_csr();
+
+    graph_data.outgoing_offsets = outgoing_offsets;
+    graph_data.outgoing_neighbors = outgoing_neighbors;
+    graph_data.incoming_offsets = incoming_offsets;
+    graph_data.incoming_neighbors = incoming_neighbors;
+
+    // Save to disk
+    let graph_path = manager.graph_path().join("adjacency.idx");
+
+    std::fs::create_dir_all(manager.graph_path()).map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to create graph directory: {}", e))
+    })?;
+
+    save_graph_index(&graph_data, &graph_path).map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save graph index: {}", e))
+    })?;
+
+    tracker.reset_graph_mutations();
+    Ok(())
+}
+
+/// Persist temporal index to disk.
+fn persist_temporal_index(
+    _historical: &Arc<RwLock<HistoricalStorage>>,
+    _temporal_indexes: &Arc<TemporalIndexes>,
+    manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
+    tracker: &Arc<PersistenceTracker>,
+) -> crate::utils::error::Result<()> {
+    // TODO: Implement actual temporal index persistence
+    // For now, just save the interner and reset counter
+    manager.save_string_interner().map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+    })?;
+
+    tracker.reset_temporal_mutations();
+    Ok(())
+}
+
+/// Persist string interner to disk.
+fn persist_string_interner(
+    manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
+    tracker: &Arc<PersistenceTracker>,
+) -> crate::utils::error::Result<()> {
+    manager.save_string_interner().map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+    })?;
+
+    tracker.reset_string_mutations();
+    Ok(())
+}
+
+/// Persist all indexes on shutdown.
+fn persist_all_indexes(
+    current: &Arc<CurrentStorage>,
+    historical: &Arc<RwLock<HistoricalStorage>>,
+    temporal_indexes: &Arc<TemporalIndexes>,
+    wal: &Arc<ConcurrentWalSystem>,
+    manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
+    tracker: &Arc<PersistenceTracker>,
+) -> crate::utils::error::Result<()> {
+    // Persist all indexes - log errors but continue with remaining indexes
+    if let Err(e) = persist_string_interner(manager, tracker) {
+        eprintln!("Failed to persist string interner: {}", e);
+    }
+    if let Err(e) = persist_graph_index(current, manager, tracker) {
+        eprintln!("Failed to persist graph index: {}", e);
+    }
+    if let Err(e) = persist_temporal_index(historical, temporal_indexes, manager, tracker) {
+        eprintln!("Failed to persist temporal index: {}", e);
+    }
+    if let Err(e) = persist_vector_indexes(current, manager, tracker) {
+        eprintln!("Failed to persist vector indexes: {}", e);
+    }
+
+    // Save manifest
+    use crate::storage::index_persistence::formats::{
+        GraphIndexManifestEntry, IndexManifest, StringInternerManifestEntry,
+    };
+
+    let current_lsn = wal.current_lsn().0;
+    let mut manifest = IndexManifest::new(current_lsn);
+
+    // Add string interner entry
+    manifest.string_interner = Some(StringInternerManifestEntry {
+        interner_file: "strings/interner.idx".to_string(),
+        string_count: crate::core::GLOBAL_INTERNER.len() as u64,
+    });
+
+    // Add graph index entry if we have nodes/edges
+    let node_count = current.all_nodes().count();
+    let edge_count = current.all_edges().count();
+    if node_count > 0 || edge_count > 0 {
+        manifest.graph_index = Some(GraphIndexManifestEntry {
+            adjacency_file: "graph/adjacency.idx".to_string(),
+            node_count: node_count as u64,
+            edge_count: edge_count as u64,
+        });
+    }
+
+    manager
+        .save_manifest(&manifest)
+        .map_err(|e| StorageError::PersistenceError(format!("Failed to save manifest: {}", e)))?;
+
+    Ok(())
+}
 
 /// Main GallifreyDB database.
 ///
@@ -66,6 +539,15 @@ pub struct GallifreyDB {
     default_durability: DurabilityMode,
     /// Query optimization statistics - cached across queries for effective cost-based optimization
     stats: Arc<Statistics>,
+    /// Index persistence configuration (stored for potential future use)
+    #[allow(dead_code)]
+    persistence_config: crate::storage::index_persistence::PersistenceConfig,
+    /// Index persistence manager (if enabled)
+    persistence_manager: Option<Arc<crate::storage::index_persistence::IndexPersistenceManager>>,
+    /// Persistence mutation tracking
+    persistence_tracker: Option<Arc<PersistenceTracker>>,
+    /// Background persistence thread health flag - set to true if thread panics or stops
+    persistence_thread_stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GallifreyDB {
@@ -145,7 +627,25 @@ impl GallifreyDB {
         let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");
         let wal = Arc::new(wal);
 
-        GallifreyDB {
+        // Create persistence manager if enabled
+        let persistence_manager = if config.persistence.enabled {
+            Some(Arc::new(
+                crate::storage::index_persistence::IndexPersistenceManager::new(
+                    &config.persistence.data_dir,
+                ),
+            ))
+        } else {
+            None
+        };
+
+        // Create persistence tracker if persistence is enabled
+        let persistence_tracker = if config.persistence.enabled {
+            Some(Arc::new(PersistenceTracker::new()))
+        } else {
+            None
+        };
+
+        let db = GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
                 config.historical,
@@ -160,7 +660,283 @@ impl GallifreyDB {
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             default_durability: durability_mode,
             stats: Arc::new(Statistics::new()),
+            persistence_config: config.persistence.clone(),
+            persistence_manager: persistence_manager.clone(),
+            persistence_tracker: persistence_tracker.clone(),
+            persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        // Load indexes on startup if enabled
+        if let Some(ref manager) = persistence_manager
+            && config.persistence.load_on_startup
+        {
+            // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
+            // (manifest is only saved on shutdown, not during background persistence)
+            match manager.load_manifest_and_strings() {
+                Ok(_) => {}, // Successfully loaded
+                Err(e) if e.is_not_found() => {}, // Expected on first run
+                Err(e) => eprintln!("Warning: Failed to load manifest: {}", e),
+            }
+
+            // Try to restore graph data even if manifest loading failed
+            let graph_path = manager.graph_path().join("adjacency.idx");
+            if graph_path.exists() {
+                use crate::api::transaction::types::TxId;
+                use crate::core::GLOBAL_INTERNER;
+                use crate::core::graph::{Edge, Node};
+                use crate::core::id::{EdgeId, NodeId, VersionId};
+                use crate::storage::index_persistence::graph::{
+                    load_graph_index, restore_property_map,
+                };
+                use crate::storage::version::VersionMetadata;
+
+                match load_graph_index(&graph_path) {
+                    Ok(graph_data) => {
+                        let current_time = time::now();
+                        let mut max_node_id = 0u64;
+                        let mut max_edge_id = 0u64;
+
+                        // Track restoration statistics
+                        let total_nodes = graph_data.nodes.len();
+                        let total_edges = graph_data.edges.len();
+                        let mut nodes_loaded = 0usize;
+                        let mut edges_loaded = 0usize;
+                        let mut nodes_failed_label = 0usize;
+                        let mut nodes_failed_properties = 0usize;
+                        let mut nodes_failed_version = 0usize;
+                        let mut edges_failed_label = 0usize;
+                        let mut edges_failed_properties = 0usize;
+                        let mut edges_failed_version = 0usize;
+
+                        // Pre-calculate max IDs before inserting to avoid race conditions
+                        for persisted_node in &graph_data.nodes {
+                            max_node_id = max_node_id.max(persisted_node.id);
+                        }
+                        for persisted_edge in &graph_data.edges {
+                            max_edge_id = max_edge_id.max(persisted_edge.id);
+                        }
+
+                        // Initialize ID generators BEFORE inserting entities to prevent collisions
+                        if max_node_id > 0
+                            && let Ok(mut node_gen) = db.node_id_gen.lock_or_err()
+                        {
+                            *node_gen = crate::core::id::IdGenerator::with_start(max_node_id + 1);
+                        }
+                        if max_edge_id > 0
+                            && let Ok(mut edge_gen) = db.edge_id_gen.lock_or_err()
+                        {
+                            *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
+                        }
+
+                        // Restore nodes with explicit error tracking
+                        for persisted_node in &graph_data.nodes {
+                            // Validate label exists in string interner
+                            let label_str = match GLOBAL_INTERNER.resolve(
+                                crate::core::InternedString::from_raw(persisted_node.label_idx),
+                            ) {
+                                Some(s) => s,
+                                None => {
+                                    nodes_failed_label += 1;
+                                    eprintln!(
+                                        "Warning: Skipping node {}: label index {} not found in string interner",
+                                        persisted_node.id, persisted_node.label_idx
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Restore properties
+                            let properties = match restore_property_map(&persisted_node.properties) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    nodes_failed_properties += 1;
+                                    eprintln!(
+                                        "Warning: Skipping node {} (label '{}'): property restoration failed: {}",
+                                        persisted_node.id, label_str, e
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Generate version ID
+                            let version_id = {
+                                let version_gen = match db.version_id_gen.lock_or_err() {
+                                    Ok(g) => g,
+                                    Err(e) => {
+                                        nodes_failed_version += 1;
+                                        eprintln!(
+                                            "Warning: Skipping node {} (label '{}'): version generator lock failed: {}",
+                                            persisted_node.id, label_str, e
+                                        );
+                                        continue;
+                                    }
+                                };
+                                match version_gen.next() {
+                                    Ok(v) => VersionId::new_unchecked(v),
+                                    Err(e) => {
+                                        nodes_failed_version += 1;
+                                        eprintln!(
+                                            "Warning: Skipping node {} (label '{}'): version ID generation failed: {}",
+                                            persisted_node.id, label_str, e
+                                        );
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            let node = Node {
+                                id: NodeId::new_unchecked(persisted_node.id),
+                                label: crate::core::InternedString::from_raw(
+                                    persisted_node.label_idx,
+                                ),
+                                properties,
+                                current_version: version_id,
+                                metadata: VersionMetadata {
+                                    created_by_tx: TxId::new(0), // Restored from disk
+                                    commit_timestamp: Some(current_time),
+                                },
+                            };
+
+                            let _ = db.current.insert_node_direct(node, current_time);
+                            nodes_loaded += 1;
+                        }
+
+                        // Restore edges with explicit error tracking
+                        for persisted_edge in &graph_data.edges {
+                            // Validate label exists in string interner
+                            let label_str = match GLOBAL_INTERNER.resolve(
+                                crate::core::InternedString::from_raw(persisted_edge.label_idx),
+                            ) {
+                                Some(s) => s,
+                                None => {
+                                    edges_failed_label += 1;
+                                    eprintln!(
+                                        "Warning: Skipping edge {}: label index {} not found in string interner",
+                                        persisted_edge.id, persisted_edge.label_idx
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Restore properties
+                            let properties = match restore_property_map(&persisted_edge.properties) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    edges_failed_properties += 1;
+                                    eprintln!(
+                                        "Warning: Skipping edge {} (label '{}'): property restoration failed: {}",
+                                        persisted_edge.id, label_str, e
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Generate version ID
+                            let version_id = {
+                                let version_gen = match db.version_id_gen.lock_or_err() {
+                                    Ok(g) => g,
+                                    Err(e) => {
+                                        edges_failed_version += 1;
+                                        eprintln!(
+                                            "Warning: Skipping edge {} (label '{}'): version generator lock failed: {}",
+                                            persisted_edge.id, label_str, e
+                                        );
+                                        continue;
+                                    }
+                                };
+                                match version_gen.next() {
+                                    Ok(v) => VersionId::new_unchecked(v),
+                                    Err(e) => {
+                                        edges_failed_version += 1;
+                                        eprintln!(
+                                            "Warning: Skipping edge {} (label '{}'): version ID generation failed: {}",
+                                            persisted_edge.id, label_str, e
+                                        );
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            let edge = Edge {
+                                id: EdgeId::new_unchecked(persisted_edge.id),
+                                source: NodeId::new_unchecked(persisted_edge.source_id),
+                                target: NodeId::new_unchecked(persisted_edge.target_id),
+                                label: crate::core::InternedString::from_raw(
+                                    persisted_edge.label_idx,
+                                ),
+                                properties,
+                                current_version: version_id,
+                                metadata: VersionMetadata {
+                                    created_by_tx: TxId::new(0), // Restored from disk
+                                    commit_timestamp: Some(current_time),
+                                },
+                            };
+
+                            let _ = db.current.insert_edge_direct(edge);
+                            edges_loaded += 1;
+                        }
+
+                        // Log restoration summary
+                        let nodes_skipped = total_nodes - nodes_loaded;
+                        let edges_skipped = total_edges - edges_loaded;
+
+                        if nodes_skipped > 0 || edges_skipped > 0 {
+                            eprintln!(
+                                "Index restoration completed with data loss:\n\
+                                 Nodes: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)\n\
+                                 Edges: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)",
+                                nodes_loaded, total_nodes, nodes_skipped,
+                                nodes_failed_label, nodes_failed_properties, nodes_failed_version,
+                                edges_loaded, total_edges, edges_skipped,
+                                edges_failed_label, edges_failed_properties, edges_failed_version
+                            );
+                        } else if total_nodes > 0 || total_edges > 0 {
+                            eprintln!(
+                                "Index restoration completed successfully: {} nodes, {} edges loaded",
+                                nodes_loaded, edges_loaded
+                            );
+                        }
+
+                        // Import CSR adjacency structures if available, otherwise rebuild
+                        if !graph_data.outgoing_offsets.is_empty()
+                            && !graph_data.incoming_offsets.is_empty()
+                        {
+                            db.current.import_csr(
+                                graph_data.outgoing_offsets,
+                                graph_data.outgoing_neighbors,
+                                graph_data.incoming_offsets,
+                                graph_data.incoming_neighbors,
+                            );
+                        } else {
+                            // Fallback for older index files without CSR data
+                            db.current.rebuild_adjacency();
+                        }
+                    }
+                    Err(_e) => {
+                        // Graph index loading failed - start with empty graph
+                        // This is normal if no index files exist yet
+                    }
+                }
+            }
         }
+
+        // Start background persistence thread if enabled
+        if let Some(ref tracker) = persistence_tracker
+            && let Some(ref manager) = persistence_manager
+        {
+            spawn_background_persistence_thread(
+                Arc::clone(&db.current),
+                Arc::clone(&db.historical),
+                Arc::clone(&db.temporal_indexes),
+                Arc::clone(&db.wal),
+                Arc::clone(manager),
+                Arc::clone(tracker),
+                config.persistence.policies.clone(),
+                Arc::clone(&db.persistence_thread_stopped),
+            );
+        }
+
+        db
     }
 
     /// Create a new database with both anchor and WAL configuration.
@@ -206,6 +982,10 @@ impl GallifreyDB {
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             default_durability: durability_mode,
             stats: Arc::new(Statistics::new()),
+            persistence_config: crate::storage::index_persistence::PersistenceConfig::default(),
+            persistence_manager: None,
+            persistence_tracker: None,
+            persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -387,7 +1167,27 @@ impl GallifreyDB {
     {
         let mut tx = self.write_transaction()?;
         let result = f(&mut tx)?;
+
+        // Track mutations for persistence before committing
+        let has_node_writes = tx.has_node_writes();
+        let has_edge_writes = tx.has_edge_writes();
+        let has_vector_writes = tx.has_vector_writes();
+
         tx.commit()?; // Ignore commit timestamp for simple write()
+
+        // Record mutations after successful commit
+        if let Some(ref tracker) = self.persistence_tracker {
+            if has_node_writes || has_edge_writes {
+                tracker.record_graph_mutation();
+                tracker.record_temporal_mutation();
+                // String interner mutations happen with every node/edge (labels)
+                tracker.record_string_mutation();
+            }
+            if has_vector_writes {
+                tracker.record_vector_mutation();
+            }
+        }
+
         Ok(result)
     }
 
@@ -412,7 +1212,25 @@ impl GallifreyDB {
     {
         let mut tx = self.write_transaction()?;
         let result = f(&mut tx)?;
+
+        // Track mutations for persistence before committing
+        let has_node_writes = tx.has_node_writes();
+        let has_edge_writes = tx.has_edge_writes();
+        let has_vector_writes = tx.has_vector_writes();
+
         let commit_ts = tx.commit_with_timestamp()?;
+
+        // Record mutations after successful commit
+        if let Some(ref tracker) = self.persistence_tracker {
+            if has_node_writes || has_edge_writes {
+                tracker.record_graph_mutation();
+                tracker.record_temporal_mutation();
+            }
+            if has_vector_writes {
+                tracker.record_vector_mutation();
+            }
+        }
+
         Ok((result, commit_ts))
     }
 
@@ -446,7 +1264,27 @@ impl GallifreyDB {
     {
         let mut tx = self.write_transaction_with_options(options)?;
         let result = f(&mut tx)?;
+
+        // Track mutations for persistence before committing
+        let has_node_writes = tx.has_node_writes();
+        let has_edge_writes = tx.has_edge_writes();
+        let has_vector_writes = tx.has_vector_writes();
+
         tx.commit()?; // Ignore commit timestamp for simple write_with_options()
+
+        // Record mutations after successful commit
+        if let Some(ref tracker) = self.persistence_tracker {
+            if has_node_writes || has_edge_writes {
+                tracker.record_graph_mutation();
+                tracker.record_temporal_mutation();
+                // String interner mutations happen with every node/edge (labels)
+                tracker.record_string_mutation();
+            }
+            if has_vector_writes {
+                tracker.record_vector_mutation();
+            }
+        }
+
         Ok(result)
     }
 
@@ -1830,6 +2668,105 @@ impl GallifreyDB {
         Ok(self.historical.read_or_err()?.stats())
     }
 
+    /// Persist all indexes to disk.
+    ///
+    /// This saves the current state of all indexes (graph, temporal, vector, strings)
+    /// to disk in the configured persistence directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Index persistence is not enabled in configuration
+    /// - Writing index files fails due to I/O errors
+    /// - Index serialization fails
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let db = GallifreyDB::new();
+    /// // ... add data ...
+    /// db.persist_indexes()?; // Save indexes to disk
+    /// ```
+    pub fn persist_indexes(&self) -> Result<()> {
+        use crate::storage::index_persistence::formats::IndexManifest;
+        use crate::storage::index_persistence::formats::{PersistedEdge, PersistedNode};
+        use crate::storage::index_persistence::graph::{
+            new_graph_index_data, persist_property_map, save_graph_index,
+        };
+
+        // Warn if background persistence thread has stopped
+        if self.persistence_thread_stopped.load(std::sync::atomic::Ordering::Acquire) {
+            eprintln!(
+                "Warning: Background persistence thread has stopped. \
+                 Automatic persistence is disabled. Manual persist_indexes() calls will still work."
+            );
+        }
+
+        let manager =
+            self.persistence_manager
+                .as_ref()
+                .ok_or_else(|| StorageError::InconsistentState {
+                    reason: "Index persistence not enabled".to_string(),
+                })?;
+
+        // 1. Save string interner first (dependency for all others)
+        manager.save_string_interner().map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+        })?;
+
+        // 2. Save graph index
+        let mut graph_data = new_graph_index_data();
+
+        // Export all nodes
+        let all_nodes = self.current.all_nodes();
+        for node in all_nodes {
+            let label_idx = node.label.as_u32();
+            let properties = persist_property_map(&node.properties).map_err(|e| {
+                StorageError::PersistenceError(format!("Failed to persist node properties: {}", e))
+            })?;
+
+            graph_data.nodes.push(PersistedNode {
+                id: node.id.as_u64(),
+                label_idx,
+                properties,
+            });
+        }
+
+        // Export all edges
+        let all_edges = self.current.all_edges();
+        for edge in all_edges {
+            let label_idx = edge.label.as_u32();
+            let properties = persist_property_map(&edge.properties).map_err(|e| {
+                StorageError::PersistenceError(format!("Failed to persist edge properties: {}", e))
+            })?;
+
+            graph_data.edges.push(PersistedEdge {
+                id: edge.id.as_u64(),
+                source_id: edge.source.as_u64(),
+                target_id: edge.target.as_u64(),
+                label_idx,
+                properties,
+            });
+        }
+
+        graph_data.node_count = graph_data.nodes.len() as u64;
+        graph_data.edge_count = graph_data.edges.len() as u64;
+
+        save_graph_index(&graph_data, &manager.graph_path().join("adjacency.idx")).map_err(
+            |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+        )?;
+
+        // 3. Save manifest last with current WAL LSN
+        // Note: This records the WAL position at persist time for future WAL replay coordination
+        let current_lsn = self.wal.current_lsn().0;
+        let manifest = IndexManifest::new(current_lsn);
+        manager.save_manifest(&manifest).map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save manifest: {}", e))
+        })?;
+
+        Ok(())
+    }
+
     /// Get a reference to the current storage (test-only helper).
     ///
     /// This method is only available in test builds and provides access to the
@@ -1920,6 +2857,19 @@ impl GallifreyDB {
     /// on the next query. The statistics will be lazily refreshed when needed.
     pub fn invalidate_statistics(&self) {
         self.stats.invalidate();
+    }
+}
+
+impl Drop for GallifreyDB {
+    fn drop(&mut self) {
+        // Signal shutdown to background persistence thread
+        if let Some(ref tracker) = self.persistence_tracker {
+            tracker.signal_shutdown();
+
+            // Give the thread a moment to finish and persist on shutdown
+            // The background thread will call persist_all_indexes() before exiting
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }
 

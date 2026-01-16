@@ -197,6 +197,11 @@ pub enum StorageError {
     IoError(String),
     /// Corrupted data detected.
     CorruptedData(String),
+    /// Index persistence error.
+    ///
+    /// This variant preserves the original IndexPersistenceError information
+    /// for better debugging and error handling of persistence operations.
+    PersistenceError(String),
     /// A lock was poisoned by a panicking thread.
     ///
     /// This occurs when a thread panics while holding a lock, causing subsequent
@@ -249,6 +254,7 @@ impl fmt::Display for StorageError {
             }
             StorageError::IoError(msg) => write!(f, "I/O error: {}", msg),
             StorageError::CorruptedData(msg) => write!(f, "Corrupted data: {}", msg),
+            StorageError::PersistenceError(msg) => write!(f, "Persistence error: {}", msg),
             StorageError::LockPoisoned { lock_type } => {
                 write!(
                     f,
@@ -881,6 +887,11 @@ mod tests {
         let err = StorageError::CorruptedData("bad checksum".to_string());
         assert!(format!("{}", err).contains("Corrupted data"));
         assert!(format!("{}", err).contains("bad checksum"));
+
+        // Test PersistenceError
+        let err = StorageError::PersistenceError("failed to save index".to_string());
+        assert!(format!("{}", err).contains("Persistence error"));
+        assert!(format!("{}", err).contains("failed to save index"));
 
         // Test LockPoisoned
         let err = StorageError::LockPoisoned { lock_type: "Mutex" };

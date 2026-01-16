@@ -18,6 +18,7 @@ arc-swap = "1.7"
 quick_cache = "0.6"
 crossbeam-channel = "0.5"
 bitcode = "0.6"
+zstd = "0.13"
 memmap2 = "0.9"
 thiserror = "2.0"
 

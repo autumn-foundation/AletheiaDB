@@ -431,6 +431,62 @@ impl CurrentIndexes {
     pub fn iter_edges(&self) -> impl Iterator<Item = Edge> + '_ {
         self.edges.iter().map(|entry| entry.value().clone())
     }
+
+    /// Export outgoing CSR data for persistence.
+    pub fn export_outgoing_csr(&self) -> (Vec<u64>, Vec<u64>) {
+        self.outgoing.load().export_csr()
+    }
+
+    /// Export incoming CSR data for persistence.
+    pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>) {
+        self.incoming.load().export_csr()
+    }
+
+    /// Import CSR data for both outgoing and incoming adjacency.
+    ///
+    /// This is used when loading persisted indexes to avoid rebuilding CSR from scratch.
+    pub fn import_csr(
+        &self,
+        outgoing_offsets: Vec<u64>,
+        outgoing_edge_ids: Vec<u64>,
+        incoming_offsets: Vec<u64>,
+        incoming_edge_ids: Vec<u64>,
+    ) {
+        use std::collections::HashMap;
+
+        // Build edges map for CSR reconstruction
+        let mut edges_map = HashMap::new();
+        for entry in self.edges.iter() {
+            let edge = entry.value();
+            edges_map.insert(edge.id, (edge.target, edge.label));
+        }
+
+        // Import outgoing adjacency
+        let outgoing = crate::index::adjacency::AdjacencyIndex::import_csr(
+            outgoing_offsets,
+            outgoing_edge_ids,
+            &edges_map,
+        );
+        self.outgoing.store(std::sync::Arc::new(outgoing));
+
+        // Rebuild edges map for incoming (maps edge_id to source, not target)
+        edges_map.clear();
+        for entry in self.edges.iter() {
+            let edge = entry.value();
+            edges_map.insert(edge.id, (edge.source, edge.label));
+        }
+
+        // Import incoming adjacency
+        let incoming = crate::index::adjacency::AdjacencyIndex::import_csr(
+            incoming_offsets,
+            incoming_edge_ids,
+            &edges_map,
+        );
+        self.incoming.store(std::sync::Arc::new(incoming));
+
+        // CSR is now current
+        self.adjacency_dirty.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl Default for CurrentIndexes {

@@ -704,6 +704,34 @@ impl CurrentStorage {
             .collect()
     }
 
+    /// Export outgoing CSR adjacency data for persistence.
+    pub fn export_outgoing_csr(&self) -> (Vec<u64>, Vec<u64>) {
+        self.indexes.export_outgoing_csr()
+    }
+
+    /// Export incoming CSR adjacency data for persistence.
+    pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>) {
+        self.indexes.export_incoming_csr()
+    }
+
+    /// Import CSR adjacency data from persistence.
+    ///
+    /// This bypasses the need to rebuild adjacency structures from scratch.
+    pub fn import_csr(
+        &self,
+        outgoing_offsets: Vec<u64>,
+        outgoing_edge_ids: Vec<u64>,
+        incoming_offsets: Vec<u64>,
+        incoming_edge_ids: Vec<u64>,
+    ) {
+        self.indexes.import_csr(
+            outgoing_offsets,
+            outgoing_edge_ids,
+            incoming_offsets,
+            incoming_edge_ids,
+        );
+    }
+
     /// Get the number of nodes.
     #[inline]
     pub fn node_count(&self) -> usize {
@@ -1694,6 +1722,28 @@ impl CurrentStorage {
     pub fn vector_count(&self) -> usize {
         let state = self.vector_index_state.read();
         state.index.as_ref().map(|idx| idx.len()).unwrap_or(0)
+    }
+
+    /// Iterate over all nodes (for persistence).
+    ///
+    /// This is a helper method for index persistence that provides
+    /// access to all nodes in the current storage.
+    ///
+    /// Returns an iterator to avoid allocating a Vec for large graphs,
+    /// improving memory efficiency during persistence operations.
+    pub(crate) fn all_nodes(&self) -> impl Iterator<Item = Node> + '_ {
+        self.indexes.iter_nodes()
+    }
+
+    /// Iterate over all edges (for persistence).
+    ///
+    /// This is a helper method for index persistence that provides
+    /// access to all edges in the current storage.
+    ///
+    /// Returns an iterator to avoid allocating a Vec for large graphs,
+    /// improving memory efficiency during persistence operations.
+    pub(crate) fn all_edges(&self) -> impl Iterator<Item = Edge> + '_ {
+        self.indexes.iter_edges()
     }
 }
 
