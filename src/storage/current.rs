@@ -371,6 +371,59 @@ impl CurrentStorage {
         }
     }
 
+    /// Register a vector index (used during index loading from disk).
+    ///
+    /// This directly inserts the index without any initialization logic.
+    pub(crate) fn register_vector_index(
+        &self,
+        property_name: &str,
+        index: crate::index::vector::HnswIndex,
+        config: crate::index::vector::HnswConfig,
+    ) {
+        let index_arc = Arc::new(index);
+
+        // Insert into multi-property map
+        self.vector_indexes.insert(
+            property_name.to_string(),
+            VectorIndexEntry {
+                index: Arc::clone(&index_arc),
+                config: config.clone(),
+            },
+        );
+
+        // Update legacy single-property state (for backward compatibility)
+        let mut state = self.vector_index_state.write();
+        state.index = Some(Arc::clone(&index_arc));
+        state.property_name = Some(property_name.to_string());
+        state.config = Some(config);
+    }
+
+    /// Get a reference to the HNSW index and its config for a specific property.
+    ///
+    /// Used for persistence operations. Returns (index, config, vector_count, mappings).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn get_vector_index_for_persistence(
+        &self,
+        property_name: &str,
+    ) -> Option<(
+        Arc<crate::index::vector::HnswIndex>,
+        crate::index::vector::HnswConfig,
+        usize,
+        Vec<(u64, u64)>,
+    )> {
+        use crate::index::vector::VectorIndex;
+        self.vector_indexes.get(property_name).map(|entry| {
+            let index = entry.value().index.clone();
+            let config = entry.value().config.clone();
+            let count = index.len();
+
+            // Extract ID mappings from the index
+            let mappings = index.get_id_mappings();
+
+            (index, config, count, mappings)
+        })
+    }
+
     /// Try to add a node's vectors to all enabled indexes.
     ///
     /// For each enabled vector index, checks if the node has that property

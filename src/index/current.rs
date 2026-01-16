@@ -485,7 +485,8 @@ impl CurrentIndexes {
         self.incoming.store(std::sync::Arc::new(incoming));
 
         // CSR is now current
-        self.adjacency_dirty.store(false, std::sync::atomic::Ordering::Release);
+        self.adjacency_dirty
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 

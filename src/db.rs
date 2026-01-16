@@ -251,69 +251,76 @@ fn spawn_background_persistence_thread(
             let check_interval = std::time::Duration::from_secs(1);
 
             while !tracker.is_shutdown() {
-            std::thread::sleep(check_interval);
+                std::thread::sleep(check_interval);
 
-            // Skip if shutdown signaled
-            if tracker.is_shutdown() {
-                break;
-            }
+                // Skip if shutdown signaled
+                if tracker.is_shutdown() {
+                    break;
+                }
 
-            // Check vector index policy
-            let vector_mutations = tracker.get_vector_mutations();
-            let vector_seconds = tracker.seconds_since_vector_persist();
-            if (vector_mutations >= policies.vector.mutation_threshold as u64
-                || vector_seconds >= policies.vector.time_interval_secs as u64)
-                && let Err(e) = persist_vector_indexes(&current, &manager, &tracker)
-            {
-                eprintln!(
-                    "Background persistence: Failed to persist vector indexes: {}",
-                    e
-                );
-            }
+                // Check vector index policy
+                let vector_mutations = tracker.get_vector_mutations();
+                let vector_seconds = tracker.seconds_since_vector_persist();
+                if (vector_mutations >= policies.vector.mutation_threshold as u64
+                    || vector_seconds >= policies.vector.time_interval_secs as u64)
+                    && let Err(e) = persist_vector_indexes(&current, &manager, &tracker)
+                {
+                    eprintln!(
+                        "Background persistence: Failed to persist vector indexes: {}",
+                        e
+                    );
+                }
 
-            // Check graph index policy
-            let graph_mutations = tracker.get_graph_mutations();
-            let graph_seconds = tracker.seconds_since_graph_persist();
-            if (graph_mutations >= policies.graph.mutation_threshold as u64
-                || graph_seconds >= policies.graph.time_interval_secs as u64)
-                && let Err(e) = persist_graph_index(&current, &manager, &tracker)
-            {
-                eprintln!(
-                    "Background persistence: Failed to persist graph index: {}",
-                    e
-                );
-            }
+                // Check graph index policy
+                let graph_mutations = tracker.get_graph_mutations();
+                let graph_seconds = tracker.seconds_since_graph_persist();
+                if (graph_mutations >= policies.graph.mutation_threshold as u64
+                    || graph_seconds >= policies.graph.time_interval_secs as u64)
+                    && let Err(e) = persist_graph_index(&current, &manager, &tracker)
+                {
+                    eprintln!(
+                        "Background persistence: Failed to persist graph index: {}",
+                        e
+                    );
+                }
 
-            // Check temporal index policy
-            let temporal_mutations = tracker.get_temporal_mutations();
-            let temporal_seconds = tracker.seconds_since_temporal_persist();
-            if (temporal_mutations >= policies.temporal.version_threshold as u64
-                || temporal_seconds >= policies.temporal.time_interval_secs as u64)
-                && let Err(e) =
-                    persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker)
-            {
-                eprintln!(
-                    "Background persistence: Failed to persist temporal index: {}",
-                    e
-                );
-            }
+                // Check temporal index policy
+                let temporal_mutations = tracker.get_temporal_mutations();
+                let temporal_seconds = tracker.seconds_since_temporal_persist();
+                if (temporal_mutations >= policies.temporal.version_threshold as u64
+                    || temporal_seconds >= policies.temporal.time_interval_secs as u64)
+                    && let Err(e) =
+                        persist_temporal_index(&historical, &temporal_indexes, &manager, &tracker)
+                {
+                    eprintln!(
+                        "Background persistence: Failed to persist temporal index: {}",
+                        e
+                    );
+                }
 
-            // Check string interner policy
-            let string_mutations = tracker.get_string_mutations();
-            let string_seconds = tracker.seconds_since_string_persist();
-            if (string_mutations >= policies.strings.new_strings_threshold as u64
-                || string_seconds >= policies.strings.time_interval_secs as u64)
-                && let Err(e) = persist_string_interner(&manager, &tracker)
-            {
-                eprintln!(
-                    "Background persistence: Failed to persist string interner: {}",
-                    e
-                );
+                // Check string interner policy
+                let string_mutations = tracker.get_string_mutations();
+                let string_seconds = tracker.seconds_since_string_persist();
+                if (string_mutations >= policies.strings.new_strings_threshold as u64
+                    || string_seconds >= policies.strings.time_interval_secs as u64)
+                    && let Err(e) = persist_string_interner(&manager, &tracker)
+                {
+                    eprintln!(
+                        "Background persistence: Failed to persist string interner: {}",
+                        e
+                    );
+                }
             }
-        }
 
             // Final persist on shutdown
-            let _ = persist_all_indexes(&current, &historical, &temporal_indexes, &wal, &manager, &tracker);
+            let _ = persist_all_indexes(
+                &current,
+                &historical,
+                &temporal_indexes,
+                &wal,
+                &manager,
+                &tracker,
+            );
         }));
 
         // Set stopped flag and log regardless of normal exit or panic
@@ -321,11 +328,15 @@ fn spawn_background_persistence_thread(
 
         match result {
             Ok(()) => {
-                eprintln!("Warning: Background persistence thread exited normally but unexpectedly. Future persistence operations will fail.");
+                eprintln!(
+                    "Warning: Background persistence thread exited normally but unexpectedly. Future persistence operations will fail."
+                );
             }
             Err(e) => {
                 eprintln!("CRITICAL: Background persistence thread panicked: {:?}", e);
-                eprintln!("Database will continue running but NO FURTHER INDEX PERSISTENCE will occur.");
+                eprintln!(
+                    "Database will continue running but NO FURTHER INDEX PERSISTENCE will occur."
+                );
                 eprintln!("You MUST restart the database to restore automatic persistence.");
             }
         }
@@ -334,17 +345,233 @@ fn spawn_background_persistence_thread(
 
 /// Persist vector indexes to disk.
 fn persist_vector_indexes(
-    _current: &Arc<CurrentStorage>,
+    current: &Arc<CurrentStorage>,
     manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
 ) -> crate::utils::error::Result<()> {
-    // TODO: Implement actual vector index persistence
-    // For now, just save the interner and reset counter
+    use crate::storage::index_persistence::formats::PersistedHnswConfig;
+    use crate::storage::index_persistence::vector::{
+        new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
+    };
+
+    // Save string interner first (required by all indexes)
     manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
     })?;
 
+    // Get list of all vector indexes
+    let vector_indexes_info = current.list_vector_indexes();
+
+    // Persist each vector index
+    for info in vector_indexes_info {
+        let property_name = &info.property_name;
+
+        // Create vector directory
+        let vec_path = manager.vector_path(property_name);
+        std::fs::create_dir_all(&vec_path).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to create vector index directory for {}: {}",
+                property_name, e
+            ))
+        })?;
+
+        // Get the index, config, vector count, and mappings
+        let (index, config, vector_count, id_mappings) = current
+            .get_vector_index_for_persistence(property_name)
+            .ok_or_else(|| {
+                StorageError::PersistenceError(format!(
+                    "Failed to get vector index for persistence: {}",
+                    property_name
+                ))
+            })?;
+
+        // Save HNSW index using usearch native format
+        let usearch_path = vec_path.join("current.usearch");
+
+        // Use the VectorIndex trait's save method
+        use crate::index::vector::VectorIndex;
+        index.save(&usearch_path).map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save usearch index: {}", e))
+        })?;
+
+        // Create and save metadata
+        let hnsw_config = PersistedHnswConfig {
+            m: config.m as u16,
+            ef_construction: config.ef_construction as u16,
+            ef_search: config.ef_search as u16,
+        };
+
+        let mut vector_meta = new_vector_meta(
+            property_name,
+            config.dimensions as u32,
+            config.metric.to_u8(),
+            hnsw_config,
+        );
+
+        // Set the actual vector count
+        vector_meta.vector_count = vector_count as u64;
+
+        save_vector_meta(&vector_meta, &vec_path.join("meta.idx")).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to save vector metadata for {}: {}",
+                property_name, e
+            ))
+        })?;
+
+        // Create and save mappings
+        use crate::storage::index_persistence::formats::VectorMapping;
+        let mut vector_mappings = new_vector_mappings();
+        vector_mappings.count = id_mappings.len() as u64;
+        vector_mappings.mappings = id_mappings
+            .into_iter()
+            .map(|(node_id, usearch_key)| VectorMapping {
+                node_id,
+                usearch_key,
+            })
+            .collect();
+
+        save_vector_mappings(&vector_mappings, &vec_path.join("mappings.idx")).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to save vector mappings for {}: {}",
+                property_name, e
+            ))
+        })?;
+    }
+
     tracker.reset_vector_mutations();
+    Ok(())
+}
+
+/// Load vector indexes from disk.
+fn load_vector_indexes(
+    db: &GallifreyDB,
+    manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
+) -> crate::utils::error::Result<()> {
+    use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
+    use crate::storage::index_persistence::vector::{load_vector_mappings, load_vector_meta};
+
+    // Get vector directory
+    let vector_base = manager.indexes_path().join("vector");
+    if !vector_base.exists() {
+        return Ok(()); // No vector indexes to load
+    }
+
+    // Iterate through all subdirectories (one per property)
+    let entries = std::fs::read_dir(&vector_base).map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to read vector directory: {}", e))
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to read directory entry: {}", e))
+        })?;
+
+        let vec_path = entry.path();
+        if !vec_path.is_dir() {
+            continue;
+        }
+
+        let property_name = vec_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                StorageError::PersistenceError("Invalid vector directory name".to_string())
+            })?;
+
+        // Load metadata
+        let meta_path = vec_path.join("meta.idx");
+        if !meta_path.exists() {
+            eprintln!(
+                "Warning: Skipping vector index '{}': metadata not found",
+                property_name
+            );
+            continue;
+        }
+
+        let meta = load_vector_meta(&meta_path).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to load vector metadata for {}: {}",
+                property_name, e
+            ))
+        })?;
+
+        // Convert metric from u8 to DistanceMetric using from_u8()
+        let metric = match DistanceMetric::from_u8(meta.metric) {
+            Ok(m) => m,
+            Err(_) => {
+                eprintln!(
+                    "Warning: Skipping vector index '{}': unknown metric {}",
+                    property_name, meta.metric
+                );
+                continue;
+            }
+        };
+
+        // Create config from metadata
+        let config = HnswConfig::new(meta.dimensions as usize, metric)
+            .with_m(meta.hnsw_config.m as usize)
+            .with_ef_construction(meta.hnsw_config.ef_construction as usize)
+            .with_ef_search(meta.hnsw_config.ef_search as usize);
+
+        // Load or create index
+        let usearch_path = vec_path.join("current.usearch");
+        let index = if usearch_path.exists() {
+            // Load existing index
+            HnswIndex::load(&usearch_path, config.clone()).map_err(|e| {
+                StorageError::PersistenceError(format!(
+                    "Failed to load usearch index for {}: {}",
+                    property_name, e
+                ))
+            })?
+        } else {
+            // Create new empty index
+            HnswIndex::new(config.clone()).map_err(|e| {
+                StorageError::PersistenceError(format!(
+                    "Failed to create HNSW index for {}: {}",
+                    property_name, e
+                ))
+            })?
+        };
+
+        // Load mappings and restore them to the index
+        let mappings_path = vec_path.join("mappings.idx");
+        if mappings_path.exists() {
+            let mappings_data = load_vector_mappings(&mappings_path).map_err(|e| {
+                StorageError::PersistenceError(format!(
+                    "Failed to load vector mappings for {}: {}",
+                    property_name, e
+                ))
+            })?;
+
+            // Restore ID mappings
+            // Note: The usearch index already has the vectors loaded from disk,
+            // but we need to restore the NodeId <-> usearch_key mappings
+            use crate::core::id::NodeId;
+            for mapping in &mappings_data.mappings {
+                match NodeId::new(mapping.node_id) {
+                    Ok(node_id) => {
+                        index.restore_mapping(node_id, mapping.usearch_key);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Skipping invalid NodeId {} in vector index '{}': {}",
+                            mapping.node_id, property_name, e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Register index with CurrentStorage
+        db.current
+            .register_vector_index(property_name, index, config);
+
+        println!(
+            "✓ Loaded vector index '{}': {} dimensions, {} vectors",
+            property_name, meta.dimensions, meta.vector_count
+        );
+    }
+
     Ok(())
 }
 
@@ -673,8 +900,8 @@ impl GallifreyDB {
             // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
             // (manifest is only saved on shutdown, not during background persistence)
             match manager.load_manifest_and_strings() {
-                Ok(_) => {}, // Successfully loaded
-                Err(e) if e.is_not_found() => {}, // Expected on first run
+                Ok(_) => {}                      // Successfully loaded
+                Err(e) if e.is_not_found() => {} // Expected on first run
                 Err(e) => eprintln!("Warning: Failed to load manifest: {}", e),
             }
 
@@ -746,7 +973,8 @@ impl GallifreyDB {
                             };
 
                             // Restore properties
-                            let properties = match restore_property_map(&persisted_node.properties) {
+                            let properties = match restore_property_map(&persisted_node.properties)
+                            {
                                 Ok(p) => p,
                                 Err(e) => {
                                     nodes_failed_properties += 1;
@@ -819,7 +1047,8 @@ impl GallifreyDB {
                             };
 
                             // Restore properties
-                            let properties = match restore_property_map(&persisted_edge.properties) {
+                            let properties = match restore_property_map(&persisted_edge.properties)
+                            {
                                 Ok(p) => p,
                                 Err(e) => {
                                     edges_failed_properties += 1;
@@ -885,10 +1114,18 @@ impl GallifreyDB {
                                 "Index restoration completed with data loss:\n\
                                  Nodes: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)\n\
                                  Edges: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)",
-                                nodes_loaded, total_nodes, nodes_skipped,
-                                nodes_failed_label, nodes_failed_properties, nodes_failed_version,
-                                edges_loaded, total_edges, edges_skipped,
-                                edges_failed_label, edges_failed_properties, edges_failed_version
+                                nodes_loaded,
+                                total_nodes,
+                                nodes_skipped,
+                                nodes_failed_label,
+                                nodes_failed_properties,
+                                nodes_failed_version,
+                                edges_loaded,
+                                total_edges,
+                                edges_skipped,
+                                edges_failed_label,
+                                edges_failed_properties,
+                                edges_failed_version
                             );
                         } else if total_nodes > 0 || total_edges > 0 {
                             eprintln!(
@@ -917,6 +1154,11 @@ impl GallifreyDB {
                         // This is normal if no index files exist yet
                     }
                 }
+            }
+
+            // Load vector indexes
+            if let Err(e) = load_vector_indexes(&db, manager) {
+                eprintln!("Warning: Failed to load vector indexes: {}", e);
             }
         }
 
@@ -1738,6 +1980,11 @@ impl GallifreyDB {
     /// Check if vector indexing is enabled.
     pub fn is_vector_index_enabled(&self) -> bool {
         self.current.is_vector_index_enabled()
+    }
+
+    /// Check if vector indexing is enabled for a specific property.
+    pub fn is_vector_index_enabled_for(&self, property_name: &str) -> bool {
+        self.current.is_vector_index_enabled_for(property_name)
     }
 
     /// Enable temporal vector indexing for a specific property.
@@ -2695,7 +2942,10 @@ impl GallifreyDB {
         };
 
         // Warn if background persistence thread has stopped
-        if self.persistence_thread_stopped.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .persistence_thread_stopped
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             eprintln!(
                 "Warning: Background persistence thread has stopped. \
                  Automatic persistence is disabled. Manual persist_indexes() calls will still work."
@@ -2756,7 +3006,12 @@ impl GallifreyDB {
             |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
         )?;
 
-        // 3. Save manifest last with current WAL LSN
+        // 3. Save vector indexes
+        if let Some(ref tracker) = self.persistence_tracker {
+            persist_vector_indexes(&self.current, manager, tracker)?;
+        }
+
+        // 4. Save manifest last with current WAL LSN
         // Note: This records the WAL position at persist time for future WAL replay coordination
         let current_lsn = self.wal.current_lsn().0;
         let manifest = IndexManifest::new(current_lsn);
