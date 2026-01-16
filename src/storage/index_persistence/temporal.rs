@@ -3,21 +3,72 @@
 use std::fs;
 use std::path::Path;
 
+use crc32fast::Hasher;
+
 use super::error::{IndexPersistenceError, Result};
 use super::formats::TemporalIndexData;
 use super::{MANIFEST_VERSION, TEMPORAL_MAGIC};
 
-/// Save temporal index data to disk.
+/// Save temporal index data to disk with CRC32 checksum using atomic write.
+///
+/// Format: [bitcode_data][crc32_checksum_4_bytes]
+///
+/// Uses write-temp-then-rename to prevent corruption on crash.
 pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> {
     let encoded = bitcode::encode(data);
-    fs::write(path, encoded)?;
+
+    // Calculate CRC32 of the encoded data
+    let mut hasher = Hasher::new();
+    hasher.update(&encoded);
+    let checksum = hasher.finalize();
+
+    // Write data + checksum
+    let mut data_with_checksum = encoded;
+    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
+
+    super::atomic_write(path, &data_with_checksum)?;
     Ok(())
 }
 
-/// Load temporal index data from disk.
+/// Load temporal index data from disk and validate CRC32 checksum.
 pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
     let bytes = fs::read(path)?;
-    let data: TemporalIndexData = bitcode::decode(&bytes)?;
+
+    // Check minimum size (must have at least 4 bytes for CRC)
+    if bytes.len() < 4 {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "File too small to contain CRC32 checksum".into(),
+        });
+    }
+
+    // Split data and checksum
+    let (data, checksum_bytes) = bytes.split_at(bytes.len() - 4);
+    let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
+        IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "Invalid CRC32 checksum format".into(),
+        }
+    })?);
+
+    // Verify checksum
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    let computed_checksum = hasher.finalize();
+
+    if computed_checksum != stored_checksum {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: format!(
+                "CRC32 checksum mismatch: expected {}, got {}",
+                stored_checksum, computed_checksum
+            )
+            .into(),
+        });
+    }
+
+    // Decode and validate
+    let data: TemporalIndexData = bitcode::decode(data)?;
 
     if data.magic != TEMPORAL_MAGIC {
         return Err(IndexPersistenceError::InvalidMagic {

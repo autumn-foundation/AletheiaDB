@@ -52,6 +52,13 @@ pub enum IndexPersistenceError {
         got: [u8; 4],
     },
 
+    /// Size limit exceeded (DoS protection)
+    #[error("Size limit exceeded: {message}")]
+    SizeLimitExceeded {
+        /// Description of the size limit violation
+        message: String,
+    },
+
     /// IO error during persistence operations
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

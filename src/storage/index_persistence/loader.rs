@@ -74,19 +74,36 @@ impl IndexPersistenceManager {
     /// Load all indexes from disk.
     ///
     /// Load order:
-    /// 1. String interner (others depend on it)
-    /// 2. Manifest
-    /// 3. Other indexes can be loaded in parallel after this
+    /// 1. Check manifest exists (early return if no persisted indexes)
+    /// 2. String interner (others depend on it)
+    /// 3. Manifest
+    /// 4. Other indexes can be loaded in parallel after this
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The manifest file is missing
+    /// - Failed to load or restore string interner
+    /// - Failed to load manifest
     pub fn load_manifest_and_strings(&self) -> Result<IndexManifest> {
-        // 1. Load and restore string interner first
+        // 1. Check if manifest exists before attempting to load interner
+        // This avoids wasting time loading interner if there are no persisted indexes
+        let manifest_path = self.manifest_path();
+        if !manifest_path.exists() {
+            return Err(super::error::IndexPersistenceError::MissingIndex {
+                name: "manifest.idx".to_string(),
+            });
+        }
+
+        // 2. Load and restore string interner first (required for manifest and other indexes)
         let interner_path = self.interner_path();
         if interner_path.exists() {
             let interner_data = load_string_interner(&interner_path)?;
             restore_string_interner(&interner_data)?;
         }
 
-        // 2. Load manifest
-        let manifest = load_manifest(&self.manifest_path())?;
+        // 3. Load manifest
+        let manifest = load_manifest(&manifest_path)?;
 
         Ok(manifest)
     }

@@ -4,6 +4,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+use crc32fast::Hasher;
+
 use crate::core::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 
@@ -49,6 +51,7 @@ pub fn persist_property_value(value: &PropertyValue) -> Result<PersistedProperty
 ///
 /// Returns an error if:
 /// - An interned string ID cannot be resolved (data corruption)
+/// - Vector dimensions exceed MAX_VECTOR_DIMENSIONS (DoS protection)
 pub fn restore_property_value(persisted: &PersistedPropertyValue) -> Result<PropertyValue> {
     Ok(match persisted {
         PersistedPropertyValue::Null => PropertyValue::Null,
@@ -68,7 +71,19 @@ pub fn restore_property_value(persisted: &PersistedPropertyValue) -> Result<Prop
             PropertyValue::String(s)
         }
         PersistedPropertyValue::Bytes(b) => PropertyValue::Bytes(Arc::from(b.as_slice())),
-        PersistedPropertyValue::Vector(v) => PropertyValue::Vector(Arc::from(v.as_slice())),
+        PersistedPropertyValue::Vector(v) => {
+            // Validate vector size to prevent DoS via maliciously large vectors
+            if v.len() > super::MAX_VECTOR_DIMENSIONS {
+                return Err(IndexPersistenceError::SizeLimitExceeded {
+                    message: format!(
+                        "Vector dimension {} exceeds maximum allowed dimension {}",
+                        v.len(),
+                        super::MAX_VECTOR_DIMENSIONS
+                    ),
+                });
+            }
+            PropertyValue::Vector(Arc::from(v.as_slice()))
+        }
     })
 }
 
@@ -109,17 +124,66 @@ pub fn restore_property_map(persisted: &PersistedPropertyMap) -> Result<Property
     Ok(builder.build())
 }
 
-/// Save graph index data to disk.
+/// Save graph index data to disk with CRC32 checksum using atomic write.
+///
+/// Format: [bitcode_data][crc32_checksum_4_bytes]
+///
+/// Uses write-temp-then-rename to prevent corruption on crash.
 pub fn save_graph_index(data: &GraphIndexData, path: &Path) -> Result<()> {
     let encoded = bitcode::encode(data);
-    fs::write(path, encoded)?;
+
+    // Calculate CRC32 of the encoded data
+    let mut hasher = Hasher::new();
+    hasher.update(&encoded);
+    let checksum = hasher.finalize();
+
+    // Write data + checksum
+    let mut data_with_checksum = encoded;
+    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
+
+    super::atomic_write(path, &data_with_checksum)?;
     Ok(())
 }
 
-/// Load graph index data from disk.
+/// Load graph index data from disk and validate CRC32 checksum.
 pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     let bytes = fs::read(path)?;
-    let data: GraphIndexData = bitcode::decode(&bytes)?;
+
+    // Check minimum size (must have at least 4 bytes for CRC)
+    if bytes.len() < 4 {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "File too small to contain CRC32 checksum".into(),
+        });
+    }
+
+    // Split data and checksum
+    let (data, checksum_bytes) = bytes.split_at(bytes.len() - 4);
+    let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
+        IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "Invalid CRC32 checksum format".into(),
+        }
+    })?);
+
+    // Verify checksum
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    let computed_checksum = hasher.finalize();
+
+    if computed_checksum != stored_checksum {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: format!(
+                "CRC32 checksum mismatch: expected {}, got {}",
+                stored_checksum, computed_checksum
+            )
+            .into(),
+        });
+    }
+
+    // Decode and validate
+    let data: GraphIndexData = bitcode::decode(data)?;
 
     if data.magic != GRAPH_MAGIC {
         return Err(IndexPersistenceError::InvalidMagic {
@@ -219,10 +283,12 @@ mod tests {
 
         let result = persist_property_value(&array_value);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Array properties are not yet supported"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Array properties are not yet supported")
+        );
     }
 
     #[test]
@@ -232,9 +298,39 @@ mod tests {
 
         let result = restore_property_value(&persisted);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to resolve interned string"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to resolve interned string")
+        );
+    }
+
+    #[test]
+    fn test_vector_size_limit_dos_protection() {
+        // Test that vectors exceeding MAX_VECTOR_DIMENSIONS are rejected
+        let oversized_vector = vec![0.0f32; super::super::MAX_VECTOR_DIMENSIONS + 1];
+        let persisted = PersistedPropertyValue::Vector(oversized_vector);
+
+        let result = restore_property_value(&persisted);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Size limit exceeded"));
+        assert!(err.to_string().contains("Vector dimension"));
+    }
+
+    #[test]
+    fn test_vector_at_size_limit_allowed() {
+        // Test that vectors exactly at MAX_VECTOR_DIMENSIONS are allowed
+        let max_vector = vec![1.0f32; super::super::MAX_VECTOR_DIMENSIONS];
+        let persisted = PersistedPropertyValue::Vector(max_vector);
+
+        let result = restore_property_value(&persisted);
+        assert!(result.is_ok());
+        if let PropertyValue::Vector(v) = result.unwrap() {
+            assert_eq!(v.len(), super::super::MAX_VECTOR_DIMENSIONS);
+        } else {
+            panic!("Expected vector property");
+        }
     }
 }

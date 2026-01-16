@@ -99,3 +99,46 @@ pub const TEMPORAL_MAGIC: [u8; 4] = *b"GTMP";
 
 /// Magic bytes for vector metadata files.
 pub const VECTOR_META_MAGIC: [u8; 4] = *b"GVEC";
+
+/// Maximum number of strings allowed in the string interner (DoS protection).
+/// ~100K strings should be sufficient for most databases while preventing
+/// memory exhaustion attacks.
+pub const MAX_STRING_COUNT: u64 = 100_000;
+
+/// Maximum length of a single string in bytes (DoS protection).
+/// 1MB per string is generous while preventing memory exhaustion.
+pub const MAX_STRING_LENGTH: usize = 1_048_576; // 1MB
+
+/// Maximum vector dimension (DoS protection).
+/// 100K dimensions aligns with the documented maximum.
+/// At 4 bytes per f32, this is 400KB per vector.
+pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
+
+/// Atomically write data to a file using write-temp-then-rename pattern.
+///
+/// This prevents corruption if the process crashes mid-write:
+/// 1. Write to `{path}.tmp`
+/// 2. Sync to disk
+/// 3. Rename temp → target (atomic on POSIX, nearly-atomic on Windows)
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Failed to write temp file
+/// - Failed to sync to disk
+/// - Failed to rename temp to target
+pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::fs;
+    use std::io::Write;
+
+    // Write to temporary file
+    let temp_path = path.with_extension("tmp");
+    let mut file = fs::File::create(&temp_path)?;
+    file.write_all(data)?;
+    file.sync_all()?; // Ensure data is on disk
+
+    // Atomically replace target with temp
+    fs::rename(&temp_path, path)?;
+
+    Ok(())
+}

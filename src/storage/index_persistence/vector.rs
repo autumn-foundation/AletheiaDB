@@ -8,23 +8,76 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crc32fast::Hasher;
+
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{
     PersistedHnswConfig, VectorIndexMeta, VectorMappingsData, VectorSnapshotMeta,
 };
 use super::{MANIFEST_VERSION, VECTOR_META_MAGIC};
 
-/// Save vector index metadata.
-pub fn save_vector_meta(meta: &VectorIndexMeta, path: &Path) -> Result<()> {
-    let encoded = bitcode::encode(meta);
-    fs::write(path, encoded)?;
+/// Helper function to save data with CRC32 checksum using atomic write.
+///
+/// Uses write-temp-then-rename to prevent corruption on crash.
+fn save_with_crc(data: &[u8], path: &Path) -> Result<()> {
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    let checksum = hasher.finalize();
+
+    let mut data_with_checksum = data.to_vec();
+    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
+
+    super::atomic_write(path, &data_with_checksum)?;
     Ok(())
 }
 
-/// Load vector index metadata.
-pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
+/// Helper function to load data and validate CRC32 checksum.
+fn load_with_crc(path: &Path) -> Result<Vec<u8>> {
     let bytes = fs::read(path)?;
-    let meta: VectorIndexMeta = bitcode::decode(&bytes)?;
+
+    if bytes.len() < 4 {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "File too small to contain CRC32 checksum".into(),
+        });
+    }
+
+    let (data, checksum_bytes) = bytes.split_at(bytes.len() - 4);
+    let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
+        IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "Invalid CRC32 checksum format".into(),
+        }
+    })?);
+
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    let computed_checksum = hasher.finalize();
+
+    if computed_checksum != stored_checksum {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: format!(
+                "CRC32 checksum mismatch: expected {}, got {}",
+                stored_checksum, computed_checksum
+            )
+            .into(),
+        });
+    }
+
+    Ok(data.to_vec())
+}
+
+/// Save vector index metadata with CRC32 checksum.
+pub fn save_vector_meta(meta: &VectorIndexMeta, path: &Path) -> Result<()> {
+    let encoded = bitcode::encode(meta);
+    save_with_crc(&encoded, path)
+}
+
+/// Load vector index metadata and validate CRC32 checksum.
+pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
+    let data = load_with_crc(path)?;
+    let meta: VectorIndexMeta = bitcode::decode(&data)?;
 
     if meta.magic != VECTOR_META_MAGIC {
         return Err(IndexPersistenceError::InvalidMagic {
@@ -44,31 +97,29 @@ pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
     Ok(meta)
 }
 
-/// Save vector ID mappings.
+/// Save vector ID mappings with CRC32 checksum.
 pub fn save_vector_mappings(mappings: &VectorMappingsData, path: &Path) -> Result<()> {
     let encoded = bitcode::encode(mappings);
-    fs::write(path, encoded)?;
-    Ok(())
+    save_with_crc(&encoded, path)
 }
 
-/// Load vector ID mappings.
+/// Load vector ID mappings and validate CRC32 checksum.
 pub fn load_vector_mappings(path: &Path) -> Result<VectorMappingsData> {
-    let bytes = fs::read(path)?;
-    let mappings: VectorMappingsData = bitcode::decode(&bytes)?;
+    let data = load_with_crc(path)?;
+    let mappings: VectorMappingsData = bitcode::decode(&data)?;
     Ok(mappings)
 }
 
-/// Save vector snapshot metadata.
+/// Save vector snapshot metadata with CRC32 checksum.
 pub fn save_snapshot_meta(meta: &VectorSnapshotMeta, path: &Path) -> Result<()> {
     let encoded = bitcode::encode(meta);
-    fs::write(path, encoded)?;
-    Ok(())
+    save_with_crc(&encoded, path)
 }
 
-/// Load vector snapshot metadata.
+/// Load vector snapshot metadata and validate CRC32 checksum.
 pub fn load_snapshot_meta(path: &Path) -> Result<VectorSnapshotMeta> {
-    let bytes = fs::read(path)?;
-    let meta: VectorSnapshotMeta = bitcode::decode(&bytes)?;
+    let data = load_with_crc(path)?;
+    let meta: VectorSnapshotMeta = bitcode::decode(&data)?;
     Ok(meta)
 }
 

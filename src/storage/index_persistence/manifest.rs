@@ -46,9 +46,11 @@ impl IndexManifest {
     }
 }
 
-/// Save manifest to disk with CRC32 checksum.
+/// Save manifest to disk with CRC32 checksum using atomic write.
 ///
 /// Format: [bitcode_data][crc32_checksum_4_bytes]
+///
+/// Uses write-temp-then-rename to prevent corruption on crash.
 pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {
     let encoded = bitcode::encode(manifest);
 
@@ -61,7 +63,7 @@ pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {
     let mut data_with_checksum = encoded;
     data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
 
-    fs::write(path, data_with_checksum)?;
+    super::atomic_write(path, &data_with_checksum)?;
     Ok(())
 }
 
@@ -79,14 +81,12 @@ pub fn load_manifest(path: &Path) -> Result<IndexManifest> {
 
     // Split data and checksum
     let (data, checksum_bytes) = bytes.split_at(bytes.len() - 4);
-    let stored_checksum = u32::from_le_bytes(
-        checksum_bytes
-            .try_into()
-            .map_err(|_| IndexPersistenceError::Corrupted {
-                path: path.to_path_buf(),
-                source: "Invalid CRC32 checksum format".into(),
-            })?,
-    );
+    let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
+        IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "Invalid CRC32 checksum format".into(),
+        }
+    })?);
 
     // Verify checksum
     let mut hasher = Hasher::new();
