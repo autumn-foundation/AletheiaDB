@@ -5,7 +5,8 @@
 //! - Causality preservation across distributed nodes
 //! - Human-readable wallclock semantics for temporal queries
 
-use crate::utils::error::StorageError;
+use crate::core::temporal::MAX_VALID_TIMESTAMP;
+use crate::utils::error::{StorageError, TemporalError};
 
 /// Hybrid Logical Clock timestamp combining wallclock and logical components.
 ///
@@ -24,9 +25,35 @@ pub struct HybridTimestamp {
 }
 
 impl HybridTimestamp {
-    /// Create a new HybridTimestamp with the given wallclock and logical components.
+    /// Create a new HybridTimestamp with validation.
+    ///
+    /// # Errors
+    /// Returns `TemporalError::InvalidTimestamp` if wallclock exceeds `MAX_VALID_TIMESTAMP`.
+    /// This prevents DoS attacks from extreme timestamp values.
     #[inline]
-    pub const fn new(wallclock: i64, logical: u32) -> Self {
+    pub fn new(wallclock: i64, logical: u32) -> Result<Self, TemporalError> {
+        if wallclock > MAX_VALID_TIMESTAMP {
+            return Err(TemporalError::InvalidTimestamp {
+                timestamp: wallclock,
+                reason: format!(
+                    "Wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
+                    wallclock, MAX_VALID_TIMESTAMP
+                ),
+            });
+        }
+        Ok(HybridTimestamp { wallclock, logical })
+    }
+
+    /// Create a new HybridTimestamp without validation.
+    ///
+    /// # Safety
+    /// This function does not validate the wallclock value. Use only with trusted data
+    /// from internal sources (WAL recovery, storage deserialization with external validation).
+    ///
+    /// Public constructors should use `new()` which validates inputs.
+    #[allow(dead_code)] // Reserved for Phase 2 WAL/storage integration
+    #[inline]
+    pub(crate) const fn new_unchecked(wallclock: i64, logical: u32) -> Self {
         HybridTimestamp { wallclock, logical }
     }
 
@@ -61,8 +88,58 @@ impl HybridTimestamp {
             // Wallclock didn't advance - increment logical counter
             HybridTimestamp {
                 wallclock: self.wallclock,
-                logical: self.logical + 1,
+                logical: self
+                    .logical
+                    .checked_add(1)
+                    .expect("HLC logical counter overflowed"),
             }
+        }
+    }
+
+    /// Generate a new timestamp for a receive event (distributed message reception).
+    ///
+    /// # HLC Algorithm for Message Reception
+    /// When receiving a message with timestamp `msg` from a remote node:
+    /// 1. `new_wallclock = max(self.wallclock, msg.wallclock, physical_wallclock)`
+    /// 2. If wallclock advances beyond both: reset logical to 0
+    /// 3. If wallclock matches both: logical = max(self.logical, msg.logical) + 1
+    /// 4. If wallclock matches only one: increment that timestamp's logical counter
+    ///
+    /// This preserves causality: if message A → message B, then timestamp(A) < timestamp(B).
+    ///
+    /// # Arguments
+    /// - `msg`: The timestamp from the received message
+    /// - `physical_wallclock`: Current physical clock reading
+    #[inline]
+    pub fn receive(&self, msg: HybridTimestamp, physical_wallclock: i64) -> Self {
+        // Compute maximum wallclock across all three values
+        let new_wallclock = self.wallclock.max(msg.wallclock).max(physical_wallclock);
+
+        // Determine logical counter based on which wallclock(s) were chosen
+        let logical = if new_wallclock > self.wallclock && new_wallclock > msg.wallclock {
+            // Physical clock advanced beyond both - reset to 0
+            0
+        } else if new_wallclock == self.wallclock && new_wallclock == msg.wallclock {
+            // Both local and message have same wallclock - use max logical + 1
+            self.logical
+                .max(msg.logical)
+                .checked_add(1)
+                .expect("HLC logical counter overflowed")
+        } else if new_wallclock == self.wallclock {
+            // Local wallclock was chosen - increment local logical
+            self.logical
+                .checked_add(1)
+                .expect("HLC logical counter overflowed")
+        } else {
+            // Message wallclock was chosen - increment message logical
+            msg.logical
+                .checked_add(1)
+                .expect("HLC logical counter overflowed")
+        };
+
+        HybridTimestamp {
+            wallclock: new_wallclock,
+            logical,
         }
     }
 
@@ -85,9 +162,13 @@ impl HybridTimestamp {
         buffer.extend_from_slice(&self.logical.to_le_bytes());
     }
 
-    /// Deserialize a HybridTimestamp from bytes.
+    /// Deserialize a HybridTimestamp from bytes with validation.
     ///
     /// Returns the HybridTimestamp and number of bytes consumed (always 12).
+    ///
+    /// # Errors
+    /// - Returns `StorageError::CorruptedData` if buffer is too short
+    /// - Returns `StorageError::CorruptedData` if wallclock exceeds `MAX_VALID_TIMESTAMP`
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, usize), StorageError> {
         if bytes.len() < 12 {
             return Err(StorageError::CorruptedData(format!(
@@ -95,10 +176,22 @@ impl HybridTimestamp {
                 bytes.len()
             )));
         }
-        let wallclock = i64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]);
-        let logical = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+
+        // Use split_at and try_into for cleaner, safer byte array conversion
+        let (wallclock_bytes, rest) = bytes.split_at(std::mem::size_of::<i64>());
+        let wallclock = i64::from_le_bytes(wallclock_bytes.try_into().unwrap());
+
+        let (logical_bytes, _) = rest.split_at(std::mem::size_of::<u32>());
+        let logical = u32::from_le_bytes(logical_bytes.try_into().unwrap());
+
+        // Validate wallclock to prevent corrupted data from injecting invalid timestamps
+        if wallclock > MAX_VALID_TIMESTAMP {
+            return Err(StorageError::CorruptedData(format!(
+                "Deserialized wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
+                wallclock, MAX_VALID_TIMESTAMP
+            )));
+        }
+
         Ok((HybridTimestamp { wallclock, logical }, 12))
     }
 }

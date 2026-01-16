@@ -6,6 +6,7 @@
 //! - Serialization/deserialization
 
 use gallifreydb::core::hlc::HybridTimestamp;
+use gallifreydb::core::temporal::MAX_VALID_TIMESTAMP;
 use proptest::prelude::*;
 
 #[test]
@@ -14,16 +15,35 @@ fn test_hybrid_timestamp_creation() {
     let wallclock = 1_000_000_000_000i64; // 1 second in microseconds
     let logical = 0u32;
 
-    let hlc = HybridTimestamp::new(wallclock, logical);
+    let hlc = HybridTimestamp::new(wallclock, logical).unwrap();
 
     assert_eq!(hlc.wallclock(), wallclock);
     assert_eq!(hlc.logical(), logical);
 }
 
 #[test]
+fn test_new_validates_wallclock() {
+    // Valid wallclock should succeed
+    let valid = HybridTimestamp::new(1_000_000, 0);
+    assert!(valid.is_ok());
+
+    // MAX_VALID_TIMESTAMP should succeed
+    let at_max = HybridTimestamp::new(MAX_VALID_TIMESTAMP, 0);
+    assert!(at_max.is_ok());
+
+    // Wallclock exceeding MAX_VALID_TIMESTAMP should fail
+    let invalid = HybridTimestamp::new(MAX_VALID_TIMESTAMP + 1, 0);
+    assert!(invalid.is_err());
+
+    // i64::MAX should fail
+    let max_i64 = HybridTimestamp::new(i64::MAX, 0);
+    assert!(max_i64.is_err());
+}
+
+#[test]
 fn test_send_when_wallclock_advances() {
     // When wallclock advances, logical counter should reset to 0
-    let prev = HybridTimestamp::new(1000, 5); // Previous timestamp with logical=5
+    let prev = HybridTimestamp::new(1000, 5).unwrap(); // Previous timestamp with logical=5
     let new_wallclock = 2000; // Wallclock has advanced
 
     let next = prev.send(new_wallclock);
@@ -37,7 +57,7 @@ fn test_send_when_wallclock_advances() {
 #[test]
 fn test_send_when_wallclock_same() {
     // When wallclock doesn't advance, logical counter should increment
-    let prev = HybridTimestamp::new(1000, 5);
+    let prev = HybridTimestamp::new(1000, 5).unwrap();
     let same_wallclock = 1000; // Wallclock hasn't advanced
 
     let next = prev.send(same_wallclock);
@@ -51,7 +71,7 @@ fn test_send_when_wallclock_same() {
 #[test]
 fn test_send_when_wallclock_regresses() {
     // When wallclock regresses (clock skew), use previous wallclock and increment logical
-    let prev = HybridTimestamp::new(2000, 3);
+    let prev = HybridTimestamp::new(2000, 3).unwrap();
     let regressed_wallclock = 1500; // Wallclock went backwards
 
     let next = prev.send(regressed_wallclock);
@@ -65,8 +85,8 @@ fn test_send_when_wallclock_regresses() {
 #[test]
 fn test_ordering_by_wallclock() {
     // HLCs should order by wallclock first
-    let earlier = HybridTimestamp::new(1000, 10);
-    let later = HybridTimestamp::new(2000, 0);
+    let earlier = HybridTimestamp::new(1000, 10).unwrap();
+    let later = HybridTimestamp::new(2000, 0).unwrap();
 
     assert!(earlier < later);
     assert!(later > earlier);
@@ -76,8 +96,8 @@ fn test_ordering_by_wallclock() {
 #[test]
 fn test_ordering_by_logical_when_wallclock_same() {
     // When wallclock is same, order by logical counter
-    let first = HybridTimestamp::new(1000, 5);
-    let second = HybridTimestamp::new(1000, 6);
+    let first = HybridTimestamp::new(1000, 5).unwrap();
+    let second = HybridTimestamp::new(1000, 6).unwrap();
 
     assert!(first < second);
     assert!(second > first);
@@ -87,8 +107,8 @@ fn test_ordering_by_logical_when_wallclock_same() {
 #[test]
 fn test_ordering_equality() {
     // HLCs with same wallclock and logical are equal
-    let hlc1 = HybridTimestamp::new(1000, 5);
-    let hlc2 = HybridTimestamp::new(1000, 5);
+    let hlc1 = HybridTimestamp::new(1000, 5).unwrap();
+    let hlc2 = HybridTimestamp::new(1000, 5).unwrap();
 
     assert_eq!(hlc1, hlc2);
     assert!(hlc1 >= hlc2);
@@ -98,7 +118,7 @@ fn test_ordering_equality() {
 #[test]
 fn test_serialization_roundtrip() {
     // Serialize and deserialize should preserve exact values
-    let original = HybridTimestamp::new(1_234_567_890_123_456i64, 42);
+    let original = HybridTimestamp::new(1_234_567_890_123_456i64, 42).unwrap();
 
     let bytes = original.serialize();
     assert_eq!(bytes.len(), 12); // 8 bytes wallclock + 4 bytes logical
@@ -113,7 +133,7 @@ fn test_serialization_roundtrip() {
 #[test]
 fn test_serialization_into_buffer() {
     // serialize_into should append to existing buffer
-    let hlc = HybridTimestamp::new(1000, 5);
+    let hlc = HybridTimestamp::new(1000, 5).unwrap();
     let mut buffer = vec![0xFF; 4]; // Pre-filled buffer
 
     hlc.serialize_into(&mut buffer);
@@ -136,6 +156,90 @@ fn test_deserialize_truncated_buffer() {
     assert!(result.is_err());
 }
 
+#[test]
+fn test_deserialize_validates_wallclock() {
+    // Deserialization should reject invalid wallclock values
+    let invalid_wallclock = i64::MAX;
+    let logical = 42u32;
+
+    let mut buffer = Vec::new();
+    buffer.extend_from_slice(&invalid_wallclock.to_le_bytes());
+    buffer.extend_from_slice(&logical.to_le_bytes());
+
+    let result = HybridTimestamp::deserialize(&buffer);
+    assert!(
+        result.is_err(),
+        "deserialize should reject wallclock > MAX_VALID_TIMESTAMP"
+    );
+
+    // Valid wallclock should succeed
+    let valid_wallclock = MAX_VALID_TIMESTAMP;
+    let mut valid_buffer = Vec::new();
+    valid_buffer.extend_from_slice(&valid_wallclock.to_le_bytes());
+    valid_buffer.extend_from_slice(&logical.to_le_bytes());
+
+    let result = HybridTimestamp::deserialize(&valid_buffer);
+    assert!(
+        result.is_ok(),
+        "deserialize should accept wallclock <= MAX_VALID_TIMESTAMP"
+    );
+}
+
+#[test]
+#[should_panic(expected = "HLC logical counter overflowed")]
+fn test_send_logical_overflow() {
+    // When logical counter is at u32::MAX, incrementing should panic
+    let prev = HybridTimestamp::new(1000, u32::MAX).unwrap();
+
+    // This should panic because logical counter would overflow
+    let _next = prev.send(1000);
+}
+
+#[test]
+fn test_receive_when_message_ahead() {
+    // When receiving a message with timestamp ahead of local time
+    let local = HybridTimestamp::new(1000, 5).unwrap();
+    let msg = HybridTimestamp::new(2000, 10).unwrap();
+    let new_wallclock = 1500; // Local wallclock between local and msg
+
+    let next = local.receive(msg, new_wallclock);
+
+    // Should use max(local.wallclock, msg.wallclock, new_wallclock) = 2000
+    assert_eq!(next.wallclock(), 2000);
+    // Logical should be msg.logical + 1
+    assert_eq!(next.logical(), 11);
+}
+
+#[test]
+fn test_receive_when_wallclock_advances() {
+    // When receiving a message but local wallclock has advanced past it
+    let local = HybridTimestamp::new(1000, 5).unwrap();
+    let msg = HybridTimestamp::new(900, 3).unwrap();
+    let new_wallclock = 2000; // Wallclock advances
+
+    let next = local.receive(msg, new_wallclock);
+
+    // Should use max wallclock = 2000
+    assert_eq!(next.wallclock(), 2000);
+    // Logical should reset to 0
+    assert_eq!(next.logical(), 0);
+}
+
+#[test]
+fn test_receive_when_all_same_wallclock() {
+    // When local, msg, and new_wallclock are all the same
+    let local = HybridTimestamp::new(1000, 5).unwrap();
+    let msg = HybridTimestamp::new(1000, 3).unwrap();
+    let new_wallclock = 1000;
+
+    let next = local.receive(msg, new_wallclock);
+
+    // Wallclock stays 1000
+    assert_eq!(next.wallclock(), 1000);
+    // Logical should be max(local.logical, msg.logical) + 1 = max(5, 3) + 1 = 6
+    assert_eq!(next.logical(), 6);
+}
+
 // Property-based tests for HLC invariants
 
 proptest! {
@@ -146,7 +250,7 @@ proptest! {
         new_wallclock in 0i64..1_000_000_000_000i64,
     ) {
         // HLC send operation must produce monotonically increasing timestamps
-        let hlc = HybridTimestamp::new(wallclock, logical);
+        let hlc = HybridTimestamp::new(wallclock, logical).unwrap();
         let next = hlc.send(new_wallclock);
 
         // Next timestamp must be >= current timestamp
@@ -160,7 +264,7 @@ proptest! {
         wallclocks in prop::collection::vec(0i64..1_000_000_000_000i64, 1..20),
     ) {
         // A sequence of send operations must produce strictly increasing HLCs
-        let mut current = HybridTimestamp::new(initial_wallclock, initial_logical);
+        let mut current = HybridTimestamp::new(initial_wallclock, initial_logical).unwrap();
 
         for wallclock in wallclocks {
             let next = current.send(wallclock);
@@ -176,11 +280,11 @@ proptest! {
 
     #[test]
     fn prop_serialization_preserves_values(
-        wallclock in i64::MIN..i64::MAX,
+        wallclock in i64::MIN..MAX_VALID_TIMESTAMP,
         logical in 0u32..u32::MAX,
     ) {
         // Serialization must be lossless
-        let original = HybridTimestamp::new(wallclock, logical);
+        let original = HybridTimestamp::new(wallclock, logical).unwrap();
         let bytes = original.serialize();
         let (deserialized, consumed) = HybridTimestamp::deserialize(&bytes).unwrap();
 
@@ -200,9 +304,9 @@ proptest! {
         l3 in 0u32..1000u32,
     ) {
         // Ordering must be transitive: if a < b and b < c, then a < c
-        let a = HybridTimestamp::new(w1, l1);
-        let b = HybridTimestamp::new(w2, l2);
-        let c = HybridTimestamp::new(w3, l3);
+        let a = HybridTimestamp::new(w1, l1).unwrap();
+        let b = HybridTimestamp::new(w2, l2).unwrap();
+        let c = HybridTimestamp::new(w3, l3).unwrap();
 
         if a < b && b < c {
             prop_assert!(a < c, "ordering must be transitive");
@@ -216,7 +320,7 @@ proptest! {
         advance_by in 1i64..1_000_000i64,  // Ensure wallclock advances
     ) {
         // When wallclock advances, logical counter must reset to 0
-        let hlc = HybridTimestamp::new(wallclock, logical);
+        let hlc = HybridTimestamp::new(wallclock, logical).unwrap();
         let new_wallclock = wallclock.saturating_add(advance_by);
 
         // Only test if wallclock actually advances
@@ -234,7 +338,7 @@ proptest! {
         logical in 0u32..1000u32,
     ) {
         // When wallclock doesn't advance, logical counter must increment
-        let hlc = HybridTimestamp::new(wallclock, logical);
+        let hlc = HybridTimestamp::new(wallclock, logical).unwrap();
         let next = hlc.send(wallclock);  // Same wallclock
 
         prop_assert_eq!(next.wallclock(), wallclock);
