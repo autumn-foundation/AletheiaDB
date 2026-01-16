@@ -4,6 +4,8 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crc32fast::Hasher;
+
 use super::error::{IndexPersistenceError, Result};
 use super::formats::IndexManifest;
 use super::{MANIFEST_MAGIC, MANIFEST_VERSION};
@@ -44,17 +46,66 @@ impl IndexManifest {
     }
 }
 
-/// Save manifest to disk.
+/// Save manifest to disk with CRC32 checksum.
+///
+/// Format: [bitcode_data][crc32_checksum_4_bytes]
 pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {
     let encoded = bitcode::encode(manifest);
-    fs::write(path, encoded)?;
+
+    // Calculate CRC32 of the encoded data
+    let mut hasher = Hasher::new();
+    hasher.update(&encoded);
+    let checksum = hasher.finalize();
+
+    // Write data + checksum
+    let mut data_with_checksum = encoded;
+    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
+
+    fs::write(path, data_with_checksum)?;
     Ok(())
 }
 
-/// Load manifest from disk.
+/// Load manifest from disk and validate CRC32 checksum.
 pub fn load_manifest(path: &Path) -> Result<IndexManifest> {
     let bytes = fs::read(path)?;
-    let manifest: IndexManifest = bitcode::decode(&bytes)?;
+
+    // Check minimum size (must have at least 4 bytes for CRC)
+    if bytes.len() < 4 {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "File too small to contain CRC32 checksum".into(),
+        });
+    }
+
+    // Split data and checksum
+    let (data, checksum_bytes) = bytes.split_at(bytes.len() - 4);
+    let stored_checksum = u32::from_le_bytes(
+        checksum_bytes
+            .try_into()
+            .map_err(|_| IndexPersistenceError::Corrupted {
+                path: path.to_path_buf(),
+                source: "Invalid CRC32 checksum format".into(),
+            })?,
+    );
+
+    // Verify checksum
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    let computed_checksum = hasher.finalize();
+
+    if computed_checksum != stored_checksum {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: format!(
+                "CRC32 checksum mismatch: expected {}, got {}",
+                stored_checksum, computed_checksum
+            )
+            .into(),
+        });
+    }
+
+    // Decode and validate
+    let manifest: IndexManifest = bitcode::decode(data)?;
 
     // Validate magic bytes
     if manifest.magic != MANIFEST_MAGIC {
@@ -121,5 +172,40 @@ mod tests {
         manifest.touch();
 
         assert!(manifest.last_modified >= original);
+    }
+
+    #[test]
+    fn test_manifest_crc_corruption_detected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("manifest.idx");
+
+        // Save a valid manifest
+        let manifest = IndexManifest::new(42);
+        save_manifest(&manifest, &path).unwrap();
+
+        // Corrupt the data (change a byte in the middle)
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[10] ^= 0xFF; // Flip all bits in one byte
+        fs::write(&path, bytes).unwrap();
+
+        // Loading should fail with corruption error
+        let result = load_manifest(&path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Index file corrupted"));
+    }
+
+    #[test]
+    fn test_manifest_truncated_file_detected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("manifest.idx");
+
+        // Write a file that's too small
+        fs::write(&path, b"ab").unwrap();
+
+        let result = load_manifest(&path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Index file corrupted"));
     }
 }
