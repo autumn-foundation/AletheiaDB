@@ -1362,6 +1362,70 @@ impl HistoricalStorage {
     pub fn __test_get_node_versions_iterator(&self) -> impl Iterator<Item = &NodeVersion> {
         self.node_versions.values()
     }
+
+    /// Get all node versions for persistence.
+    ///
+    /// This is a crate-internal method used by the index persistence layer.
+    pub(crate) fn get_node_versions(&self) -> &HashMap<VersionId, NodeVersion> {
+        &self.node_versions
+    }
+
+    /// Get all edge versions for persistence.
+    ///
+    /// This is a crate-internal method used by the index persistence layer.
+    pub(crate) fn get_edge_versions(&self) -> &HashMap<VersionId, EdgeVersion> {
+        &self.edge_versions
+    }
+
+    /// Insert a restored node version directly into storage.
+    ///
+    /// This is used during index loading to restore persisted versions.
+    /// Unlike normal version insertion, this bypasses transaction processing
+    /// since the data comes from a trusted source (our own persistence layer).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the version ID or node ID is invalid.
+    pub(crate) fn insert_restored_node_version(&mut self, version: NodeVersion) -> Result<()> {
+        let version_id = version.id;
+        let node_id = version.node_id;
+
+        // Store the version
+        self.node_versions.insert(version_id, version);
+
+        // Update version head
+        self.node_version_heads.insert(node_id, version_id);
+
+        // Update version count
+        *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+
+        Ok(())
+    }
+
+    /// Insert a restored edge version directly into storage.
+    ///
+    /// This is used during index loading to restore persisted versions.
+    /// Unlike normal version insertion, this bypasses transaction processing
+    /// since the data comes from a trusted source (our own persistence layer).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the version ID or edge ID is invalid.
+    pub(crate) fn insert_restored_edge_version(&mut self, version: EdgeVersion) -> Result<()> {
+        let version_id = version.id;
+        let edge_id = version.edge_id;
+
+        // Store the version
+        self.edge_versions.insert(version_id, version);
+
+        // Update version head
+        self.edge_version_heads.insert(edge_id, version_id);
+
+        // Update version count
+        *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+
+        Ok(())
+    }
 }
 
 impl Default for HistoricalStorage {

@@ -1897,3 +1897,361 @@ fn test_vector_index_persistence() {
         println!("\n=== Vector Index Persistence Test PASSED ===");
     }
 }
+
+/// Test temporal version round-trip: convert → save → load → restore.
+///
+/// Validates that temporal versions (both nodes and edges, anchors and deltas)
+/// can be persisted and restored correctly.
+#[test]
+fn test_temporal_version_round_trip() {
+    use gallifreydb::core::id::{EdgeId, NodeId, VersionId};
+    use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
+    use gallifreydb::storage::index_persistence::formats::PersistedVersionType;
+    use gallifreydb::storage::index_persistence::temporal::{
+        convert_edge_version, convert_node_version, load_temporal_index, restore_edge_version,
+        restore_node_version,
+    };
+    use gallifreydb::storage::version::{EdgeVersion, NodeVersion, VersionData};
+
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    // ========================================================================
+    // Phase 1: Create temporal versions
+    // ========================================================================
+
+    let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+    let knows_label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+    GLOBAL_INTERNER.intern("name").unwrap();
+    GLOBAL_INTERNER.intern("age").unwrap();
+    GLOBAL_INTERNER.intern("weight").unwrap();
+
+    // Create node anchor version
+    let node_props = PropertyMapBuilder::new()
+        .insert("name", "Alice")
+        .insert("age", 30i64)
+        .build();
+
+    let node_version = NodeVersion {
+        id: VersionId::new(1000).unwrap(),
+        node_id: NodeId::new(1).unwrap(),
+        temporal: BiTemporalInterval::new(
+            TimeRange::new(1000, 2000).unwrap(),
+            TimeRange::from(1000),
+        ),
+        label: person_label,
+        data: VersionData::Anchor {
+            properties: node_props,
+            vector_snapshot_id: Some(42),
+        },
+        next_version: None,
+        prev_version: None,
+    };
+
+    // Create edge anchor version
+    let edge_props = PropertyMapBuilder::new().insert("weight", 1.5f64).build();
+
+    let edge_version = EdgeVersion {
+        id: VersionId::new(1001).unwrap(),
+        edge_id: EdgeId::new(100).unwrap(),
+        temporal: BiTemporalInterval::new(
+            TimeRange::new(1000, 2000).unwrap(),
+            TimeRange::from(1000),
+        ),
+        label: knows_label,
+        source: NodeId::new(1).unwrap(),
+        target: NodeId::new(2).unwrap(),
+        data: VersionData::anchor(edge_props),
+        next_version: None,
+        prev_version: None,
+    };
+
+    // ========================================================================
+    // Phase 2: Convert and Save
+    // ========================================================================
+
+    let dir = tempdir().unwrap();
+    let manager = IndexPersistenceManager::new(dir.path());
+    manager.ensure_directories().unwrap();
+
+    // Save interner first (dependency)
+    manager.save_string_interner().unwrap();
+
+    // Convert versions
+    let node_entry = convert_node_version(&node_version).unwrap();
+    let edge_entry = convert_edge_version(&edge_version).unwrap();
+
+    // Create temporal data
+    let mut temporal_data = new_temporal_index_data();
+    temporal_data.node_versions.push(node_entry.clone());
+    temporal_data.edge_versions.push(edge_entry.clone());
+
+    // Save to disk
+    let temporal_path = manager.temporal_path().join("versions.idx");
+    save_temporal_index(&temporal_data, &temporal_path).unwrap();
+
+    assert!(temporal_path.exists(), "Temporal index file should exist");
+
+    // ========================================================================
+    // Phase 3: Load and Restore
+    // ========================================================================
+
+    // Load from disk
+    let loaded_data = load_temporal_index(&temporal_path).unwrap();
+
+    assert_eq!(
+        loaded_data.node_versions.len(),
+        1,
+        "Should have 1 node version"
+    );
+    assert_eq!(
+        loaded_data.edge_versions.len(),
+        1,
+        "Should have 1 edge version"
+    );
+
+    // Restore versions
+    let restored_node = restore_node_version(&loaded_data.node_versions[0], person_label).unwrap();
+    let restored_edge = restore_edge_version(&loaded_data.edge_versions[0], knows_label).unwrap();
+
+    // ========================================================================
+    // Phase 4: Verify
+    // ========================================================================
+
+    // Verify node version
+    assert_eq!(restored_node.node_id, node_version.node_id);
+    assert_eq!(
+        restored_node.temporal.valid_time().start(),
+        node_version.temporal.valid_time().start()
+    );
+    assert_eq!(
+        restored_node.temporal.valid_time().end(),
+        node_version.temporal.valid_time().end()
+    );
+    assert!(restored_node.data.is_anchor());
+    assert_eq!(
+        restored_node.data.get_vector_snapshot_id(),
+        Some(42),
+        "Vector snapshot ID should be preserved"
+    );
+
+    // Verify node properties
+    if let VersionData::Anchor { properties, .. } = &restored_node.data {
+        assert_eq!(properties.len(), 2);
+        assert_eq!(properties.get("name").unwrap().as_str().unwrap(), "Alice");
+        assert_eq!(properties.get("age").unwrap().as_int().unwrap(), 30);
+    } else {
+        panic!("Expected anchor version for node");
+    }
+
+    // Verify edge version
+    assert_eq!(restored_edge.edge_id, edge_version.edge_id);
+    assert_eq!(restored_edge.source, edge_version.source);
+    assert_eq!(restored_edge.target, edge_version.target);
+    assert!(restored_edge.data.is_anchor());
+
+    // Verify edge properties
+    if let VersionData::Anchor { properties, .. } = &restored_edge.data {
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties.get("weight").unwrap().as_float().unwrap(), 1.5);
+    } else {
+        panic!("Expected anchor version for edge");
+    }
+
+    // Verify entry types are correct
+    assert!(
+        matches!(
+            loaded_data.node_versions[0].version_type,
+            PersistedVersionType::Anchor
+        ),
+        "Node should be persisted as anchor"
+    );
+    assert!(
+        matches!(
+            loaded_data.edge_versions[0].version_type,
+            PersistedVersionType::Anchor
+        ),
+        "Edge should be persisted as anchor"
+    );
+
+    println!("✓ Temporal version round-trip test passed");
+}
+
+/// Test full temporal persistence lifecycle with database.
+///
+/// This test validates the complete temporal persistence workflow:
+/// 1. Create database with nodes/edges (which creates temporal versions)
+/// 2. Persist indexes (including temporal versions)
+/// 3. Restart database
+/// 4. Verify temporal versions are restored correctly
+#[test]
+fn test_temporal_persistence_with_database() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    println!("\n=== Temporal Persistence with Database Test ===");
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+
+    let node1_id;
+    let node2_id;
+    let edge_id;
+
+    // ========================================================================
+    // Phase 1: Create database with nodes/edges
+    // ========================================================================
+
+    println!("\nPhase 1: Creating database with nodes and edges...");
+
+    {
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: false,
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        // Create nodes (each node creation creates a temporal version)
+        node1_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .build(),
+            )
+            .unwrap();
+
+        node2_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Bob")
+                    .insert("age", 25i64)
+                    .build(),
+            )
+            .unwrap();
+
+        println!("✓ Created 2 nodes");
+
+        // Create edge (edge creation also creates a temporal version)
+        edge_id = db
+            .create_edge(
+                node1_id,
+                node2_id,
+                "KNOWS",
+                PropertyMapBuilder::new().insert("since", 2020i64).build(),
+            )
+            .unwrap();
+
+        println!("✓ Created 1 edge");
+
+        // Persist indexes (including temporal versions)
+        db.persist_indexes().unwrap();
+        println!("✓ Persisted all indexes to disk");
+
+        drop(db);
+    }
+
+    // ========================================================================
+    // Phase 2: Verify temporal index file exists
+    // ========================================================================
+
+    println!("\nPhase 2: Verifying temporal index file...");
+
+    {
+        use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+
+        let manager = IndexPersistenceManager::new(&data_dir);
+        let temporal_path = manager.temporal_path().join("versions.idx");
+
+        assert!(
+            temporal_path.exists(),
+            "Temporal index file should exist: {:?}",
+            temporal_path
+        );
+
+        println!("✓ Temporal index file exists");
+
+        // Load and verify temporal data
+        use gallifreydb::storage::index_persistence::temporal::load_temporal_index;
+        let temporal_data = load_temporal_index(&temporal_path).unwrap();
+
+        println!(
+            "✓ Temporal index contains {} node versions, {} edge versions",
+            temporal_data.node_versions.len(),
+            temporal_data.edge_versions.len()
+        );
+
+        // We should have versions for the nodes and edges we created
+        assert!(
+            temporal_data.node_versions.len() >= 2,
+            "Should have persisted at least 2 node versions"
+        );
+        assert!(
+            !temporal_data.edge_versions.is_empty(),
+            "Should have persisted at least 1 edge version"
+        );
+    }
+
+    // ========================================================================
+    // Phase 3: Restart database and verify data restored
+    // ========================================================================
+
+    println!("\nPhase 3: Restarting database and verifying restoration...");
+
+    {
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: true, // This should load temporal versions
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        println!("✓ Database restarted with load_on_startup=true");
+
+        // Verify nodes were restored
+        let node1 = db.get_node(node1_id).unwrap();
+        assert_eq!(
+            node1.properties.get("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(
+            node1.properties.get("age").and_then(|v| v.as_int()),
+            Some(30)
+        );
+
+        let node2 = db.get_node(node2_id).unwrap();
+        assert_eq!(
+            node2.properties.get("name").and_then(|v| v.as_str()),
+            Some("Bob")
+        );
+
+        println!("✓ Nodes restored correctly");
+
+        // Verify edge was restored
+        let edge = db.get_edge(edge_id).unwrap();
+        assert_eq!(
+            edge.properties.get("since").and_then(|v| v.as_int()),
+            Some(2020)
+        );
+
+        println!("✓ Edge restored correctly");
+
+        // Verify the database is fully functional after restore
+        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.edge_count(), 1);
+
+        println!("✓ Database counts match expected values");
+
+        println!("\n=== Temporal Persistence with Database Test PASSED ===");
+    }
+}
