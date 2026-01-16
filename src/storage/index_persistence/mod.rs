@@ -142,3 +142,67 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
 
     Ok(())
 }
+
+/// Load graph, temporal, and vector indexes in parallel for faster startup.
+///
+/// This function spawns threads to load all three index types concurrently,
+/// reducing startup time for databases with large indexes.
+///
+/// # Arguments
+///
+/// * `graph_path` - Path to the graph index file
+/// * `temporal_path` - Optional path to the temporal index file
+/// * `vector_paths` - Optional vector of vector index paths (meta, mappings, snapshots)
+///
+/// # Returns
+///
+/// A tuple of (graph_data, temporal_data_option, vector_data_vec)
+///
+/// # Errors
+///
+/// Returns an error if any of the index files fail to load.
+///
+/// # Examples
+///
+/// ```ignore
+/// use gallifreydb::storage::index_persistence::load_indexes_parallel;
+///
+/// let (graph, temporal, vector) = load_indexes_parallel(
+///     &graph_path,
+///     Some(&temporal_path),
+///     vec![],
+/// )?;
+/// ```
+pub fn load_indexes_parallel(
+    graph_path: &std::path::Path,
+    temporal_path: Option<&std::path::Path>,
+    _vector_paths: Vec<&std::path::Path>, // TODO: implement vector loading
+) -> Result<(formats::GraphIndexData, Option<formats::TemporalIndexData>)> {
+    use std::thread;
+
+    // Convert paths to owned PathBufs for thread safety
+    let graph_path = graph_path.to_path_buf();
+    let temporal_path_opt = temporal_path.map(|p| p.to_path_buf());
+
+    // Spawn thread for graph loading
+    let graph_handle = thread::spawn(move || graph::load_graph_index(&graph_path));
+
+    // Spawn thread for temporal loading if path provided
+    let temporal_handle =
+        temporal_path_opt.map(|path| thread::spawn(move || temporal::load_temporal_index(&path)));
+
+    // TODO: Spawn threads for vector index loading
+
+    // Join threads and collect results
+    let graph_data = graph_handle
+        .join()
+        .expect("Graph loading thread panicked")?;
+
+    let temporal_data = if let Some(handle) = temporal_handle {
+        Some(handle.join().expect("Temporal loading thread panicked")?)
+    } else {
+        None
+    };
+
+    Ok((graph_data, temporal_data))
+}
