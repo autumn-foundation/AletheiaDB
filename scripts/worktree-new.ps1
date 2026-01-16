@@ -36,9 +36,9 @@ if (-not $RepoRoot) {
 }
 
 # Validate branch name format
-if (-not ($BranchName -match "^(feature|fix)/[\w\-]+$")) {
-    Write-Err "Error: Branch name must be in format 'feature/<name>' or 'fix/<name>'"
-    Write-Err "  Examples: feature/add-auth, fix/memory-leak"
+if (-not ($BranchName -match "^(feature|fix|docs)/[\w\-]+$")) {
+    Write-Err "Error: Branch name must be in format 'feature/<name>', 'fix/<name>', or 'docs/<name>'"
+    Write-Err "  Examples: feature/add-auth, fix/memory-leak, docs/update-readme"
     exit 1
 }
 
