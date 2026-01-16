@@ -982,6 +982,30 @@ impl HnswIndex {
         self.config.m
     }
 
+    /// Get all ID mappings for persistence.
+    ///
+    /// Returns a vector of (node_id, usearch_key) tuples.
+    pub(crate) fn get_id_mappings(&self) -> Vec<(u64, u64)> {
+        self.id_mapping
+            .iter()
+            .map(|entry| (entry.key().as_u64(), *entry.value()))
+            .collect()
+    }
+
+    /// Restore a single ID mapping (used during index loading).
+    ///
+    /// This directly inserts the mapping without adding vectors to the index.
+    pub(crate) fn restore_mapping(&self, node_id: crate::core::id::NodeId, usearch_key: u64) {
+        self.id_mapping.insert(node_id, usearch_key);
+        self.reverse_mapping.insert(usearch_key, node_id);
+
+        // Update next_key if necessary
+        let current_max = self.next_key.load(Ordering::SeqCst);
+        if usearch_key >= current_max {
+            self.next_key.store(usearch_key + 1, Ordering::SeqCst);
+        }
+    }
+
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
         let options = IndexOptions {

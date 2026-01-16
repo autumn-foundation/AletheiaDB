@@ -1346,18 +1346,16 @@ fn test_truncated_file_detection() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
     use gallifreydb::PropertyMapBuilder;
-    use gallifreydb::storage::index_persistence::graph::{
-        new_graph_index_data, persist_property_map, save_graph_index, load_graph_index,
-    };
     use gallifreydb::storage::index_persistence::PersistedNode;
+    use gallifreydb::storage::index_persistence::graph::{
+        load_graph_index, new_graph_index_data, persist_property_map, save_graph_index,
+    };
 
     let dir = tempdir().unwrap();
 
     // Create valid graph data
     let mut graph_data = new_graph_index_data();
-    let props = PropertyMapBuilder::new()
-        .insert("name", "Alice")
-        .build();
+    let props = PropertyMapBuilder::new().insert("name", "Alice").build();
     let persisted_props = persist_property_map(&props).unwrap();
 
     graph_data.nodes.push(PersistedNode {
@@ -1392,10 +1390,8 @@ fn test_truncated_file_detection() {
 fn test_invalid_id_detection() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::storage::index_persistence::{
-        PersistenceConfig,
-    };
-    use gallifreydb::{GallifreyDB, config::GallifreyDBConfig, PropertyMapBuilder};
+    use gallifreydb::storage::index_persistence::PersistenceConfig;
+    use gallifreydb::{GallifreyDB, PropertyMapBuilder, config::GallifreyDBConfig};
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
@@ -1425,8 +1421,8 @@ fn test_invalid_id_detection() {
     }
 
     // Manually corrupt the graph file with invalid IDs
-    use gallifreydb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
     use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+    use gallifreydb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
 
     let manager = IndexPersistenceManager::new(&data_dir);
     let graph_path = manager.graph_path().join("adjacency.idx");
@@ -1467,10 +1463,8 @@ fn test_invalid_id_detection() {
 fn test_missing_interner_entries() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::storage::index_persistence::{
-        PersistenceConfig,
-    };
-    use gallifreydb::{GallifreyDB, config::GallifreyDBConfig, PropertyMapBuilder};
+    use gallifreydb::storage::index_persistence::PersistenceConfig;
+    use gallifreydb::{GallifreyDB, PropertyMapBuilder, config::GallifreyDBConfig};
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
@@ -1539,7 +1533,7 @@ fn test_corrupted_property_data() {
 
     use gallifreydb::PropertyMapBuilder;
     use gallifreydb::storage::index_persistence::graph::{
-        new_graph_index_data, persist_property_map, save_graph_index, load_graph_index,
+        load_graph_index, new_graph_index_data, persist_property_map, save_graph_index,
     };
     use gallifreydb::storage::index_persistence::{PersistedNode, PersistedPropertyMap};
 
@@ -1588,10 +1582,8 @@ fn test_corrupted_property_data() {
 fn test_multiple_restoration_errors() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
-    use gallifreydb::storage::index_persistence::{
-        PersistenceConfig,
-    };
-    use gallifreydb::{GallifreyDB, config::GallifreyDBConfig, PropertyMapBuilder};
+    use gallifreydb::storage::index_persistence::PersistenceConfig;
+    use gallifreydb::{GallifreyDB, PropertyMapBuilder, config::GallifreyDBConfig};
 
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
@@ -1625,8 +1617,8 @@ fn test_multiple_restoration_errors() {
     }
 
     // Corrupt the graph file to simulate various errors
-    use gallifreydb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
     use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+    use gallifreydb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
 
     let manager = IndexPersistenceManager::new(&data_dir);
     let graph_path = manager.graph_path().join("adjacency.idx");
@@ -1676,5 +1668,232 @@ fn test_multiple_restoration_errors() {
     );
 
     println!("✓ Multiple restoration errors test passed");
-    println!("  Loaded {} nodes (expected to skip some invalid ones)", db.node_count());
+    println!(
+        "  Loaded {} nodes (expected to skip some invalid ones)",
+        db.node_count()
+    );
+}
+
+// ============================================================================
+// Vector Index Persistence Tests (Issue #408)
+// ============================================================================
+
+/// Test that vector indexes can be persisted and loaded correctly.
+///
+/// This test validates:
+/// 1. Vector index metadata (dimensions, metric, config) is persisted
+/// 2. Vector mappings (NodeID ↔ usearch key) are persisted
+/// 3. HNSW index is persisted (usearch native format)
+/// 4. Vector index can be loaded and queried after restart
+#[test]
+fn test_vector_index_persistence() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    println!("\n=== Vector Index Persistence Test ===");
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+
+    let node_ids;
+    let similar_results_before;
+
+    // ========================================================================
+    // Phase 1: Create database with vector index and data
+    // ========================================================================
+
+    println!("\nPhase 1: Creating database with vector index...");
+
+    {
+        use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
+
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: false,
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        // Enable vector index for "embedding" property
+        db.vector_index("embedding")
+            .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+            .enable()
+            .unwrap();
+
+        println!("✓ Vector index enabled for 'embedding' property");
+
+        // Create nodes with vector embeddings
+        node_ids = vec![
+            db.create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Rust Programming")
+                    .insert_vector("embedding", &vec![0.1; 384])
+                    .build(),
+            )
+            .unwrap(),
+            db.create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Python Guide")
+                    .insert_vector("embedding", &vec![0.2; 384])
+                    .build(),
+            )
+            .unwrap(),
+            db.create_node(
+                "Document",
+                PropertyMapBuilder::new()
+                    .insert("title", "Go Tutorial")
+                    .insert_vector("embedding", &vec![0.3; 384])
+                    .build(),
+            )
+            .unwrap(),
+        ];
+
+        println!("✓ Created {} nodes with embeddings", node_ids.len());
+
+        // Query vector index before persistence
+        similar_results_before = db.find_similar(node_ids[0], 2).unwrap();
+        assert!(
+            !similar_results_before.is_empty(),
+            "Should find similar vectors before persistence"
+        );
+
+        println!(
+            "✓ Found {} similar nodes before persistence",
+            similar_results_before.len()
+        );
+
+        // Persist indexes
+        db.persist_indexes().unwrap();
+
+        println!("✓ Persisted all indexes to disk");
+
+        drop(db);
+    }
+
+    // ========================================================================
+    // Phase 2: Verify vector index files exist on disk
+    // ========================================================================
+
+    println!("\nPhase 2: Verifying vector index files...");
+
+    {
+        use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+
+        let manager = IndexPersistenceManager::new(&data_dir);
+
+        // Check that vector index directory and files exist
+        let vec_path = manager.vector_path("embedding");
+        assert!(
+            vec_path.exists(),
+            "Vector index directory should exist for 'embedding' property"
+        );
+
+        let meta_path = vec_path.join("meta.idx");
+        assert!(
+            meta_path.exists(),
+            "Vector metadata file should exist: {:?}",
+            meta_path
+        );
+
+        let mappings_path = vec_path.join("mappings.idx");
+        assert!(
+            mappings_path.exists(),
+            "Vector mappings file should exist: {:?}",
+            mappings_path
+        );
+
+        let usearch_path = vec_path.join("current.usearch");
+        assert!(
+            usearch_path.exists(),
+            "Usearch index file should exist: {:?}",
+            usearch_path
+        );
+
+        println!("✓ All vector index files exist on disk");
+
+        // Verify metadata content
+        use gallifreydb::storage::index_persistence::vector::load_vector_meta;
+        let meta = load_vector_meta(&meta_path).unwrap();
+        assert_eq!(meta.property_name, "embedding");
+        assert_eq!(meta.dimensions, 384);
+        assert_eq!(meta.vector_count, 3);
+
+        println!("✓ Vector metadata is correct (384 dimensions, 3 vectors)");
+
+        // Verify mappings content
+        use gallifreydb::storage::index_persistence::vector::load_vector_mappings;
+        let mappings = load_vector_mappings(&mappings_path).unwrap();
+        assert_eq!(mappings.count, 3);
+        assert_eq!(mappings.mappings.len(), 3);
+
+        println!("✓ Vector mappings are correct (3 mappings)");
+    }
+
+    // ========================================================================
+    // Phase 3: Restart database and verify vector index is restored
+    // ========================================================================
+
+    println!("\nPhase 3: Restarting database and verifying restoration...");
+
+    {
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: true, // This should load vector indexes
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        println!("✓ Database restarted, loading indexes...");
+
+        // Verify vector index is enabled
+        assert!(
+            db.is_vector_index_enabled_for("embedding"),
+            "Vector index should be enabled after loading"
+        );
+
+        println!("✓ Vector index is enabled for 'embedding'");
+
+        // Verify nodes were restored
+        assert_eq!(db.node_count(), 3);
+
+        for &node_id in &node_ids {
+            let node = db.get_node(node_id).unwrap();
+            assert!(
+                node.properties.get("embedding").is_some(),
+                "Node should have embedding property"
+            );
+        }
+
+        println!("✓ All nodes with embeddings were restored");
+
+        // Verify vector queries work after restart
+        let similar_results_after = db.find_similar(node_ids[0], 2).unwrap();
+        assert!(
+            !similar_results_after.is_empty(),
+            "Should find similar vectors after restart"
+        );
+
+        println!(
+            "✓ Found {} similar nodes after restart",
+            similar_results_after.len()
+        );
+
+        // Results should be similar (same approximate neighbors)
+        assert_eq!(
+            similar_results_before.len(),
+            similar_results_after.len(),
+            "Should find same number of similar nodes"
+        );
+
+        println!("\n=== Vector Index Persistence Test PASSED ===");
+    }
 }
