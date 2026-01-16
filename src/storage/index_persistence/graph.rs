@@ -146,6 +146,8 @@ pub fn save_graph_index(data: &GraphIndexData, path: &Path) -> Result<()> {
 }
 
 /// Load graph index data from disk and validate CRC32 checksum.
+///
+/// Automatically detects zstd compression by checking for magic bytes.
 pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     let bytes = fs::read(path)?;
 
@@ -158,7 +160,7 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     }
 
     // Split data and checksum
-    let (data, checksum_bytes) = bytes.split_at(bytes.len() - 4);
+    let (data_slice, checksum_bytes) = bytes.split_at(bytes.len() - 4);
     let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
         IndexPersistenceError::Corrupted {
             path: path.to_path_buf(),
@@ -166,9 +168,22 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
         }
     })?);
 
-    // Verify checksum
+    // Check for zstd compression (magic bytes: 0x28B52FFD in big-endian)
+    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+    let decompressed_data;
+    let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
+        // Decompress the data
+        decompressed_data = zstd::decode_all(data_slice).map_err(|e| {
+            IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e))
+        })?;
+        &decompressed_data[..]
+    } else {
+        data_slice
+    };
+
+    // Verify checksum (against decompressed data if compressed)
     let mut hasher = Hasher::new();
-    hasher.update(data);
+    hasher.update(data_to_verify);
     let computed_checksum = hasher.finalize();
 
     if computed_checksum != stored_checksum {
@@ -183,7 +198,7 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
     }
 
     // Decode and validate
-    let data: GraphIndexData = bitcode::decode(data)?;
+    let data: GraphIndexData = bitcode::decode(data_to_verify)?;
 
     if data.magic != GRAPH_MAGIC {
         return Err(IndexPersistenceError::InvalidMagic {
@@ -217,6 +232,42 @@ pub fn new_graph_index_data() -> GraphIndexData {
         incoming_offsets: Vec::new(),
         incoming_neighbors: Vec::new(),
     }
+}
+
+/// Save graph index data with zstd compression.
+///
+/// # Arguments
+///
+/// * `data` - The graph index data to save
+/// * `path` - The file path to write to
+/// * `compression_level` - zstd compression level (0-22, default 3)
+///
+/// # Errors
+///
+/// Returns an error if serialization, compression, or file write fails.
+pub fn save_graph_index_compressed(
+    data: &GraphIndexData,
+    path: &Path,
+    compression_level: i32,
+) -> Result<()> {
+    let encoded = bitcode::encode(data);
+
+    // Calculate CRC32 of uncompressed data
+    let mut hasher = Hasher::new();
+    hasher.update(&encoded);
+    let checksum = hasher.finalize();
+
+    // Compress the encoded data
+    let compressed = zstd::encode_all(&encoded[..], compression_level).map_err(|e| {
+        IndexPersistenceError::Serialization(format!("zstd compression failed: {}", e))
+    })?;
+
+    // Write: compressed_data + checksum (of uncompressed)
+    let mut data_with_checksum = compressed;
+    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
+
+    super::atomic_write(path, &data_with_checksum)?;
+    Ok(())
 }
 
 #[cfg(test)]

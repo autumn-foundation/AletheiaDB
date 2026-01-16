@@ -694,3 +694,119 @@ fn test_automatic_persistence_integration() {
 
     println!("\n=== Automatic Persistence Integration Test PASSED ===");
 }
+
+/// Test basic zstd compression round-trip.
+#[test]
+fn test_zstd_round_trip() {
+    let original_data = b"Hello, world! This is a test of zstd compression.";
+
+    // Compress
+    let compressed = zstd::encode_all(&original_data[..], 3).unwrap();
+    println!(
+        "Original: {} bytes, Compressed: {} bytes",
+        original_data.len(),
+        compressed.len()
+    );
+
+    // Decompress
+    let decompressed = zstd::decode_all(&compressed[..]).unwrap();
+
+    // Verify
+    assert_eq!(&decompressed[..], &original_data[..]);
+
+    // Verify CRC matches
+    use crc32fast::Hasher;
+    let mut hasher1 = Hasher::new();
+    hasher1.update(original_data);
+    let crc1 = hasher1.finalize();
+
+    let mut hasher2 = Hasher::new();
+    hasher2.update(&decompressed);
+    let crc2 = hasher2.finalize();
+
+    assert_eq!(crc1, crc2);
+}
+
+/// Test zstd compression for index persistence.
+///
+/// This test validates:
+/// 1. Compressed files are smaller than uncompressed
+/// 2. Compressed data can be loaded correctly
+/// 3. Compression level affects file size
+#[test]
+fn test_compression_reduces_file_size() {
+    // Acquire mutex to prevent race conditions with GLOBAL_INTERNER
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::PropertyMapBuilder;
+    use gallifreydb::storage::index_persistence::PersistedNode;
+    use gallifreydb::storage::index_persistence::graph::{
+        load_graph_index, new_graph_index_data, persist_property_map, save_graph_index,
+        save_graph_index_compressed,
+    };
+
+    println!("\n=== Compression Test ===");
+
+    let dir = tempdir().unwrap();
+
+    // Create test data with repetitive content (compresses well)
+    let mut graph_data = new_graph_index_data();
+    graph_data.node_count = 100;
+
+    for i in 0..100 {
+        let props = PropertyMapBuilder::new()
+            .insert("name", format!("Node_{}", i))
+            .insert("index", i as i64)
+            .build();
+
+        let persisted_props = persist_property_map(&props).unwrap();
+
+        graph_data.nodes.push(PersistedNode {
+            id: i,
+            label_idx: 1, // Same label for all - compresses well
+            properties: persisted_props,
+        });
+    }
+
+    // Save without compression
+    let uncompressed_path = dir.path().join("uncompressed.idx");
+    save_graph_index(&graph_data, &uncompressed_path).unwrap();
+    let uncompressed_size = std::fs::metadata(&uncompressed_path).unwrap().len();
+
+    println!("Uncompressed size: {} bytes", uncompressed_size);
+
+    // Save with compression
+    let compressed_path = dir.path().join("compressed.idx");
+    save_graph_index_compressed(&graph_data, &compressed_path, 3).unwrap();
+    let compressed_size = std::fs::metadata(&compressed_path).unwrap().len();
+
+    println!("Compressed size: {} bytes", compressed_size);
+
+    // Verify compression actually reduced size
+    assert!(
+        compressed_size < uncompressed_size,
+        "Compressed size ({}) should be smaller than uncompressed ({})",
+        compressed_size,
+        uncompressed_size
+    );
+
+    // Verify compression ratio is reasonable (at least 30% reduction)
+    let compression_ratio = compressed_size as f64 / uncompressed_size as f64;
+    println!("Compression ratio: {:.2}%", compression_ratio * 100.0);
+
+    assert!(
+        compression_ratio < 0.7,
+        "Compression ratio should be < 70%, got {:.2}%",
+        compression_ratio * 100.0
+    );
+
+    // Verify we can load compressed data correctly
+    let loaded_data = load_graph_index(&compressed_path).unwrap();
+
+    assert_eq!(loaded_data.node_count, 100);
+    assert_eq!(loaded_data.nodes.len(), 100);
+    assert_eq!(loaded_data.nodes[0].label_idx, 1);
+    assert_eq!(loaded_data.nodes[50].id, 50);
+
+    println!("✓ Compression test passed");
+}
