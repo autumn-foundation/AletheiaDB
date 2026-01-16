@@ -224,6 +224,16 @@ impl PersistenceTracker {
 /// - Mutation thresholds are exceeded
 /// - Time intervals have elapsed
 /// - Special events occur (e.g., graph adjacency rebuild)
+///
+/// # Crash Safety
+///
+/// The thread is wrapped in `catch_unwind` to prevent silent failures. If a panic occurs:
+/// - The panic is logged to stderr
+/// - The `stopped_flag` is set to true
+/// - The database continues running but future persistence attempts will fail with warnings
+///
+/// This prevents data corruption while alerting users to the failure.
+#[allow(clippy::too_many_arguments)]
 fn spawn_background_persistence_thread(
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
@@ -232,6 +242,7 @@ fn spawn_background_persistence_thread(
     manager: Arc<crate::storage::index_persistence::IndexPersistenceManager>,
     tracker: Arc<PersistenceTracker>,
     policies: crate::storage::index_persistence::formats::PersistencePolicies,
+    stopped_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
     std::thread::spawn(move || {
         // Wrap entire thread in panic handler to prevent silent failures
@@ -305,8 +316,18 @@ fn spawn_background_persistence_thread(
             let _ = persist_all_indexes(&current, &historical, &temporal_indexes, &wal, &manager, &tracker);
         }));
 
-        if let Err(e) = result {
-            eprintln!("Background persistence thread panicked: {:?}", e);
+        // Set stopped flag and log regardless of normal exit or panic
+        stopped_flag.store(true, Ordering::Release);
+
+        match result {
+            Ok(()) => {
+                eprintln!("Warning: Background persistence thread exited normally but unexpectedly. Future persistence operations will fail.");
+            }
+            Err(e) => {
+                eprintln!("CRITICAL: Background persistence thread panicked: {:?}", e);
+                eprintln!("Database will continue running but NO FURTHER INDEX PERSISTENCE will occur.");
+                eprintln!("You MUST restart the database to restore automatic persistence.");
+            }
         }
     });
 }
@@ -340,11 +361,8 @@ fn persist_graph_index(
 
     let mut graph_data = new_graph_index_data();
 
-    // Collect all nodes
-    let nodes: Vec<_> = current.all_nodes().collect();
-    graph_data.node_count = nodes.len() as u64;
-
-    for node in nodes {
+    // Stream all nodes without collecting into intermediate Vec (prevents OOM on large graphs)
+    for node in current.all_nodes() {
         let properties = persist_property_map(&node.properties).map_err(|e| {
             StorageError::PersistenceError(format!("Failed to persist node properties: {}", e))
         })?;
@@ -355,12 +373,10 @@ fn persist_graph_index(
             properties,
         });
     }
+    graph_data.node_count = graph_data.nodes.len() as u64;
 
-    // Collect all edges
-    let edges: Vec<_> = current.all_edges().collect();
-    graph_data.edge_count = edges.len() as u64;
-
-    for edge in edges {
+    // Stream all edges without collecting into intermediate Vec (prevents OOM on large graphs)
+    for edge in current.all_edges() {
         let properties = persist_property_map(&edge.properties).map_err(|e| {
             StorageError::PersistenceError(format!("Failed to persist edge properties: {}", e))
         })?;
@@ -373,6 +389,7 @@ fn persist_graph_index(
             properties,
         });
     }
+    graph_data.edge_count = graph_data.edges.len() as u64;
 
     // Export CSR adjacency structures for fast loading
     let (outgoing_offsets, outgoing_neighbors) = current.export_outgoing_csr();
@@ -529,6 +546,8 @@ pub struct GallifreyDB {
     persistence_manager: Option<Arc<crate::storage::index_persistence::IndexPersistenceManager>>,
     /// Persistence mutation tracking
     persistence_tracker: Option<Arc<PersistenceTracker>>,
+    /// Background persistence thread health flag - set to true if thread panics or stops
+    persistence_thread_stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GallifreyDB {
@@ -644,6 +663,7 @@ impl GallifreyDB {
             persistence_config: config.persistence.clone(),
             persistence_manager: persistence_manager.clone(),
             persistence_tracker: persistence_tracker.clone(),
+            persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         // Load indexes on startup if enabled
@@ -676,64 +696,205 @@ impl GallifreyDB {
                         let mut max_node_id = 0u64;
                         let mut max_edge_id = 0u64;
 
-                        // Restore nodes
+                        // Track restoration statistics
+                        let total_nodes = graph_data.nodes.len();
+                        let total_edges = graph_data.edges.len();
+                        let mut nodes_loaded = 0usize;
+                        let mut edges_loaded = 0usize;
+                        let mut nodes_failed_label = 0usize;
+                        let mut nodes_failed_properties = 0usize;
+                        let mut nodes_failed_version = 0usize;
+                        let mut edges_failed_label = 0usize;
+                        let mut edges_failed_properties = 0usize;
+                        let mut edges_failed_version = 0usize;
+
+                        // Pre-calculate max IDs before inserting to avoid race conditions
                         for persisted_node in &graph_data.nodes {
-                            if let Some(_label_str) = GLOBAL_INTERNER.resolve(
-                                crate::core::InternedString::from_raw(persisted_node.label_idx),
-                            ) && let Ok(properties) =
-                                restore_property_map(&persisted_node.properties)
-                                && let Ok(version_gen) = db.version_id_gen.lock_or_err()
-                                && let Ok(version_raw) = version_gen.next()
-                            {
-                                let version_id = VersionId::new_unchecked(version_raw);
-
-                                let node = Node {
-                                    id: NodeId::new_unchecked(persisted_node.id),
-                                    label: crate::core::InternedString::from_raw(
-                                        persisted_node.label_idx,
-                                    ),
-                                    properties,
-                                    current_version: version_id,
-                                    metadata: VersionMetadata {
-                                        created_by_tx: TxId::new(0), // Restored from disk
-                                        commit_timestamp: Some(current_time),
-                                    },
-                                };
-
-                                let _ = db.current.insert_node_direct(node, current_time);
-                                max_node_id = max_node_id.max(persisted_node.id);
-                            }
+                            max_node_id = max_node_id.max(persisted_node.id);
+                        }
+                        for persisted_edge in &graph_data.edges {
+                            max_edge_id = max_edge_id.max(persisted_edge.id);
                         }
 
-                        // Restore edges
-                        for persisted_edge in &graph_data.edges {
-                            if let Some(_label_str) = GLOBAL_INTERNER.resolve(
-                                crate::core::InternedString::from_raw(persisted_edge.label_idx),
-                            ) && let Ok(properties) =
-                                restore_property_map(&persisted_edge.properties)
-                                && let Ok(version_gen) = db.version_id_gen.lock_or_err()
-                                && let Ok(version_raw) = version_gen.next()
-                            {
-                                let version_id = VersionId::new_unchecked(version_raw);
+                        // Initialize ID generators BEFORE inserting entities to prevent collisions
+                        if max_node_id > 0
+                            && let Ok(mut node_gen) = db.node_id_gen.lock_or_err()
+                        {
+                            *node_gen = crate::core::id::IdGenerator::with_start(max_node_id + 1);
+                        }
+                        if max_edge_id > 0
+                            && let Ok(mut edge_gen) = db.edge_id_gen.lock_or_err()
+                        {
+                            *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
+                        }
 
-                                let edge = Edge {
-                                    id: EdgeId::new_unchecked(persisted_edge.id),
-                                    source: NodeId::new_unchecked(persisted_edge.source_id),
-                                    target: NodeId::new_unchecked(persisted_edge.target_id),
-                                    label: crate::core::InternedString::from_raw(
-                                        persisted_edge.label_idx,
-                                    ),
-                                    properties,
-                                    current_version: version_id,
-                                    metadata: VersionMetadata {
-                                        created_by_tx: TxId::new(0), // Restored from disk
-                                        commit_timestamp: Some(current_time),
-                                    },
+                        // Restore nodes with explicit error tracking
+                        for persisted_node in &graph_data.nodes {
+                            // Validate label exists in string interner
+                            let label_str = match GLOBAL_INTERNER.resolve(
+                                crate::core::InternedString::from_raw(persisted_node.label_idx),
+                            ) {
+                                Some(s) => s,
+                                None => {
+                                    nodes_failed_label += 1;
+                                    eprintln!(
+                                        "Warning: Skipping node {}: label index {} not found in string interner",
+                                        persisted_node.id, persisted_node.label_idx
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Restore properties
+                            let properties = match restore_property_map(&persisted_node.properties) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    nodes_failed_properties += 1;
+                                    eprintln!(
+                                        "Warning: Skipping node {} (label '{}'): property restoration failed: {}",
+                                        persisted_node.id, label_str, e
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Generate version ID
+                            let version_id = {
+                                let version_gen = match db.version_id_gen.lock_or_err() {
+                                    Ok(g) => g,
+                                    Err(e) => {
+                                        nodes_failed_version += 1;
+                                        eprintln!(
+                                            "Warning: Skipping node {} (label '{}'): version generator lock failed: {}",
+                                            persisted_node.id, label_str, e
+                                        );
+                                        continue;
+                                    }
                                 };
+                                match version_gen.next() {
+                                    Ok(v) => VersionId::new_unchecked(v),
+                                    Err(e) => {
+                                        nodes_failed_version += 1;
+                                        eprintln!(
+                                            "Warning: Skipping node {} (label '{}'): version ID generation failed: {}",
+                                            persisted_node.id, label_str, e
+                                        );
+                                        continue;
+                                    }
+                                }
+                            };
 
-                                let _ = db.current.insert_edge_direct(edge);
-                                max_edge_id = max_edge_id.max(persisted_edge.id);
-                            }
+                            let node = Node {
+                                id: NodeId::new_unchecked(persisted_node.id),
+                                label: crate::core::InternedString::from_raw(
+                                    persisted_node.label_idx,
+                                ),
+                                properties,
+                                current_version: version_id,
+                                metadata: VersionMetadata {
+                                    created_by_tx: TxId::new(0), // Restored from disk
+                                    commit_timestamp: Some(current_time),
+                                },
+                            };
+
+                            let _ = db.current.insert_node_direct(node, current_time);
+                            nodes_loaded += 1;
+                        }
+
+                        // Restore edges with explicit error tracking
+                        for persisted_edge in &graph_data.edges {
+                            // Validate label exists in string interner
+                            let label_str = match GLOBAL_INTERNER.resolve(
+                                crate::core::InternedString::from_raw(persisted_edge.label_idx),
+                            ) {
+                                Some(s) => s,
+                                None => {
+                                    edges_failed_label += 1;
+                                    eprintln!(
+                                        "Warning: Skipping edge {}: label index {} not found in string interner",
+                                        persisted_edge.id, persisted_edge.label_idx
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Restore properties
+                            let properties = match restore_property_map(&persisted_edge.properties) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    edges_failed_properties += 1;
+                                    eprintln!(
+                                        "Warning: Skipping edge {} (label '{}'): property restoration failed: {}",
+                                        persisted_edge.id, label_str, e
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            // Generate version ID
+                            let version_id = {
+                                let version_gen = match db.version_id_gen.lock_or_err() {
+                                    Ok(g) => g,
+                                    Err(e) => {
+                                        edges_failed_version += 1;
+                                        eprintln!(
+                                            "Warning: Skipping edge {} (label '{}'): version generator lock failed: {}",
+                                            persisted_edge.id, label_str, e
+                                        );
+                                        continue;
+                                    }
+                                };
+                                match version_gen.next() {
+                                    Ok(v) => VersionId::new_unchecked(v),
+                                    Err(e) => {
+                                        edges_failed_version += 1;
+                                        eprintln!(
+                                            "Warning: Skipping edge {} (label '{}'): version ID generation failed: {}",
+                                            persisted_edge.id, label_str, e
+                                        );
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            let edge = Edge {
+                                id: EdgeId::new_unchecked(persisted_edge.id),
+                                source: NodeId::new_unchecked(persisted_edge.source_id),
+                                target: NodeId::new_unchecked(persisted_edge.target_id),
+                                label: crate::core::InternedString::from_raw(
+                                    persisted_edge.label_idx,
+                                ),
+                                properties,
+                                current_version: version_id,
+                                metadata: VersionMetadata {
+                                    created_by_tx: TxId::new(0), // Restored from disk
+                                    commit_timestamp: Some(current_time),
+                                },
+                            };
+
+                            let _ = db.current.insert_edge_direct(edge);
+                            edges_loaded += 1;
+                        }
+
+                        // Log restoration summary
+                        let nodes_skipped = total_nodes - nodes_loaded;
+                        let edges_skipped = total_edges - edges_loaded;
+
+                        if nodes_skipped > 0 || edges_skipped > 0 {
+                            eprintln!(
+                                "Index restoration completed with data loss:\n\
+                                 Nodes: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)\n\
+                                 Edges: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)",
+                                nodes_loaded, total_nodes, nodes_skipped,
+                                nodes_failed_label, nodes_failed_properties, nodes_failed_version,
+                                edges_loaded, total_edges, edges_skipped,
+                                edges_failed_label, edges_failed_properties, edges_failed_version
+                            );
+                        } else if total_nodes > 0 || total_edges > 0 {
+                            eprintln!(
+                                "Index restoration completed successfully: {} nodes, {} edges loaded",
+                                nodes_loaded, edges_loaded
+                            );
                         }
 
                         // Import CSR adjacency structures if available, otherwise rebuild
@@ -749,19 +910,6 @@ impl GallifreyDB {
                         } else {
                             // Fallback for older index files without CSR data
                             db.current.rebuild_adjacency();
-                        }
-
-                        // Initialize ID generators to avoid conflicts with restored IDs
-                        // Set them to one more than the max ID we loaded
-                        if max_node_id > 0
-                            && let Ok(mut node_gen) = db.node_id_gen.lock_or_err()
-                        {
-                            *node_gen = crate::core::id::IdGenerator::with_start(max_node_id + 1);
-                        }
-                        if max_edge_id > 0
-                            && let Ok(mut edge_gen) = db.edge_id_gen.lock_or_err()
-                        {
-                            *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
                         }
                     }
                     Err(_e) => {
@@ -784,6 +932,7 @@ impl GallifreyDB {
                 Arc::clone(manager),
                 Arc::clone(tracker),
                 config.persistence.policies.clone(),
+                Arc::clone(&db.persistence_thread_stopped),
             );
         }
 
@@ -836,6 +985,7 @@ impl GallifreyDB {
             persistence_config: crate::storage::index_persistence::PersistenceConfig::default(),
             persistence_manager: None,
             persistence_tracker: None,
+            persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -2544,6 +2694,14 @@ impl GallifreyDB {
             new_graph_index_data, persist_property_map, save_graph_index,
         };
 
+        // Warn if background persistence thread has stopped
+        if self.persistence_thread_stopped.load(std::sync::atomic::Ordering::Acquire) {
+            eprintln!(
+                "Warning: Background persistence thread has stopped. \
+                 Automatic persistence is disabled. Manual persist_indexes() calls will still work."
+            );
+        }
+
         let manager =
             self.persistence_manager
                 .as_ref()
@@ -2598,8 +2756,10 @@ impl GallifreyDB {
             |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
         )?;
 
-        // 3. Save manifest last
-        let manifest = IndexManifest::new(0); // TODO: Use actual LSN
+        // 3. Save manifest last with current WAL LSN
+        // Note: This records the WAL position at persist time for future WAL replay coordination
+        let current_lsn = self.wal.current_lsn().0;
+        let manifest = IndexManifest::new(current_lsn);
         manager.save_manifest(&manifest).map_err(|e| {
             StorageError::PersistenceError(format!("Failed to save manifest: {}", e))
         })?;

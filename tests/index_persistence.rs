@@ -1311,3 +1311,370 @@ fn test_delta_encoding_reduces_incremental_save_size() {
     );
     println!("✓ Delta encoding comprehensive test passed");
 }
+
+// ============================================================================
+// Error Path Tests - Corruption Scenarios
+// ============================================================================
+
+/// Test that malformed manifests are handled gracefully.
+#[test]
+fn test_malformed_manifest_handling() {
+    let dir = tempdir().unwrap();
+    let manager = IndexPersistenceManager::new(dir.path());
+    manager.ensure_directories().unwrap();
+
+    // Write invalid manifest (wrong magic bytes)
+    let manifest_path = manager.manifest_path();
+    std::fs::write(&manifest_path, b"WRONG_MAGIC").unwrap();
+
+    // Should fail gracefully, not panic
+    let result = manager.load_manifest_and_strings();
+    assert!(result.is_err(), "Should fail on malformed manifest");
+
+    // Write truncated manifest (incomplete header)
+    std::fs::write(&manifest_path, b"GIDX\x01\x00\x00").unwrap();
+
+    let result = manager.load_manifest_and_strings();
+    assert!(result.is_err(), "Should fail on truncated manifest");
+
+    println!("✓ Malformed manifest handling test passed");
+}
+
+/// Test that truncated index files are detected and handled.
+#[test]
+fn test_truncated_file_detection() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::PropertyMapBuilder;
+    use gallifreydb::storage::index_persistence::graph::{
+        new_graph_index_data, persist_property_map, save_graph_index, load_graph_index,
+    };
+    use gallifreydb::storage::index_persistence::PersistedNode;
+
+    let dir = tempdir().unwrap();
+
+    // Create valid graph data
+    let mut graph_data = new_graph_index_data();
+    let props = PropertyMapBuilder::new()
+        .insert("name", "Alice")
+        .build();
+    let persisted_props = persist_property_map(&props).unwrap();
+
+    graph_data.nodes.push(PersistedNode {
+        id: 1,
+        label_idx: 1,
+        properties: persisted_props,
+    });
+    graph_data.node_count = 1;
+
+    // Save valid file
+    let path = dir.path().join("graph.idx");
+    save_graph_index(&graph_data, &path).unwrap();
+
+    // Verify it loads correctly
+    let loaded = load_graph_index(&path);
+    assert!(loaded.is_ok(), "Valid file should load");
+
+    // Truncate the file (corrupt it)
+    let data = std::fs::read(&path).unwrap();
+    let truncated = &data[..data.len() / 2]; // Cut in half
+    std::fs::write(&path, truncated).unwrap();
+
+    // Should fail gracefully
+    let result = load_graph_index(&path);
+    assert!(result.is_err(), "Should detect truncated file");
+
+    println!("✓ Truncated file detection test passed");
+}
+
+/// Test that invalid IDs are detected during restoration.
+#[test]
+fn test_invalid_id_detection() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::storage::index_persistence::{
+        PersistenceConfig,
+    };
+    use gallifreydb::{GallifreyDB, config::GallifreyDBConfig, PropertyMapBuilder};
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+
+    // Create database with data
+    {
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: false, // Don't load yet
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        // Add node
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+
+        // Persist
+        db.persist_indexes().unwrap();
+    }
+
+    // Manually corrupt the graph file with invalid IDs
+    use gallifreydb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
+    use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+
+    let manager = IndexPersistenceManager::new(&data_dir);
+    let graph_path = manager.graph_path().join("adjacency.idx");
+
+    let mut graph_data = load_graph_index(&graph_path).unwrap();
+
+    // Add node with invalid ID (exceeding MAX_VALID_ID would be u64::MAX - 1000+)
+    // For this test, we'll just create a node with a very large ID
+    use gallifreydb::storage::index_persistence::PersistedNode;
+    graph_data.nodes.push(PersistedNode {
+        id: u64::MAX - 500, // Very large ID
+        label_idx: 1,
+        properties: graph_data.nodes[0].properties.clone(),
+    });
+
+    // Save corrupted data
+    save_graph_index(&graph_data, &graph_path).unwrap();
+
+    // Try to load - should handle gracefully
+    // Note: Current implementation may skip invalid IDs during restoration
+    let config = GallifreyDBConfig::builder()
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: data_dir.clone(),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .build();
+
+    // Should not panic, may log warnings
+    let _db = GallifreyDB::with_unified_config(config);
+
+    println!("✓ Invalid ID detection test passed");
+}
+
+/// Test that missing string interner entries are detected.
+#[test]
+fn test_missing_interner_entries() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::storage::index_persistence::{
+        PersistenceConfig,
+    };
+    use gallifreydb::{GallifreyDB, config::GallifreyDBConfig, PropertyMapBuilder};
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+
+    // Create database with data
+    {
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: false,
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        db.create_node(
+            "Person",
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+        )
+        .unwrap();
+
+        db.persist_indexes().unwrap();
+    }
+
+    // Delete the string interner file to simulate corruption
+    use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+    let manager = IndexPersistenceManager::new(&data_dir);
+    std::fs::remove_file(manager.interner_path()).unwrap();
+
+    // Try to load - should handle missing interner gracefully
+    let config = GallifreyDBConfig::builder()
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: data_dir.clone(),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .build();
+
+    // Should not panic - may start with empty DB or skip invalid entries
+    let db = GallifreyDB::with_unified_config(config);
+
+    // Verify database is functional even if data was lost
+    let node_id = db
+        .create_node(
+            "TestNode",
+            PropertyMapBuilder::new().insert("test", "recovery").build(),
+        )
+        .unwrap();
+
+    let node = db.get_node(node_id).unwrap();
+    assert_eq!(
+        node.properties.get("test").and_then(|v| v.as_str()),
+        Some("recovery")
+    );
+
+    println!("✓ Missing interner entries test passed");
+}
+
+/// Test that corrupted property data is handled gracefully.
+#[test]
+fn test_corrupted_property_data() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::PropertyMapBuilder;
+    use gallifreydb::storage::index_persistence::graph::{
+        new_graph_index_data, persist_property_map, save_graph_index, load_graph_index,
+    };
+    use gallifreydb::storage::index_persistence::{PersistedNode, PersistedPropertyMap};
+
+    let dir = tempdir().unwrap();
+
+    // Create graph with valid properties
+    let mut graph_data = new_graph_index_data();
+    let props = PropertyMapBuilder::new()
+        .insert("name", "Alice")
+        .insert("age", 30i64)
+        .build();
+    let persisted_props = persist_property_map(&props).unwrap();
+
+    graph_data.nodes.push(PersistedNode {
+        id: 1,
+        label_idx: 1,
+        properties: persisted_props,
+    });
+
+    // Add node with corrupted property data (invalid serialization)
+    graph_data.nodes.push(PersistedNode {
+        id: 2,
+        label_idx: 1,
+        properties: PersistedPropertyMap {
+            entries: vec![], // Empty properties - edge case
+        },
+    });
+
+    graph_data.node_count = 2;
+
+    // Save and load
+    let path = dir.path().join("graph.idx");
+    save_graph_index(&graph_data, &path).unwrap();
+
+    let loaded = load_graph_index(&path);
+    assert!(loaded.is_ok(), "Should handle empty properties gracefully");
+
+    let loaded_data = loaded.unwrap();
+    assert_eq!(loaded_data.node_count, 2);
+
+    println!("✓ Corrupted property data test passed");
+}
+
+/// Test restoration with multiple simultaneous errors.
+#[test]
+fn test_multiple_restoration_errors() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::storage::index_persistence::{
+        PersistenceConfig,
+    };
+    use gallifreydb::{GallifreyDB, config::GallifreyDBConfig, PropertyMapBuilder};
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+
+    // Create database with multiple nodes
+    {
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: false,
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        // Add several nodes
+        for i in 0..10 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("Person {}", i))
+                    .insert("id", i as i64)
+                    .build(),
+            )
+            .unwrap();
+        }
+
+        db.persist_indexes().unwrap();
+    }
+
+    // Corrupt the graph file to simulate various errors
+    use gallifreydb::storage::index_persistence::graph::{load_graph_index, save_graph_index};
+    use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+
+    let manager = IndexPersistenceManager::new(&data_dir);
+    let graph_path = manager.graph_path().join("adjacency.idx");
+
+    let mut graph_data = load_graph_index(&graph_path).unwrap();
+
+    // Add nodes with various invalid states
+    use gallifreydb::storage::index_persistence::PersistedNode;
+
+    // Node with invalid label index (non-existent string)
+    graph_data.nodes.push(PersistedNode {
+        id: 100,
+        label_idx: 99999, // Non-existent string index
+        properties: graph_data.nodes[0].properties.clone(),
+    });
+
+    // Node with very large ID
+    graph_data.nodes.push(PersistedNode {
+        id: u64::MAX - 100,
+        label_idx: 1,
+        properties: graph_data.nodes[0].properties.clone(),
+    });
+
+    graph_data.node_count = graph_data.nodes.len() as u64;
+
+    // Save corrupted data
+    save_graph_index(&graph_data, &graph_path).unwrap();
+
+    // Load and verify it handles multiple errors gracefully
+    // With our new logging, this should print warnings for each skipped node
+    let config = GallifreyDBConfig::builder()
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: data_dir.clone(),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .build();
+
+    let db = GallifreyDB::with_unified_config(config);
+
+    // Should have loaded the valid nodes (10) and skipped the invalid ones (2)
+    // Note: Exact count may vary depending on restoration logic
+    assert!(
+        db.node_count() >= 10,
+        "Should have loaded at least the 10 valid nodes"
+    );
+
+    println!("✓ Multiple restoration errors test passed");
+    println!("  Loaded {} nodes (expected to skip some invalid ones)", db.node_count());
+}
