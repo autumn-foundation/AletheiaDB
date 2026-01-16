@@ -270,10 +270,12 @@ fn setup_shutdown_handler(
 
 **Tips for Faster Cold Starts:**
 
-1. **Use SSD storage** for index files
-2. **Enable multiple vector indexes** (they load in parallel)
-3. **Keep manifest small** (it loads first)
-4. **Prewarm the page cache** (OS-level optimization)
+1. **Use parallel loading** - `load_indexes_parallel()` loads graph, temporal, and vector indexes concurrently (~3x faster)
+2. **Use memory-mapped loading** - `load_graph_index_mmap()` for multi-GB indexes that exceed available RAM
+3. **Use SSD storage** for index files
+4. **Enable multiple vector indexes** (they load in parallel)
+5. **Keep manifest small** (it loads first)
+6. **Prewarm the page cache** (OS-level optimization)
 
 ### Save Performance
 
@@ -289,10 +291,12 @@ fn setup_shutdown_handler(
 
 **Tips for Faster Saves:**
 
-1. **Save less frequently** in production (5-10 minute intervals)
-2. **Use background threads** to avoid blocking main operations
-3. **Disable temporal indexes** if not needed (reduces save time)
-4. **Limit vector properties** (each property adds save overhead)
+1. **Use delta encoding** - `save_graph_index_delta()` for incremental saves (60-75% size reduction)
+2. **Use compression** - `save_graph_index_compressed()` with zstd (levels 0-22) reduces disk I/O
+3. **Save less frequently** in production (5-10 minute intervals)
+4. **Use background threads** to avoid blocking main operations
+5. **Disable temporal indexes** if not needed (reduces save time)
+6. **Limit vector properties** (each property adds save overhead)
 
 ### Disk Space
 
@@ -537,18 +541,34 @@ time gallifreydb load-indexes --path data/my-db --verbose
 
 **Solutions:**
 
-1. **Optimize graph index:**
+1. **Use parallel loading:**
+   ```rust
+   use gallifreydb::storage::index_persistence::load_indexes_parallel;
+
+   // Load graph, temporal, and vector indexes concurrently (~3x faster)
+   load_indexes_parallel(&db, &manager)?;
+   ```
+
+2. **Use memory-mapped loading for large indexes:**
+   ```rust
+   use gallifreydb::storage::index_persistence::graph::load_graph_index_mmap;
+
+   // Handles multi-GB indexes without loading entire file into RAM
+   let graph_data = load_graph_index_mmap(&graph_path)?;
+   ```
+
+3. **Optimize graph index:**
    ```rust
    // Reduce node property sizes
    db.compact_graph_properties()?;
    ```
 
-2. **Use SSD storage:**
+4. **Use SSD storage:**
    ```bash
    mv data/my-db /ssd/data/my-db
    ```
 
-3. **Prewarm page cache (Linux):**
+5. **Prewarm page cache (Linux):**
    ```bash
    vmtouch -t data/my-db/indexes/
    ```
@@ -614,10 +634,18 @@ PersistenceConfig {
 
 ### Q: What's the maximum database size for persistence?
 
-**A:** Theoretical limit: Available disk space. Practical limit: Depends on RAM for loading. For very large databases (>100GB), consider:
-- Memory-mapped loading (future enhancement)
-- Index sharding (future enhancement)
-- Incremental loading (future enhancement)
+**A:** Theoretical limit: Available disk space. GallifreyDB provides several features for handling large databases:
+
+**Implemented:**
+- **Memory-mapped loading** (`load_graph_index_mmap()`) - Handle multi-GB indexes without loading entire files into RAM
+- **Parallel loading** (`load_indexes_parallel()`) - Load indexes concurrently for faster startup (~3x speedup)
+- **Delta encoding** (`save_graph_index_delta()`) - Incremental saves for faster updates (60-75% size reduction)
+- **Compression** (`save_graph_index_compressed()`) - Zstd compression to reduce disk I/O and storage
+
+**Future enhancements:**
+- Index sharding for horizontal scaling (when needed for >100GB databases)
+- Distributed index coordination
+- Streaming index loading
 
 ## See Also
 
