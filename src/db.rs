@@ -190,13 +190,100 @@ impl GallifreyDB {
                 .load_manifest_and_strings()
                 .map_err(|e| eprintln!("Warning: Failed to load indexes: {}", e));
 
-            // TODO: Phase 2 - Restore graph data from persisted indexes
-            // For MVP, we just verify indexes exist and load strings/manifest
-            // Full restoration requires handling:
-            // - Version IDs for each restored node/edge
-            // - Transaction metadata (VersionMetadata)
-            // - Historical storage restoration
-            // - ID generator initialization to avoid conflicts
+            // Restore graph data from persisted indexes
+            let graph_path = manager.graph_path().join("adjacency.idx");
+            if graph_path.exists() {
+                use crate::api::transaction::types::TxId;
+                use crate::core::GLOBAL_INTERNER;
+                use crate::core::graph::{Edge, Node};
+                use crate::core::id::{EdgeId, NodeId, VersionId};
+                use crate::storage::index_persistence::graph::{
+                    load_graph_index, restore_property_map,
+                };
+                use crate::storage::version::VersionMetadata;
+
+                if let Ok(graph_data) = load_graph_index(&graph_path) {
+                    let current_time = time::now();
+                    let mut max_node_id = 0u64;
+                    let mut max_edge_id = 0u64;
+
+                    // Restore nodes
+                    for persisted_node in &graph_data.nodes {
+                        if let Some(_label_str) = GLOBAL_INTERNER.resolve(
+                            crate::core::InternedString::from_raw(persisted_node.label_idx),
+                        ) && let Ok(properties) =
+                            restore_property_map(&persisted_node.properties)
+                            && let Ok(version_gen) = db.version_id_gen.lock_or_err()
+                            && let Ok(version_raw) = version_gen.next()
+                        {
+                            let version_id = VersionId::new_unchecked(version_raw);
+
+                            let node = Node {
+                                id: NodeId::new_unchecked(persisted_node.id),
+                                label: crate::core::InternedString::from_raw(
+                                    persisted_node.label_idx,
+                                ),
+                                properties,
+                                current_version: version_id,
+                                metadata: VersionMetadata {
+                                    created_by_tx: TxId::new(0), // Restored from disk
+                                    commit_timestamp: Some(current_time),
+                                },
+                            };
+
+                            let _ = db.current.insert_node_direct(node, current_time);
+                            max_node_id = max_node_id.max(persisted_node.id);
+                        }
+                    }
+
+                    // Restore edges
+                    for persisted_edge in &graph_data.edges {
+                        if let Some(_label_str) = GLOBAL_INTERNER.resolve(
+                            crate::core::InternedString::from_raw(persisted_edge.label_idx),
+                        ) && let Ok(properties) =
+                            restore_property_map(&persisted_edge.properties)
+                            && let Ok(version_gen) = db.version_id_gen.lock_or_err()
+                            && let Ok(version_raw) = version_gen.next()
+                        {
+                            let version_id = VersionId::new_unchecked(version_raw);
+
+                            let edge = Edge {
+                                id: EdgeId::new_unchecked(persisted_edge.id),
+                                source: NodeId::new_unchecked(persisted_edge.source_id),
+                                target: NodeId::new_unchecked(persisted_edge.target_id),
+                                label: crate::core::InternedString::from_raw(
+                                    persisted_edge.label_idx,
+                                ),
+                                properties,
+                                current_version: version_id,
+                                metadata: VersionMetadata {
+                                    created_by_tx: TxId::new(0), // Restored from disk
+                                    commit_timestamp: Some(current_time),
+                                },
+                            };
+
+                            let _ = db.current.insert_edge_direct(edge);
+                            max_edge_id = max_edge_id.max(persisted_edge.id);
+                        }
+                    }
+
+                    // Rebuild adjacency structures after loading all edges
+                    db.current.rebuild_adjacency();
+
+                    // Initialize ID generators to avoid conflicts with restored IDs
+                    // Set them to one more than the max ID we loaded
+                    if max_node_id > 0
+                        && let Ok(mut node_gen) = db.node_id_gen.lock_or_err()
+                    {
+                        *node_gen = crate::core::id::IdGenerator::with_start(max_node_id + 1);
+                    }
+                    if max_edge_id > 0
+                        && let Ok(mut edge_gen) = db.edge_id_gen.lock_or_err()
+                    {
+                        *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
+                    }
+                }
+            }
         }
 
         db
