@@ -57,6 +57,65 @@ pub struct AdjacencyIndex {
 }
 
 impl AdjacencyIndex {
+    /// Export CSR data for persistence.
+    ///
+    /// Returns (offsets, edge_ids) where:
+    /// - offsets: offset array for CSR format
+    /// - edge_ids: flat array of edge IDs
+    pub fn export_csr(&self) -> (Vec<u64>, Vec<u64>) {
+        let offsets = self.offsets.iter().map(|&x| x as u64).collect();
+        let edge_ids = self.edges.iter().map(|e| e.edge_id.as_u64()).collect();
+        (offsets, edge_ids)
+    }
+
+    /// Import CSR data from persistence, reconstructing adjacency entries from edges.
+    ///
+    /// # Arguments
+    /// * `offsets` - CSR offset array
+    /// * `edge_ids` - Flat array of edge IDs
+    /// * `edges_map` - Map from edge ID to (target, label) for reconstruction
+    pub fn import_csr(
+        offsets: Vec<u64>,
+        edge_ids: Vec<u64>,
+        edges_map: &std::collections::HashMap<EdgeId, (NodeId, InternedString)>,
+    ) -> Self {
+        if offsets.is_empty() || edge_ids.is_empty() {
+            return Self::new();
+        }
+
+        let max_node_id = if offsets.len() > 1 {
+            (offsets.len() - 2) as u64
+        } else {
+            0
+        };
+
+        let offsets_usize: Vec<usize> = offsets.iter().map(|&x| x as usize).collect();
+        let mut adjacency_entries = Vec::with_capacity(edge_ids.len());
+
+        for &edge_id_u64 in &edge_ids {
+            let edge_id = EdgeId::new_unchecked(edge_id_u64);
+            if let Some((target, label)) = edges_map.get(&edge_id) {
+                adjacency_entries.push(AdjacencyEntry::new(*target, edge_id, *label));
+            } else {
+                // Edge not found - this shouldn't happen with valid data
+                // Use a placeholder to maintain CSR structure integrity
+                adjacency_entries.push(AdjacencyEntry::new(
+                    NodeId::new_unchecked(0),
+                    edge_id,
+                    InternedString::from_raw(0),
+                ));
+            }
+        }
+
+        Self {
+            offsets: offsets_usize,
+            edges: adjacency_entries,
+            max_node_id,
+        }
+    }
+}
+
+impl AdjacencyIndex {
     /// Create a new empty adjacency index.
     pub fn new() -> Self {
         AdjacencyIndex {

@@ -74,5 +74,15 @@ impl From<bitcode::Error> for IndexPersistenceError {
     }
 }
 
+impl IndexPersistenceError {
+    /// Check if this error is due to a file not being found.
+    pub fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            IndexPersistenceError::Io(e) if e.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+}
+
 /// Result type for index persistence operations.
 pub type Result<T> = std::result::Result<T, IndexPersistenceError>;

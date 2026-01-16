@@ -704,6 +704,34 @@ impl CurrentStorage {
             .collect()
     }
 
+    /// Export outgoing CSR adjacency data for persistence.
+    pub fn export_outgoing_csr(&self) -> (Vec<u64>, Vec<u64>) {
+        self.indexes.export_outgoing_csr()
+    }
+
+    /// Export incoming CSR adjacency data for persistence.
+    pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>) {
+        self.indexes.export_incoming_csr()
+    }
+
+    /// Import CSR adjacency data from persistence.
+    ///
+    /// This bypasses the need to rebuild adjacency structures from scratch.
+    pub fn import_csr(
+        &self,
+        outgoing_offsets: Vec<u64>,
+        outgoing_edge_ids: Vec<u64>,
+        incoming_offsets: Vec<u64>,
+        incoming_edge_ids: Vec<u64>,
+    ) {
+        self.indexes.import_csr(
+            outgoing_offsets,
+            outgoing_edge_ids,
+            incoming_offsets,
+            incoming_edge_ids,
+        );
+    }
+
     /// Get the number of nodes.
     #[inline]
     pub fn node_count(&self) -> usize {

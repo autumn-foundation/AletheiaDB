@@ -228,15 +228,18 @@ fn spawn_background_persistence_thread(
     current: Arc<CurrentStorage>,
     historical: Arc<RwLock<HistoricalStorage>>,
     temporal_indexes: Arc<TemporalIndexes>,
+    wal: Arc<ConcurrentWalSystem>,
     manager: Arc<crate::storage::index_persistence::IndexPersistenceManager>,
     tracker: Arc<PersistenceTracker>,
     policies: crate::storage::index_persistence::formats::PersistencePolicies,
 ) {
     std::thread::spawn(move || {
-        // Check policies every second
-        let check_interval = std::time::Duration::from_secs(1);
+        // Wrap entire thread in panic handler to prevent silent failures
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Check policies every second
+            let check_interval = std::time::Duration::from_secs(1);
 
-        while !tracker.is_shutdown() {
+            while !tracker.is_shutdown() {
             std::thread::sleep(check_interval);
 
             // Skip if shutdown signaled
@@ -298,8 +301,13 @@ fn spawn_background_persistence_thread(
             }
         }
 
-        // Final persist on shutdown
-        let _ = persist_all_indexes(&current, &historical, &temporal_indexes, &manager, &tracker);
+            // Final persist on shutdown
+            let _ = persist_all_indexes(&current, &historical, &temporal_indexes, &wal, &manager, &tracker);
+        }));
+
+        if let Err(e) = result {
+            eprintln!("Background persistence thread panicked: {:?}", e);
+        }
     });
 }
 
@@ -366,6 +374,15 @@ fn persist_graph_index(
         });
     }
 
+    // Export CSR adjacency structures for fast loading
+    let (outgoing_offsets, outgoing_neighbors) = current.export_outgoing_csr();
+    let (incoming_offsets, incoming_neighbors) = current.export_incoming_csr();
+
+    graph_data.outgoing_offsets = outgoing_offsets;
+    graph_data.outgoing_neighbors = outgoing_neighbors;
+    graph_data.incoming_offsets = incoming_offsets;
+    graph_data.incoming_neighbors = incoming_neighbors;
+
     // Save to disk
     let graph_path = manager.graph_path().join("adjacency.idx");
 
@@ -416,21 +433,31 @@ fn persist_all_indexes(
     current: &Arc<CurrentStorage>,
     historical: &Arc<RwLock<HistoricalStorage>>,
     temporal_indexes: &Arc<TemporalIndexes>,
+    wal: &Arc<ConcurrentWalSystem>,
     manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
 ) -> crate::utils::error::Result<()> {
-    // Persist all indexes
-    let _ = persist_string_interner(manager, tracker);
-    let _ = persist_graph_index(current, manager, tracker);
-    let _ = persist_temporal_index(historical, temporal_indexes, manager, tracker);
-    let _ = persist_vector_indexes(current, manager, tracker);
+    // Persist all indexes - log errors but continue with remaining indexes
+    if let Err(e) = persist_string_interner(manager, tracker) {
+        eprintln!("Failed to persist string interner: {}", e);
+    }
+    if let Err(e) = persist_graph_index(current, manager, tracker) {
+        eprintln!("Failed to persist graph index: {}", e);
+    }
+    if let Err(e) = persist_temporal_index(historical, temporal_indexes, manager, tracker) {
+        eprintln!("Failed to persist temporal index: {}", e);
+    }
+    if let Err(e) = persist_vector_indexes(current, manager, tracker) {
+        eprintln!("Failed to persist vector indexes: {}", e);
+    }
 
     // Save manifest
     use crate::storage::index_persistence::formats::{
         GraphIndexManifestEntry, IndexManifest, StringInternerManifestEntry,
     };
 
-    let mut manifest = IndexManifest::new(0); // TODO: Get actual LSN from WAL
+    let current_lsn = wal.current_lsn().0;
+    let mut manifest = IndexManifest::new(current_lsn);
 
     // Add string interner entry
     manifest.string_interner = Some(StringInternerManifestEntry {
@@ -625,7 +652,11 @@ impl GallifreyDB {
         {
             // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
             // (manifest is only saved on shutdown, not during background persistence)
-            let _manifest_result = manager.load_manifest_and_strings();
+            match manager.load_manifest_and_strings() {
+                Ok(_) => {}, // Successfully loaded
+                Err(e) if e.is_not_found() => {}, // Expected on first run
+                Err(e) => eprintln!("Warning: Failed to load manifest: {}", e),
+            }
 
             // Try to restore graph data even if manifest loading failed
             let graph_path = manager.graph_path().join("adjacency.idx");
@@ -705,8 +736,20 @@ impl GallifreyDB {
                             }
                         }
 
-                        // Rebuild adjacency structures after loading all edges
-                        db.current.rebuild_adjacency();
+                        // Import CSR adjacency structures if available, otherwise rebuild
+                        if !graph_data.outgoing_offsets.is_empty()
+                            && !graph_data.incoming_offsets.is_empty()
+                        {
+                            db.current.import_csr(
+                                graph_data.outgoing_offsets,
+                                graph_data.outgoing_neighbors,
+                                graph_data.incoming_offsets,
+                                graph_data.incoming_neighbors,
+                            );
+                        } else {
+                            // Fallback for older index files without CSR data
+                            db.current.rebuild_adjacency();
+                        }
 
                         // Initialize ID generators to avoid conflicts with restored IDs
                         // Set them to one more than the max ID we loaded
@@ -737,6 +780,7 @@ impl GallifreyDB {
                 Arc::clone(&db.current),
                 Arc::clone(&db.historical),
                 Arc::clone(&db.temporal_indexes),
+                Arc::clone(&db.wal),
                 Arc::clone(manager),
                 Arc::clone(tracker),
                 config.persistence.policies.clone(),
