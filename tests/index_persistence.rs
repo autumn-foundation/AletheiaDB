@@ -2,6 +2,9 @@
 
 use gallifreydb::PropertyMapBuilder;
 use gallifreydb::core::GLOBAL_INTERNER;
+use gallifreydb::core::id::{NodeId, VersionId};
+use gallifreydb::core::property::PropertyValue;
+use gallifreydb::core::temporal::BiTemporalInterval;
 use gallifreydb::storage::index_persistence::formats::{
     IndexManifest, PersistedEdge, PersistedNode, PersistedPropertyMap,
 };
@@ -9,7 +12,8 @@ use gallifreydb::storage::index_persistence::graph::{
     new_graph_index_data, persist_property_map, restore_property_map, save_graph_index,
 };
 use gallifreydb::storage::index_persistence::temporal::{
-    new_temporal_index_data, save_temporal_index,
+    convert_node_version, load_temporal_index, new_temporal_index_data, restore_node_version,
+    save_temporal_index,
 };
 use gallifreydb::storage::index_persistence::vector::{
     new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
@@ -17,6 +21,7 @@ use gallifreydb::storage::index_persistence::vector::{
 use gallifreydb::storage::index_persistence::{
     IndexPersistenceManager, formats::PersistedHnswConfig,
 };
+use gallifreydb::storage::version::{NodeVersion, PropertyDelta, VersionData};
 use std::sync::Mutex;
 use tempfile::tempdir;
 
@@ -2253,5 +2258,126 @@ fn test_temporal_persistence_with_database() {
         println!("✓ Database counts match expected values");
 
         println!("\n=== Temporal Persistence with Database Test PASSED ===");
+    }
+}
+
+/// Test that delta versions with removed properties are correctly persisted and restored.
+///
+/// This test verifies that PropertyDelta.removed keys are preserved through persistence.
+#[test]
+fn test_delta_removed_properties_persistence() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    println!("\n=== Delta Removed Properties Persistence Test ===");
+
+    // Create anchor with multiple properties
+    let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+    let anchor_props = PropertyMapBuilder::new()
+        .insert("name", "Alice")
+        .insert("age", 30i64)
+        .insert("city", "Seattle")
+        .build();
+
+    let _anchor_version = NodeVersion {
+        id: VersionId::new(1).unwrap(),
+        node_id: NodeId::new(100).unwrap(),
+        temporal: BiTemporalInterval::now(1000i64, 2000i64),
+        label: person_label,
+        data: VersionData::Anchor {
+            properties: anchor_props,
+            vector_snapshot_id: None,
+        },
+        next_version: None,
+        prev_version: None,
+    };
+
+    // Create delta that removes "city" property
+    let mut delta = PropertyDelta::new();
+    delta.changed.insert(
+        GLOBAL_INTERNER.intern("age").unwrap(),
+        PropertyValue::Int(31),
+    );
+    delta
+        .removed
+        .insert(GLOBAL_INTERNER.intern("city").unwrap());
+
+    let delta_version = NodeVersion {
+        id: VersionId::new(2).unwrap(),
+        node_id: NodeId::new(100).unwrap(),
+        temporal: BiTemporalInterval::now(1000i64, 3000i64),
+        label: person_label,
+        data: VersionData::Delta {
+            delta: delta.clone(),
+        },
+        next_version: None,
+        prev_version: Some(VersionId::new(1).unwrap()),
+    };
+
+    println!("✓ Created delta with 1 changed property (age: 31) and 1 removed property (city)");
+    assert!(
+        !delta.removed.is_empty(),
+        "Delta should have removed properties"
+    );
+
+    // Persist
+    let dir = tempdir().unwrap();
+    let manager = IndexPersistenceManager::new(dir.path());
+    manager.ensure_directories().unwrap();
+    manager.save_string_interner().unwrap();
+
+    let delta_entry = convert_node_version(&delta_version).unwrap();
+
+    let mut temporal_data = new_temporal_index_data();
+    temporal_data.node_versions.push(delta_entry);
+
+    let temporal_path = manager.temporal_path().join("versions.idx");
+    save_temporal_index(&temporal_data, &temporal_path).unwrap();
+
+    println!("✓ Persisted delta version");
+
+    // Restore
+    let loaded_data = load_temporal_index(&temporal_path).unwrap();
+    let restored_delta = restore_node_version(&loaded_data.node_versions[0], person_label).unwrap();
+
+    println!("✓ Restored delta version");
+
+    // Verify removed properties are preserved
+    match &restored_delta.data {
+        VersionData::Delta {
+            delta: restored_delta_inner,
+        } => {
+            println!(
+                "Restored delta.changed: {} properties",
+                restored_delta_inner.changed.len()
+            );
+            println!(
+                "Restored delta.removed: {} properties",
+                restored_delta_inner.removed.len()
+            );
+
+            assert_eq!(
+                restored_delta_inner.changed.len(),
+                1,
+                "Should have 1 changed property"
+            );
+
+            // THIS WILL FAIL - removed properties are not persisted!
+            assert_eq!(
+                restored_delta_inner.removed.len(),
+                1,
+                "Should have 1 removed property (THIS IS THE BUG)"
+            );
+
+            // Verify the removed property is the correct one
+            let city_key = GLOBAL_INTERNER.intern("city").unwrap();
+            assert!(
+                restored_delta_inner.removed.contains(&city_key),
+                "Delta should indicate 'city' was removed"
+            );
+
+            println!("✓ Delta removed properties preserved correctly");
+        }
+        _ => panic!("Expected Delta version, got Anchor"),
     }
 }

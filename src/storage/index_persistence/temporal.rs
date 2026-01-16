@@ -35,19 +35,21 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
             vector_snapshot_id.map(|id| id as u64),
         ),
         VersionData::Delta { delta } => {
-            // For deltas, we persist only the changed properties
-            // The delta will be applied on load to reconstruct full state
-            let delta_props = crate::core::property::PropertyMapBuilder::new();
-            let mut builder = delta_props;
+            // For deltas, we persist changed properties AND removed keys
+            let mut builder = crate::core::property::PropertyMapBuilder::new();
 
             for (key, value) in &delta.changed {
                 builder = builder.insert_by_key(*key, value.clone());
             }
 
+            // Collect removed property keys (as interned string indices)
+            let removed_keys: Vec<u32> = delta.removed.iter().map(|k| k.as_u32()).collect();
+
             let props = builder.build();
             (
                 PersistedVersionType::Delta {
                     base_anchor_tx: tx_time.start(),
+                    removed_keys,
                 },
                 persist_property_map(&props)?,
                 None,
@@ -56,6 +58,7 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
     };
 
     Ok(NodeVersionEntry {
+        version_id: version.id.as_u64(),
         node_id: version.node_id.as_u64(),
         valid_from: valid_time.start(),
         valid_to: if valid_time.is_current() {
@@ -86,18 +89,21 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
             persist_property_map(properties)?,
         ),
         VersionData::Delta { delta } => {
-            // For deltas, we persist only the changed properties
-            let delta_props = crate::core::property::PropertyMapBuilder::new();
-            let mut builder = delta_props;
+            // For deltas, we persist changed properties AND removed keys
+            let mut builder = crate::core::property::PropertyMapBuilder::new();
 
             for (key, value) in &delta.changed {
                 builder = builder.insert_by_key(*key, value.clone());
             }
 
+            // Collect removed property keys (as interned string indices)
+            let removed_keys: Vec<u32> = delta.removed.iter().map(|k| k.as_u32()).collect();
+
             let props = builder.build();
             (
                 PersistedVersionType::Delta {
                     base_anchor_tx: tx_time.start(),
+                    removed_keys,
                 },
                 persist_property_map(&props)?,
             )
@@ -105,6 +111,7 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
     };
 
     Ok(EdgeVersionEntry {
+        version_id: version.id.as_u64(),
         edge_id: version.edge_id.as_u64(),
         source_id: version.source.as_u64(),
         target_id: version.target.as_u64(),
@@ -150,10 +157,12 @@ pub fn restore_node_version(
     let tx_time = TimeRange::from(entry.tx_time);
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
-    // Generate a version ID from node_id and tx_time
-    // Note: The actual version ID will be reassigned when inserted into HistoricalStorage
-    let version_id = crate::core::id::VersionId::new(entry.tx_time as u64).map_err(|e| {
-        IndexPersistenceError::Serialization(format!("Invalid version ID from tx_time: {}", e))
+    // Use the preserved version ID from the persisted entry
+    let version_id = crate::core::id::VersionId::new(entry.version_id).map_err(|e| {
+        IndexPersistenceError::Serialization(format!(
+            "Invalid version ID {}: {}",
+            entry.version_id, e
+        ))
     })?;
 
     // Restore version data based on type
@@ -166,14 +175,21 @@ pub fn restore_node_version(
             }
             version_data
         }
-        PersistedVersionType::Delta { .. } => {
+        PersistedVersionType::Delta { removed_keys, .. } => {
             // Restore delta - convert properties back to PropertyDelta
             let properties = restore_property_map(&entry.properties)?;
             let mut delta = PropertyDelta::new();
 
-            // All properties in the persisted entry are changes
+            // Restore changed properties
             for (key, value) in properties.iter() {
                 delta.changed.insert(*key, value.clone());
+            }
+
+            // Restore removed property keys
+            for key_idx in removed_keys {
+                delta
+                    .removed
+                    .insert(crate::core::InternedString::from_raw(*key_idx));
             }
 
             VersionData::Delta { delta }
@@ -235,9 +251,12 @@ pub fn restore_edge_version(
     let tx_time = TimeRange::from(entry.tx_time);
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
-    // Generate a version ID from tx_time
-    let version_id = crate::core::id::VersionId::new(entry.tx_time as u64).map_err(|e| {
-        IndexPersistenceError::Serialization(format!("Invalid version ID from tx_time: {}", e))
+    // Use the preserved version ID from the persisted entry
+    let version_id = crate::core::id::VersionId::new(entry.version_id).map_err(|e| {
+        IndexPersistenceError::Serialization(format!(
+            "Invalid version ID {}: {}",
+            entry.version_id, e
+        ))
     })?;
 
     // Restore version data based on type
@@ -246,14 +265,21 @@ pub fn restore_edge_version(
             let properties = restore_property_map(&entry.properties)?;
             VersionData::anchor(properties)
         }
-        PersistedVersionType::Delta { .. } => {
+        PersistedVersionType::Delta { removed_keys, .. } => {
             // Restore delta - convert properties back to PropertyDelta
             let properties = restore_property_map(&entry.properties)?;
             let mut delta = PropertyDelta::new();
 
-            // All properties in the persisted entry are changes
+            // Restore changed properties
             for (key, value) in properties.iter() {
                 delta.changed.insert(*key, value.clone());
+            }
+
+            // Restore removed property keys
+            for key_idx in removed_keys {
+                delta
+                    .removed
+                    .insert(crate::core::InternedString::from_raw(*key_idx));
             }
 
             VersionData::Delta { delta }
@@ -443,6 +469,7 @@ mod tests {
 
         let mut data = new_temporal_index_data();
         data.node_versions.push(NodeVersionEntry {
+            version_id: 100,
             node_id: 1,
             valid_from: 1000,
             valid_to: Some(2000),
@@ -612,6 +639,7 @@ mod tests {
             .push((age_key.as_u32(), PersistedPropertyValue::Int(30)));
 
         let entry = NodeVersionEntry {
+            version_id: 100,
             node_id: 1,
             valid_from: 1000,
             valid_to: Some(2000),
@@ -624,6 +652,7 @@ mod tests {
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
         let version = restore_node_version(&entry, label).unwrap();
 
+        assert_eq!(version.id.as_u64(), 100);
         assert_eq!(version.node_id.as_u64(), 1);
         assert_eq!(version.temporal.valid_time().start(), 1000);
         assert_eq!(version.temporal.valid_time().end(), 2000);
@@ -655,12 +684,14 @@ mod tests {
             .push((age_key.as_u32(), PersistedPropertyValue::Int(31)));
 
         let entry = NodeVersionEntry {
+            version_id: 101,
             node_id: 1,
             valid_from: 2000,
             valid_to: Some(3000),
             tx_time: 2000,
             version_type: PersistedVersionType::Delta {
                 base_anchor_tx: 1000,
+                removed_keys: vec![],
             },
             properties,
             vector_snapshot_id: None,
@@ -694,6 +725,7 @@ mod tests {
             .push((weight_key.as_u32(), PersistedPropertyValue::Float(1.5)));
 
         let entry = EdgeVersionEntry {
+            version_id: 200,
             edge_id: 10,
             source_id: 1,
             target_id: 2,
@@ -707,6 +739,7 @@ mod tests {
         let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
         let version = restore_edge_version(&entry, label).unwrap();
 
+        assert_eq!(version.id.as_u64(), 200);
         assert_eq!(version.edge_id.as_u64(), 10);
         assert_eq!(version.source.as_u64(), 1);
         assert_eq!(version.target.as_u64(), 2);
@@ -746,6 +779,7 @@ mod tests {
             .push((age_key.as_u32(), PersistedPropertyValue::Int(30)));
 
         let entry = NodeVersionEntry {
+            version_id: 100,
             node_id: 1,
             valid_from: 1000,
             valid_to: Some(2000),
