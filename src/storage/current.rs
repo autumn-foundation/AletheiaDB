@@ -1695,6 +1695,22 @@ impl CurrentStorage {
         let state = self.vector_index_state.read();
         state.index.as_ref().map(|idx| idx.len()).unwrap_or(0)
     }
+
+    /// Iterate over all nodes (for persistence).
+    ///
+    /// This is a helper method for index persistence that provides
+    /// access to all nodes in the current storage.
+    pub(crate) fn all_nodes(&self) -> Vec<Node> {
+        self.indexes.iter_nodes().collect()
+    }
+
+    /// Iterate over all edges (for persistence).
+    ///
+    /// This is a helper method for index persistence that provides
+    /// access to all edges in the current storage.
+    pub(crate) fn all_edges(&self) -> Vec<Edge> {
+        self.indexes.iter_edges().collect()
+    }
 }
 
 impl Default for CurrentStorage {

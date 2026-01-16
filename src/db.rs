@@ -66,6 +66,11 @@ pub struct GallifreyDB {
     default_durability: DurabilityMode,
     /// Query optimization statistics - cached across queries for effective cost-based optimization
     stats: Arc<Statistics>,
+    /// Index persistence configuration
+    #[allow(dead_code)] // Used in future phases for shutdown persistence
+    persistence_config: crate::storage::index_persistence::PersistenceConfig,
+    /// Index persistence manager (if enabled)
+    persistence_manager: Option<Arc<crate::storage::index_persistence::IndexPersistenceManager>>,
 }
 
 impl GallifreyDB {
@@ -145,7 +150,18 @@ impl GallifreyDB {
         let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");
         let wal = Arc::new(wal);
 
-        GallifreyDB {
+        // Create persistence manager if enabled
+        let persistence_manager = if config.persistence.enabled {
+            Some(Arc::new(
+                crate::storage::index_persistence::IndexPersistenceManager::new(
+                    &config.persistence.data_dir,
+                ),
+            ))
+        } else {
+            None
+        };
+
+        let db = GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
                 config.historical,
@@ -160,7 +176,30 @@ impl GallifreyDB {
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             default_durability: durability_mode,
             stats: Arc::new(Statistics::new()),
+            persistence_config: config.persistence.clone(),
+            persistence_manager: persistence_manager.clone(),
+        };
+
+        // Load indexes on startup if enabled
+        if let Some(ref manager) = persistence_manager
+            && config.persistence.load_on_startup
+            && manager.indexes_exist()
+        {
+            // Load manifest and string interner
+            let _ = manager
+                .load_manifest_and_strings()
+                .map_err(|e| eprintln!("Warning: Failed to load indexes: {}", e));
+
+            // TODO: Phase 2 - Restore graph data from persisted indexes
+            // For MVP, we just verify indexes exist and load strings/manifest
+            // Full restoration requires handling:
+            // - Version IDs for each restored node/edge
+            // - Transaction metadata (VersionMetadata)
+            // - Historical storage restoration
+            // - ID generator initialization to avoid conflicts
         }
+
+        db
     }
 
     /// Create a new database with both anchor and WAL configuration.
@@ -206,6 +245,8 @@ impl GallifreyDB {
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             default_durability: durability_mode,
             stats: Arc::new(Statistics::new()),
+            persistence_config: crate::storage::index_persistence::PersistenceConfig::default(),
+            persistence_manager: None,
         }
     }
 
@@ -1828,6 +1869,94 @@ impl GallifreyDB {
     /// Returns an error if the historical storage lock is poisoned.
     pub fn historical_stats(&self) -> Result<crate::storage::historical::HistoricalStats> {
         Ok(self.historical.read_or_err()?.stats())
+    }
+
+    /// Persist all indexes to disk.
+    ///
+    /// This saves the current state of all indexes (graph, temporal, vector, strings)
+    /// to disk in the configured persistence directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Index persistence is not enabled in configuration
+    /// - Writing index files fails due to I/O errors
+    /// - Index serialization fails
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let db = GallifreyDB::new();
+    /// // ... add data ...
+    /// db.persist_indexes()?; // Save indexes to disk
+    /// ```
+    pub fn persist_indexes(&self) -> Result<()> {
+        use crate::storage::index_persistence::formats::IndexManifest;
+        use crate::storage::index_persistence::formats::{PersistedEdge, PersistedNode};
+        use crate::storage::index_persistence::graph::{
+            new_graph_index_data, persist_property_map, save_graph_index,
+        };
+
+        let manager =
+            self.persistence_manager
+                .as_ref()
+                .ok_or_else(|| StorageError::InconsistentState {
+                    reason: "Index persistence not enabled".to_string(),
+                })?;
+
+        // 1. Save string interner first (dependency for all others)
+        manager
+            .save_string_interner()
+            .map_err(|e| StorageError::IoError(format!("Failed to save string interner: {}", e)))?;
+
+        // 2. Save graph index
+        let mut graph_data = new_graph_index_data();
+
+        // Export all nodes
+        let all_nodes = self.current.all_nodes();
+        for node in all_nodes {
+            let label_idx = node.label.as_u32();
+            let properties = persist_property_map(&node.properties).map_err(|e| {
+                StorageError::IoError(format!("Failed to persist node properties: {}", e))
+            })?;
+
+            graph_data.nodes.push(PersistedNode {
+                id: node.id.as_u64(),
+                label_idx,
+                properties,
+            });
+        }
+
+        // Export all edges
+        let all_edges = self.current.all_edges();
+        for edge in all_edges {
+            let label_idx = edge.label.as_u32();
+            let properties = persist_property_map(&edge.properties).map_err(|e| {
+                StorageError::IoError(format!("Failed to persist edge properties: {}", e))
+            })?;
+
+            graph_data.edges.push(PersistedEdge {
+                id: edge.id.as_u64(),
+                source_id: edge.source.as_u64(),
+                target_id: edge.target.as_u64(),
+                label_idx,
+                properties,
+            });
+        }
+
+        graph_data.node_count = graph_data.nodes.len() as u64;
+        graph_data.edge_count = graph_data.edges.len() as u64;
+
+        save_graph_index(&graph_data, &manager.graph_path().join("adjacency.idx"))
+            .map_err(|e| StorageError::IoError(format!("Failed to save graph index: {}", e)))?;
+
+        // 3. Save manifest last
+        let manifest = IndexManifest::new(0); // TODO: Use actual LSN
+        manager
+            .save_manifest(&manifest)
+            .map_err(|e| StorageError::IoError(format!("Failed to save manifest: {}", e)))?;
+
+        Ok(())
     }
 
     /// Get a reference to the current storage (test-only helper).

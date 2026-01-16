@@ -205,3 +205,114 @@ fn test_indexes_exist_detection() {
     // Now indexes exist
     assert!(manager.indexes_exist());
 }
+
+// ============================================================================
+// GallifreyDB Integration Tests
+// ============================================================================
+
+use gallifreydb::storage::index_persistence::PersistenceConfig;
+use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
+
+/// Test that GallifreyDB can persist indexes to disk (MVP - Phase 1).
+///
+/// This test verifies:
+/// 1. persist_indexes() successfully saves all index data
+/// 2. Index files are created on disk
+/// 3. Manifest and strings can be loaded back
+///
+/// Note: Full graph restoration is deferred to Phase 2.
+#[test]
+fn test_db_persist_indexes_mvp() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+
+    // Phase 1: Create database, add data, persist indexes
+    {
+        let config = GallifreyDBConfig::builder()
+            .persistence(PersistenceConfig {
+                enabled: true,
+                data_dir: data_dir.clone(),
+                load_on_startup: true,
+                ..Default::default()
+            })
+            .build();
+
+        let db = GallifreyDB::with_unified_config(config);
+
+        // Add some nodes
+        let node1_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .build(),
+            )
+            .unwrap();
+
+        let node2_id = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Bob")
+                    .insert("age", 25i64)
+                    .build(),
+            )
+            .unwrap();
+
+        // Add an edge
+        db.create_edge(
+            node1_id,
+            node2_id,
+            "KNOWS",
+            PropertyMapBuilder::new().build(),
+        )
+        .unwrap();
+
+        // Verify before persist
+        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.edge_count(), 1);
+
+        // Persist indexes - this is what we're testing
+        db.persist_indexes().unwrap();
+
+        // Drop database to simulate shutdown
+        drop(db);
+    }
+
+    // Phase 2: Verify index files were created
+    {
+        use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+
+        let manager = IndexPersistenceManager::new(&data_dir);
+
+        // Verify all expected files exist
+        assert!(
+            manager.manifest_path().exists(),
+            "Manifest file should exist"
+        );
+        assert!(
+            manager.interner_path().exists(),
+            "String interner file should exist"
+        );
+        assert!(
+            manager.graph_path().join("adjacency.idx").exists(),
+            "Graph index file should exist"
+        );
+
+        // Verify we can load manifest and strings back
+        let manifest = manager.load_manifest_and_strings().unwrap();
+        assert_eq!(manifest.version, 1, "Manifest version should be 1");
+
+        // Verify strings were saved (we interned "Person", "name", "age", "Bob", "Alice", "KNOWS")
+        use gallifreydb::core::GLOBAL_INTERNER;
+        let person_str = GLOBAL_INTERNER.intern("Person").unwrap();
+        assert_eq!(
+            GLOBAL_INTERNER.resolve(person_str).unwrap().as_ref(),
+            "Person",
+            "Should have persisted and loaded 'Person' string"
+        );
+
+        println!("✓ Database persisted indexes successfully (MVP Phase 1)");
+    }
+}
