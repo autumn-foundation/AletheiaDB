@@ -999,11 +999,9 @@ impl HnswIndex {
         self.id_mapping.insert(node_id, usearch_key);
         self.reverse_mapping.insert(usearch_key, node_id);
 
-        // Update next_key if necessary
-        let current_max = self.next_key.load(Ordering::SeqCst);
-        if usearch_key >= current_max {
-            self.next_key.store(usearch_key + 1, Ordering::SeqCst);
-        }
+        // Update next_key atomically to prevent race conditions during concurrent loading
+        // fetch_max ensures we always get the highest key seen, even with concurrent calls
+        self.next_key.fetch_max(usearch_key + 1, Ordering::SeqCst);
     }
 
     /// Loads an index from a file path.

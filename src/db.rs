@@ -404,14 +404,7 @@ fn persist_vector_indexes(
         let mut vector_meta = new_vector_meta(
             property_name,
             config.dimensions as u32,
-            match config.metric {
-                crate::index::vector::DistanceMetric::Cosine => 0,
-                crate::index::vector::DistanceMetric::Euclidean => 1,
-                crate::index::vector::DistanceMetric::DotProduct => 2,
-                crate::index::vector::DistanceMetric::Haversine => 3,
-                crate::index::vector::DistanceMetric::Hamming => 4,
-                crate::index::vector::DistanceMetric::Tanimoto => 5,
-            },
+            config.metric.to_u8(),
             hnsw_config,
         );
 
@@ -502,15 +495,10 @@ fn load_vector_indexes(
             ))
         })?;
 
-        // Convert metric from u8 to DistanceMetric
-        let metric = match meta.metric {
-            0 => DistanceMetric::Cosine,
-            1 => DistanceMetric::Euclidean,
-            2 => DistanceMetric::DotProduct,
-            3 => DistanceMetric::Haversine,
-            4 => DistanceMetric::Hamming,
-            5 => DistanceMetric::Tanimoto,
-            _ => {
+        // Convert metric from u8 to DistanceMetric using from_u8()
+        let metric = match DistanceMetric::from_u8(meta.metric) {
+            Ok(m) => m,
+            Err(_) => {
                 eprintln!(
                     "Warning: Skipping vector index '{}': unknown metric {}",
                     property_name, meta.metric
@@ -560,7 +548,17 @@ fn load_vector_indexes(
             // but we need to restore the NodeId <-> usearch_key mappings
             use crate::core::id::NodeId;
             for mapping in &mappings_data.mappings {
-                index.restore_mapping(NodeId::new_unchecked(mapping.node_id), mapping.usearch_key);
+                match NodeId::new(mapping.node_id) {
+                    Ok(node_id) => {
+                        index.restore_mapping(node_id, mapping.usearch_key);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Skipping invalid NodeId {} in vector index '{}': {}",
+                            mapping.node_id, property_name, e
+                        );
+                    }
+                }
             }
         }
 
