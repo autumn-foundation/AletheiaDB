@@ -644,15 +644,63 @@ fn persist_graph_index(
 
 /// Persist temporal index to disk.
 fn persist_temporal_index(
-    _historical: &Arc<RwLock<HistoricalStorage>>,
+    historical: &Arc<RwLock<HistoricalStorage>>,
     _temporal_indexes: &Arc<TemporalIndexes>,
     manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
 ) -> crate::utils::error::Result<()> {
-    // TODO: Implement actual temporal index persistence
-    // For now, just save the interner and reset counter
+    use crate::storage::index_persistence::temporal::{
+        convert_edge_version, convert_node_version, new_temporal_index_data, save_temporal_index,
+    };
+
+    // First save string interner (versions depend on interned strings)
     manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+    })?;
+
+    // Get read lock on historical storage
+    let historical_guard = historical.read();
+
+    // Convert all node versions
+    let mut node_versions = Vec::new();
+    for version in historical_guard.get_node_versions().values() {
+        let entry = convert_node_version(version).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to convert node version {}: {}",
+                version.id.as_u64(),
+                e
+            ))
+        })?;
+        node_versions.push(entry);
+    }
+
+    // Convert all edge versions
+    let mut edge_versions = Vec::new();
+    for version in historical_guard.get_edge_versions().values() {
+        let entry = convert_edge_version(version).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to convert edge version {}: {}",
+                version.id.as_u64(),
+                e
+            ))
+        })?;
+        edge_versions.push(entry);
+    }
+
+    // Create temporal index data
+    let mut temporal_data = new_temporal_index_data();
+    temporal_data.node_versions = node_versions;
+    temporal_data.edge_versions = edge_versions;
+
+    // Note: Anchors are not stored separately - they're identified by version_type in the entries
+
+    // Drop the lock before disk I/O
+    drop(historical_guard);
+
+    // Save to disk
+    let temporal_path = manager.indexes_path().join("temporal").join("versions.idx");
+    save_temporal_index(&temporal_data, &temporal_path).map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save temporal index: {}", e))
     })?;
 
     tracker.reset_temporal_mutations();
@@ -1152,6 +1200,56 @@ impl GallifreyDB {
                     Err(_e) => {
                         // Graph index loading failed - start with empty graph
                         // This is normal if no index files exist yet
+                    }
+                }
+            }
+
+            // Load temporal index (version history)
+            let temporal_path = manager.temporal_path().join("versions.idx");
+            if temporal_path.exists() {
+                use crate::storage::index_persistence::temporal::{
+                    load_temporal_index, restore_into_historical_storage,
+                };
+                use std::collections::HashMap;
+
+                match load_temporal_index(&temporal_path) {
+                    Ok(temporal_data) => {
+                        // Build label maps from current storage (nodes/edges were just loaded)
+                        let node_labels: HashMap<u64, crate::core::InternedString> = db
+                            .current
+                            .all_nodes()
+                            .map(|node| (node.id.as_u64(), node.label))
+                            .collect();
+
+                        let edge_labels: HashMap<u64, crate::core::InternedString> = db
+                            .current
+                            .all_edges()
+                            .map(|edge| (edge.id.as_u64(), edge.label))
+                            .collect();
+
+                        // Restore versions into historical storage
+                        let mut historical_guard = db.historical.write();
+                        match restore_into_historical_storage(
+                            &temporal_data,
+                            &mut historical_guard,
+                            &node_labels,
+                            &edge_labels,
+                        ) {
+                            Ok(()) => {
+                                eprintln!(
+                                    "Temporal index restored: {} node versions, {} edge versions",
+                                    temporal_data.node_versions.len(),
+                                    temporal_data.edge_versions.len()
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: Failed to restore temporal versions: {}", e);
+                            }
+                        }
+                        drop(historical_guard);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load temporal index: {}", e);
                     }
                 }
             }
@@ -3011,7 +3109,12 @@ impl GallifreyDB {
             persist_vector_indexes(&self.current, manager, tracker)?;
         }
 
-        // 4. Save manifest last with current WAL LSN
+        // 4. Save temporal index (version history)
+        if let Some(ref tracker) = self.persistence_tracker {
+            persist_temporal_index(&self.historical, &self.temporal_indexes, manager, tracker)?;
+        }
+
+        // 5. Save manifest last with current WAL LSN
         // Note: This records the WAL position at persist time for future WAL replay coordination
         let current_lsn = self.wal.current_lsn().0;
         let manifest = IndexManifest::new(current_lsn);

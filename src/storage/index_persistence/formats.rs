@@ -241,6 +241,8 @@ pub struct TemporalIndexData {
 /// Persisted node version entry.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct NodeVersionEntry {
+    /// Unique version identifier (preserved from original)
+    pub version_id: u64,
     /// Node ID
     pub node_id: u64,
     /// Valid time start (unix timestamp)
@@ -277,6 +279,8 @@ pub enum PersistedVersionType {
     Delta {
         /// Transaction time of base anchor
         base_anchor_tx: i64,
+        /// Property keys that were removed in this delta (interned string indices)
+        removed_keys: Vec<u32>,
     },
     /// Full anchor snapshot
     Anchor,
@@ -285,6 +289,8 @@ pub enum PersistedVersionType {
 /// Persisted edge version entry.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct EdgeVersionEntry {
+    /// Unique version identifier (preserved from original)
+    pub version_id: u64,
     /// Edge ID
     pub edge_id: u64,
     /// Source node ID
