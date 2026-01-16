@@ -4,6 +4,7 @@
 //! everything else is built upon.
 
 pub mod graph;
+pub mod hlc;
 pub mod id;
 pub mod interning;
 pub mod property;
