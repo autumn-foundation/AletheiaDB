@@ -46,7 +46,7 @@ impl HybridTimestamp {
 
     /// Create a new HybridTimestamp without validation.
     ///
-    /// # Safety
+    /// # Internal Use Only
     /// This function does not validate the wallclock value. Use only with trusted data
     /// from internal sources (WAL recovery, storage deserialization with external validation).
     ///
@@ -69,6 +69,19 @@ impl HybridTimestamp {
         self.logical
     }
 
+    /// Helper: Increment logical counter with overflow check.
+    ///
+    /// This helper reduces duplication in `send()` and `receive()` methods.
+    #[inline]
+    fn increment_logical(logical: u32, wallclock: i64) -> Result<u32, TemporalError> {
+        logical
+            .checked_add(1)
+            .ok_or(TemporalError::LogicalCounterOverflow {
+                wallclock,
+                current_logical: logical,
+            })
+    }
+
     /// Generate a new timestamp for a send event.
     ///
     /// # HLC Algorithm
@@ -76,23 +89,26 @@ impl HybridTimestamp {
     /// - Otherwise: Keep max(wallclock, new_wallclock), increment logical
     ///
     /// This ensures monotonicity while preserving wallclock semantics.
+    ///
+    /// # Errors
+    /// Returns `TemporalError::LogicalCounterOverflow` if the logical counter would exceed u32::MAX.
+    /// This theoretically requires 4+ billion events at the same microsecond, indicating severe
+    /// clock drift or pathological workload.
     #[inline]
-    pub fn send(&self, new_wallclock: i64) -> Self {
+    pub fn send(&self, new_wallclock: i64) -> Result<Self, TemporalError> {
         if new_wallclock > self.wallclock {
             // Wallclock advanced - reset logical counter
-            HybridTimestamp {
+            Ok(HybridTimestamp {
                 wallclock: new_wallclock,
                 logical: 0,
-            }
+            })
         } else {
             // Wallclock didn't advance - increment logical counter
-            HybridTimestamp {
+            let logical = Self::increment_logical(self.logical, self.wallclock)?;
+            Ok(HybridTimestamp {
                 wallclock: self.wallclock,
-                logical: self
-                    .logical
-                    .checked_add(1)
-                    .expect("HLC logical counter overflowed"),
-            }
+                logical,
+            })
         }
     }
 
@@ -110,8 +126,48 @@ impl HybridTimestamp {
     /// # Arguments
     /// - `msg`: The timestamp from the received message
     /// - `physical_wallclock`: Current physical clock reading
+    ///
+    /// # Errors
+    /// Returns `TemporalError::LogicalCounterOverflow` if the logical counter would exceed u32::MAX.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gallifreydb::core::hlc::HybridTimestamp;
+    ///
+    /// // Receiving a message from a remote node
+    /// let local_time = HybridTimestamp::new(1000, 5).unwrap();
+    /// let message_time = HybridTimestamp::new(2000, 10).unwrap();
+    /// let physical_clock = 1500;
+    ///
+    /// let updated = local_time.receive(message_time, physical_clock).unwrap();
+    /// assert!(updated > local_time);
+    /// assert!(updated > message_time);
+    /// ```
+    ///
+    /// Receiving multiple messages maintains causality:
+    ///
+    /// ```
+    /// use gallifreydb::core::hlc::HybridTimestamp;
+    ///
+    /// let mut local = HybridTimestamp::new(1000, 0).unwrap();
+    /// let msg1 = HybridTimestamp::new(1100, 0).unwrap();
+    /// let msg2 = HybridTimestamp::new(1050, 0).unwrap();
+    ///
+    /// // Receive msg1, update local time
+    /// local = local.receive(msg1, 1000).unwrap();
+    /// assert!(local > msg1); // Causality: local happened-after msg1
+    ///
+    /// // Receive msg2 (older wallclock but causally after local)
+    /// local = local.receive(msg2, 1000).unwrap();
+    /// assert!(local > msg2); // Causality preserved despite clock skew
+    /// ```
     #[inline]
-    pub fn receive(&self, msg: HybridTimestamp, physical_wallclock: i64) -> Self {
+    pub fn receive(
+        &self,
+        msg: HybridTimestamp,
+        physical_wallclock: i64,
+    ) -> Result<Self, TemporalError> {
         // Compute maximum wallclock across all three values
         let new_wallclock = self.wallclock.max(msg.wallclock).max(physical_wallclock);
 
@@ -121,26 +177,19 @@ impl HybridTimestamp {
             0
         } else if new_wallclock == self.wallclock && new_wallclock == msg.wallclock {
             // Both local and message have same wallclock - use max logical + 1
-            self.logical
-                .max(msg.logical)
-                .checked_add(1)
-                .expect("HLC logical counter overflowed")
+            Self::increment_logical(self.logical.max(msg.logical), new_wallclock)?
         } else if new_wallclock == self.wallclock {
             // Local wallclock was chosen - increment local logical
-            self.logical
-                .checked_add(1)
-                .expect("HLC logical counter overflowed")
+            Self::increment_logical(self.logical, new_wallclock)?
         } else {
             // Message wallclock was chosen - increment message logical
-            msg.logical
-                .checked_add(1)
-                .expect("HLC logical counter overflowed")
+            Self::increment_logical(msg.logical, new_wallclock)?
         };
 
-        HybridTimestamp {
+        Ok(HybridTimestamp {
             wallclock: new_wallclock,
             logical,
-        }
+        })
     }
 
     /// Serialize this HybridTimestamp to bytes.
@@ -150,6 +199,10 @@ impl HybridTimestamp {
     /// [wallclock:8][logical:4]
     /// ```
     /// Total: 12 bytes, little-endian
+    ///
+    /// # Performance Note
+    /// This allocates a new `Vec<u8>`. For better performance when serializing
+    /// multiple timestamps, consider using `serialize_into()` with a reused buffer.
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::with_capacity(12);
         self.serialize_into(&mut buffer);

@@ -46,7 +46,7 @@ fn test_send_when_wallclock_advances() {
     let prev = HybridTimestamp::new(1000, 5).unwrap(); // Previous timestamp with logical=5
     let new_wallclock = 2000; // Wallclock has advanced
 
-    let next = prev.send(new_wallclock);
+    let next = prev.send(new_wallclock).unwrap();
 
     // Wallclock should advance
     assert_eq!(next.wallclock(), 2000);
@@ -60,7 +60,7 @@ fn test_send_when_wallclock_same() {
     let prev = HybridTimestamp::new(1000, 5).unwrap();
     let same_wallclock = 1000; // Wallclock hasn't advanced
 
-    let next = prev.send(same_wallclock);
+    let next = prev.send(same_wallclock).unwrap();
 
     // Wallclock should stay the same
     assert_eq!(next.wallclock(), 1000);
@@ -74,7 +74,7 @@ fn test_send_when_wallclock_regresses() {
     let prev = HybridTimestamp::new(2000, 3).unwrap();
     let regressed_wallclock = 1500; // Wallclock went backwards
 
-    let next = prev.send(regressed_wallclock);
+    let next = prev.send(regressed_wallclock).unwrap();
 
     // Should keep previous wallclock (monotonicity)
     assert_eq!(next.wallclock(), 2000);
@@ -186,13 +186,29 @@ fn test_deserialize_validates_wallclock() {
 }
 
 #[test]
-#[should_panic(expected = "HLC logical counter overflowed")]
 fn test_send_logical_overflow() {
-    // When logical counter is at u32::MAX, incrementing should panic
+    // When logical counter is at u32::MAX, incrementing should return an error
     let prev = HybridTimestamp::new(1000, u32::MAX).unwrap();
 
-    // This should panic because logical counter would overflow
-    let _next = prev.send(1000);
+    // This should return Err because logical counter would overflow
+    let result = prev.send(1000);
+    assert!(
+        result.is_err(),
+        "send should return Err on logical counter overflow"
+    );
+
+    // Verify it's the right error type
+    match result {
+        Err(ref e) => {
+            let error_msg = format!("{}", e);
+            assert!(
+                error_msg.contains("logical counter overflow"),
+                "Expected LogicalCounterOverflow error, got: {}",
+                error_msg
+            );
+        }
+        Ok(_) => panic!("Expected Err, got Ok"),
+    }
 }
 
 #[test]
@@ -202,7 +218,7 @@ fn test_receive_when_message_ahead() {
     let msg = HybridTimestamp::new(2000, 10).unwrap();
     let new_wallclock = 1500; // Local wallclock between local and msg
 
-    let next = local.receive(msg, new_wallclock);
+    let next = local.receive(msg, new_wallclock).unwrap();
 
     // Should use max(local.wallclock, msg.wallclock, new_wallclock) = 2000
     assert_eq!(next.wallclock(), 2000);
@@ -217,7 +233,7 @@ fn test_receive_when_wallclock_advances() {
     let msg = HybridTimestamp::new(900, 3).unwrap();
     let new_wallclock = 2000; // Wallclock advances
 
-    let next = local.receive(msg, new_wallclock);
+    let next = local.receive(msg, new_wallclock).unwrap();
 
     // Should use max wallclock = 2000
     assert_eq!(next.wallclock(), 2000);
@@ -232,7 +248,7 @@ fn test_receive_when_all_same_wallclock() {
     let msg = HybridTimestamp::new(1000, 3).unwrap();
     let new_wallclock = 1000;
 
-    let next = local.receive(msg, new_wallclock);
+    let next = local.receive(msg, new_wallclock).unwrap();
 
     // Wallclock stays 1000
     assert_eq!(next.wallclock(), 1000);
@@ -251,7 +267,7 @@ proptest! {
     ) {
         // HLC send operation must produce monotonically increasing timestamps
         let hlc = HybridTimestamp::new(wallclock, logical).unwrap();
-        let next = hlc.send(new_wallclock);
+        let next = hlc.send(new_wallclock).unwrap();
 
         // Next timestamp must be >= current timestamp
         prop_assert!(next >= hlc, "send must produce monotonically increasing timestamps");
@@ -267,7 +283,7 @@ proptest! {
         let mut current = HybridTimestamp::new(initial_wallclock, initial_logical).unwrap();
 
         for wallclock in wallclocks {
-            let next = current.send(wallclock);
+            let next = current.send(wallclock).unwrap();
             prop_assert!(
                 next > current,
                 "each send must produce a strictly greater timestamp: current={:?}, next={:?}",
@@ -280,7 +296,7 @@ proptest! {
 
     #[test]
     fn prop_serialization_preserves_values(
-        wallclock in i64::MIN..MAX_VALID_TIMESTAMP,
+        wallclock in i64::MIN..=MAX_VALID_TIMESTAMP,
         logical in 0u32..u32::MAX,
     ) {
         // Serialization must be lossless
@@ -326,7 +342,7 @@ proptest! {
         // Only test if wallclock actually advances
         prop_assume!(new_wallclock > wallclock);
 
-        let next = hlc.send(new_wallclock);
+        let next = hlc.send(new_wallclock).unwrap();
 
         prop_assert_eq!(next.wallclock(), new_wallclock);
         prop_assert_eq!(next.logical(), 0, "logical must reset to 0 when wallclock advances");
@@ -339,9 +355,93 @@ proptest! {
     ) {
         // When wallclock doesn't advance, logical counter must increment
         let hlc = HybridTimestamp::new(wallclock, logical).unwrap();
-        let next = hlc.send(wallclock);  // Same wallclock
+        let next = hlc.send(wallclock).unwrap();  // Same wallclock
 
         prop_assert_eq!(next.wallclock(), wallclock);
         prop_assert_eq!(next.logical(), logical + 1, "logical must increment when wallclock stays same");
+    }
+
+    #[test]
+    fn prop_receive_monotonicity(
+        local_wallclock in 0i64..1_000_000_000_000i64,
+        local_logical in 0u32..1000u32,
+        msg_wallclock in 0i64..1_000_000_000_000i64,
+        msg_logical in 0u32..1000u32,
+        physical_wallclock in 0i64..1_000_000_000_000i64,
+    ) {
+        // receive() must produce timestamps >= both local and message timestamps
+        let local = HybridTimestamp::new(local_wallclock, local_logical).unwrap();
+        let msg = HybridTimestamp::new(msg_wallclock, msg_logical).unwrap();
+
+        let next = local.receive(msg, physical_wallclock).unwrap();
+
+        // Result must be >= local timestamp
+        prop_assert!(
+            next >= local,
+            "receive must produce timestamp >= local: local={:?}, next={:?}",
+            local,
+            next
+        );
+
+        // Result must be >= message timestamp
+        prop_assert!(
+            next >= msg,
+            "receive must produce timestamp >= message: msg={:?}, next={:?}",
+            msg,
+            next
+        );
+    }
+
+    #[test]
+    fn prop_receive_causality_preservation(
+        local_wallclock in 0i64..1_000_000_000_000i64,
+        local_logical in 0u32..100u32,
+        msg_wallclock in 0i64..1_000_000_000_000i64,
+        msg_logical in 0u32..100u32,
+        physical_wallclock in 0i64..1_000_000_000_000i64,
+    ) {
+        // If msg > local, then receive(msg) must produce timestamp > msg (causality)
+        let local = HybridTimestamp::new(local_wallclock, local_logical).unwrap();
+        let msg = HybridTimestamp::new(msg_wallclock, msg_logical).unwrap();
+
+        let next = local.receive(msg, physical_wallclock).unwrap();
+
+        if msg > local {
+            prop_assert!(
+                next > msg,
+                "receive must preserve causality: if msg > local, then result > msg. msg={:?}, local={:?}, next={:?}",
+                msg,
+                local,
+                next
+            );
+        }
+    }
+
+    #[test]
+    fn prop_receive_sequence_monotonic(
+        initial_wallclock in 0i64..1_000_000_000_000i64,
+        initial_logical in 0u32..100u32,
+        events in prop::collection::vec(
+            (0i64..1_000_000_000_000i64, 0u32..100u32, 0i64..1_000_000_000_000i64),
+            1..10
+        ),
+    ) {
+        // A sequence of receive operations must produce monotonically increasing timestamps
+        let mut current = HybridTimestamp::new(initial_wallclock, initial_logical).unwrap();
+
+        for (msg_wc, msg_log, phys_wc) in events {
+            let msg = HybridTimestamp::new(msg_wc, msg_log).unwrap();
+            let next = current.receive(msg, phys_wc).unwrap();
+
+            prop_assert!(
+                next > current,
+                "each receive must produce strictly greater timestamp: current={:?}, msg={:?}, next={:?}",
+                current,
+                msg,
+                next
+            );
+
+            current = next;
+        }
     }
 }

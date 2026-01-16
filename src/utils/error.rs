@@ -365,6 +365,17 @@ pub enum TemporalError {
     },
     /// Version was not found.
     VersionNotFound(VersionId),
+    /// HLC logical counter overflow.
+    ///
+    /// This occurs when the logical counter would exceed u32::MAX, which theoretically
+    /// requires 4+ billion events at the same microsecond wallclock. In practice, this
+    /// indicates severe clock drift or a pathological workload.
+    LogicalCounterOverflow {
+        /// The wallclock at which overflow occurred
+        wallclock: i64,
+        /// The current logical counter value (u32::MAX)
+        current_logical: u32,
+    },
 }
 
 impl fmt::Display for TemporalError {
@@ -431,6 +442,16 @@ impl fmt::Display for TemporalError {
             }
             TemporalError::VersionNotFound(version_id) => {
                 write!(f, "Version {} not found", version_id)
+            }
+            TemporalError::LogicalCounterOverflow {
+                wallclock,
+                current_logical,
+            } => {
+                write!(
+                    f,
+                    "HLC logical counter overflow at wallclock={}: current_logical={} would exceed u32::MAX",
+                    wallclock, current_logical
+                )
             }
         }
     }
