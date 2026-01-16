@@ -487,3 +487,210 @@ fn test_full_persistence_lifecycle() {
         println!("✓ Full persistence lifecycle test passed");
     }
 }
+
+/// Test automatic persistence integration with GallifreyDB.
+///
+/// This test validates:
+/// 1. Automatic persistence triggers based on mutation thresholds
+/// 2. Background persistence thread operation
+/// 3. Graceful shutdown persistence
+/// 4. Data recovery on restart
+#[test]
+fn test_automatic_persistence_integration() {
+    // Acquire mutex to prevent race conditions with GLOBAL_INTERNER
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::GallifreyDB;
+    use gallifreydb::config::GallifreyDBConfig;
+    use gallifreydb::storage::index_persistence::{
+        PersistenceConfig, formats::PersistencePolicies,
+    };
+
+    println!("\n=== Automatic Persistence Integration Test ===");
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+
+    // ========================================================================
+    // Phase 1: Create database with automatic persistence enabled
+    // ========================================================================
+
+    println!("\nPhase 1: Creating database with automatic persistence...");
+
+    let persistence_config = PersistenceConfig {
+        enabled: true,
+        data_dir: data_dir.clone(),
+        load_on_startup: true,
+        policies: PersistencePolicies {
+            graph: gallifreydb::storage::index_persistence::formats::GraphPersistencePolicy {
+                on_adjacency_rebuild: true,
+                mutation_threshold: 1, // Persist after 1 graph mutation (for testing)
+                time_interval_secs: 3600, // Or after 1 hour
+            },
+            vector: gallifreydb::storage::index_persistence::formats::VectorPersistencePolicy {
+                mutation_threshold: 10,
+                time_interval_secs: 3600,
+            },
+            temporal: gallifreydb::storage::index_persistence::formats::TemporalPersistencePolicy {
+                version_threshold: 10,
+                anchor_threshold: 5,
+                time_interval_secs: 3600,
+            },
+            strings: gallifreydb::storage::index_persistence::formats::StringPersistencePolicy {
+                new_strings_threshold: 10,
+                time_interval_secs: 3600,
+            },
+        },
+        use_mmap: false,
+    };
+
+    let config = GallifreyDBConfig::builder()
+        .persistence(persistence_config)
+        .build();
+
+    let db = GallifreyDB::with_unified_config(config);
+
+    // Create test data - enough to trigger automatic persistence
+    println!("Creating 10 nodes to trigger automatic persistence...");
+
+    let mut node_ids = Vec::new();
+    for i in 0..10 {
+        let node_id = db
+            .create_node(
+                "TestNode",
+                PropertyMapBuilder::new()
+                    .insert("name", format!("Node {}", i))
+                    .insert("index", i as i64)
+                    .build(),
+            )
+            .unwrap();
+        node_ids.push(node_id);
+    }
+
+    println!("Created {} nodes", node_ids.len());
+
+    // Wait for background persistence to trigger (check every 1 second)
+    println!("Waiting for automatic persistence to trigger (max 5 seconds)...");
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    // Verify index files were created by background persistence
+    // Note: The manifest is only saved on shutdown, so we check for individual index files
+    // IndexPersistenceManager adds an "indexes" subdirectory
+    let strings_path = data_dir
+        .join("indexes")
+        .join("strings")
+        .join("interner.idx");
+    let graph_path = data_dir.join("indexes").join("graph").join("adjacency.idx");
+
+    assert!(
+        graph_path.exists(),
+        "Graph index file should exist after automatic persistence"
+    );
+
+    // String interner is saved as part of any persistence operation
+    assert!(
+        strings_path.exists(),
+        "String interner file should exist after automatic persistence"
+    );
+
+    println!("✓ Automatic persistence created index files");
+
+    // ========================================================================
+    // Phase 2: Drop database to trigger shutdown persistence
+    // ========================================================================
+
+    println!("\nPhase 2: Testing graceful shutdown persistence...");
+
+    drop(db); // This should trigger Drop impl and persist final state
+
+    // Give shutdown persistence time to complete
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    println!("✓ Database dropped (graceful shutdown)");
+
+    // ========================================================================
+    // Phase 3: Reload database and verify data was persisted
+    // ========================================================================
+
+    println!("\nPhase 3: Reloading database from persisted indexes...");
+
+    let persistence_config = PersistenceConfig {
+        enabled: true,
+        data_dir: data_dir.clone(),
+        load_on_startup: true,
+        policies: PersistencePolicies::default(),
+        use_mmap: false,
+    };
+
+    let config = GallifreyDBConfig::builder()
+        .persistence(persistence_config)
+        .build();
+
+    let db2 = GallifreyDB::with_unified_config(config);
+
+    // Verify all nodes were restored
+    println!("Verifying restored data...");
+
+    for (i, &node_id) in node_ids.iter().enumerate() {
+        let node = db2.get_node(node_id).unwrap();
+        assert_eq!(node.id, node_id);
+
+        let name = node.properties.get("name").and_then(|v| v.as_str());
+        assert_eq!(name, Some(&*format!("Node {}", i)));
+
+        let index = node.properties.get("index").and_then(|v| v.as_int());
+        assert_eq!(index, Some(i as i64));
+    }
+
+    println!("✓ All {} nodes restored correctly", node_ids.len());
+
+    // ========================================================================
+    // Phase 4: Test corruption recovery
+    // ========================================================================
+
+    println!("\nPhase 4: Testing corruption recovery...");
+
+    drop(db2);
+
+    // Corrupt the graph file to test recovery
+    std::fs::write(&graph_path, b"CORRUPTED DATA").unwrap();
+
+    println!("Corrupted graph index file");
+
+    // Try to load - should handle corruption gracefully
+    let persistence_config = PersistenceConfig {
+        enabled: true,
+        data_dir: data_dir.clone(),
+        load_on_startup: true,
+        policies: PersistencePolicies::default(),
+        use_mmap: false,
+    };
+
+    let config = GallifreyDBConfig::builder()
+        .persistence(persistence_config)
+        .build();
+
+    // This should not panic - should start with empty database
+    let db3 = GallifreyDB::with_unified_config(config);
+
+    // Verify database started (even if empty due to corruption)
+    let test_node = db3
+        .create_node(
+            "TestNode",
+            PropertyMapBuilder::new().insert("test", "recovery").build(),
+        )
+        .unwrap();
+
+    let recovered_node = db3.get_node(test_node).unwrap();
+    assert_eq!(
+        recovered_node
+            .properties
+            .get("test")
+            .and_then(|v| v.as_str()),
+        Some("recovery")
+    );
+
+    println!("✓ Database started successfully after corruption (recovery mode)");
+
+    println!("\n=== Automatic Persistence Integration Test PASSED ===");
+}

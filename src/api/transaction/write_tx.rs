@@ -433,6 +433,35 @@ impl WriteTransaction {
         Ok(())
     }
 
+    /// Check if this transaction has any node writes (create, update, delete).
+    pub(crate) fn has_node_writes(&self) -> bool {
+        self.buffer.operations().iter().any(|op| {
+            matches!(
+                op,
+                super::BufferedWrite::CreateNode { .. }
+                    | super::BufferedWrite::UpdateNode { .. }
+                    | super::BufferedWrite::DeleteNode { .. }
+            )
+        })
+    }
+
+    /// Check if this transaction has any edge writes (create, update, delete).
+    pub(crate) fn has_edge_writes(&self) -> bool {
+        self.buffer.operations().iter().any(|op| {
+            matches!(
+                op,
+                super::BufferedWrite::CreateEdge { .. }
+                    | super::BufferedWrite::UpdateEdge { .. }
+                    | super::BufferedWrite::DeleteEdge { .. }
+            )
+        })
+    }
+
+    /// Check if this transaction has any vector property writes.
+    pub(crate) fn has_vector_writes(&self) -> bool {
+        self.buffer.has_vector_operations()
+    }
+
     /// Validate all buffered writes.
     ///
     /// Checks:
