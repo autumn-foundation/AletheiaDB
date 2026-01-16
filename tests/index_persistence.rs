@@ -2381,3 +2381,153 @@ fn test_delta_removed_properties_persistence() {
         _ => panic!("Expected Delta version, got Anchor"),
     }
 }
+
+/// Test that version chains are properly rebuilt after restoration.
+///
+/// This verifies that prev_version/next_version links are reconstructed
+/// and version heads point to the latest (highest tx_time) version.
+#[test]
+fn test_version_chain_reconstruction() {
+    use gallifreydb::core::id::{NodeId, VersionId};
+    use gallifreydb::core::interning::GLOBAL_INTERNER;
+    use gallifreydb::storage::historical::HistoricalStorage;
+    use gallifreydb::storage::index_persistence::formats::{
+        NodeVersionEntry, PersistedPropertyMap, PersistedVersionType,
+    };
+    use gallifreydb::storage::index_persistence::temporal::{
+        new_temporal_index_data, restore_into_historical_storage,
+    };
+    use std::collections::HashMap;
+
+    // Create multiple versions for the same node with different tx_times
+    // Version 1: tx_time = 1000 (oldest)
+    // Version 2: tx_time = 2000 (middle)
+    // Version 3: tx_time = 3000 (newest)
+
+    let node_id = 42u64;
+    let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+    // Create node versions in NON-chronological order to test sorting
+    let node_versions = vec![
+        // Version 2 (middle) - inserted first
+        NodeVersionEntry {
+            version_id: 200,
+            node_id,
+            valid_from: 0,
+            valid_to: None,
+            tx_time: 2000,
+            version_type: PersistedVersionType::Delta {
+                base_anchor_tx: 1000,
+                removed_keys: vec![],
+            },
+            properties: PersistedPropertyMap { entries: vec![] },
+            vector_snapshot_id: None,
+        },
+        // Version 3 (newest) - inserted second
+        NodeVersionEntry {
+            version_id: 300,
+            node_id,
+            valid_from: 0,
+            valid_to: None,
+            tx_time: 3000,
+            version_type: PersistedVersionType::Delta {
+                base_anchor_tx: 1000,
+                removed_keys: vec![],
+            },
+            properties: PersistedPropertyMap { entries: vec![] },
+            vector_snapshot_id: None,
+        },
+        // Version 1 (oldest) - inserted last
+        NodeVersionEntry {
+            version_id: 100,
+            node_id,
+            valid_from: 0,
+            valid_to: None,
+            tx_time: 1000,
+            version_type: PersistedVersionType::Anchor,
+            properties: PersistedPropertyMap { entries: vec![] },
+            vector_snapshot_id: None,
+        },
+    ];
+
+    // Use the helper function to create data with correct magic/version
+    let mut temporal_data = new_temporal_index_data();
+    temporal_data.node_versions = node_versions;
+
+    // Create label maps
+    let mut node_labels = HashMap::new();
+    node_labels.insert(node_id, label);
+    let edge_labels: HashMap<u64, _> = HashMap::new();
+
+    // Restore into HistoricalStorage
+    let mut historical = HistoricalStorage::new();
+    restore_into_historical_storage(&temporal_data, &mut historical, &node_labels, &edge_labels)
+        .expect("Restoration should succeed");
+
+    // Now verify the version chains are correctly reconstructed using public APIs
+    // Use the test iterator to access versions
+    let versions: Vec<_> = historical.__test_get_node_versions_iterator().collect();
+    assert_eq!(versions.len(), 3, "Should have 3 versions");
+
+    // Get versions by ID using public method
+    let v1 = historical
+        .get_node_version(VersionId::new(100).unwrap())
+        .expect("Version 100 should exist");
+    let v2 = historical
+        .get_node_version(VersionId::new(200).unwrap())
+        .expect("Version 200 should exist");
+    let v3 = historical
+        .get_node_version(VersionId::new(300).unwrap())
+        .expect("Version 300 should exist");
+
+    // Verify version 1 (oldest): prev=None, next=v2
+    assert!(
+        v1.prev_version.is_none(),
+        "Oldest version should have no prev_version"
+    );
+    assert_eq!(
+        v1.next_version,
+        Some(VersionId::new(200).unwrap()),
+        "Oldest version's next should be middle version"
+    );
+
+    // Verify version 2 (middle): prev=v1, next=v3
+    assert_eq!(
+        v2.prev_version,
+        Some(VersionId::new(100).unwrap()),
+        "Middle version's prev should be oldest version"
+    );
+    assert_eq!(
+        v2.next_version,
+        Some(VersionId::new(300).unwrap()),
+        "Middle version's next should be newest version"
+    );
+
+    // Verify version 3 (newest): prev=v2, next=None
+    assert_eq!(
+        v3.prev_version,
+        Some(VersionId::new(200).unwrap()),
+        "Newest version's prev should be middle version"
+    );
+    assert!(
+        v3.next_version.is_none(),
+        "Newest version should have no next_version"
+    );
+
+    println!("✓ Version chain links correctly reconstructed");
+
+    // Verify version head points to the newest version (highest tx_time)
+    let node_id_typed = NodeId::new(node_id).unwrap();
+    let head_version_id = historical
+        .get_current_node_version(node_id_typed)
+        .expect("Should have a version for this node");
+
+    assert_eq!(
+        head_version_id,
+        VersionId::new(300).unwrap(),
+        "Version head should point to newest version (tx_time=3000)"
+    );
+
+    println!("✓ Version head correctly points to latest version");
+    println!("✓ Version chain reconstruction test passed!");
+}

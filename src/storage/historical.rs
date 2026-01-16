@@ -1377,6 +1377,31 @@ impl HistoricalStorage {
         &self.edge_versions
     }
 
+    /// Reserve capacity for batch restoration from persistence.
+    ///
+    /// Pre-allocating capacity improves restoration performance by reducing
+    /// reallocations during bulk insertion. Call this before restoring
+    /// persisted versions.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_versions` - Expected number of node versions to restore
+    /// * `edge_versions` - Expected number of edge versions to restore
+    pub(crate) fn reserve_restoration_capacity(
+        &mut self,
+        node_versions: usize,
+        edge_versions: usize,
+    ) {
+        self.node_versions.reserve(node_versions);
+        self.edge_versions.reserve(edge_versions);
+        // Conservatively estimate unique entities as half of versions
+        // (typical case: each entity has ~2 versions on average)
+        self.node_version_heads.reserve(node_versions / 2);
+        self.edge_version_heads.reserve(edge_versions / 2);
+        self.node_version_counts.reserve(node_versions / 2);
+        self.edge_version_counts.reserve(edge_versions / 2);
+    }
+
     /// Insert a restored node version directly into storage.
     ///
     /// This is used during index loading to restore persisted versions.
@@ -1425,6 +1450,123 @@ impl HistoricalStorage {
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
 
         Ok(())
+    }
+
+    /// Rebuild version chains after restoration from persistence.
+    ///
+    /// This method reconstructs the `prev_version` and `next_version` links for all
+    /// versions, and ensures version heads point to the correct (latest tx_time) version.
+    /// Must be called after all versions have been inserted via `insert_restored_node_version`
+    /// and `insert_restored_edge_version`.
+    ///
+    /// # Version Chain Semantics
+    ///
+    /// - Versions are ordered by transaction time (tx_time start)
+    /// - `prev_version` points to the temporally previous version (earlier tx_time)
+    /// - `next_version` points to the temporally next version (later tx_time)
+    /// - Version heads point to the version with the latest tx_time
+    pub(crate) fn rebuild_version_chains(&mut self) {
+        // === Rebuild node version chains ===
+
+        // Group versions by node ID
+        let mut node_versions_by_id: HashMap<NodeId, Vec<VersionId>> = HashMap::new();
+        for (vid, version) in &self.node_versions {
+            node_versions_by_id
+                .entry(version.node_id)
+                .or_default()
+                .push(*vid);
+        }
+
+        // For each node, sort versions by tx_time and link them
+        for (node_id, mut version_ids) in node_versions_by_id {
+            // Sort by transaction time start (ascending order)
+            version_ids.sort_by_key(|vid| {
+                self.node_versions
+                    .get(vid)
+                    .map(|v| v.temporal.transaction_time().start())
+                    .unwrap_or(i64::MAX)
+            });
+
+            // Link prev/next
+            for i in 0..version_ids.len() {
+                let vid = version_ids[i];
+
+                // Link to previous version (earlier in time)
+                let prev = if i > 0 {
+                    Some(version_ids[i - 1])
+                } else {
+                    None
+                };
+
+                // Link to next version (later in time)
+                let next = if i < version_ids.len() - 1 {
+                    Some(version_ids[i + 1])
+                } else {
+                    None
+                };
+
+                if let Some(version) = self.node_versions.get_mut(&vid) {
+                    version.prev_version = prev;
+                    version.next_version = next;
+                }
+            }
+
+            // Set head to the latest version (last in sorted order)
+            if let Some(&latest_vid) = version_ids.last() {
+                self.node_version_heads.insert(node_id, latest_vid);
+            }
+        }
+
+        // === Rebuild edge version chains ===
+
+        // Group versions by edge ID
+        let mut edge_versions_by_id: HashMap<EdgeId, Vec<VersionId>> = HashMap::new();
+        for (vid, version) in &self.edge_versions {
+            edge_versions_by_id
+                .entry(version.edge_id)
+                .or_default()
+                .push(*vid);
+        }
+
+        // For each edge, sort versions by tx_time and link them
+        for (edge_id, mut version_ids) in edge_versions_by_id {
+            // Sort by transaction time start (ascending order)
+            version_ids.sort_by_key(|vid| {
+                self.edge_versions
+                    .get(vid)
+                    .map(|v| v.temporal.transaction_time().start())
+                    .unwrap_or(i64::MAX)
+            });
+
+            // Link prev/next
+            for i in 0..version_ids.len() {
+                let vid = version_ids[i];
+
+                // Link to previous version (earlier in time)
+                let prev = if i > 0 {
+                    Some(version_ids[i - 1])
+                } else {
+                    None
+                };
+
+                // Link to next version (later in time)
+                let next = if i < version_ids.len() - 1 {
+                    Some(version_ids[i + 1])
+                } else {
+                    None
+                };
+
+                if let Some(version) = self.edge_versions.get_mut(&vid) {
+                    version.prev_version = prev;
+                    version.next_version = next;
+                }
+            }
+
+            // Set head to the latest version (last in sorted order)
+            if let Some(&latest_vid) = version_ids.last() {
+                self.edge_version_heads.insert(edge_id, latest_vid);
+            }
+        }
     }
 }
 

@@ -317,6 +317,9 @@ pub fn restore_into_historical_storage(
     node_labels: &std::collections::HashMap<u64, InternedString>,
     edge_labels: &std::collections::HashMap<u64, InternedString>,
 ) -> Result<()> {
+    // Pre-allocate capacity for better performance during bulk restoration
+    historical.reserve_restoration_capacity(data.node_versions.len(), data.edge_versions.len());
+
     // Restore node versions
     for entry in &data.node_versions {
         let label = node_labels.get(&entry.node_id).ok_or_else(|| {
@@ -356,6 +359,11 @@ pub fn restore_into_historical_storage(
                 ))
             })?;
     }
+
+    // Rebuild version chains now that all versions are loaded.
+    // This reconstructs prev_version/next_version links and ensures
+    // version heads point to the correct (latest tx_time) version.
+    historical.rebuild_version_chains();
 
     Ok(())
 }
