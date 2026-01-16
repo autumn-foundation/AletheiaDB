@@ -41,6 +41,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+use crate::storage::index_persistence::PersistenceConfig;
+
 /// Configuration for WAL (Write-Ahead Log) system.
 ///
 /// Controls buffer sizes, stripe configuration, flush behavior, and durability settings.
@@ -531,6 +533,8 @@ pub struct GallifreyDBConfig {
     pub historical: HistoricalConfig,
     /// Vector index configuration
     pub vector: VectorIndexConfig,
+    /// Index persistence configuration
+    pub persistence: PersistenceConfig,
 }
 
 /// Builder for unified database configuration.
@@ -565,6 +569,12 @@ impl GallifreyDBConfigBuilder {
     /// Set vector index configuration.
     pub fn vector(mut self, vector_config: VectorIndexConfig) -> Self {
         self.config.vector = vector_config;
+        self
+    }
+
+    /// Set persistence configuration.
+    pub fn persistence(mut self, persistence_config: PersistenceConfig) -> Self {
+        self.config.persistence = persistence_config;
         self
     }
 
