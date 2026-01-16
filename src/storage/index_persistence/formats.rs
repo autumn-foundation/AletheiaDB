@@ -129,8 +129,39 @@ pub struct GraphIndexData {
     pub incoming_neighbors: Vec<u64>,
 }
 
-/// Persisted node data.
+/// Delta encoding for incremental graph index saves.
+///
+/// Stores only the changes between a base snapshot and a modified version,
+/// enabling smaller incremental saves. Tracks additions, modifications, and deletions.
 #[derive(Debug, Clone, Encode, Decode)]
+pub struct GraphIndexDelta {
+    /// Magic bytes: "GDLT"
+    pub magic: [u8; 4],
+    /// Format version
+    pub version: u16,
+
+    /// Nodes added since base
+    pub added_nodes: Vec<PersistedNode>,
+    /// Nodes modified since base (full new state)
+    pub modified_nodes: Vec<PersistedNode>,
+    /// Node IDs deleted since base
+    pub deleted_node_ids: Vec<u64>,
+
+    /// Edges added since base
+    pub added_edges: Vec<PersistedEdge>,
+    /// Edges modified since base (full new state)
+    pub modified_edges: Vec<PersistedEdge>,
+    /// Edge IDs deleted since base
+    pub deleted_edge_ids: Vec<u64>,
+
+    /// New node count after applying delta
+    pub new_node_count: u64,
+    /// New edge count after applying delta
+    pub new_edge_count: u64,
+}
+
+/// Persisted node data.
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct PersistedNode {
     /// Node ID
     pub id: u64,
@@ -141,7 +172,7 @@ pub struct PersistedNode {
 }
 
 /// Persisted edge data.
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct PersistedEdge {
     /// Edge ID
     pub id: u64,
@@ -156,7 +187,7 @@ pub struct PersistedEdge {
 }
 
 /// Persisted property map.
-#[derive(Debug, Clone, Default, Encode, Decode)]
+#[derive(Debug, Clone, Default, PartialEq, Encode, Decode)]
 pub struct PersistedPropertyMap {
     /// Property entries: (key_index, value)
     pub entries: Vec<(u32, PersistedPropertyValue)>,
@@ -166,7 +197,7 @@ pub struct PersistedPropertyMap {
 ///
 /// Note: Array and Map variants are currently not supported due to
 /// bitcode recursion limitations. These will be added in a future update.
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub enum PersistedPropertyValue {
     /// Null value
     Null,

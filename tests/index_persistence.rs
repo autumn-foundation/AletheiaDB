@@ -977,3 +977,337 @@ fn test_memory_mapped_loading() {
     println!("✓ Memory-mapped loading test passed");
     println!("  Loaded {} nodes correctly", mmap_data.node_count);
 }
+
+#[test]
+fn test_delta_encoding_reduces_incremental_save_size() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::PropertyMapBuilder;
+    use gallifreydb::storage::index_persistence::graph::{
+        load_graph_index, load_graph_index_with_delta, new_graph_index_data, persist_property_map,
+        save_graph_index_compressed, save_graph_index_delta,
+    };
+    use gallifreydb::storage::index_persistence::{PersistedEdge, PersistedNode};
+
+    let dir = tempdir().unwrap();
+
+    println!("\n=== Comprehensive Delta Encoding Test (Nodes + Edges) ===");
+
+    // ========================================================================
+    // Phase 1: Create base index with nodes AND edges
+    // ========================================================================
+
+    let mut base_data = new_graph_index_data();
+    base_data.node_count = 100;
+
+    for i in 0..100 {
+        let props = PropertyMapBuilder::new()
+            .insert("name", format!("Node_{}", i))
+            .insert("value", i as i64)
+            .build();
+
+        let persisted_props = persist_property_map(&props).unwrap();
+
+        base_data.nodes.push(PersistedNode {
+            id: i,
+            label_idx: 1,
+            properties: persisted_props,
+        });
+    }
+
+    // Add base edges: 0->1, 1->2, ..., 99->0 (circular)
+    base_data.edge_count = 100;
+    for i in 0..100 {
+        let target = (i + 1) % 100;
+        let props = PropertyMapBuilder::new().insert("weight", i as i64).build();
+
+        let persisted_props = persist_property_map(&props).unwrap();
+
+        base_data.edges.push(PersistedEdge {
+            id: i,
+            source_id: i,
+            target_id: target,
+            label_idx: 2, // Different label for edges
+            properties: persisted_props,
+        });
+    }
+
+    // Save base snapshot
+    let base_path = dir.path().join("base.idx");
+    save_graph_index_compressed(&base_data, &base_path, 3).unwrap();
+    let base_size = std::fs::metadata(&base_path).unwrap().len();
+
+    println!(
+        "Base snapshot: {} nodes, {} edges, {} bytes",
+        base_data.node_count, base_data.edge_count, base_size
+    );
+
+    // ========================================================================
+    // Phase 2: Create modified index with ALL three change types (nodes + edges)
+    // ========================================================================
+
+    let mut modified_data = base_data.clone();
+
+    // NODE CHANGES
+    // 1. ADDITIONS: Add 10 new nodes (IDs 100-109)
+    for i in 100..110 {
+        let props = PropertyMapBuilder::new()
+            .insert("name", format!("Node_{}", i))
+            .insert("value", i as i64)
+            .build();
+
+        let persisted_props = persist_property_map(&props).unwrap();
+
+        modified_data.nodes.push(PersistedNode {
+            id: i,
+            label_idx: 1,
+            properties: persisted_props,
+        });
+    }
+
+    // 2. MODIFICATIONS: Modify nodes 10-19 (change their properties)
+    for i in 10..20 {
+        let props = PropertyMapBuilder::new()
+            .insert("name", format!("Modified_Node_{}", i))
+            .insert("value", (i * 1000) as i64) // Changed value
+            .insert("modified", true) // New property
+            .build();
+
+        let persisted_props = persist_property_map(&props).unwrap();
+
+        if let Some(node) = modified_data.nodes.iter_mut().find(|n| n.id == i) {
+            node.properties = persisted_props;
+        }
+    }
+
+    // 3. DELETIONS: Delete nodes 90-99 (10 nodes)
+    // Keep nodes with id < 90 OR id >= 100 (removes only 90-99)
+    modified_data.nodes.retain(|n| n.id < 90 || n.id >= 100);
+
+    // EDGE CHANGES
+    // 1. ADDITIONS: Add 10 new edges (IDs 100-109) connecting new nodes
+    for i in 100..110 {
+        let target = if i < 109 { i + 1 } else { 100 }; // Connect new nodes in a chain
+        let props = PropertyMapBuilder::new()
+            .insert("weight", i as i64)
+            .insert("new_edge", true)
+            .build();
+
+        let persisted_props = persist_property_map(&props).unwrap();
+
+        modified_data.edges.push(PersistedEdge {
+            id: i,
+            source_id: i,
+            target_id: target,
+            label_idx: 2,
+            properties: persisted_props,
+        });
+    }
+
+    // 2. MODIFICATIONS: Modify edges 10-19 (change their properties)
+    for i in 10..20 {
+        let props = PropertyMapBuilder::new()
+            .insert("weight", (i * 2000) as i64) // Changed weight
+            .insert("modified_edge", true) // New property
+            .build();
+
+        let persisted_props = persist_property_map(&props).unwrap();
+
+        if let Some(edge) = modified_data.edges.iter_mut().find(|e| e.id == i) {
+            edge.properties = persisted_props;
+        }
+    }
+
+    // 3. DELETIONS: Delete edges 90-99 (10 edges)
+    // Keep edges with id < 90 OR id >= 100 (removes only 90-99)
+    modified_data.edges.retain(|e| e.id < 90 || e.id >= 100);
+
+    // Update counts
+    modified_data.node_count = modified_data.nodes.len() as u64; // 100 - 10 + 10 = 100
+    modified_data.edge_count = modified_data.edges.len() as u64; // 100 - 10 + 10 = 100
+
+    println!("Modified index: 10 node additions, 10 node modifications, 10 node deletions");
+    println!("               10 edge additions, 10 edge modifications, 10 edge deletions");
+
+    // ========================================================================
+    // Phase 3: Save and verify delta
+    // ========================================================================
+
+    // Save delta (only the changes)
+    let delta_path = dir.path().join("delta.idx");
+    save_graph_index_delta(&base_data, &modified_data, &delta_path, 3).unwrap();
+    let delta_size = std::fs::metadata(&delta_path).unwrap().len();
+
+    // Save full modified version for comparison
+    let full_path = dir.path().join("full.idx");
+    save_graph_index_compressed(&modified_data, &full_path, 3).unwrap();
+    let full_size = std::fs::metadata(&full_path).unwrap().len();
+
+    // Verify delta is smaller than full save
+    assert!(
+        delta_size < full_size,
+        "Delta size ({}) should be smaller than full save ({})",
+        delta_size,
+        full_size
+    );
+
+    println!(
+        "Delta size: {} bytes (vs {} bytes full)",
+        delta_size, full_size
+    );
+    println!(
+        "Delta reduction: {:.1}%",
+        (1.0 - delta_size as f64 / full_size as f64) * 100.0
+    );
+
+    // ========================================================================
+    // Phase 4: Reconstruct from delta and verify ALL changes applied
+    // ========================================================================
+
+    let reconstructed_data = load_graph_index_with_delta(&base_path, &delta_path).unwrap();
+
+    // Verify counts
+    assert_eq!(reconstructed_data.node_count, modified_data.node_count);
+    assert_eq!(reconstructed_data.nodes.len(), modified_data.nodes.len());
+    assert_eq!(reconstructed_data.edge_count, modified_data.edge_count);
+    assert_eq!(reconstructed_data.edges.len(), modified_data.edges.len());
+
+    println!("\nVerifying NODE changes:");
+
+    // Verify node additions (nodes 100-109 exist)
+    for i in 100..110 {
+        assert!(
+            reconstructed_data.nodes.iter().any(|n| n.id == i),
+            "Added node {} should exist",
+            i
+        );
+    }
+    println!("  ✓ 10 node additions verified");
+
+    // Verify node modifications (nodes 10-19 have updated properties)
+    for i in 10..20 {
+        let node = reconstructed_data
+            .nodes
+            .iter()
+            .find(|n| n.id == i)
+            .unwrap_or_else(|| panic!("Modified node {} should exist", i));
+
+        let restored_props = restore_property_map(&node.properties).unwrap();
+        assert_eq!(
+            restored_props.get("name").and_then(|v| v.as_str()),
+            Some(&*format!("Modified_Node_{}", i)),
+            "Node {} should have modified name",
+            i
+        );
+        assert_eq!(
+            restored_props.get("value").and_then(|v| v.as_int()),
+            Some((i * 1000) as i64),
+            "Node {} should have modified value",
+            i
+        );
+        assert_eq!(
+            restored_props.get("modified").and_then(|v| v.as_bool()),
+            Some(true),
+            "Node {} should have new 'modified' property",
+            i
+        );
+    }
+    println!("  ✓ 10 node modifications verified");
+
+    // Verify node deletions (nodes 90-99 should NOT exist)
+    for i in 90..100 {
+        assert!(
+            !reconstructed_data.nodes.iter().any(|n| n.id == i),
+            "Deleted node {} should NOT exist",
+            i
+        );
+    }
+    println!("  ✓ 10 node deletions verified");
+
+    // Verify unmodified nodes still exist unchanged (e.g., node 5)
+    let unmodified_node = reconstructed_data
+        .nodes
+        .iter()
+        .find(|n| n.id == 5)
+        .expect("Unmodified node 5 should exist");
+    let restored_props = restore_property_map(&unmodified_node.properties).unwrap();
+    assert_eq!(
+        restored_props.get("name").and_then(|v| v.as_str()),
+        Some("Node_5"),
+        "Unmodified node should retain original properties"
+    );
+
+    println!("\nVerifying EDGE changes:");
+
+    // Verify edge additions (edges 100-109 exist)
+    for i in 100..110 {
+        assert!(
+            reconstructed_data.edges.iter().any(|e| e.id == i),
+            "Added edge {} should exist",
+            i
+        );
+    }
+    println!("  ✓ 10 edge additions verified");
+
+    // Verify edge modifications (edges 10-19 have updated properties)
+    for i in 10..20 {
+        let edge = reconstructed_data
+            .edges
+            .iter()
+            .find(|e| e.id == i)
+            .unwrap_or_else(|| panic!("Modified edge {} should exist", i));
+
+        let restored_props = restore_property_map(&edge.properties).unwrap();
+        assert_eq!(
+            restored_props.get("weight").and_then(|v| v.as_int()),
+            Some((i * 2000) as i64),
+            "Edge {} should have modified weight",
+            i
+        );
+        assert_eq!(
+            restored_props
+                .get("modified_edge")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "Edge {} should have new 'modified_edge' property",
+            i
+        );
+    }
+    println!("  ✓ 10 edge modifications verified");
+
+    // Verify edge deletions (edges 90-99 should NOT exist)
+    for i in 90..100 {
+        assert!(
+            !reconstructed_data.edges.iter().any(|e| e.id == i),
+            "Deleted edge {} should NOT exist",
+            i
+        );
+    }
+    println!("  ✓ 10 edge deletions verified");
+
+    // Verify unmodified edges still exist unchanged (e.g., edge 5)
+    let unmodified_edge = reconstructed_data
+        .edges
+        .iter()
+        .find(|e| e.id == 5)
+        .expect("Unmodified edge 5 should exist");
+    let restored_props = restore_property_map(&unmodified_edge.properties).unwrap();
+    assert_eq!(
+        restored_props.get("weight").and_then(|v| v.as_int()),
+        Some(5),
+        "Unmodified edge should retain original properties"
+    );
+    // Verify edge structure unchanged
+    assert_eq!(unmodified_edge.source_id, 5);
+    assert_eq!(unmodified_edge.target_id, 6);
+
+    // Verify loading without delta gives us the original base
+    let base_loaded = load_graph_index(&base_path).unwrap();
+    assert_eq!(base_loaded.node_count, 100);
+    assert_eq!(base_loaded.edge_count, 100);
+
+    println!(
+        "\n✓ All delta operations verified: nodes + edges (additions, modifications, deletions)"
+    );
+    println!("✓ Delta encoding comprehensive test passed");
+}

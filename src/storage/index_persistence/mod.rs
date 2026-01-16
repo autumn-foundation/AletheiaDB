@@ -94,6 +94,9 @@ pub const INTERNER_MAGIC: [u8; 4] = *b"GSTR";
 /// Magic bytes for graph index files.
 pub const GRAPH_MAGIC: [u8; 4] = *b"GGRP";
 
+/// Magic bytes for graph delta files.
+pub const DELTA_MAGIC: [u8; 4] = *b"GDLT";
+
 /// Magic bytes for temporal index files.
 pub const TEMPORAL_MAGIC: [u8; 4] = *b"GTMP";
 

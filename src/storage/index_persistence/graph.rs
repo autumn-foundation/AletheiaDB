@@ -10,8 +10,10 @@ use crate::core::GLOBAL_INTERNER;
 use crate::core::property::{PropertyMap, PropertyMapBuilder, PropertyValue};
 
 use super::error::{IndexPersistenceError, Result};
-use super::formats::{GraphIndexData, PersistedPropertyMap, PersistedPropertyValue};
-use super::{GRAPH_MAGIC, MANIFEST_VERSION};
+use super::formats::{
+    GraphIndexData, GraphIndexDelta, PersistedPropertyMap, PersistedPropertyValue,
+};
+use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
 
 /// Convert PropertyValue to PersistedPropertyValue.
 ///
@@ -369,6 +371,284 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
     }
 
     Ok(data)
+}
+
+/// Save graph index delta with zstd compression.
+///
+/// This function saves only the changes between the base and modified graph data,
+/// significantly reducing the size of incremental saves. Tracks additions, modifications,
+/// and deletions for complete change tracking.
+///
+/// # Arguments
+///
+/// * `base` - The base graph index data (previous snapshot)
+/// * `modified` - The modified graph index data (current state)
+/// * `path` - The file path to write the delta to
+/// * `compression_level` - zstd compression level (0-22, default 3)
+///
+/// # Errors
+///
+/// Returns an error if serialization, compression, or file write fails.
+///
+/// # Examples
+///
+/// ```ignore
+/// use gallifreydb::storage::index_persistence::graph::{
+///     save_graph_index_delta, load_graph_index, save_graph_index_compressed
+/// };
+///
+/// // Save base snapshot
+/// save_graph_index_compressed(&base_data, &base_path, 3)?;
+///
+/// // ... make changes to create modified_data ...
+///
+/// // Save only the delta (additions, modifications, deletions)
+/// save_graph_index_delta(&base_data, &modified_data, &delta_path, 3)?;
+/// ```
+pub fn save_graph_index_delta(
+    base: &GraphIndexData,
+    modified: &GraphIndexData,
+    path: &Path,
+    compression_level: i32,
+) -> Result<()> {
+    // Build lookup maps for efficient comparison
+    let base_nodes: std::collections::HashMap<u64, &super::formats::PersistedNode> =
+        base.nodes.iter().map(|n| (n.id, n)).collect();
+    let modified_nodes: std::collections::HashMap<u64, &super::formats::PersistedNode> =
+        modified.nodes.iter().map(|n| (n.id, n)).collect();
+
+    let base_edges: std::collections::HashMap<u64, &super::formats::PersistedEdge> =
+        base.edges.iter().map(|e| (e.id, e)).collect();
+    let modified_edges: std::collections::HashMap<u64, &super::formats::PersistedEdge> =
+        modified.edges.iter().map(|e| (e.id, e)).collect();
+
+    // Detect added nodes (exist in modified but not in base)
+    let added_nodes: Vec<_> = modified
+        .nodes
+        .iter()
+        .filter(|node| !base_nodes.contains_key(&node.id))
+        .cloned()
+        .collect();
+
+    // Detect modified nodes (exist in both but with different content)
+    let modified_nodes_vec: Vec<_> = modified
+        .nodes
+        .iter()
+        .filter(|node| {
+            base_nodes
+                .get(&node.id)
+                .is_some_and(|base_node| *base_node != *node)
+        })
+        .cloned()
+        .collect();
+
+    // Detect deleted nodes (exist in base but not in modified)
+    let deleted_node_ids: Vec<_> = base
+        .nodes
+        .iter()
+        .filter(|node| !modified_nodes.contains_key(&node.id))
+        .map(|node| node.id)
+        .collect();
+
+    // Detect added edges (exist in modified but not in base)
+    let added_edges: Vec<_> = modified
+        .edges
+        .iter()
+        .filter(|edge| !base_edges.contains_key(&edge.id))
+        .cloned()
+        .collect();
+
+    // Detect modified edges (exist in both but with different content)
+    let modified_edges_vec: Vec<_> = modified
+        .edges
+        .iter()
+        .filter(|edge| {
+            base_edges
+                .get(&edge.id)
+                .is_some_and(|base_edge| *base_edge != *edge)
+        })
+        .cloned()
+        .collect();
+
+    // Detect deleted edges (exist in base but not in modified)
+    let deleted_edge_ids: Vec<_> = base
+        .edges
+        .iter()
+        .filter(|edge| !modified_edges.contains_key(&edge.id))
+        .map(|edge| edge.id)
+        .collect();
+
+    // Create delta structure
+    let delta = GraphIndexDelta {
+        magic: DELTA_MAGIC,
+        version: MANIFEST_VERSION,
+        added_nodes,
+        modified_nodes: modified_nodes_vec,
+        deleted_node_ids,
+        added_edges,
+        modified_edges: modified_edges_vec,
+        deleted_edge_ids,
+        new_node_count: modified.node_count,
+        new_edge_count: modified.edge_count,
+    };
+
+    // Encode delta
+    let encoded = bitcode::encode(&delta);
+
+    // Calculate CRC32 of uncompressed data
+    let mut hasher = Hasher::new();
+    hasher.update(&encoded);
+    let checksum = hasher.finalize();
+
+    // Compress the encoded data
+    let compressed = zstd::encode_all(&encoded[..], compression_level).map_err(|e| {
+        IndexPersistenceError::Serialization(format!("zstd compression failed: {}", e))
+    })?;
+
+    // Write: compressed_data + checksum (of uncompressed)
+    let mut data_with_checksum = compressed;
+    data_with_checksum.extend_from_slice(&checksum.to_le_bytes());
+
+    super::atomic_write(path, &data_with_checksum)?;
+    Ok(())
+}
+
+/// Load graph index data by loading base and applying delta.
+///
+/// This function loads a base graph index and applies a delta to reconstruct
+/// the modified state. Applies all change types: deletions, modifications, and additions.
+/// This is more efficient than loading the full modified state when only a small
+/// portion of the graph has changed.
+///
+/// # Delta Application Order
+///
+/// 1. **Deletions**: Remove nodes/edges that were deleted
+/// 2. **Modifications**: Update properties/labels of existing nodes/edges
+/// 3. **Additions**: Add new nodes/edges
+/// 4. **Counts**: Update node_count and edge_count
+///
+/// # Arguments
+///
+/// * `base_path` - Path to the base graph index file
+/// * `delta_path` - Path to the delta file
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Base or delta file cannot be loaded
+/// - Files are corrupted (CRC mismatch)
+/// - Decompression fails
+/// - Deserialization fails
+/// - Magic bytes or version are invalid
+///
+/// # Examples
+///
+/// ```ignore
+/// use gallifreydb::storage::index_persistence::graph::load_graph_index_with_delta;
+///
+/// let reconstructed_data = load_graph_index_with_delta(&base_path, &delta_path)?;
+/// ```
+pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Result<GraphIndexData> {
+    // Load base index
+    let mut base = load_graph_index(base_path)?;
+
+    // Load and decompress delta
+    let bytes = fs::read(delta_path)?;
+
+    // Check minimum size (must have at least 4 bytes for CRC)
+    if bytes.len() < 4 {
+        return Err(IndexPersistenceError::Corrupted {
+            path: delta_path.to_path_buf(),
+            source: "File too small to contain CRC32 checksum".into(),
+        });
+    }
+
+    // Split data and checksum
+    let (data_slice, checksum_bytes) = bytes.split_at(bytes.len() - 4);
+    let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
+        IndexPersistenceError::Corrupted {
+            path: delta_path.to_path_buf(),
+            source: "Invalid CRC32 checksum format".into(),
+        }
+    })?);
+
+    // Check for zstd compression (magic bytes: 0x28B52FFD in big-endian)
+    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+    let decompressed_data;
+    let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
+        // Decompress the data
+        decompressed_data = zstd::decode_all(data_slice).map_err(|e| {
+            IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e))
+        })?;
+        &decompressed_data[..]
+    } else {
+        data_slice
+    };
+
+    // Verify checksum (against decompressed data if compressed)
+    let mut hasher = Hasher::new();
+    hasher.update(data_to_verify);
+    let computed_checksum = hasher.finalize();
+
+    if computed_checksum != stored_checksum {
+        return Err(IndexPersistenceError::Corrupted {
+            path: delta_path.to_path_buf(),
+            source: format!(
+                "CRC32 checksum mismatch: expected {}, got {}",
+                stored_checksum, computed_checksum
+            )
+            .into(),
+        });
+    }
+
+    // Decode delta
+    let delta: GraphIndexDelta = bitcode::decode(data_to_verify)?;
+
+    // Validate magic and version
+    if delta.magic != DELTA_MAGIC {
+        return Err(IndexPersistenceError::InvalidMagic {
+            path: delta_path.to_path_buf(),
+            expected: DELTA_MAGIC,
+            got: delta.magic,
+        });
+    }
+
+    if delta.version > MANIFEST_VERSION {
+        return Err(IndexPersistenceError::UnsupportedVersion {
+            found: delta.version,
+            supported: MANIFEST_VERSION,
+        });
+    }
+
+    // Apply delta changes
+
+    // 1. Handle deletions first (remove from base)
+    base.nodes
+        .retain(|node| !delta.deleted_node_ids.contains(&node.id));
+    base.edges
+        .retain(|edge| !delta.deleted_edge_ids.contains(&edge.id));
+
+    // 2. Handle modifications (update existing entries)
+    for modified_node in &delta.modified_nodes {
+        if let Some(existing) = base.nodes.iter_mut().find(|n| n.id == modified_node.id) {
+            *existing = modified_node.clone();
+        }
+    }
+    for modified_edge in &delta.modified_edges {
+        if let Some(existing) = base.edges.iter_mut().find(|e| e.id == modified_edge.id) {
+            *existing = modified_edge.clone();
+        }
+    }
+
+    // 3. Handle additions (append to base)
+    base.nodes.extend(delta.added_nodes);
+    base.edges.extend(delta.added_edges);
+
+    // 4. Update counts
+    base.node_count = delta.new_node_count;
+    base.edge_count = delta.new_edge_count;
+
+    Ok(base)
 }
 
 #[cfg(test)]
