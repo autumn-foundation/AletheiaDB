@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crc32fast::Hasher;
 
@@ -15,7 +15,7 @@ impl IndexManifest {
     pub fn new(lsn: u64) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs() as i64;
 
         Self {
@@ -35,7 +35,7 @@ impl IndexManifest {
     pub fn touch(&mut self) {
         self.last_modified = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs() as i64;
     }
 

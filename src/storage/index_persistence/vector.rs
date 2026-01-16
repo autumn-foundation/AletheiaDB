@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crc32fast::Hasher;
 
@@ -132,7 +132,7 @@ pub fn new_vector_meta(
 ) -> VectorIndexMeta {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_else(|_| Duration::from_secs(0))
         .as_secs() as i64;
 
     VectorIndexMeta {
