@@ -59,7 +59,7 @@ fn test_full_persistence_cycle() {
         .insert("name", "Alice")
         .insert("age", 30i64)
         .build();
-    let persisted_props = persist_property_map(&props);
+    let persisted_props = persist_property_map(&props).unwrap();
 
     graph_data.nodes.push(PersistedNode {
         id: 1,
@@ -74,7 +74,7 @@ fn test_full_persistence_cycle() {
     graph_data.nodes.push(PersistedNode {
         id: 2,
         label_idx: GLOBAL_INTERNER.intern("Document").unwrap().as_u32(),
-        properties: persist_property_map(&doc_props),
+        properties: persist_property_map(&doc_props).unwrap(),
     });
 
     // Add an edge
@@ -156,7 +156,7 @@ fn test_full_persistence_cycle() {
     );
 
     // Verify graph data can be loaded and properties restored
-    let restored_props = restore_property_map(&persisted_props);
+    let restored_props = restore_property_map(&persisted_props).unwrap();
     assert_eq!(
         restored_props.get("name").unwrap().as_str().unwrap(),
         "Alice"
@@ -180,8 +180,8 @@ fn test_property_map_persistence() {
         .insert("active", true)
         .build();
 
-    let persisted = persist_property_map(&original);
-    let restored = restore_property_map(&persisted);
+    let persisted = persist_property_map(&original).unwrap();
+    let restored = restore_property_map(&persisted).unwrap();
 
     assert_eq!(restored.get("name").unwrap().as_str().unwrap(), "Bob");
     assert_eq!(restored.get("age").unwrap().as_int().unwrap(), 25);

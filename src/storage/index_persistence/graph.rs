@@ -12,29 +12,45 @@ use super::formats::{GraphIndexData, PersistedPropertyMap, PersistedPropertyValu
 use super::{GRAPH_MAGIC, MANIFEST_VERSION};
 
 /// Convert PropertyValue to PersistedPropertyValue.
-pub fn persist_property_value(value: &PropertyValue) -> PersistedPropertyValue {
-    match value {
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The property contains an Array (not yet supported)
+/// - String interning fails (interner out of capacity)
+pub fn persist_property_value(value: &PropertyValue) -> Result<PersistedPropertyValue> {
+    Ok(match value {
         PropertyValue::Null => PersistedPropertyValue::Null,
         PropertyValue::Bool(b) => PersistedPropertyValue::Bool(*b),
         PropertyValue::Int(i) => PersistedPropertyValue::Int(*i),
         PropertyValue::Float(f) => PersistedPropertyValue::Float(*f),
         PropertyValue::String(s) => {
-            let interned = GLOBAL_INTERNER.intern(s.as_ref()).unwrap();
+            let interned = GLOBAL_INTERNER.intern(s.as_ref()).map_err(|e| {
+                IndexPersistenceError::Serialization(format!("Failed to intern string: {}", e))
+            })?;
             PersistedPropertyValue::String(interned.as_u32())
         }
         PropertyValue::Bytes(b) => PersistedPropertyValue::Bytes(b.to_vec()),
         PropertyValue::Vector(v) => PersistedPropertyValue::Vector(v.to_vec()),
         // Array variant exists but is not yet supported in serialization
         PropertyValue::Array(_) => {
-            // For now, skip arrays - they're rarely used
-            PersistedPropertyValue::Null
+            return Err(IndexPersistenceError::Serialization(
+                "Array properties are not yet supported for persistence. \
+                 This prevents silent data loss. Support will be added in a future update."
+                    .to_string(),
+            ));
         }
-    }
+    })
 }
 
 /// Convert PersistedPropertyValue back to PropertyValue.
-pub fn restore_property_value(persisted: &PersistedPropertyValue) -> PropertyValue {
-    match persisted {
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - An interned string ID cannot be resolved (data corruption)
+pub fn restore_property_value(persisted: &PersistedPropertyValue) -> Result<PropertyValue> {
+    Ok(match persisted {
         PersistedPropertyValue::Null => PropertyValue::Null,
         PersistedPropertyValue::Bool(b) => PropertyValue::Bool(*b),
         PersistedPropertyValue::Int(i) => PropertyValue::Int(*i),
@@ -42,36 +58,55 @@ pub fn restore_property_value(persisted: &PersistedPropertyValue) -> PropertyVal
         PersistedPropertyValue::String(idx) => {
             let s = GLOBAL_INTERNER
                 .resolve(crate::core::InternedString::from_raw(*idx))
-                .unwrap_or_else(|| Arc::from(""));
+                .ok_or_else(|| {
+                    IndexPersistenceError::Serialization(format!(
+                        "Failed to resolve interned string with ID: {}. \
+                         This likely indicates data corruption.",
+                        idx
+                    ))
+                })?;
             PropertyValue::String(s)
         }
         PersistedPropertyValue::Bytes(b) => PropertyValue::Bytes(Arc::from(b.as_slice())),
         PersistedPropertyValue::Vector(v) => PropertyValue::Vector(Arc::from(v.as_slice())),
-    }
+    })
 }
 
 /// Convert PropertyMap to PersistedPropertyMap.
-pub fn persist_property_map(props: &PropertyMap) -> PersistedPropertyMap {
-    let entries: Vec<_> = props
-        .iter()
-        .map(|(k, v)| {
-            // k is already an InternedString (PropertyKey)
-            (k.as_u32(), persist_property_value(v))
-        })
-        .collect();
-    PersistedPropertyMap { entries }
+///
+/// # Errors
+///
+/// Returns an error if any property value fails to persist.
+pub fn persist_property_map(props: &PropertyMap) -> Result<PersistedPropertyMap> {
+    let mut entries = Vec::with_capacity(props.len());
+    for (k, v) in props.iter() {
+        // k is already an InternedString (PropertyKey)
+        entries.push((k.as_u32(), persist_property_value(v)?));
+    }
+    Ok(PersistedPropertyMap { entries })
 }
 
 /// Convert PersistedPropertyMap back to PropertyMap.
-pub fn restore_property_map(persisted: &PersistedPropertyMap) -> PropertyMap {
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Any property key cannot be resolved (data corruption)
+/// - Any property value fails to restore
+pub fn restore_property_map(persisted: &PersistedPropertyMap) -> Result<PropertyMap> {
     let mut builder = PropertyMapBuilder::new();
     for (key_idx, value) in &persisted.entries {
         let key_id = crate::core::InternedString::from_raw(*key_idx);
-        if let Some(key_arc) = GLOBAL_INTERNER.resolve(key_id) {
-            builder = builder.insert(key_arc.as_ref(), restore_property_value(value));
-        }
+        let key_arc = GLOBAL_INTERNER.resolve(key_id).ok_or_else(|| {
+            IndexPersistenceError::Serialization(format!(
+                "Failed to resolve interned property key with ID: {}. \
+                 This likely indicates data corruption.",
+                key_idx
+            ))
+        })?;
+        builder = builder.insert(key_arc.as_ref(), restore_property_value(value)?);
     }
-    builder.build()
+    Ok(builder.build())
 }
 
 /// Save graph index data to disk.
@@ -140,8 +175,8 @@ mod tests {
         ];
 
         for value in values {
-            let persisted = persist_property_value(&value);
-            let restored = restore_property_value(&persisted);
+            let persisted = persist_property_value(&value).unwrap();
+            let restored = restore_property_value(&persisted).unwrap();
 
             // Compare string representation for simplicity
             assert_eq!(format!("{:?}", value), format!("{:?}", restored));
@@ -171,5 +206,35 @@ mod tests {
 
         assert_eq!(loaded.node_count, 2);
         assert_eq!(loaded.nodes.len(), 2);
+    }
+
+    #[test]
+    fn test_array_property_errors() {
+        // Test that Array properties properly error instead of silently losing data
+        let array_value = PropertyValue::Array(Arc::from(vec![
+            PropertyValue::Int(1),
+            PropertyValue::Int(2),
+            PropertyValue::Int(3),
+        ]));
+
+        let result = persist_property_value(&array_value);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Array properties are not yet supported"));
+    }
+
+    #[test]
+    fn test_missing_string_interned_id_errors() {
+        // Test that missing interned string IDs properly error
+        let persisted = PersistedPropertyValue::String(999999); // Non-existent ID
+
+        let result = restore_property_value(&persisted);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to resolve interned string"));
     }
 }
