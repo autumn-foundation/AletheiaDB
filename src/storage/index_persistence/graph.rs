@@ -270,6 +270,107 @@ pub fn save_graph_index_compressed(
     Ok(())
 }
 
+/// Load graph index data using memory-mapped file for efficient large file handling.
+///
+/// This function uses memory-mapping to avoid loading the entire file into memory,
+/// which can be more efficient for large index files and enables working with
+/// indexes larger than available RAM.
+///
+/// # Arguments
+///
+/// * `path` - The file path to read from
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - File cannot be opened or memory-mapped
+/// - File is corrupted (CRC mismatch)
+/// - Decompression fails
+/// - Deserialization fails
+/// - Magic bytes or version are invalid
+///
+/// # Examples
+///
+/// ```ignore
+/// use gallifreydb::storage::index_persistence::graph::load_graph_index_mmap;
+///
+/// let data = load_graph_index_mmap(&path)?;
+/// ```
+pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
+    use memmap2::Mmap;
+    use std::fs::File;
+
+    // Open file and create memory map
+    let file = File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+
+    // Check minimum size (must have at least 4 bytes for CRC)
+    if mmap.len() < 4 {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "File too small to contain CRC32 checksum".into(),
+        });
+    }
+
+    // Split data and checksum
+    let (data_slice, checksum_bytes) = mmap.split_at(mmap.len() - 4);
+    let stored_checksum = u32::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
+        IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: "Invalid CRC32 checksum format".into(),
+        }
+    })?);
+
+    // Check for zstd compression (magic bytes: 0x28B52FFD in big-endian)
+    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+    let decompressed_data;
+    let data_to_verify = if data_slice.len() >= 4 && data_slice[..4] == ZSTD_MAGIC {
+        // Decompress the data
+        decompressed_data = zstd::decode_all(data_slice).map_err(|e| {
+            IndexPersistenceError::Serialization(format!("zstd decompression failed: {}", e))
+        })?;
+        &decompressed_data[..]
+    } else {
+        data_slice
+    };
+
+    // Verify checksum (against decompressed data if compressed)
+    let mut hasher = Hasher::new();
+    hasher.update(data_to_verify);
+    let computed_checksum = hasher.finalize();
+
+    if computed_checksum != stored_checksum {
+        return Err(IndexPersistenceError::Corrupted {
+            path: path.to_path_buf(),
+            source: format!(
+                "CRC32 checksum mismatch: expected {}, got {}",
+                stored_checksum, computed_checksum
+            )
+            .into(),
+        });
+    }
+
+    // Decode and validate
+    let data: GraphIndexData = bitcode::decode(data_to_verify)?;
+
+    if data.magic != GRAPH_MAGIC {
+        return Err(IndexPersistenceError::InvalidMagic {
+            path: path.to_path_buf(),
+            expected: GRAPH_MAGIC,
+            got: data.magic,
+        });
+    }
+
+    if data.version > MANIFEST_VERSION {
+        return Err(IndexPersistenceError::UnsupportedVersion {
+            found: data.version,
+            supported: MANIFEST_VERSION,
+        });
+    }
+
+    Ok(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

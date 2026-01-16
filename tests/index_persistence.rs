@@ -916,3 +916,64 @@ fn test_parallel_loading_is_faster() {
 
     println!("✓ Parallel loading test passed");
 }
+
+#[test]
+fn test_memory_mapped_loading() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::PropertyMapBuilder;
+    use gallifreydb::storage::index_persistence::PersistedNode;
+    use gallifreydb::storage::index_persistence::graph::{
+        load_graph_index, new_graph_index_data, persist_property_map, save_graph_index_compressed,
+    };
+
+    let dir = tempdir().unwrap();
+
+    // Create test graph data
+    let mut graph_data = new_graph_index_data();
+    graph_data.node_count = 500;
+
+    for i in 0..500 {
+        let props = PropertyMapBuilder::new()
+            .insert("name", format!("Node_{}", i))
+            .insert("value", i as i64)
+            .build();
+
+        let persisted_props = persist_property_map(&props).unwrap();
+
+        graph_data.nodes.push(PersistedNode {
+            id: i,
+            label_idx: 1,
+            properties: persisted_props,
+        });
+    }
+
+    // Save graph index
+    let graph_path = dir.path().join("graph_mmap.idx");
+    save_graph_index_compressed(&graph_data, &graph_path, 3).unwrap();
+
+    // Load using regular loading
+    let regular_data = load_graph_index(&graph_path).unwrap();
+
+    // Load using memory-mapped loading (this will fail - function doesn't exist yet)
+    use gallifreydb::storage::index_persistence::graph::load_graph_index_mmap;
+    let mmap_data = load_graph_index_mmap(&graph_path).unwrap();
+
+    // Verify both methods produce identical results
+    assert_eq!(regular_data.node_count, mmap_data.node_count);
+    assert_eq!(regular_data.nodes.len(), mmap_data.nodes.len());
+    assert_eq!(regular_data.magic, mmap_data.magic);
+    assert_eq!(regular_data.version, mmap_data.version);
+
+    // Verify specific node data
+    assert_eq!(regular_data.nodes[0].id, mmap_data.nodes[0].id);
+    assert_eq!(
+        regular_data.nodes[0].label_idx,
+        mmap_data.nodes[0].label_idx
+    );
+    assert_eq!(regular_data.nodes[100].id, mmap_data.nodes[100].id);
+    assert_eq!(regular_data.nodes[499].id, mmap_data.nodes[499].id);
+
+    println!("✓ Memory-mapped loading test passed");
+    println!("  Loaded {} nodes correctly", mmap_data.node_count);
+}
