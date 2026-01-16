@@ -17,7 +17,17 @@ use gallifreydb::storage::index_persistence::vector::{
 use gallifreydb::storage::index_persistence::{
     IndexPersistenceManager, formats::PersistedHnswConfig,
 };
+use std::sync::Mutex;
 use tempfile::tempdir;
+
+/// Global mutex to serialize tests that use GLOBAL_INTERNER.
+///
+/// Since GLOBAL_INTERNER is a global singleton, tests that use it can interfere
+/// with each other when run in parallel. This mutex ensures only one test modifies
+/// the interner at a time, preventing flaky tests and race conditions.
+///
+/// Each test should acquire this lock at the start to ensure exclusive access.
+static INTERNER_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Test full persistence cycle: save → clear → load → verify.
 ///
@@ -29,6 +39,9 @@ use tempfile::tempdir;
 /// 5. Vector index (metadata + mappings)
 #[test]
 fn test_full_persistence_cycle() {
+    // Acquire mutex to prevent race conditions with GLOBAL_INTERNER
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
     // ========================================================================
     // Phase 1: Setup and Save
     // ========================================================================
@@ -169,6 +182,9 @@ fn test_full_persistence_cycle() {
 /// Test property map serialization round-trip.
 #[test]
 fn test_property_map_persistence() {
+    // Acquire mutex to prevent race conditions with GLOBAL_INTERNER
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
     // Intern strings first
     GLOBAL_INTERNER.intern("name").unwrap();
     GLOBAL_INTERNER.intern("age").unwrap();
@@ -223,6 +239,9 @@ use gallifreydb::{GallifreyDB, config::GallifreyDBConfig};
 /// Note: Full graph restoration is deferred to Phase 2.
 #[test]
 fn test_db_persist_indexes_mvp() {
+    // Acquire mutex to prevent race conditions with GLOBAL_INTERNER
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
 
@@ -326,6 +345,9 @@ fn test_db_persist_indexes_mvp() {
 /// 4. Verify all data was restored correctly
 #[test]
 fn test_full_persistence_lifecycle() {
+    // Acquire mutex to prevent race conditions with GLOBAL_INTERNER
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
 

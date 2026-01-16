@@ -66,8 +66,8 @@ pub struct GallifreyDB {
     default_durability: DurabilityMode,
     /// Query optimization statistics - cached across queries for effective cost-based optimization
     stats: Arc<Statistics>,
-    /// Index persistence configuration
-    #[allow(dead_code)] // Used in future phases for shutdown persistence
+    /// Index persistence configuration (stored for future automatic persistence)
+    #[allow(dead_code)]
     persistence_config: crate::storage::index_persistence::PersistenceConfig,
     /// Index persistence manager (if enabled)
     persistence_manager: Option<Arc<crate::storage::index_persistence::IndexPersistenceManager>>,
@@ -186,9 +186,10 @@ impl GallifreyDB {
             && manager.indexes_exist()
         {
             // Load manifest and string interner
-            let _ = manager
+            // Fatal error if loading fails - prevents starting in inconsistent state
+            manager
                 .load_manifest_and_strings()
-                .map_err(|e| eprintln!("Warning: Failed to load indexes: {}", e));
+                .expect("Fatal: Failed to load indexes on startup - database cannot start in inconsistent state");
 
             // Restore graph data from persisted indexes
             let graph_path = manager.graph_path().join("adjacency.idx");
@@ -1992,9 +1993,9 @@ impl GallifreyDB {
                 })?;
 
         // 1. Save string interner first (dependency for all others)
-        manager
-            .save_string_interner()
-            .map_err(|e| StorageError::IoError(format!("Failed to save string interner: {}", e)))?;
+        manager.save_string_interner().map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
+        })?;
 
         // 2. Save graph index
         let mut graph_data = new_graph_index_data();
@@ -2004,7 +2005,7 @@ impl GallifreyDB {
         for node in all_nodes {
             let label_idx = node.label.as_u32();
             let properties = persist_property_map(&node.properties).map_err(|e| {
-                StorageError::IoError(format!("Failed to persist node properties: {}", e))
+                StorageError::PersistenceError(format!("Failed to persist node properties: {}", e))
             })?;
 
             graph_data.nodes.push(PersistedNode {
@@ -2019,7 +2020,7 @@ impl GallifreyDB {
         for edge in all_edges {
             let label_idx = edge.label.as_u32();
             let properties = persist_property_map(&edge.properties).map_err(|e| {
-                StorageError::IoError(format!("Failed to persist edge properties: {}", e))
+                StorageError::PersistenceError(format!("Failed to persist edge properties: {}", e))
             })?;
 
             graph_data.edges.push(PersistedEdge {
@@ -2034,14 +2035,15 @@ impl GallifreyDB {
         graph_data.node_count = graph_data.nodes.len() as u64;
         graph_data.edge_count = graph_data.edges.len() as u64;
 
-        save_graph_index(&graph_data, &manager.graph_path().join("adjacency.idx"))
-            .map_err(|e| StorageError::IoError(format!("Failed to save graph index: {}", e)))?;
+        save_graph_index(&graph_data, &manager.graph_path().join("adjacency.idx")).map_err(
+            |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+        )?;
 
         // 3. Save manifest last
         let manifest = IndexManifest::new(0); // TODO: Use actual LSN
-        manager
-            .save_manifest(&manifest)
-            .map_err(|e| StorageError::IoError(format!("Failed to save manifest: {}", e)))?;
+        manager.save_manifest(&manifest).map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save manifest: {}", e))
+        })?;
 
         Ok(())
     }

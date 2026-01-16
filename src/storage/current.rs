@@ -1700,16 +1700,22 @@ impl CurrentStorage {
     ///
     /// This is a helper method for index persistence that provides
     /// access to all nodes in the current storage.
-    pub(crate) fn all_nodes(&self) -> Vec<Node> {
-        self.indexes.iter_nodes().collect()
+    ///
+    /// Returns an iterator to avoid allocating a Vec for large graphs,
+    /// improving memory efficiency during persistence operations.
+    pub(crate) fn all_nodes(&self) -> impl Iterator<Item = Node> + '_ {
+        self.indexes.iter_nodes()
     }
 
     /// Iterate over all edges (for persistence).
     ///
     /// This is a helper method for index persistence that provides
     /// access to all edges in the current storage.
-    pub(crate) fn all_edges(&self) -> Vec<Edge> {
-        self.indexes.iter_edges().collect()
+    ///
+    /// Returns an iterator to avoid allocating a Vec for large graphs,
+    /// improving memory efficiency during persistence operations.
+    pub(crate) fn all_edges(&self) -> impl Iterator<Item = Edge> + '_ {
+        self.indexes.iter_edges()
     }
 }
 
