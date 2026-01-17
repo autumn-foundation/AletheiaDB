@@ -362,7 +362,7 @@ fn test_vector_snapshot_id_stored_in_anchors() {
 /// is identical, and this avoids the complexity of temporal snapshot infrastructure.
 #[test]
 fn test_multi_property_temporal_vector_search_execution() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Enable vector indexing for TWO different properties (non-temporal for simplicity)
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
