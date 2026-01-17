@@ -482,17 +482,17 @@ mod tests {
 
     #[test]
     fn test_time_range_creation() {
-        let range = TimeRange::new(100, 200).unwrap();
-        assert_eq!(range.start(), 100);
-        assert_eq!(range.end(), 200);
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert_eq!(range.start(), 100.into());
+        assert_eq!(range.end(), 200.into());
         assert!(!range.is_current());
         assert!(range.is_closed());
     }
 
     #[test]
     fn test_time_range_current() {
-        let range = TimeRange::from(100);
-        assert_eq!(range.start(), 100);
+        let range = TimeRange::from(100.into());
+        assert_eq!(range.start(), 100.into());
         assert_eq!(range.end(), TIMESTAMP_MAX);
         assert!(range.is_current());
         assert!(!range.is_closed());
@@ -500,20 +500,20 @@ mod tests {
 
     #[test]
     fn test_time_range_contains() {
-        let range = TimeRange::new(100, 200).unwrap();
-        assert!(!range.contains(99));
-        assert!(range.contains(100));
-        assert!(range.contains(150));
-        assert!(range.contains(199));
-        assert!(!range.contains(200)); // Exclusive end
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
+        assert!(!range.contains(99.into()));
+        assert!(range.contains(100.into()));
+        assert!(range.contains(150.into()));
+        assert!(range.contains(199.into()));
+        assert!(!range.contains(200.into())); // Exclusive end
     }
 
     #[test]
     fn test_time_range_overlaps() {
-        let r1 = TimeRange::new(100, 200).unwrap();
-        let r2 = TimeRange::new(150, 250).unwrap();
-        let r3 = TimeRange::new(200, 300).unwrap();
-        let r4 = TimeRange::new(50, 75).unwrap();
+        let r1 = TimeRange::new(100.into(), 200.into()).unwrap();
+        let r2 = TimeRange::new(150.into(), 250.into()).unwrap();
+        let r3 = TimeRange::new(200.into(), 300.into()).unwrap();
+        let r4 = TimeRange::new(50.into(), 75.into()).unwrap();
 
         assert!(r1.overlaps(&r2));
         assert!(r2.overlaps(&r1));
@@ -523,9 +523,9 @@ mod tests {
 
     #[test]
     fn test_time_range_contains_range() {
-        let outer = TimeRange::new(100, 300).unwrap();
-        let inner = TimeRange::new(150, 250).unwrap();
-        let overlapping = TimeRange::new(150, 350).unwrap();
+        let outer = TimeRange::new(100.into(), 300.into()).unwrap();
+        let inner = TimeRange::new(150.into(), 250.into()).unwrap();
+        let overlapping = TimeRange::new(150.into(), 350.into()).unwrap();
 
         assert!(outer.contains_range(&inner));
         assert!(!inner.contains_range(&outer));
@@ -534,27 +534,27 @@ mod tests {
 
     #[test]
     fn test_time_range_close_at() {
-        let open = TimeRange::from(100);
-        let closed = open.close_at(200);
+        let open = TimeRange::from(100.into());
+        let closed = open.close_at(200.into());
 
         assert!(open.is_current());
         assert!(!closed.is_current());
-        assert_eq!(closed.start(), 100);
-        assert_eq!(closed.end(), 200);
+        assert_eq!(closed.start(), 100.into());
+        assert_eq!(closed.end(), 200.into());
     }
 
     #[test]
     fn test_time_range_duration() {
-        let range = TimeRange::new(100, 500).unwrap();
-        assert_eq!(range.duration_micros(), Some(400));
+        let range = TimeRange::new(100.into(), 500.into()).unwrap();
+        assert_eq!(range.duration_micros(), Some(400.into()));
 
-        let open = TimeRange::from(100);
+        let open = TimeRange::from(100.into());
         assert_eq!(open.duration_micros(), None);
     }
 
     #[test]
     fn test_bitemporal_current() {
-        let interval = BiTemporalInterval::current(1000);
+        let interval = BiTemporalInterval::current(1000.into());
         assert!(interval.is_currently_valid());
         assert!(interval.is_currently_recorded());
         assert!(interval.is_current());
@@ -562,9 +562,9 @@ mod tests {
 
     #[test]
     fn test_bitemporal_now() {
-        let interval = BiTemporalInterval::now(1000, 2000);
-        assert_eq!(interval.valid_time().start(), 1000);
-        assert_eq!(interval.transaction_time().start(), 2000);
+        let interval = BiTemporalInterval::now(1000.into(), 2000.into());
+        assert_eq!(interval.valid_time().start(), 1000.into());
+        assert_eq!(interval.transaction_time().start(), 2000.into());
         assert!(interval.is_currently_valid());
         assert!(interval.is_currently_recorded());
     }
@@ -572,31 +572,31 @@ mod tests {
     #[test]
     fn test_bitemporal_visibility() {
         let interval = BiTemporalInterval::new(
-            TimeRange::new(1000, 2000).unwrap(), // Valid from 1000 to 2000
-            TimeRange::new(3000, 4000).unwrap(), // Recorded from 3000 to 4000
+            TimeRange::new(1000.into(), 2000.into()).unwrap(), // Valid from 1000 to 2000
+            TimeRange::new(3000.into(), 4000.into()).unwrap(), // Recorded from 3000 to 4000
         );
 
         // Visible if both dimensions are in range
-        assert!(interval.is_visible_at(1500, 3500));
-        assert!(!interval.is_visible_at(500, 3500)); // Before valid time
-        assert!(!interval.is_visible_at(1500, 2500)); // Before transaction time
-        assert!(!interval.is_visible_at(2500, 3500)); // After valid time
-        assert!(!interval.is_visible_at(1500, 4500)); // After transaction time
+        assert!(interval.is_visible_at(1500.into(), 3500.into()));
+        assert!(!interval.is_visible_at(500.into(), 3500.into())); // Before valid time
+        assert!(!interval.is_visible_at(1500.into(), 2500.into())); // Before transaction time
+        assert!(!interval.is_visible_at(2500.into(), 3500.into())); // After valid time
+        assert!(!interval.is_visible_at(1500.into(), 4500.into())); // After transaction time
     }
 
     #[test]
     fn test_bitemporal_close() {
-        let interval = BiTemporalInterval::now(1000, 2000);
+        let interval = BiTemporalInterval::now(1000.into(), 2000.into());
 
         let closed_valid = interval.close_valid_time(1500);
         assert!(!closed_valid.is_currently_valid());
         assert!(closed_valid.is_currently_recorded());
-        assert_eq!(closed_valid.valid_time().end(), 1500);
+        assert_eq!(closed_valid.valid_time().end(), 1500.into());
 
         let closed_tx = interval.close_transaction_time(2500);
         assert!(closed_tx.is_currently_valid());
         assert!(!closed_tx.is_currently_recorded());
-        assert_eq!(closed_tx.transaction_time().end(), 2500);
+        assert_eq!(closed_tx.transaction_time().end(), 2500.into());
 
         let closed_both = interval.close_both(1500, 2500);
         assert!(!closed_both.is_currently_valid());
@@ -625,12 +625,12 @@ mod tests {
     #[test]
     fn test_time_range_invalid_returns_error() {
         // TimeRange::new should return an error for invalid ranges (start > end)
-        let result = TimeRange::new(200, 100);
+        let result = TimeRange::new(200.into(), 100.into());
         assert!(matches!(
             result,
             Err(crate::utils::error::TemporalError::InvalidTimeRange {
-                start: 200,
-                end: 100
+                start: 200.into(),
+                end: 100.into()
             })
         ));
     }
@@ -638,21 +638,21 @@ mod tests {
     #[test]
     fn test_time_range_valid_returns_ok() {
         // TimeRange::new should return Ok for valid ranges
-        let result = TimeRange::new(100, 200);
+        let result = TimeRange::new(100.into(), 200.into());
         assert!(result.is_ok());
         let range = result.unwrap();
-        assert_eq!(range.start(), 100);
-        assert_eq!(range.end(), 200);
+        assert_eq!(range.start(), 100.into());
+        assert_eq!(range.end(), 200.into());
     }
 
     #[test]
     fn test_time_range_equal_start_end_returns_ok() {
         // TimeRange::new should return Ok when start == end (point-in-time)
-        let result = TimeRange::new(100, 100);
+        let result = TimeRange::new(100.into(), 100.into());
         assert!(result.is_ok());
         let range = result.unwrap();
-        assert_eq!(range.start(), 100);
-        assert_eq!(range.end(), 100);
+        assert_eq!(range.start(), 100.into());
+        assert_eq!(range.end(), 100.into());
     }
 
     // Serialization tests
@@ -660,27 +660,27 @@ mod tests {
     #[test]
     fn test_timerange_serialize_roundtrip() {
         let ranges = [
-            TimeRange::new(100, 200).unwrap(),
-            TimeRange::from(1000),
-            TimeRange::at(500),
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+            TimeRange::from(1000.into()),
+            TimeRange::at(500.into()),
             TimeRange::new(i64::MIN, i64::MAX).unwrap(),
-            TimeRange::new(0, 0).unwrap(),
+            TimeRange::new(0.into(), 0.into()).unwrap(),
         ];
         for range in ranges {
             let bytes = range.serialize();
-            assert_eq!(bytes.len(), 16);
+            assert_eq!(bytes.len(), 16.into());
             let (deserialized, consumed) = TimeRange::deserialize(&bytes).unwrap();
             assert_eq!(deserialized, range);
-            assert_eq!(consumed, 16);
+            assert_eq!(consumed, 16.into());
         }
     }
 
     #[test]
     fn test_timerange_serialize_into() {
-        let range = TimeRange::new(100, 200).unwrap();
+        let range = TimeRange::new(100.into(), 200.into()).unwrap();
         let mut buffer = Vec::new();
         range.serialize_into(&mut buffer);
-        assert_eq!(buffer.len(), 16);
+        assert_eq!(buffer.len(), 16.into());
         let (deserialized, _) = TimeRange::deserialize(&buffer).unwrap();
         assert_eq!(deserialized, range);
     }
@@ -694,32 +694,32 @@ mod tests {
     #[test]
     fn test_bitemporal_serialize_roundtrip() {
         let intervals = [
-            BiTemporalInterval::current(1000),
-            BiTemporalInterval::now(500, 600),
+            BiTemporalInterval::current(1000.into()),
+            BiTemporalInterval::now(500.into(), 600.into()),
             BiTemporalInterval::new(
-                TimeRange::new(100, 200).unwrap(),
-                TimeRange::new(300, 400).unwrap(),
+                TimeRange::new(100.into(), 200.into()).unwrap(),
+                TimeRange::new(300.into(), 400.into()).unwrap(),
             ),
-            BiTemporalInterval::new(TimeRange::from(0), TimeRange::from(0)),
+            BiTemporalInterval::new(TimeRange::from(0.into()), TimeRange::from(0.into())),
         ];
         for interval in intervals {
             let bytes = interval.serialize();
-            assert_eq!(bytes.len(), 32);
+            assert_eq!(bytes.len(), 32.into());
             let (deserialized, consumed) = BiTemporalInterval::deserialize(&bytes).unwrap();
             assert_eq!(deserialized, interval);
-            assert_eq!(consumed, 32);
+            assert_eq!(consumed, 32.into());
         }
     }
 
     #[test]
     fn test_bitemporal_serialize_into() {
         let interval = BiTemporalInterval::new(
-            TimeRange::new(100, 200).unwrap(),
-            TimeRange::new(300, 400).unwrap(),
+            TimeRange::new(100.into(), 200.into()).unwrap(),
+            TimeRange::new(300.into(), 400.into()).unwrap(),
         );
         let mut buffer = Vec::new();
         interval.serialize_into(&mut buffer);
-        assert_eq!(buffer.len(), 32);
+        assert_eq!(buffer.len(), 32.into());
         let (deserialized, _) = BiTemporalInterval::deserialize(&buffer).unwrap();
         assert_eq!(deserialized, interval);
     }
@@ -749,8 +749,6 @@ mod tests {
     #[test]
     fn test_timestamp_is_hybrid_timestamp() {
         // After Phase 2, Timestamp should be HybridTimestamp
-        use crate::core::hlc::HybridTimestamp;
-
         // time::now() should return HybridTimestamp
         let ts = time::now();
 
@@ -758,7 +756,7 @@ mod tests {
         assert!(ts.wallclock() > 0);
 
         // Should have logical component (starts at 0)
-        assert_eq!(ts.logical(), 0);
+        assert_eq!(ts.logical(), 0.into());
     }
 
     #[test]
@@ -816,7 +814,7 @@ mod tests {
         // HybridTimestamp is 12 bytes (8 wallclock + 4 logical)
         let ts = HybridTimestamp::new(1000, 5).unwrap();
         let serialized = ts.serialize();
-        assert_eq!(serialized.len(), 12);
+        assert_eq!(serialized.len(), 12.into());
 
         // TimeRange with HybridTimestamp should be 24 bytes (2 × 12)
         let range = TimeRange::new(
@@ -825,7 +823,7 @@ mod tests {
         )
         .unwrap();
         let serialized = range.serialize();
-        assert_eq!(serialized.len(), 24);
+        assert_eq!(serialized.len(), 24.into());
 
         // BiTemporalInterval should be 48 bytes (4 × 12)
         let interval = BiTemporalInterval::now(
@@ -833,16 +831,14 @@ mod tests {
             HybridTimestamp::new(2000, 0).unwrap(),
         );
         let serialized = interval.serialize();
-        assert_eq!(serialized.len(), 48);
+        assert_eq!(serialized.len(), 48.into());
     }
 
     #[test]
     fn test_timestamp_max_with_hybrid_timestamp() {
-        use crate::core::hlc::HybridTimestamp;
-
         // TIMESTAMP_MAX should be representable as HybridTimestamp
         // It represents "infinity" or "current"
         assert_eq!(TIMESTAMP_MAX.wallclock(), i64::MAX);
-        assert_eq!(TIMESTAMP_MAX.logical(), 0);
+        assert_eq!(TIMESTAMP_MAX.logical(), 0.into());
     }
 }

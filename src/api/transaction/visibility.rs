@@ -293,29 +293,29 @@ mod tests {
     #[test]
     fn test_snapshot_visibility_committed_before() {
         let snapshot = TransactionSnapshot {
-            snapshot_timestamp: 100,
+            snapshot_timestamp: 100.into(),
             active_transactions: Arc::new(HashSet::new()),
         };
 
         // Version committed before snapshot - visible
-        assert!(snapshot.is_visible(TxId::new(1), Some(50)));
+        assert!(snapshot.is_visible(TxId::new(1), Some(50.into())));
     }
 
     #[test]
     fn test_snapshot_visibility_committed_after() {
         let snapshot = TransactionSnapshot {
-            snapshot_timestamp: 100,
+            snapshot_timestamp: 100.into(),
             active_transactions: Arc::new(HashSet::new()),
         };
 
         // Version committed after snapshot - not visible
-        assert!(!snapshot.is_visible(TxId::new(1), Some(150)));
+        assert!(!snapshot.is_visible(TxId::new(1), Some(150.into())));
     }
 
     #[test]
     fn test_snapshot_visibility_uncommitted() {
         let snapshot = TransactionSnapshot {
-            snapshot_timestamp: 100,
+            snapshot_timestamp: 100.into(),
             active_transactions: Arc::new(HashSet::new()),
         };
 
@@ -329,19 +329,19 @@ mod tests {
         active.insert(TxId::new(1));
 
         let snapshot = TransactionSnapshot {
-            snapshot_timestamp: 100,
+            snapshot_timestamp: 100.into(),
             active_transactions: Arc::new(active),
         };
 
         // Version from active transaction - not visible even if committed before snapshot
-        assert!(!snapshot.is_visible(TxId::new(1), Some(50)));
+        assert!(!snapshot.is_visible(TxId::new(1), Some(50.into())));
     }
 
     #[test]
     fn test_visibility_manager_creation() {
         let manager = TxVisibilityManager::new();
-        assert_eq!(manager.active_count(), 0);
-        assert_eq!(manager.committed_count(), 0);
+        assert_eq!(manager.active_count(), 0.into());
+        assert_eq!(manager.committed_count(), 0.into());
     }
 
     #[test]
@@ -350,7 +350,7 @@ mod tests {
         manager.register_active(TxId::new(1));
         manager.register_active(TxId::new(2));
 
-        assert_eq!(manager.active_count(), 2);
+        assert_eq!(manager.active_count(), 2.into());
     }
 
     #[test]
@@ -359,10 +359,10 @@ mod tests {
         manager.register_active(TxId::new(1));
         manager.register_active(TxId::new(2));
 
-        let snapshot = manager.capture_snapshot(100);
+        let snapshot = manager.capture_snapshot(100.into());
 
-        assert_eq!(snapshot.snapshot_timestamp, 100);
-        assert_eq!(snapshot.active_transactions.len(), 2);
+        assert_eq!(snapshot.snapshot_timestamp, 100.into());
+        assert_eq!(snapshot.active_transactions.len(), 2.into());
         assert!(snapshot.active_transactions.contains(&TxId::new(1)));
         assert!(snapshot.active_transactions.contains(&TxId::new(2)));
     }
@@ -372,13 +372,13 @@ mod tests {
         let manager = TxVisibilityManager::new();
         manager.register_active(TxId::new(1));
 
-        assert_eq!(manager.active_count(), 1);
-        assert_eq!(manager.committed_count(), 0);
+        assert_eq!(manager.active_count(), 1.into());
+        assert_eq!(manager.committed_count(), 0.into());
 
-        manager.register_commit(TxId::new(1), 100);
+        manager.register_commit(TxId::new(1), 100.into());
 
-        assert_eq!(manager.active_count(), 0);
-        assert_eq!(manager.committed_count(), 1);
+        assert_eq!(manager.active_count(), 0.into());
+        assert_eq!(manager.committed_count(), 1.into());
     }
 
     #[test]
@@ -386,12 +386,12 @@ mod tests {
         let manager = TxVisibilityManager::new();
         manager.register_active(TxId::new(1));
 
-        assert_eq!(manager.active_count(), 1);
+        assert_eq!(manager.active_count(), 1.into());
 
         manager.register_abort(TxId::new(1));
 
-        assert_eq!(manager.active_count(), 0);
-        assert_eq!(manager.committed_count(), 0);
+        assert_eq!(manager.active_count(), 0.into());
+        assert_eq!(manager.committed_count(), 0.into());
     }
 
     #[test]
@@ -400,10 +400,10 @@ mod tests {
 
         // Start and commit transaction 1
         manager.register_active(TxId::new(1));
-        manager.register_commit(TxId::new(1), 50);
+        manager.register_commit(TxId::new(1), 50.into());
 
         // Take snapshot after commit
-        let snapshot = manager.capture_snapshot(100);
+        let snapshot = manager.capture_snapshot(100.into());
 
         // Version from tx1 should be visible
         assert!(manager.is_visible(&snapshot, TxId::new(1)));
@@ -416,7 +416,7 @@ mod tests {
         // Start transaction 1 but don't commit
         manager.register_active(TxId::new(1));
 
-        let snapshot = manager.capture_snapshot(100);
+        let snapshot = manager.capture_snapshot(100.into());
 
         // Version from uncommitted tx1 should not be visible
         assert!(!manager.is_visible(&snapshot, TxId::new(1)));
@@ -430,10 +430,10 @@ mod tests {
         manager.register_active(TxId::new(1));
 
         // Take snapshot (tx1 is active)
-        let snapshot = manager.capture_snapshot(100);
+        let snapshot = manager.capture_snapshot(100.into());
 
         // Commit tx1 after snapshot
-        manager.register_commit(TxId::new(1), 90);
+        manager.register_commit(TxId::new(1), 90.into());
 
         // Even though tx1 committed before snapshot timestamp,
         // it was active at snapshot time, so not visible
@@ -448,20 +448,20 @@ mod tests {
         manager.register_active(TxId::new(1));
 
         // Snapshot 1 - sees tx1 as active
-        let snapshot1 = manager.capture_snapshot(100);
-        assert_eq!(snapshot1.active_transactions.len(), 1);
+        let snapshot1 = manager.capture_snapshot(100.into());
+        assert_eq!(snapshot1.active_transactions.len(), 1.into());
 
         // Commit tx1, start tx2
-        manager.register_commit(TxId::new(1), 110);
+        manager.register_commit(TxId::new(1), 110.into());
         manager.register_active(TxId::new(2));
 
         // Snapshot 2 - sees tx2 as active, tx1 committed
-        let snapshot2 = manager.capture_snapshot(120);
-        assert_eq!(snapshot2.active_transactions.len(), 1);
+        let snapshot2 = manager.capture_snapshot(120.into());
+        assert_eq!(snapshot2.active_transactions.len(), 1.into());
         assert!(snapshot2.active_transactions.contains(&TxId::new(2)));
 
         // Original snapshot1 unchanged
-        assert_eq!(snapshot1.active_transactions.len(), 1);
+        assert_eq!(snapshot1.active_transactions.len(), 1.into());
         assert!(snapshot1.active_transactions.contains(&TxId::new(1)));
     }
 
@@ -470,24 +470,24 @@ mod tests {
         let manager = TxVisibilityManager::new();
 
         // Initially empty
-        assert_eq!(manager.active_count(), 0);
-        assert_eq!(manager.committed_count(), 0);
+        assert_eq!(manager.active_count(), 0.into());
+        assert_eq!(manager.committed_count(), 0.into());
 
         // Add active transactions
         manager.register_active(TxId::new(1));
         manager.register_active(TxId::new(2));
-        assert_eq!(manager.active_count(), 2);
-        assert_eq!(manager.committed_count(), 0);
+        assert_eq!(manager.active_count(), 2.into());
+        assert_eq!(manager.committed_count(), 0.into());
 
         // Commit one
-        manager.register_commit(TxId::new(1), 100);
-        assert_eq!(manager.active_count(), 1);
-        assert_eq!(manager.committed_count(), 1);
+        manager.register_commit(TxId::new(1), 100.into());
+        assert_eq!(manager.active_count(), 1.into());
+        assert_eq!(manager.committed_count(), 1.into());
 
         // Abort the other
         manager.register_abort(TxId::new(2));
-        assert_eq!(manager.active_count(), 0);
-        assert_eq!(manager.committed_count(), 1);
+        assert_eq!(manager.active_count(), 0.into());
+        assert_eq!(manager.committed_count(), 1.into());
     }
 
     #[test]
@@ -504,7 +504,7 @@ mod tests {
         }
 
         // Take snapshot after all commits (timestamp 100 is the last commit)
-        let snapshot = manager.capture_snapshot(101);
+        let snapshot = manager.capture_snapshot(101.into());
 
         // Spawn multiple threads doing concurrent visibility checks
         // This test demonstrates that RwLock allows concurrent readers
@@ -529,6 +529,6 @@ mod tests {
         }
 
         // Verify the manager is still in a valid state
-        assert_eq!(manager.committed_count(), 10);
+        assert_eq!(manager.committed_count(), 10.into());
     }
 }

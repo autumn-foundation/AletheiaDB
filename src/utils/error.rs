@@ -794,8 +794,8 @@ mod tests {
     #[test]
     fn test_temporal_error_display() {
         let err = TemporalError::NonMonotonicTransactionTime {
-            previous: 100,
-            attempted: 50,
+            previous: 100.into(),
+            attempted: 50.into(),
         };
         assert!(format!("{}", err).contains("monotonic"));
         assert!(format!("{}", err).contains("100"));
@@ -857,7 +857,7 @@ mod tests {
             Err(StorageError::NodeNotFound(NodeId::new(1).unwrap()).into())
         }
 
-        assert_eq!(returns_result().unwrap(), 42);
+        assert_eq!(returns_result().unwrap(), 42.into());
         assert!(returns_error().is_err());
     }
 
@@ -938,8 +938,8 @@ mod tests {
 
         // Test ValidTimeBeforeCreation
         let err = TemporalError::ValidTimeBeforeCreation {
-            valid_time: 50,
-            creation_time: 100,
+            valid_time: 50.into(),
+            creation_time: 100.into(),
         };
         assert!(format!("{}", err).contains("precedes creation"));
 
@@ -1154,8 +1154,8 @@ mod tests {
         let node_id = NodeId::new(42).unwrap();
         let err = TemporalError::NodeNotFoundAtTime {
             node_id,
-            valid_time: 1000,
-            transaction_time: 2000,
+            valid_time: 1000.into(),
+            transaction_time: 2000.into(),
         };
 
         let display = format!("{}", err);
@@ -1182,8 +1182,8 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let err = TemporalError::NodeNotFoundAtTime {
             node_id,
-            valid_time: 1000,
-            transaction_time: 2000,
+            valid_time: 1000.into(),
+            transaction_time: 2000.into(),
         };
 
         let converted: Error = err.into();

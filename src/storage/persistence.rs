@@ -985,8 +985,8 @@ mod tests {
         let checkpoint = Checkpoint::new(LSN(100), &current, &historical);
 
         assert_eq!(checkpoint.metadata.lsn, LSN(100));
-        assert_eq!(checkpoint.metadata.node_count, 0);
-        assert_eq!(checkpoint.metadata.edge_count, 0);
+        assert_eq!(checkpoint.metadata.node_count, 0.into());
+        assert_eq!(checkpoint.metadata.edge_count, 0.into());
     }
 
     #[test]
@@ -1081,12 +1081,12 @@ mod tests {
         let mut cursor = Cursor::new(buffer);
         let loaded = HnswConfig::deserialize_from(&mut cursor)?;
 
-        assert_eq!(loaded.dimensions, 384);
+        assert_eq!(loaded.dimensions, 384.into());
         assert_eq!(loaded.metric, DistanceMetric::Cosine);
-        assert_eq!(loaded.m, 32);
-        assert_eq!(loaded.ef_construction, 200);
-        assert_eq!(loaded.ef_search, 100);
-        assert_eq!(loaded.capacity, 5000);
+        assert_eq!(loaded.m, 32.into());
+        assert_eq!(loaded.ef_construction, 200.into());
+        assert_eq!(loaded.ef_search, 100.into());
+        assert_eq!(loaded.capacity, 5000.into());
 
         Ok(())
     }
@@ -1129,7 +1129,7 @@ mod tests {
 
         assert!(loaded.enabled);
         assert_eq!(loaded.property_name, "embedding");
-        assert_eq!(loaded.config.dimensions, 768);
+        assert_eq!(loaded.config.dimensions, 768.into());
         assert_eq!(loaded.config.metric, DistanceMetric::Euclidean);
 
         Ok(())
@@ -1164,7 +1164,7 @@ mod tests {
         let vector_config = loaded.metadata.vector_index_config.unwrap();
         assert!(vector_config.enabled);
         assert_eq!(vector_config.property_name, "embedding");
-        assert_eq!(vector_config.config.dimensions, 384);
+        assert_eq!(vector_config.config.dimensions, 384.into());
         assert_eq!(vector_config.config.metric, DistanceMetric::Cosine);
 
         Ok(())
@@ -1202,9 +1202,9 @@ mod tests {
         use crate::index::vector::DistanceMetric;
 
         // Test all variants
-        assert_eq!(DistanceMetric::Cosine.to_u8(), 0);
-        assert_eq!(DistanceMetric::Euclidean.to_u8(), 1);
-        assert_eq!(DistanceMetric::DotProduct.to_u8(), 2);
+        assert_eq!(DistanceMetric::Cosine.to_u8(), 0.into());
+        assert_eq!(DistanceMetric::Euclidean.to_u8(), 1.into());
+        assert_eq!(DistanceMetric::DotProduct.to_u8(), 2.into());
 
         // Test roundtrip
         assert_eq!(DistanceMetric::from_u8(0)?, DistanceMetric::Cosine);
@@ -1240,7 +1240,7 @@ mod tests {
         // - LSN (8) + Timestamp (8) + NodeCount (8) + EdgeCount (8) + VersionCount (8) = 40
         // - Vector config: enabled (1) + name_len (4) + "test_property" (13) + HnswConfig (41) = 59
         // Total = 107 bytes
-        assert_eq!(metadata.len(), 107);
+        assert_eq!(metadata.len(), 107.into());
 
         Ok(())
     }
@@ -1407,7 +1407,7 @@ mod tests {
         match result {
             Ok((current, _historical, lsn)) => {
                 // Successful recovery from empty state
-                assert_eq!(current.node_count(), 0);
+                assert_eq!(current.node_count(), 0.into());
                 assert_eq!(lsn, LSN::initial());
             }
             Err(e) => {

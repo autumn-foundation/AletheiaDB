@@ -465,8 +465,8 @@ mod tests {
 
         let delta = PropertyDelta::from_diff(&old, &new);
 
-        assert_eq!(delta.changed.len(), 2); // age modified, country added
-        assert_eq!(delta.removed.len(), 1); // city removed
+        assert_eq!(delta.changed.len(), 2.into()); // age modified, country added
+        assert_eq!(delta.removed.len(), 1.into()); // city removed
         assert!(
             delta
                 .removed
@@ -494,7 +494,7 @@ mod tests {
         let result = delta.apply(&base);
 
         assert_eq!(result.get("name").and_then(|v| v.as_str()), Some("Alice"));
-        assert_eq!(result.get("age").and_then(|v| v.as_int()), Some(31));
+        assert_eq!(result.get("age").and_then(|v| v.as_int()), Some(31.into()));
         assert_eq!(result.get("city").and_then(|v| v.as_str()), Some("NYC"));
     }
 
@@ -510,7 +510,7 @@ mod tests {
     fn test_node_version_anchor() {
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
 
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
 
         let version = NodeVersion::new_anchor(
             VersionId::new(1).unwrap(),
@@ -533,7 +533,7 @@ mod tests {
 
         let new_props = PropertyMapBuilder::new().insert("weight", 2i64).build();
 
-        let temporal = BiTemporalInterval::current(2000);
+        let temporal = BiTemporalInterval::current(2000.into());
 
         let version = EdgeVersion::new_delta(
             VersionId::new(2).unwrap(),

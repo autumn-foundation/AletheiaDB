@@ -1757,7 +1757,7 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
 
         storage
@@ -1835,7 +1835,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("name", "Alice")
@@ -1850,7 +1850,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("name", "Alice")
@@ -1862,7 +1862,7 @@ mod tests {
         // Reconstruct v2 properties
         let props = storage.reconstruct_node_properties(v2).unwrap();
         assert_eq!(props.get("name").and_then(|v| v.as_str()), Some("Alice"));
-        assert_eq!(props.get("age").and_then(|v| v.as_int()), Some(31));
+        assert_eq!(props.get("age").and_then(|v| v.as_int()), Some(31.into()));
     }
 
     #[test]
@@ -1882,8 +1882,8 @@ mod tests {
                 node_id,
                 v1,
                 BiTemporalInterval::new(
-                    TimeRange::new(0, 1000).unwrap(),
-                    TimeRange::new(0, Timestamp::MAX).unwrap(),
+                    TimeRange::new(0.into(), 1000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                 ),
                 label,
                 PropertyMapBuilder::new().insert("age", 30i64).build(),
@@ -1895,8 +1895,8 @@ mod tests {
                 node_id,
                 v2,
                 BiTemporalInterval::new(
-                    TimeRange::new(1000, 2000).unwrap(),
-                    TimeRange::new(0, Timestamp::MAX).unwrap(),
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                 ),
                 label,
                 PropertyMapBuilder::new().insert("age", 31i64).build(),
@@ -1908,8 +1908,8 @@ mod tests {
                 node_id,
                 v3,
                 BiTemporalInterval::new(
-                    TimeRange::new(2000, Timestamp::MAX).unwrap(),
-                    TimeRange::new(0, Timestamp::MAX).unwrap(),
+                    TimeRange::new(2000.into(), TIMESTAMP_MAX).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                 ),
                 label,
                 PropertyMapBuilder::new().insert("age", 32i64).build(),
@@ -1959,7 +1959,7 @@ mod tests {
         let result = storage.add_node_version(
             node_id,
             VersionId::new(3).unwrap(),
-            BiTemporalInterval::current(1300),
+            BiTemporalInterval::current(1300.into()),
             label,
             PropertyMapBuilder::new().build(),
         );
@@ -1972,8 +1972,8 @@ mod tests {
                 limit,
             }) => {
                 assert!(resource.contains("node"));
-                assert_eq!(current, 3);
-                assert_eq!(limit, 3);
+                assert_eq!(current, 3.into());
+                assert_eq!(limit, 3.into());
             }
             _ => panic!("Expected CapacityExceeded error"),
         }
@@ -2011,7 +2011,7 @@ mod tests {
         let result = storage.add_edge_version(
             edge_id,
             VersionId::new(2).unwrap(),
-            BiTemporalInterval::current(1200),
+            BiTemporalInterval::current(1200.into()),
             label,
             source,
             target,
@@ -2026,8 +2026,8 @@ mod tests {
                 limit,
             }) => {
                 assert!(resource.contains("edge"));
-                assert_eq!(current, 2);
-                assert_eq!(limit, 2);
+                assert_eq!(current, 2.into());
+                assert_eq!(limit, 2.into());
             }
             _ => panic!("Expected CapacityExceeded error"),
         }
@@ -2056,10 +2056,10 @@ mod tests {
         }
 
         let stats = storage.stats();
-        assert_eq!(stats.total_node_versions, 3);
-        assert_eq!(stats.node_anchor_count, 2);
-        assert_eq!(stats.node_delta_count, 1);
-        assert_eq!(stats.unique_nodes, 1);
+        assert_eq!(stats.total_node_versions, 3.into());
+        assert_eq!(stats.node_anchor_count, 2.into());
+        assert_eq!(stats.node_delta_count, 1.into());
+        assert_eq!(stats.unique_nodes, 1.into());
 
         // Compression ratio should be 2/3 ≈ 0.67
         assert!((stats.compression_ratio() - 0.6666).abs() < 0.01);
@@ -2089,7 +2089,7 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("Document").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
 
         // Create node with vector embedding
         let embedding = vec![0.1f32, 0.2, 0.3, 0.4, 0.5];
@@ -2128,7 +2128,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "Doc")
@@ -2144,7 +2144,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "Doc")
@@ -2185,7 +2185,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "Same Title")
@@ -2201,7 +2201,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "Same Title") // Unchanged
@@ -2242,7 +2242,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "V1 Title")
@@ -2257,7 +2257,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "V2 Title")
@@ -2357,7 +2357,7 @@ mod tests {
         let edge_id = EdgeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("SIMILAR_TO").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
         let source = NodeId::new(10).unwrap();
         let target = NodeId::new(20).unwrap();
 
@@ -2404,7 +2404,7 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 source,
                 target,
@@ -2422,7 +2422,7 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v2,
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 source,
                 target,
@@ -2463,7 +2463,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &embedding)
@@ -2493,7 +2493,7 @@ mod tests {
         let embeddings = [
             (0, 500, vec![0.1f32, 0.0]),               // valid 0-500
             (500, 1000, vec![0.2f32, 0.0]),            // valid 500-1000
-            (1000, Timestamp::MAX, vec![0.3f32, 0.0]), // valid 1000+
+            (1000, TIMESTAMP_MAX, vec![0.3f32, 0.0]), // valid 1000+
         ];
 
         for (i, (start, end, emb)) in embeddings.iter().enumerate() {
@@ -2503,7 +2503,7 @@ mod tests {
                     VersionId::new(i as u64).unwrap(),
                     BiTemporalInterval::new(
                         TimeRange::new(*start, *end).unwrap(),
-                        TimeRange::new(0, Timestamp::MAX).unwrap(),
+                        TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                     ),
                     label,
                     PropertyMapBuilder::new()
@@ -2556,7 +2556,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("name", "empty")
@@ -2571,7 +2571,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert("name", "updated")
@@ -2612,7 +2612,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &special_vec)
@@ -2649,7 +2649,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &nan_vec)
@@ -2663,7 +2663,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &nan_vec)
@@ -2701,7 +2701,7 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
         let props = PropertyMapBuilder::new()
             .insert("name", "Alice")
             .insert("age", 30i64)
@@ -2717,7 +2717,7 @@ mod tests {
 
         // Check cache was populated
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 1);
+        assert_eq!(stats.node_cache_entries, 1.into());
 
         // Second read - should hit cache
         let result2 = storage.reconstruct_node_properties(version_id).unwrap();
@@ -2725,7 +2725,7 @@ mod tests {
 
         // Cache size shouldn't change
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 1);
+        assert_eq!(stats.node_cache_entries, 1.into());
     }
 
     #[test]
@@ -2740,7 +2740,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new().insert("value", 1i64).build(),
             )
@@ -2751,7 +2751,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 PropertyMapBuilder::new().insert("value", 2i64).build(),
             )
@@ -2762,7 +2762,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v3,
-                BiTemporalInterval::current(3000),
+                BiTemporalInterval::current(3000.into()),
                 label,
                 PropertyMapBuilder::new().insert("value", 3i64).build(),
             )
@@ -2773,7 +2773,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v4,
-                BiTemporalInterval::current(4000),
+                BiTemporalInterval::current(4000.into()),
                 label,
                 PropertyMapBuilder::new().insert("value", 4i64).build(),
             )
@@ -2781,7 +2781,7 @@ mod tests {
 
         // Reconstruct v4 (latest delta) - should populate entire chain
         let result = storage.reconstruct_node_properties(v4).unwrap();
-        assert_eq!(result.get("value").and_then(|v| v.as_int()), Some(4));
+        assert_eq!(result.get("value").and_then(|v| v.as_int()), Some(4.into()));
 
         // Cache should have all versions in the chain
         let stats = storage.stats();
@@ -2797,8 +2797,8 @@ mod tests {
         );
 
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 0);
-        assert_eq!(stats.edge_cache_entries, 0);
+        assert_eq!(stats.node_cache_entries, 0.into());
+        assert_eq!(stats.edge_cache_entries, 0.into());
     }
 
     #[test]
@@ -2809,7 +2809,7 @@ mod tests {
         let target = NodeId::new(20).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
         let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
 
         storage
@@ -2818,19 +2818,19 @@ mod tests {
 
         // First read - cache miss
         let result1 = storage.reconstruct_edge_properties(version_id).unwrap();
-        assert_eq!(result1.get("since").and_then(|v| v.as_int()), Some(2020));
+        assert_eq!(result1.get("since").and_then(|v| v.as_int()), Some(2020.into()));
 
         // Check cache was populated
         let stats = storage.stats();
-        assert_eq!(stats.edge_cache_entries, 1);
+        assert_eq!(stats.edge_cache_entries, 1.into());
 
         // Second read - should hit cache
         let result2 = storage.reconstruct_edge_properties(version_id).unwrap();
-        assert_eq!(result2.get("since").and_then(|v| v.as_int()), Some(2020));
+        assert_eq!(result2.get("since").and_then(|v| v.as_int()), Some(2020.into()));
 
         // Cache size shouldn't change
         let stats = storage.stats();
-        assert_eq!(stats.edge_cache_entries, 1);
+        assert_eq!(stats.edge_cache_entries, 1.into());
     }
 
     #[test]
@@ -2839,7 +2839,7 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let edge_id = EdgeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Test").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
 
         // Create 5 node versions
         for i in 0..5 {
@@ -2876,8 +2876,8 @@ mod tests {
         }
 
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 5);
-        assert_eq!(stats.edge_cache_entries, 3);
+        assert_eq!(stats.node_cache_entries, 5.into());
+        assert_eq!(stats.edge_cache_entries, 3.into());
     }
 
     #[test]
@@ -2899,7 +2899,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 version_id,
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 props,
             )
@@ -2920,7 +2920,7 @@ mod tests {
         assert_eq!(result1.get("title"), result2.get("title"));
 
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 1);
+        assert_eq!(stats.node_cache_entries, 1.into());
     }
 
     #[test]
@@ -2929,7 +2929,7 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
         let props = PropertyMapBuilder::new().insert("name", "Bob").build();
 
         storage
@@ -2958,7 +2958,7 @@ mod tests {
         let target = NodeId::new(20).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
         let props = PropertyMapBuilder::new().insert("since", 2021i64).build();
 
         storage
@@ -2976,7 +2976,7 @@ mod tests {
         // Verify data
         match data {
             VersionData::Anchor { properties, .. } => {
-                assert_eq!(properties.get("since").and_then(|v| v.as_int()), Some(2021));
+                assert_eq!(properties.get("since").and_then(|v| v.as_int()), Some(2021.into()));
             }
             _ => panic!("Expected anchor"),
         }
@@ -3068,9 +3068,9 @@ mod tests {
         }
 
         // Should have 2 anchors (v0 and v3)
-        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2);
+        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2.into());
         // Should have 5 total version events
-        assert_eq!(observer.version_count.load(Ordering::SeqCst), 5);
+        assert_eq!(observer.version_count.load(Ordering::SeqCst), 5.into());
     }
 
     #[test]
@@ -3107,7 +3107,7 @@ mod tests {
         }
 
         // Should have 2 anchors
-        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2);
+        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2.into());
     }
 
     #[test]
@@ -3129,7 +3129,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new().build(),
             )
@@ -3140,7 +3140,7 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 VersionId::new(2).unwrap(),
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 node_id,
                 node_id,
@@ -3149,7 +3149,7 @@ mod tests {
             .unwrap();
 
         // Should only count node anchor (not edge anchor)
-        assert_eq!(observer.count.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.count.load(Ordering::SeqCst), 1.into());
     }
 
     #[test]
@@ -3177,7 +3177,7 @@ mod tests {
             .unwrap();
 
         let events = collector.events.lock().unwrap();
-        assert_eq!(events.len(), 2); // NodeAnchorCreated + NodeVersionCreated
+        assert_eq!(events.len(), 2.into()); // NodeAnchorCreated + NodeVersionCreated
 
         // Check anchor event
         let anchor_event = events
@@ -3222,15 +3222,15 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new().build(),
             )
             .unwrap();
 
         // Both observers should be notified
-        assert_eq!(observer1.anchor_count.load(Ordering::SeqCst), 1);
-        assert_eq!(observer2.anchor_count.load(Ordering::SeqCst), 1);
+        assert_eq!(observer1.anchor_count.load(Ordering::SeqCst), 1.into());
+        assert_eq!(observer2.anchor_count.load(Ordering::SeqCst), 1.into());
     }
 
     #[test]
@@ -3258,7 +3258,7 @@ mod tests {
         let result = storage.add_node_version(
             node_id,
             VersionId::new(1).unwrap(),
-            BiTemporalInterval::current(1000),
+            BiTemporalInterval::current(1000.into()),
             label,
             PropertyMapBuilder::new().build(),
         );
@@ -3286,7 +3286,7 @@ mod tests {
         let hook: PreAnchorHook =
             Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
                 hook_called_clone.store(true, Ordering::SeqCst);
-                Ok(Some(42))
+                Ok(Some(42.into()))
             });
 
         storage.register_pre_node_anchor_hook(hook);
@@ -3299,7 +3299,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new().build(),
             )
@@ -3315,7 +3315,7 @@ mod tests {
 
         // Hook that returns snapshot ID 123
         let hook: PreAnchorHook =
-            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| Ok(Some(123)));
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| Ok(Some(123.into())));
 
         storage.register_pre_node_anchor_hook(hook);
 
@@ -3327,7 +3327,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new().build(),
             )
@@ -3338,7 +3338,7 @@ mod tests {
             .get_node_version(VersionId::new(1).unwrap())
             .unwrap();
         assert!(version.is_anchor());
-        assert_eq!(version.data.get_vector_snapshot_id(), Some(123));
+        assert_eq!(version.data.get_vector_snapshot_id(), Some(123.into()));
     }
 
     #[test]
@@ -3359,7 +3359,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new().build(),
             )
@@ -3396,7 +3396,7 @@ mod tests {
         let result = storage.add_node_version(
             node_id,
             VersionId::new(1).unwrap(),
-            BiTemporalInterval::current(1000),
+            BiTemporalInterval::current(1000.into()),
             label,
             PropertyMapBuilder::new().build(),
         );
@@ -3427,7 +3427,7 @@ mod tests {
         let hook: PreAnchorHook =
             Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
                 hook_call_count_clone.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(42))
+                Ok(Some(42.into()))
             });
 
         storage.register_pre_node_anchor_hook(hook);
@@ -3449,7 +3449,7 @@ mod tests {
         }
 
         // Hook should be called only for anchors (v0 and v3)
-        assert_eq!(hook_call_count.load(Ordering::SeqCst), 2);
+        assert_eq!(hook_call_count.load(Ordering::SeqCst), 2.into());
     }
 
     #[test]
@@ -3463,7 +3463,7 @@ mod tests {
         let node_hook: PreAnchorHook =
             Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
                 node_hook_count_clone.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(1))
+                Ok(Some(1.into()))
             });
 
         let edge_hook_count = Arc::new(AtomicUsize::new(0));
@@ -3471,7 +3471,7 @@ mod tests {
         let edge_hook: PreAnchorHook =
             Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
                 edge_hook_count_clone.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(2))
+                Ok(Some(2.into()))
             });
 
         storage.register_pre_node_anchor_hook(node_hook);
@@ -3487,7 +3487,7 @@ mod tests {
             .add_node_version(
                 node1_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000),
+                BiTemporalInterval::current(1000.into()),
                 label,
                 PropertyMapBuilder::new().build(),
             )
@@ -3498,7 +3498,7 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 VersionId::new(2).unwrap(),
-                BiTemporalInterval::current(2000),
+                BiTemporalInterval::current(2000.into()),
                 label,
                 node1_id,
                 node2_id,
@@ -3507,8 +3507,8 @@ mod tests {
             .unwrap();
 
         // Each hook should be called once
-        assert_eq!(node_hook_count.load(Ordering::SeqCst), 1);
-        assert_eq!(edge_hook_count.load(Ordering::SeqCst), 1);
+        assert_eq!(node_hook_count.load(Ordering::SeqCst), 1.into());
+        assert_eq!(edge_hook_count.load(Ordering::SeqCst), 1.into());
 
         // Verify snapshot IDs are different
         let node_version = storage
@@ -3517,8 +3517,8 @@ mod tests {
         let edge_version = storage
             .get_edge_version(VersionId::new(2).unwrap())
             .unwrap();
-        assert_eq!(node_version.data.get_vector_snapshot_id(), Some(1));
-        assert_eq!(edge_version.data.get_vector_snapshot_id(), Some(2));
+        assert_eq!(node_version.data.get_vector_snapshot_id(), Some(1.into()));
+        assert_eq!(edge_version.data.get_vector_snapshot_id(), Some(2.into()));
     }
 
     // ========================================================================
@@ -3549,7 +3549,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v0,
-                BiTemporalInterval::current(0),
+                BiTemporalInterval::current(0.into()),
                 label,
                 PropertyMapBuilder::new().insert("counter", 0i64).build(),
             )
@@ -3610,7 +3610,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 v0,
-                BiTemporalInterval::current(0),
+                BiTemporalInterval::current(0.into()),
                 label,
                 PropertyMapBuilder::new().insert("counter", 0i64).build(),
             )
@@ -3672,7 +3672,7 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v0,
-                BiTemporalInterval::current(0),
+                BiTemporalInterval::current(0.into()),
                 label,
                 source,
                 target,
@@ -3737,7 +3737,7 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v0,
-                BiTemporalInterval::current(0),
+                BiTemporalInterval::current(0.into()),
                 label,
                 source,
                 target,
@@ -3789,7 +3789,7 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
         let props = PropertyMapBuilder::new()
             .insert("name", "Alice")
             .insert("age", 30i64)
@@ -3835,7 +3835,7 @@ mod tests {
         let target = NodeId::new(200).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        let temporal = BiTemporalInterval::current(1000);
+        let temporal = BiTemporalInterval::current(1000.into());
         let props = PropertyMapBuilder::new()
             .insert("since", 2020i64)
             .insert("weight", 0.8f64)
@@ -3981,9 +3981,9 @@ mod tests {
         let props10 = storage.reconstruct_node_properties(anchor_v10).unwrap();
         let props20 = storage.reconstruct_node_properties(anchor_v20).unwrap();
 
-        assert_eq!(props0.get("counter").and_then(|v| v.as_int()), Some(0));
-        assert_eq!(props10.get("counter").and_then(|v| v.as_int()), Some(10));
-        assert_eq!(props20.get("counter").and_then(|v| v.as_int()), Some(20));
+        assert_eq!(props0.get("counter").and_then(|v| v.as_int()), Some(0.into()));
+        assert_eq!(props10.get("counter").and_then(|v| v.as_int()), Some(10.into()));
+        assert_eq!(props20.get("counter").and_then(|v| v.as_int()), Some(20.into()));
     }
 
     #[test]
@@ -4026,7 +4026,7 @@ mod tests {
         // Reconstruct a delta version (v7) - should use anchor cache for v5
         let v7 = VersionId::new(7).unwrap();
         let props = storage.reconstruct_node_properties(v7).unwrap();
-        assert_eq!(props.get("version").and_then(|v| v.as_int()), Some(7));
+        assert_eq!(props.get("version").and_then(|v| v.as_int()), Some(7.into()));
         assert_eq!(
             props.get("data").and_then(|v| v.as_str()),
             Some("content_7")
@@ -4080,7 +4080,7 @@ mod tests {
         );
         // We can't directly access cache capacity, but we can verify it works correctly
         // by checking that anchors are cached even with small cache
-        assert_eq!(storage_small.node_property_cache.len(), 0);
+        assert_eq!(storage_small.node_property_cache.len(), 0.into());
 
         // Medium cache: 1000 entries -> anchor cache should be max(1000/5, 100) = 200
         let storage_medium = HistoricalStorage::with_config_retention_and_cache_size(
@@ -4088,7 +4088,7 @@ mod tests {
             RetentionPolicy::default(),
             1000,
         );
-        assert_eq!(storage_medium.node_property_cache.len(), 0);
+        assert_eq!(storage_medium.node_property_cache.len(), 0.into());
 
         // Large cache: 10000 entries -> anchor cache should be max(10000/5, 100) = 2000
         let storage_large = HistoricalStorage::with_config_retention_and_cache_size(
@@ -4096,7 +4096,7 @@ mod tests {
             RetentionPolicy::default(),
             10000,
         );
-        assert_eq!(storage_large.node_property_cache.len(), 0);
+        assert_eq!(storage_large.node_property_cache.len(), 0.into());
 
         // Very small cache: 10 entries -> anchor cache should be max(10/5, 100) = 100 (minimum)
         let storage_tiny = HistoricalStorage::with_config_retention_and_cache_size(
@@ -4104,7 +4104,7 @@ mod tests {
             RetentionPolicy::default(),
             10,
         );
-        assert_eq!(storage_tiny.node_property_cache.len(), 0);
+        assert_eq!(storage_tiny.node_property_cache.len(), 0.into());
     }
 
     // ========================================================================
