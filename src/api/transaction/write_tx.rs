@@ -266,17 +266,18 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
 
-            // Use wallclock time for transaction_time (required for temporal queries)
-            let wallclock = crate::core::temporal::time::now();
+            // Phase 2: Use HLC for distributed temporal consistency
+            // Get current physical wallclock
+            let current_wallclock = crate::core::temporal::time::now();
 
-            // Check for pathological clock skew that would break temporal semantics
-            let drift = wallclock - *ts;
+            // Check for pathological clock skew using wallclock components
+            let drift = current_wallclock.wallclock() - ts.wallclock();
 
             // Backward drift check: prevent timestamps jumping far into future
             if drift < -MAX_BACKWARD_DRIFT_US {
                 return Err(TransactionError::ClockSkew {
-                    wallclock,
-                    previous: *ts,
+                    wallclock: current_wallclock.wallclock(),
+                    previous: ts.wallclock(),
                     drift_us: drift,
                     max_allowed: -MAX_BACKWARD_DRIFT_US,
                 }
@@ -286,34 +287,38 @@ impl WriteTransaction {
             // Forward jump check: prevent timestamps in far future
             if drift > MAX_FORWARD_JUMP_US {
                 return Err(TransactionError::ClockSkew {
-                    wallclock,
-                    previous: *ts,
+                    wallclock: current_wallclock.wallclock(),
+                    previous: ts.wallclock(),
                     drift_us: drift,
                     max_allowed: MAX_FORWARD_JUMP_US,
                 }
                 .into());
             }
 
-            // Ensure monotonicity: if wallclock went backwards (small NTP adjustment),
-            // use previous timestamp + 1
-            let commit = std::cmp::max(wallclock, *ts + 1);
+            // Phase 2: Use HLC .send() method for monotonic timestamp generation
+            // This ensures: if wallclock advances, reset logical; otherwise increment logical
+            let commit = ts
+                .send(current_wallclock.wallclock())
+                .expect("HLC send should not fail with valid wallclock");
 
             // Observability: Warn about clock skew issues
             #[cfg(feature = "observability")]
             {
-                if commit == *ts + 1 && wallclock < *ts {
+                // Clock went backwards: wallclock < previous wallclock
+                if current_wallclock.wallclock() < ts.wallclock() {
                     tracing::warn!(
-                        wallclock_ts = wallclock,
-                        prev_ts = *ts,
-                        skew_us = *ts - wallclock,
+                        wallclock_ts = %current_wallclock,
+                        prev_ts = %ts,
+                        skew_us = ts.wallclock() - current_wallclock.wallclock(),
+                        logical_counter = commit.logical(),
                         "Clock skew detected: wallclock went backwards (NTP adjustment?)"
                     );
-                } else if commit > *ts + 60_000_000 {
+                } else if commit.wallclock() > ts.wallclock() + 60_000_000 {
                     // Large forward jump (>60 seconds)
                     tracing::warn!(
-                        wallclock_ts = wallclock,
-                        prev_ts = *ts,
-                        jump_us = commit - *ts,
+                        wallclock_ts = %current_wallclock,
+                        prev_ts = %ts,
+                        jump_us = commit.wallclock() - ts.wallclock(),
                         "Large clock jump detected: timestamps will be lumpy"
                     );
                 }

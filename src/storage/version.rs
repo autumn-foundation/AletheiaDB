@@ -69,9 +69,11 @@ impl VersionMetadata {
 
     /// Create default metadata for existing data (migration helper).
     pub fn default_for_existing() -> Self {
+        use crate::core::hlc::HybridTimestamp;
         VersionMetadata {
             created_by_tx: TxId::new(0),
-            commit_timestamp: Some(0),
+            // Phase 2: Use HybridTimestamp instead of integer literal
+            commit_timestamp: Some(HybridTimestamp::new_unchecked(0, 0)),
         }
     }
 }

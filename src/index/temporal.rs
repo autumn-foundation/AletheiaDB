@@ -146,7 +146,8 @@ impl EntityTimeline {
         // Adaptive pre-allocation heuristic:
         // - Point/small range queries (< POINT_QUERY_THRESHOLD_TICKS) typically return 1-2 versions → cap at 4
         // - Large range queries can return many versions → cap at 16
-        let range_size = range.end() - range.start();
+        // Phase 2: Use wallclock components for arithmetic
+        let range_size = range.end().wallclock() - range.start().wallclock();
         let estimated_capacity = if range_size < POINT_QUERY_THRESHOLD_TICKS {
             cutoff.min(4) // Point query or small range
         } else {

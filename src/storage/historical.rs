@@ -13,7 +13,7 @@
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
-use crate::core::temporal::{BiTemporalInterval, Timestamp};
+use crate::core::temporal::{BiTemporalInterval, Timestamp, TIMESTAMP_MAX};
 use crate::storage::observer::{Observer, StorageEvent, notify_observers};
 use crate::storage::version::{
     AnchorConfig, EdgeVersion, NodeVersion, TemporalVersion, VersionData,
@@ -1480,11 +1480,13 @@ impl HistoricalStorage {
         // For each node, sort versions by tx_time and link them
         for (node_id, mut version_ids) in node_versions_by_id {
             // Sort by transaction time start (ascending order)
+            // Phase 2: Use TIMESTAMP_MAX instead of i64::MAX
+            use crate::core::temporal::TIMESTAMP_MAX;
             version_ids.sort_by_key(|vid| {
                 self.node_versions
                     .get(vid)
                     .map(|v| v.temporal.transaction_time().start())
-                    .unwrap_or(i64::MAX)
+                    .unwrap_or(TIMESTAMP_MAX)
             });
 
             // Link prev/next
@@ -1531,11 +1533,12 @@ impl HistoricalStorage {
         // For each edge, sort versions by tx_time and link them
         for (edge_id, mut version_ids) in edge_versions_by_id {
             // Sort by transaction time start (ascending order)
+            // Phase 2: Use TIMESTAMP_MAX (already imported above)
             version_ids.sort_by_key(|vid| {
                 self.edge_versions
                     .get(vid)
                     .map(|v| v.temporal.transaction_time().start())
-                    .unwrap_or(i64::MAX)
+                    .unwrap_or(TIMESTAMP_MAX)
             });
 
             // Link prev/next

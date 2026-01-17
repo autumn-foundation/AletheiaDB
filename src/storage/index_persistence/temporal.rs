@@ -48,7 +48,8 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
             let props = builder.build();
             (
                 PersistedVersionType::Delta {
-                    base_anchor_tx: tx_time.start(),
+                    // Phase 2: Extract wallclock for persistence format (i64)
+                    base_anchor_tx: tx_time.start().wallclock(),
                     removed_keys,
                 },
                 persist_property_map(&props)?,
@@ -57,16 +58,17 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
         }
     };
 
+    // Phase 2: Extract wallclock components for persistence format
     Ok(NodeVersionEntry {
         version_id: version.id.as_u64(),
         node_id: version.node_id.as_u64(),
-        valid_from: valid_time.start(),
+        valid_from: valid_time.start().wallclock(),
         valid_to: if valid_time.is_current() {
             None
         } else {
-            Some(valid_time.end())
+            Some(valid_time.end().wallclock())
         },
-        tx_time: tx_time.start(),
+        tx_time: tx_time.start().wallclock(),
         version_type,
         properties,
         vector_snapshot_id,
@@ -102,7 +104,8 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
             let props = builder.build();
             (
                 PersistedVersionType::Delta {
-                    base_anchor_tx: tx_time.start(),
+                    // Phase 2: Extract wallclock for persistence format (i64)
+                    base_anchor_tx: tx_time.start().wallclock(),
                     removed_keys,
                 },
                 persist_property_map(&props)?,
@@ -110,18 +113,19 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
         }
     };
 
+    // Phase 2: Extract wallclock components for persistence format
     Ok(EdgeVersionEntry {
         version_id: version.id.as_u64(),
         edge_id: version.edge_id.as_u64(),
         source_id: version.source.as_u64(),
         target_id: version.target.as_u64(),
-        valid_from: valid_time.start(),
+        valid_from: valid_time.start().wallclock(),
         valid_to: if valid_time.is_current() {
             None
         } else {
-            Some(valid_time.end())
+            Some(valid_time.end().wallclock())
         },
-        tx_time: tx_time.start(),
+        tx_time: tx_time.start().wallclock(),
         version_type,
         properties,
     })
@@ -146,7 +150,12 @@ pub fn restore_node_version(
     })?;
 
     // Restore temporal interval
-    let valid_time = TimeRange::new(entry.valid_from, entry.valid_to.unwrap_or(TIMESTAMP_MAX))
+    // Phase 2: Convert i64 from persistence format to HybridTimestamp
+    use crate::core::hlc::HybridTimestamp;
+    let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
+    let valid_end = entry.valid_to.map(|t| HybridTimestamp::new_unchecked(t, 0)).unwrap_or(TIMESTAMP_MAX);
+
+    let valid_time = TimeRange::new(valid_start, valid_end)
         .map_err(|e| {
             IndexPersistenceError::Serialization(format!(
                 "Invalid valid time range [{}, {:?}]: {}",
@@ -154,7 +163,7 @@ pub fn restore_node_version(
             ))
         })?;
 
-    let tx_time = TimeRange::from(entry.tx_time);
+    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(entry.tx_time, 0));
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
     // Use the preserved version ID from the persisted entry
@@ -240,7 +249,12 @@ pub fn restore_edge_version(
     })?;
 
     // Restore temporal interval
-    let valid_time = TimeRange::new(entry.valid_from, entry.valid_to.unwrap_or(TIMESTAMP_MAX))
+    // Phase 2: Convert i64 from persistence format to HybridTimestamp
+    use crate::core::hlc::HybridTimestamp;
+    let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
+    let valid_end = entry.valid_to.map(|t| HybridTimestamp::new_unchecked(t, 0)).unwrap_or(TIMESTAMP_MAX);
+
+    let valid_time = TimeRange::new(valid_start, valid_end)
         .map_err(|e| {
             IndexPersistenceError::Serialization(format!(
                 "Invalid valid time range [{}, {:?}]: {}",
@@ -248,7 +262,7 @@ pub fn restore_edge_version(
             ))
         })?;
 
-    let tx_time = TimeRange::from(entry.tx_time);
+    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(entry.tx_time, 0));
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
     // Use the preserved version ID from the persisted entry

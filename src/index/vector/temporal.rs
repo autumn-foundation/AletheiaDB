@@ -976,13 +976,9 @@ impl TemporalVectorIndex {
 
     /// Returns the current timestamp in microseconds since epoch.
     fn current_timestamp() -> Result<Timestamp> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_micros() as Timestamp)
-            .map_err(|_| {
-                VectorError::IndexError("System time is before UNIX epoch".to_string()).into()
-            })
+        // Phase 2: Use the core time::now() function which returns HybridTimestamp
+        use crate::core::temporal::time;
+        Ok(time::now())
     }
 
     /// Adds a vector to the current index and tracks it for snapshot creation.
@@ -1011,19 +1007,21 @@ impl TemporalVectorIndex {
         self.vectors.insert(id, vector_arc);
 
         // Validate timestamp is within valid range
-        if timestamp < 0 {
+        // Phase 2: Compare wallclock components
+        use crate::core::hlc::HybridTimestamp;
+        if timestamp.wallclock() < 0 {
             return Err(Error::Temporal(TemporalError::InvalidTimeRange {
                 start: timestamp,
-                end: 0,
+                end: HybridTimestamp::new_unchecked(0, 0),
             }));
         }
 
-        if timestamp > crate::core::temporal::MAX_VALID_TIMESTAMP {
+        if timestamp.wallclock() > crate::core::temporal::MAX_VALID_TIMESTAMP {
             return Err(Error::Temporal(TemporalError::InvalidTimestamp {
                 timestamp,
                 reason: format!(
-                    "Timestamp {} exceeds MAX_VALID_TIMESTAMP {} (reserved range for internal use)",
-                    timestamp,
+                    "Timestamp wallclock {} exceeds MAX_VALID_TIMESTAMP {} (reserved range for internal use)",
+                    timestamp.wallclock(),
                     crate::core::temporal::MAX_VALID_TIMESTAMP
                 ),
             }));
@@ -1374,7 +1372,8 @@ impl TemporalVectorIndex {
             }
 
             SnapshotStrategy::TimeInterval(interval_secs) => {
-                let elapsed_micros = current_time - metadata.last_snapshot_time;
+                // Phase 2: Use wallclock components for arithmetic
+                let elapsed_micros = current_time.wallclock() - metadata.last_snapshot_time.wallclock();
                 let elapsed_secs = elapsed_micros / 1_000_000;
                 Ok(elapsed_secs >= *interval_secs as i64)
             }
@@ -1395,7 +1394,8 @@ impl TemporalVectorIndex {
             } => {
                 let by_txn = metadata.transactions_since_snapshot >= *transaction_interval;
 
-                let elapsed_micros = current_time - metadata.last_snapshot_time;
+                // Phase 2: Use wallclock components for arithmetic
+                let elapsed_micros = current_time.wallclock() - metadata.last_snapshot_time.wallclock();
                 let elapsed_secs = elapsed_micros / 1_000_000;
                 let by_time = elapsed_secs >= *time_interval_secs as i64;
 
@@ -1509,8 +1509,11 @@ impl TemporalVectorIndex {
             }
             RetentionPolicy::KeepDuration(duration) => {
                 let current_time = Self::current_timestamp()?;
-                let duration_micros = duration.as_micros() as Timestamp;
-                let cutoff_time = current_time.saturating_sub(duration_micros);
+                // Phase 2: Calculate cutoff using wallclock arithmetic, then create HybridTimestamp
+                let duration_micros = duration.as_micros() as i64;
+                let cutoff_wallclock = current_time.wallclock().saturating_sub(duration_micros);
+                use crate::core::hlc::HybridTimestamp;
+                let cutoff_time = HybridTimestamp::new_unchecked(cutoff_wallclock, 0);
 
                 let keys_to_remove: Vec<Timestamp> = snapshot_data
                     .snapshots
@@ -1953,7 +1956,8 @@ impl TemporalVectorIndex {
             .snapshots
             .iter()
             .map(|(&timestamp, (stable_id, snapshot))| {
-                let age_micros = current_time - timestamp;
+                // Phase 2: Use wallclock components for arithmetic
+                let age_micros = current_time.wallclock() - timestamp.wallclock();
 
                 SnapshotInfo {
                     snapshot_id: *stable_id,

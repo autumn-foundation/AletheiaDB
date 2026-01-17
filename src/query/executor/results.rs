@@ -507,10 +507,12 @@ impl QueryResults {
                 if let Some(timestamp) = row.timestamp {
                     // Safely convert timestamp (i64) to VersionId (u64)
                     // Negative timestamps are clamped to 0
-                    let ts_u64 = if timestamp < 0 {
+                    // Phase 2: Use wallclock component for version ID
+                    let wallclock = timestamp.wallclock();
+                    let ts_u64 = if wallclock < 0 {
                         0_u64
                     } else {
-                        timestamp as u64
+                        wallclock as u64
                     };
 
                     // VersionId::new validates against MAX_VALID_ID

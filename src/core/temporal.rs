@@ -9,22 +9,30 @@
 
 use std::fmt;
 
+use crate::core::hlc::HybridTimestamp;
 use crate::utils::error::{StorageError, TemporalError};
 
-/// Timestamp represented as microseconds since Unix epoch (1970-01-01 00:00:00 UTC).
+/// Timestamp represented as Hybrid Logical Clock (HLC).
 ///
-/// Using i64 microseconds gives us:
-/// - Range: ~290,000 years before/after epoch
-/// - Precision: 1 microsecond
-/// - Monotonic ordering for transaction time
-pub type Timestamp = i64;
+/// Phase 2: Migrated from i64 to HybridTimestamp for distributed temporal consistency.
+///
+/// HybridTimestamp combines:
+/// - Wallclock component (i64 microseconds since Unix epoch)
+/// - Logical counter (u32) for ordering events at same wallclock
+///
+/// This provides:
+/// - Monotonic ordering despite clock skew
+/// - Causality preservation across distributed nodes
+/// - Human-readable wallclock semantics for temporal queries
+pub type Timestamp = HybridTimestamp;
 
 /// Sentinel value representing "infinity" or "current" timestamp.
 ///
 /// Used for open-ended time ranges that extend to the present.
-pub const TIMESTAMP_MAX: Timestamp = i64::MAX;
+/// For HybridTimestamp, this is (i64::MAX, 0) - maximum wallclock, zero logical counter.
+pub const TIMESTAMP_MAX: Timestamp = HybridTimestamp::new_unchecked(i64::MAX, 0);
 
-/// Maximum valid timestamp value for user data.
+/// Maximum valid timestamp wallclock value for user data.
 ///
 /// Similar to MAX_VALID_ID, this reserves the upper 1000 i64 values for internal use
 /// (sentinel values, metadata). Timestamps exceeding this value are rejected to prevent
@@ -32,7 +40,9 @@ pub const TIMESTAMP_MAX: Timestamp = i64::MAX;
 ///
 /// The reserved range provides a safety margin without meaningfully restricting the
 /// timestamp space (still covers ~290,000 years before/after epoch).
-pub const MAX_VALID_TIMESTAMP: Timestamp = i64::MAX - 1000;
+///
+/// Note: This is the maximum wallclock value. The logical counter can be any u32 value.
+pub const MAX_VALID_TIMESTAMP: i64 = i64::MAX - 1000;
 
 /// Represents a continuous range of time [start, end).
 ///
@@ -94,40 +104,46 @@ impl TimeRange {
     }
 
     /// Returns true if this range is currently open-ended (end == TIMESTAMP_MAX).
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn is_current(&self) -> bool {
+    pub fn is_current(&self) -> bool {
         self.end == TIMESTAMP_MAX
     }
 
     /// Returns true if this range has been closed (end < TIMESTAMP_MAX).
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn is_closed(&self) -> bool {
+    pub fn is_closed(&self) -> bool {
         self.end < TIMESTAMP_MAX
     }
 
     /// Returns true if the given timestamp is contained within this range [start, end).
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn contains(&self, timestamp: Timestamp) -> bool {
+    pub fn contains(&self, timestamp: Timestamp) -> bool {
         timestamp >= self.start && timestamp < self.end
     }
 
     /// Returns true if the given timestamp is at or after the start of this range.
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn contains_or_after(&self, timestamp: Timestamp) -> bool {
+    pub fn contains_or_after(&self, timestamp: Timestamp) -> bool {
         timestamp >= self.start
     }
 
     /// Returns true if this range overlaps with another range.
     ///
     /// Two ranges overlap if there exists any timestamp that is in both ranges.
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn overlaps(&self, other: &TimeRange) -> bool {
+    pub fn overlaps(&self, other: &TimeRange) -> bool {
         self.start < other.end && other.start < self.end
     }
 
     /// Returns true if this range completely contains another range.
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn contains_range(&self, other: &TimeRange) -> bool {
+    pub fn contains_range(&self, other: &TimeRange) -> bool {
         self.start <= other.start && other.end <= self.end
     }
 
@@ -145,51 +161,49 @@ impl TimeRange {
     /// Returns the duration of this range in microseconds.
     ///
     /// Returns None if the range is open-ended (current).
+    /// Duration is calculated using wallclock components only.
+    /// Note: Phase 2 - removed const due to is_current() needing HybridTimestamp comparison.
     #[inline]
-    pub const fn duration_micros(&self) -> Option<i64> {
+    pub fn duration_micros(&self) -> Option<i64> {
         if self.is_current() {
             None
         } else {
-            Some(self.end - self.start)
+            Some(self.end.wallclock() - self.start.wallclock())
         }
     }
 
     /// Serialize this TimeRange to bytes.
     ///
-    /// # Binary Format
+    /// # Binary Format (Phase 2: HybridTimestamp)
     /// ```text
-    /// [start:8][end:8]
+    /// [start.wallclock:8][start.logical:4][end.wallclock:8][end.logical:4]
     /// ```
-    /// Total: 16 bytes, little-endian i64 values.
+    /// Total: 24 bytes (2 HybridTimestamps × 12 bytes each)
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buffer = Vec::with_capacity(16);
+        let mut buffer = Vec::with_capacity(24);
         self.serialize_into(&mut buffer);
         buffer
     }
 
     /// Serialize into an existing buffer.
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        buffer.extend_from_slice(&self.start.to_le_bytes());
-        buffer.extend_from_slice(&self.end.to_le_bytes());
+        self.start.serialize_into(buffer);
+        self.end.serialize_into(buffer);
     }
 
     /// Deserialize a TimeRange from bytes.
     ///
-    /// Returns the TimeRange and number of bytes consumed (always 16).
+    /// Returns the TimeRange and number of bytes consumed (always 24).
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, usize), StorageError> {
-        if bytes.len() < 16 {
+        if bytes.len() < 24 {
             return Err(StorageError::CorruptedData(format!(
-                "Buffer too short for TimeRange: {} bytes (need 16)",
+                "Buffer too short for TimeRange: {} bytes (need 24)",
                 bytes.len()
             )));
         }
-        let start = i64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]);
-        let end = i64::from_le_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-        ]);
-        Ok((TimeRange { start, end }, 16))
+        let (start, _) = HybridTimestamp::deserialize(&bytes[0..12])?;
+        let (end, _) = HybridTimestamp::deserialize(&bytes[12..24])?;
+        Ok((TimeRange { start, end }, 24))
     }
 }
 
@@ -266,40 +280,46 @@ impl BiTemporalInterval {
     }
 
     /// Returns true if this interval is currently valid (valid time is open).
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn is_currently_valid(&self) -> bool {
+    pub fn is_currently_valid(&self) -> bool {
         self.valid_time.is_current()
     }
 
     /// Returns true if this interval is currently in the database (transaction time is open).
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn is_currently_recorded(&self) -> bool {
+    pub fn is_currently_recorded(&self) -> bool {
         self.transaction_time.is_current()
     }
 
     /// Returns true if this interval is current in both dimensions.
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn is_current(&self) -> bool {
+    pub fn is_current(&self) -> bool {
         self.is_currently_valid() && self.is_currently_recorded()
     }
 
     /// Check if this interval is visible at the given valid time.
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn is_valid_at(&self, timestamp: Timestamp) -> bool {
+    pub fn is_valid_at(&self, timestamp: Timestamp) -> bool {
         self.valid_time.contains(timestamp)
     }
 
     /// Check if this interval was recorded by the given transaction time.
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn is_recorded_at(&self, timestamp: Timestamp) -> bool {
+    pub fn is_recorded_at(&self, timestamp: Timestamp) -> bool {
         self.transaction_time.contains(timestamp)
     }
 
     /// Check if this interval is visible in both dimensions at the given times.
     ///
     /// This answers: "At transaction time T1, did we believe this fact was true at valid time T2?"
+    /// Note: Phase 2 - removed const due to HybridTimestamp comparison.
     #[inline]
-    pub const fn is_visible_at(&self, valid_time: Timestamp, tx_time: Timestamp) -> bool {
+    pub fn is_visible_at(&self, valid_time: Timestamp, tx_time: Timestamp) -> bool {
         self.valid_time.contains(valid_time) && self.transaction_time.contains(tx_time)
     }
 
@@ -336,13 +356,13 @@ impl BiTemporalInterval {
 
     /// Serialize this BiTemporalInterval to bytes.
     ///
-    /// # Binary Format
+    /// # Binary Format (Phase 2: HybridTimestamp)
     /// ```text
-    /// [valid_time.start:8][valid_time.end:8][transaction_time.start:8][transaction_time.end:8]
+    /// [valid_time: 24 bytes][transaction_time: 24 bytes]
     /// ```
-    /// Total: 32 bytes
+    /// Total: 48 bytes (2 TimeRanges × 24 bytes each)
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buffer = Vec::with_capacity(32);
+        let mut buffer = Vec::with_capacity(48);
         self.serialize_into(&mut buffer);
         buffer
     }
@@ -355,22 +375,22 @@ impl BiTemporalInterval {
 
     /// Deserialize a BiTemporalInterval from bytes.
     ///
-    /// Returns the BiTemporalInterval and number of bytes consumed (always 32).
+    /// Returns the BiTemporalInterval and number of bytes consumed (always 48).
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, usize), StorageError> {
-        if bytes.len() < 32 {
+        if bytes.len() < 48 {
             return Err(StorageError::CorruptedData(format!(
-                "Buffer too short for BiTemporalInterval: {} bytes (need 32)",
+                "Buffer too short for BiTemporalInterval: {} bytes (need 48)",
                 bytes.len()
             )));
         }
-        let (valid_time, _) = TimeRange::deserialize(&bytes[0..16])?;
-        let (transaction_time, _) = TimeRange::deserialize(&bytes[16..32])?;
+        let (valid_time, _) = TimeRange::deserialize(&bytes[0..24])?;
+        let (transaction_time, _) = TimeRange::deserialize(&bytes[24..48])?;
         Ok((
             BiTemporalInterval {
                 valid_time,
                 transaction_time,
             },
-            32,
+            48,
         ))
     }
 }
@@ -390,28 +410,37 @@ pub mod time {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// Get the current system time as a Timestamp.
+    /// Get the current system time as a Timestamp (HybridTimestamp).
+    ///
+    /// Returns HybridTimestamp with current wallclock and logical counter = 0.
+    /// For monotonic HLC generation with causality, use HLC's send() method.
     ///
     /// # Panics
     /// Panics if the system clock is set before Unix epoch.
     pub fn now() -> Timestamp {
-        SystemTime::now()
+        let wallclock = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("System clock is before Unix epoch")
-            .as_micros() as i64
+            .as_micros() as i64;
+
+        // Return HybridTimestamp with logical counter = 0
+        // Use new_unchecked for performance (system clock is trusted)
+        HybridTimestamp::new_unchecked(wallclock, 0)
     }
 
     /// Convert a Timestamp to a human-readable ISO 8601 string (UTC).
     ///
     /// Returns "current" for TIMESTAMP_MAX.
+    /// Uses the wallclock component for display.
     pub fn to_iso8601(timestamp: Timestamp) -> String {
         if timestamp == TIMESTAMP_MAX {
             return "current".to_string();
         }
 
+        let wallclock = timestamp.wallclock();
         // Convert microseconds to seconds and nanoseconds
-        let secs = timestamp / 1_000_000;
-        let nanos = ((timestamp % 1_000_000) * 1000) as u32;
+        let secs = wallclock / 1_000_000;
+        let nanos = ((wallclock % 1_000_000) * 1000) as u32;
 
         // This is a simplified conversion - for production use chrono crate
         let datetime = UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos);
@@ -419,27 +448,31 @@ pub mod time {
     }
 
     /// Create a timestamp from seconds since Unix epoch.
+    /// Logical counter is set to 0.
     #[inline]
     pub const fn from_secs(secs: i64) -> Timestamp {
-        secs * 1_000_000
+        HybridTimestamp::new_unchecked(secs * 1_000_000, 0)
     }
 
     /// Create a timestamp from milliseconds since Unix epoch.
+    /// Logical counter is set to 0.
     #[inline]
     pub const fn from_millis(millis: i64) -> Timestamp {
-        millis * 1_000
+        HybridTimestamp::new_unchecked(millis * 1_000, 0)
     }
 
     /// Convert a timestamp to seconds since Unix epoch.
+    /// Uses the wallclock component.
     #[inline]
     pub const fn to_secs(timestamp: Timestamp) -> i64 {
-        timestamp / 1_000_000
+        timestamp.wallclock() / 1_000_000
     }
 
     /// Convert a timestamp to milliseconds since Unix epoch.
+    /// Uses the wallclock component.
     #[inline]
     pub const fn to_millis(timestamp: Timestamp) -> i64 {
-        timestamp / 1_000
+        timestamp.wallclock() / 1_000
     }
 }
 
@@ -707,5 +740,109 @@ mod tests {
         assert_eq!(bytes[7], 0x01);
         assert_eq!(bytes[8], 0x18);
         assert_eq!(bytes[15], 0x11);
+    }
+
+    // =========================================================================
+    // Phase 2: HybridTimestamp Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_timestamp_is_hybrid_timestamp() {
+        // After Phase 2, Timestamp should be HybridTimestamp
+        use crate::core::hlc::HybridTimestamp;
+
+        // time::now() should return HybridTimestamp
+        let ts = time::now();
+
+        // Should have wallclock component
+        assert!(ts.wallclock() > 0);
+
+        // Should have logical component (starts at 0)
+        assert_eq!(ts.logical(), 0);
+    }
+
+    #[test]
+    fn test_time_range_with_hybrid_timestamps() {
+        use crate::core::hlc::HybridTimestamp;
+
+        // Create timestamps with different wallclocks
+        let ts1 = HybridTimestamp::new(1000, 0).unwrap();
+        let ts2 = HybridTimestamp::new(2000, 0).unwrap();
+
+        // TimeRange should work with HybridTimestamp
+        let range = TimeRange::new(ts1, ts2).unwrap();
+
+        assert_eq!(range.start(), ts1);
+        assert_eq!(range.end(), ts2);
+    }
+
+    #[test]
+    fn test_time_range_ordering_with_logical_component() {
+        use crate::core::hlc::HybridTimestamp;
+
+        // Same wallclock, different logical counters
+        let ts1 = HybridTimestamp::new(1000, 0).unwrap();
+        let ts2 = HybridTimestamp::new(1000, 1).unwrap();
+        let ts3 = HybridTimestamp::new(1000, 2).unwrap();
+
+        // HybridTimestamp ordering is lexicographic: wallclock first, then logical
+        assert!(ts1 < ts2);
+        assert!(ts2 < ts3);
+
+        // TimeRange should respect this ordering
+        let range = TimeRange::new(ts1, ts3).unwrap();
+        assert!(range.contains(ts1));
+        assert!(range.contains(ts2));
+        assert!(!range.contains(ts3)); // Exclusive end
+    }
+
+    #[test]
+    fn test_bitemporal_with_hybrid_timestamps() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_start = HybridTimestamp::new(1000, 0).unwrap();
+        let tx_start = HybridTimestamp::new(2000, 0).unwrap();
+
+        let interval = BiTemporalInterval::now(valid_start, tx_start);
+
+        assert_eq!(interval.valid_time().start(), valid_start);
+        assert_eq!(interval.transaction_time().start(), tx_start);
+    }
+
+    #[test]
+    fn test_hybrid_timestamp_serialization_size() {
+        use crate::core::hlc::HybridTimestamp;
+
+        // HybridTimestamp is 12 bytes (8 wallclock + 4 logical)
+        let ts = HybridTimestamp::new(1000, 5).unwrap();
+        let serialized = ts.serialize();
+        assert_eq!(serialized.len(), 12);
+
+        // TimeRange with HybridTimestamp should be 24 bytes (2 × 12)
+        let range = TimeRange::new(
+            HybridTimestamp::new(1000, 0).unwrap(),
+            HybridTimestamp::new(2000, 0).unwrap(),
+        )
+        .unwrap();
+        let serialized = range.serialize();
+        assert_eq!(serialized.len(), 24);
+
+        // BiTemporalInterval should be 48 bytes (4 × 12)
+        let interval = BiTemporalInterval::now(
+            HybridTimestamp::new(1000, 0).unwrap(),
+            HybridTimestamp::new(2000, 0).unwrap(),
+        );
+        let serialized = interval.serialize();
+        assert_eq!(serialized.len(), 48);
+    }
+
+    #[test]
+    fn test_timestamp_max_with_hybrid_timestamp() {
+        use crate::core::hlc::HybridTimestamp;
+
+        // TIMESTAMP_MAX should be representable as HybridTimestamp
+        // It represents "infinity" or "current"
+        assert_eq!(TIMESTAMP_MAX.wallclock(), i64::MAX);
+        assert_eq!(TIMESTAMP_MAX.logical(), 0);
     }
 }

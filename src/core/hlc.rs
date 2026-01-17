@@ -33,8 +33,10 @@ impl HybridTimestamp {
     #[inline]
     pub fn new(wallclock: i64, logical: u32) -> Result<Self, TemporalError> {
         if wallclock > MAX_VALID_TIMESTAMP {
+            // Phase 2: Error field expects HybridTimestamp, not i64
+            let invalid_ts = HybridTimestamp { wallclock, logical };
             return Err(TemporalError::InvalidTimestamp {
-                timestamp: wallclock,
+                timestamp: invalid_ts,
                 reason: format!(
                     "Wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
                     wallclock, MAX_VALID_TIMESTAMP
@@ -246,5 +248,12 @@ impl HybridTimestamp {
         }
 
         Ok((HybridTimestamp { wallclock, logical }, 12))
+    }
+}
+
+impl std::fmt::Display for HybridTimestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Display as wallclock.logical for human readability
+        write!(f, "{}.{}", self.wallclock, self.logical)
     }
 }

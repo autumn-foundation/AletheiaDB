@@ -245,8 +245,11 @@ impl Checkpoint {
             .write_all(&self.metadata.lsn.0.to_le_bytes())
             .map_err(|e| StorageError::IoError(format!("Failed to write LSN: {}", e)))?;
 
+        // Phase 2: Serialize HybridTimestamp (12 bytes)
+        let mut ts_buffer = Vec::with_capacity(12);
+        self.metadata.timestamp.serialize_into(&mut ts_buffer);
         writer
-            .write_all(&self.metadata.timestamp.to_le_bytes())
+            .write_all(&ts_buffer)
             .map_err(|e| StorageError::IoError(format!("Failed to write timestamp: {}", e)))?;
 
         writer
@@ -328,11 +331,13 @@ impl Checkpoint {
             .map_err(|e| StorageError::IoError(format!("Failed to read LSN: {}", e)))?;
         let lsn = LSN(u64::from_le_bytes(lsn_bytes));
 
+        // Phase 2: Read timestamp as i64 wallclock, convert to HybridTimestamp
         let mut timestamp_bytes = [0u8; 8];
         reader
             .read_exact(&mut timestamp_bytes)
             .map_err(|e| StorageError::IoError(format!("Failed to read timestamp: {}", e)))?;
-        let timestamp = i64::from_le_bytes(timestamp_bytes);
+        let timestamp_i64 = i64::from_le_bytes(timestamp_bytes);
+        let timestamp = crate::core::hlc::HybridTimestamp::new_unchecked(timestamp_i64, 0);
 
         let mut node_count_bytes = [0u8; 8];
         reader
