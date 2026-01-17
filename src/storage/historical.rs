@@ -463,7 +463,7 @@ impl HistoricalStorage {
 
         // Create version (anchor or delta based on chain length)
         let mut version = if let Some(prev_id) = prev_version_id {
-            // Verify previous version exists
+            // Verify previous version exists (properties reconstructed later via reconstruct_node_properties)
             if !self.node_versions.contains_key(&prev_id) {
                 return Err(StorageError::VersionNotFound(prev_id).into());
             }
@@ -588,7 +588,7 @@ impl HistoricalStorage {
 
         // Create version (anchor or delta based on chain length)
         let mut version = if let Some(prev_id) = prev_version_id {
-            // Verify previous version exists
+            // Verify previous version exists (properties reconstructed later via reconstruct_edge_properties)
             if !self.edge_versions.contains_key(&prev_id) {
                 return Err(StorageError::VersionNotFound(prev_id).into());
             }
@@ -1100,23 +1100,23 @@ impl HistoricalStorage {
     ) {
         prev_version.set_next_version(Some(new_version_id));
 
-        let new_start_time = new_temporal.valid_time().start();
-        let new_tx_time = new_temporal.transaction_time().start();
+        // Work on a local copy, apply modifications, then write back
+        let mut prev_temporal = *prev_version.temporal();
 
-        // Copy values to avoid holding immutable borrow during mutation
-        let is_currently_valid = prev_version.temporal().is_currently_valid();
-        let prev_valid_start = prev_version.temporal().valid_time().start();
-        let is_currently_recorded = prev_version.temporal().is_currently_recorded();
-        let prev_tx_start = prev_version.temporal().transaction_time().start();
+        if prev_temporal.is_currently_valid()
+            && new_temporal.valid_time().start() > prev_temporal.valid_time().start()
+        {
+            prev_temporal = prev_temporal.close_valid_time(new_temporal.valid_time().start());
+        }
 
-        if is_currently_valid && new_start_time > prev_valid_start {
-            let temporal = prev_version.temporal_mut();
-            *temporal = temporal.close_valid_time(new_start_time);
+        if prev_temporal.is_currently_recorded()
+            && new_temporal.transaction_time().start() > prev_temporal.transaction_time().start()
+        {
+            prev_temporal =
+                prev_temporal.close_transaction_time(new_temporal.transaction_time().start());
         }
-        if is_currently_recorded && new_tx_time > prev_tx_start {
-            let temporal = prev_version.temporal_mut();
-            *temporal = temporal.close_transaction_time(new_tx_time);
-        }
+
+        *prev_version.temporal_mut() = prev_temporal;
     }
 
     /// Populate caches for an anchor version.
@@ -4511,5 +4511,125 @@ mod tests {
         assert_eq!(version.prev_version, None);
         assert_eq!(version.source, source);
         assert_eq!(version.target, target);
+    }
+
+    #[test]
+    fn test_independent_node_edge_anchor_intervals() {
+        // Verify that node and edge version chains maintain separate anchor counters
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        });
+
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(2).unwrap();
+        let target = NodeId::new(3).unwrap();
+        let node_label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let edge_label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Create interleaved node and edge versions to ensure they don't interfere
+        // Node pattern: anchor(0), delta(1), delta(2), anchor(3), delta(4)
+        // Edge pattern: anchor(100), delta(101), delta(102), anchor(103), delta(104)
+        let mut node_version_ids = Vec::new();
+        let mut edge_version_ids = Vec::new();
+
+        for i in 0..5 {
+            // Add node version
+            let node_vid = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    node_vid,
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    node_label,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+            node_version_ids.push(node_vid);
+
+            // Add edge version (interleaved)
+            let edge_vid = VersionId::new(100 + i).unwrap();
+            storage
+                .add_edge_version(
+                    edge_id,
+                    edge_vid,
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    edge_label,
+                    source,
+                    target,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+            edge_version_ids.push(edge_vid);
+        }
+
+        // Verify node version pattern: anchor, delta, delta, anchor, delta
+        assert!(
+            storage
+                .get_node_version(node_version_ids[0])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(
+            storage
+                .get_node_version(node_version_ids[1])
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_node_version(node_version_ids[2])
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_node_version(node_version_ids[3])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(
+            storage
+                .get_node_version(node_version_ids[4])
+                .unwrap()
+                .is_delta()
+        );
+
+        // Verify edge version pattern is the same (independent counter)
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[0])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[1])
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[2])
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[3])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[4])
+                .unwrap()
+                .is_delta()
+        );
     }
 }
