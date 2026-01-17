@@ -2,6 +2,30 @@
 //!
 //! This module provides [`GroupCommitCoordinator`], which manages the epoch-based
 //! waiting mechanism for [`GroupCommit`](super::DurabilityMode::GroupCommit) mode.
+//!
+//! # Error Handling Strategy
+//!
+//! All public methods return `Result` types to handle lock poisoning gracefully.
+//! Lock poisoning occurs when a thread panics while holding the coordinator's mutex.
+//!
+//! ## For Callers
+//!
+//! When a `StorageError::LockPoisoned` error is returned:
+//! - **Flush thread**: Should panic immediately. Continuing would leave waiting
+//!   transactions hanging indefinitely. This is an unrecoverable state.
+//! - **Transaction threads**: Should propagate the error to the caller. The
+//!   transaction cannot complete and must be rolled back.
+//!
+//! ## Rationale
+//!
+//! Lock poisoning in the coordinator indicates severe corruption. The alternatives
+//! are:
+//! 1. **Panic everywhere** (too aggressive for transaction threads)
+//! 2. **Continue silently** (leaves transactions hanging - worse than panicking)
+//! 3. **Return Result** (chosen approach - lets callers decide appropriate action)
+//!
+//! The flush thread uses `.expect()` to panic on lock poisoning because silent
+//! degradation is worse than fail-fast behavior for background infrastructure.
 
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
@@ -163,7 +187,9 @@ impl GroupCommitCoordinator {
                 .flush_complete
                 .wait_timeout(state, timeout)
                 .map_err(|_| StorageError::LockPoisoned {
-                    lock_type: "Condvar",
+                    // Note: Condvar::wait_timeout() returns PoisonError when the MUTEX
+                    // is poisoned, not the Condvar. Condvars cannot be poisoned.
+                    lock_type: "Mutex",
                 })?;
 
             state = new_state;
@@ -314,6 +340,13 @@ mod tests {
     // ==================== TDD Tests for Lock Poisoning Error Handling ====================
     // These tests verify that methods return proper errors instead of panicking
     // when mutex locks are poisoned.
+    //
+    // TEST GAP: The wait_timeout() path in wait_for_flush() (line ~164) cannot be
+    // reliably tested for poisoning during the actual condvar wait. This would
+    // require poisoning the lock WHILE another thread is blocked in wait_timeout(),
+    // which is inherently racy. The current test (test_wait_for_flush_with_poisoned_lock)
+    // only tests the initial lock acquisition path. The implementation does handle
+    // the condvar poisoning case, but it's not covered by tests.
 
     #[test]
     fn test_register_transaction_returns_result() {

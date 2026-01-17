@@ -317,21 +317,15 @@ impl ConcurrentWalSystem {
             // group commit has pending transactions. This handles the race where
             // transactions register with GroupCommitCoordinator but their entries
             // were already drained by a previous flush iteration.
+            //
+            // LOCK POISONING: If current_batch_size() fails, the coordinator lock is
+            // poisoned and the system is in an unrecoverable state. Panicking is correct
+            // here - continuing would leave waiting transactions hanging indefinitely.
             let should_mark_flushed = !entries.is_empty()
                 || group_commit.as_ref().is_some_and(|gc| {
-                    match gc.current_batch_size() {
-                        Ok(size) => size > 0,
-                        Err(e) => {
-                            // Lock poisoned - coordinator is in unrecoverable state.
-                            // Log error and assume no pending transactions (conservative).
-                            eprintln!(
-                                "CRITICAL: GroupCommitCoordinator lock poisoned during batch size check: {}. \
-                                 Pending transactions may be lost.",
-                                e
-                            );
-                            false
-                        }
-                    }
+                    gc.current_batch_size().expect(
+                        "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
+                    ) > 0
                 });
 
             if !entries.is_empty() {
@@ -339,21 +333,19 @@ impl ConcurrentWalSystem {
                 let result = coordinator.flush(entries, sync_on_flush);
 
                 // Notify group commit waiters and handle errors
+                //
+                // LOCK POISONING: If mark_flushed() fails due to lock poisoning, we panic.
+                // This is an unrecoverable state - waiting transactions would hang forever.
+                // Panicking the flush thread ensures fail-fast behavior rather than silent
+                // degradation.
                 match result {
                     Ok(_) => {
                         // Reset error counter on success
                         error_counter.store(0, Ordering::Relaxed);
                         if let Some(ref gc) = group_commit {
-                            // If mark_flushed fails due to lock poisoning, the coordinator is
-                            // in an unrecoverable state. Log the error but continue - waiters
-                            // will fail on their next operation anyway.
-                            if let Err(e) = gc.mark_flushed(Ok(())) {
-                                eprintln!(
-                                    "CRITICAL: GroupCommitCoordinator lock poisoned during mark_flushed: {}. \
-                                     Database is in degraded state, transactions may hang.",
-                                    e
-                                );
-                            }
+                            gc.mark_flushed(Ok(())).expect(
+                                "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
+                            );
                         }
                     }
                     Err(e) => {
@@ -372,15 +364,10 @@ impl ConcurrentWalSystem {
                         if let Some(ref gc) = group_commit {
                             // Create a new error from the string representation
                             // (Error doesn't implement Clone, but mark_flushed only stores the string)
-                            if let Err(poison_err) = gc
-                                .mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
-                            {
-                                eprintln!(
-                                    "CRITICAL: GroupCommitCoordinator lock poisoned during mark_flushed: {}. \
-                                     Database is in degraded state, transactions may hang.",
-                                    poison_err
+                            gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
+                                .expect(
+                                    "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
                                 );
-                            }
                         }
                     }
                 }
@@ -388,13 +375,9 @@ impl ConcurrentWalSystem {
                 // No entries but there are pending transactions - advance epoch anyway
                 // This handles the race where entries were flushed before transactions
                 // called register_transaction()
-                if let Some(ref gc) = group_commit
-                    && let Err(e) = gc.mark_flushed(Ok(()))
-                {
-                    eprintln!(
-                        "CRITICAL: GroupCommitCoordinator lock poisoned during mark_flushed: {}. \
-                         Database is in degraded state, transactions may hang.",
-                        e
+                if let Some(ref gc) = group_commit {
+                    gc.mark_flushed(Ok(())).expect(
+                        "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
                     );
                 }
             }
@@ -412,25 +395,16 @@ impl ConcurrentWalSystem {
             match result {
                 Ok(_) => {
                     error_counter.store(0, Ordering::Relaxed);
-                    if let Some(ref gc) = group_commit
-                        && let Err(e) = gc.mark_flushed(Ok(()))
-                    {
-                        eprintln!(
-                            "CRITICAL: GroupCommitCoordinator lock poisoned during shutdown flush: {}",
-                            e
-                        );
+                    if let Some(ref gc) = group_commit {
+                        gc.mark_flushed(Ok(()))
+                            .expect("GroupCommitCoordinator lock poisoned during shutdown");
                     }
                 }
                 Err(e) => {
                     error_counter.fetch_add(1, Ordering::Relaxed);
-                    if let Some(ref gc) = group_commit
-                        && let Err(poison_err) =
-                            gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
-                    {
-                        eprintln!(
-                            "CRITICAL: GroupCommitCoordinator lock poisoned during shutdown flush: {}",
-                            poison_err
-                        );
+                    if let Some(ref gc) = group_commit {
+                        gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
+                            .expect("GroupCommitCoordinator lock poisoned during shutdown");
                     }
                 }
             }
