@@ -121,6 +121,21 @@ pub type PreAnchorHook = Arc<
         + Sync,
 >;
 
+/// Context for pre-anchor hook invocation.
+///
+/// Groups the parameters needed to invoke a pre-anchor hook, improving
+/// readability and reducing the number of function parameters.
+struct AnchorHookContext<'a> {
+    /// Entity type ("node" or "edge")
+    entity_type: &'a str,
+    /// Entity ID as u64
+    entity_id: u64,
+    /// Transaction timestamp
+    timestamp: Timestamp,
+    /// Properties being stored in the anchor
+    properties: &'a PropertyMap,
+}
+
 /// Default cache size for reconstructed properties (10,000 entries)
 const DEFAULT_RECONSTRUCTION_CACHE_SIZE: usize = 10_000;
 
@@ -498,10 +513,12 @@ impl HistoricalStorage {
         // Handle pre-anchor hook (BEFORE storing)
         if version.is_anchor() {
             Self::handle_pre_anchor_hook(
-                "node",
-                node_id.as_u64(),
-                temporal.transaction_time().start(),
-                &properties_for_hook,
+                AnchorHookContext {
+                    entity_type: "node",
+                    entity_id: node_id.as_u64(),
+                    timestamp: temporal.transaction_time().start(),
+                    properties: &properties_for_hook,
+                },
                 &mut version.data,
                 &self.pre_node_anchor_hook,
             );
@@ -628,10 +645,12 @@ impl HistoricalStorage {
         // Handle pre-anchor hook (BEFORE storing)
         if version.is_anchor() {
             Self::handle_pre_anchor_hook(
-                "edge",
-                edge_id.as_u64(),
-                temporal.transaction_time().start(),
-                &properties_for_hook,
+                AnchorHookContext {
+                    entity_type: "edge",
+                    entity_id: edge_id.as_u64(),
+                    timestamp: temporal.transaction_time().start(),
+                    properties: &properties_for_hook,
+                },
                 &mut version.data,
                 &self.pre_edge_anchor_hook,
             );
@@ -1032,11 +1051,17 @@ impl HistoricalStorage {
     }
 
     /// Count how many versions exist since the last anchor (for a node).
+    ///
+    /// Note: The closure overhead is negligible and typically optimized away by LLVM.
+    /// If profiling shows this is a hotspot, consider monomorphizing.
     fn count_versions_since_anchor_node(&self, version_id: VersionId) -> usize {
         self.count_versions_since_anchor(version_id, |vid| self.node_versions.get(&vid))
     }
 
     /// Count how many versions exist since the last anchor (for an edge).
+    ///
+    /// Note: The closure overhead is negligible and typically optimized away by LLVM.
+    /// If profiling shows this is a hotspot, consider monomorphizing.
     fn count_versions_since_anchor_edge(&self, version_id: VersionId) -> usize {
         self.count_versions_since_anchor(version_id, |vid| self.edge_versions.get(&vid))
     }
@@ -1046,42 +1071,43 @@ impl HistoricalStorage {
     /// This helper method encapsulates the common pattern of calling pre-anchor hooks
     /// and handling their results (success with snapshot ID, success without snapshot,
     /// or graceful degradation on failure).
-    #[allow(clippy::too_many_arguments)]
     fn handle_pre_anchor_hook(
-        entity_type: &str,
-        entity_id: u64,
-        timestamp: Timestamp,
-        properties: &PropertyMap,
+        context: AnchorHookContext<'_>,
         version_data: &mut VersionData,
         hook: &Option<PreAnchorHook>,
     ) {
         if let Some(hook_fn) = hook {
-            match hook_fn(entity_type, entity_id, timestamp, properties) {
+            match hook_fn(
+                context.entity_type,
+                context.entity_id,
+                context.timestamp,
+                context.properties,
+            ) {
                 Ok(Some(snapshot_id)) => {
                     version_data.set_vector_snapshot_id(snapshot_id);
                     #[cfg(feature = "observability")]
                     tracing::debug!(
                         "Pre-anchor hook returned snapshot ID {} for {} {}",
                         snapshot_id,
-                        entity_type,
-                        entity_id
+                        context.entity_type,
+                        context.entity_id
                     );
                 }
                 Ok(None) => {
                     #[cfg(feature = "observability")]
                     tracing::debug!(
                         "Pre-anchor hook returned None for {} {} (no snapshot needed)",
-                        entity_type,
-                        entity_id
+                        context.entity_type,
+                        context.entity_id
                     );
                 }
                 Err(_e) => {
                     #[cfg(feature = "observability")]
                     tracing::warn!(
                         "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
-                        entity_type,
-                        entity_id,
-                        timestamp,
+                        context.entity_type,
+                        context.entity_id,
+                        context.timestamp,
                         _e
                     );
                 }
@@ -4631,5 +4657,67 @@ mod tests {
                 .unwrap()
                 .is_delta()
         );
+    }
+
+    #[test]
+    fn test_count_versions_since_anchor_generic() {
+        // Direct test of the generic count_versions_since_anchor helper
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        });
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Create anchor(0), delta(1), delta(2)
+        let mut version_ids = Vec::new();
+        for i in 0..3 {
+            let vid = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+            version_ids.push(vid);
+        }
+
+        // Test counting from version 2 (delta) - should find 2 deltas before anchor
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[2]), 2);
+
+        // Test counting from version 1 (delta) - should find 1 delta before anchor
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[1]), 1);
+
+        // Test counting from version 0 (anchor) - should find 0 deltas
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[0]), 0);
+
+        // Create more versions to get anchor(3), delta(4)
+        for i in 3..5 {
+            let vid = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+            version_ids.push(vid);
+        }
+
+        // Test counting from version 4 (delta after new anchor) - should find 1 delta
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[4]), 1);
+
+        // Test counting from version 3 (new anchor) - should find 0 deltas
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[3]), 0);
     }
 }

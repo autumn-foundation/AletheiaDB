@@ -442,9 +442,43 @@ impl TemporalVersion for EdgeVersion {
 
 /// Trait for version types that support common version chain operations.
 ///
-/// This trait extends `TemporalVersion` with methods needed for version chain
+/// This trait extends [`TemporalVersion`] with methods needed for version chain
 /// management, enabling generic implementations of version creation logic
 /// and reducing code duplication between node and edge version handling.
+///
+/// # Trait Bounds
+///
+/// This trait requires `TemporalVersion`, which provides access to temporal
+/// intervals via `temporal()` and `temporal_mut()`. This allows generic code
+/// to both read and modify temporal properties.
+///
+/// # Example
+///
+/// ```ignore
+/// use crate::storage::version::EntityVersion;
+///
+/// /// Count versions in a chain until reaching an anchor.
+/// fn count_deltas_to_anchor<V: EntityVersion>(
+///     start_version: &V,
+///     get_version: impl Fn(VersionId) -> Option<&V>,
+/// ) -> usize {
+///     let mut count = 0;
+///     let mut current_id = start_version.prev_version();
+///
+///     while let Some(vid) = current_id {
+///         if let Some(version) = get_version(vid) {
+///             if version.is_anchor() {
+///                 break;
+///             }
+///             count += 1;
+///             current_id = version.prev_version();
+///         } else {
+///             break;
+///         }
+///     }
+///     count
+/// }
+/// ```
 pub trait EntityVersion: TemporalVersion {
     /// Get the version's unique identifier.
     fn version_id(&self) -> VersionId;
