@@ -233,6 +233,13 @@ impl CurrentIndexes {
     /// This optimization saves ~0.5-2ns per adjacency access by avoiding
     /// the acquire fence on the fast path. See Issue #336 for details.
     ///
+    /// # Safety Justification
+    ///
+    /// Even if we miss `dirty=true` due to Relaxed ordering, the subsequent
+    /// `ArcSwap::load_full()` uses Acquire ordering internally, which synchronizes
+    /// with the Release store from `rebuild_adjacency_internal()`. This guarantees
+    /// we see a consistent (though possibly pre-rebuild) adjacency snapshot.
+    ///
     /// # Race Window (Acceptable)
     ///
     /// There's a benign race where:
@@ -1529,8 +1536,9 @@ mod dirty_flag_optimization_tests {
                     assert_eq!(len, iter_count, "Snapshot should be internally consistent");
 
                     // Each entry should have valid data
+                    // Targets are created as (i + 1) % 10, so always < 10
                     for entry in guard.iter() {
-                        assert!(entry.target.as_u64() < 100);
+                        assert!(entry.target.as_u64() < 10);
                         assert!(entry.edge_id.as_u64() < 100);
                     }
                 }
@@ -1613,7 +1621,7 @@ mod dirty_flag_optimization_tests {
         });
 
         writer.join().expect("Writer should complete");
-        let _saw_new = reader.join().expect("Reader should complete");
+        let _ = reader.join().expect("Reader should complete");
 
         // Eventually, the new edge must be visible
         let final_guard = indexes.get_outgoing(NodeId::new(0).unwrap());
@@ -1651,7 +1659,7 @@ mod dirty_flag_optimization_tests {
             let running_clone = Arc::clone(&running);
             reader_handles.push(thread::spawn(move || {
                 let mut reads = 0u64;
-                while running_clone.load(Ordering::Relaxed) {
+                while running_clone.load(Ordering::Acquire) {
                     for node_id in 0..20 {
                         let guard = indexes_clone.get_outgoing(NodeId::new(node_id).unwrap());
                         // Verify data consistency
@@ -1686,8 +1694,8 @@ mod dirty_flag_optimization_tests {
             handle.join().expect("Writer should complete");
         }
 
-        // Stop readers
-        running.store(false, Ordering::Relaxed);
+        // Stop readers (Release synchronizes with Acquire loads in reader threads)
+        running.store(false, Ordering::Release);
 
         // Wait for readers and collect stats
         let mut total_reads = 0u64;
