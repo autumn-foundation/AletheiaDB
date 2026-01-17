@@ -436,7 +436,7 @@ impl TemporalIndexes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::temporal::BiTemporalInterval;
+    use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX};
 
     #[test]
     fn test_insert_and_find_node_versions() {

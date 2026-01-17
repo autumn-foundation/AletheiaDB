@@ -1747,7 +1747,7 @@ mod tests {
     use super::*;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::TimeRange;
+    use crate::core::temporal::{TimeRange, TIMESTAMP_MAX};
     use crate::storage::{StorageEvent, StorageObserver};
 
     #[test]
