@@ -23,7 +23,7 @@ fn create_benchmark_db() -> GallifreyDB {
             flush_interval_ms: 100,
         })
         .build();
-    GallifreyDB::with_wal_config(wal_config)
+    GallifreyDB::with_wal_config(wal_config).unwrap()
 }
 
 /// Create a test database with versioned history.
@@ -314,7 +314,7 @@ fn bench_batch_operations(c: &mut Criterion) {
             &batch_size,
             |b, &size| {
                 b.iter_batched(
-                    GallifreyDB::new,
+                    || GallifreyDB::new().unwrap(),
                     |db| {
                         for i in 0..size {
                             let props = PropertyMapBuilder::new().insert("id", i as i64).build();
