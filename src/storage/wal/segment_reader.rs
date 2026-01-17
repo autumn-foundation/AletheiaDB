@@ -342,8 +342,8 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                 }
             }
             5 => {
-                // Checkpoint
-                if offset + 16 > buffer.len() {
+                // Checkpoint: Phase 2: LSN (8 bytes) + HybridTimestamp (12 bytes) = 20 bytes
+                if offset + 20 > buffer.len() {
                     break;
                 }
                 let cp_lsn = LSN(u64::from_le_bytes([
@@ -358,21 +358,13 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                 ]));
                 offset += 8;
 
-                let cp_timestamp = i64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]);
-                offset += 8;
+                // Phase 2: Deserialize HybridTimestamp (12 bytes: 8 wallclock + 4 logical)
+                let (cp_timestamp, consumed) = HybridTimestamp::deserialize(&buffer[offset..])?;
+                offset += consumed;
 
                 WalOperation::Checkpoint {
                     lsn: cp_lsn,
-                    timestamp: HybridTimestamp::new_unchecked(cp_timestamp, 0),
+                    timestamp: cp_timestamp,
                 }
             }
             6 => {

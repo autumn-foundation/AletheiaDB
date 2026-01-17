@@ -668,10 +668,10 @@ mod tests {
         ];
         for range in ranges {
             let bytes = range.serialize();
-            assert_eq!(bytes.len(), 16.into());
+            assert_eq!(bytes.len(), 24); // Phase 2: 2 x 12-byte HybridTimestamp
             let (deserialized, consumed) = TimeRange::deserialize(&bytes).unwrap();
             assert_eq!(deserialized, range);
-            assert_eq!(consumed, 16.into());
+            assert_eq!(consumed, 24);
         }
     }
 
@@ -680,14 +680,14 @@ mod tests {
         let range = TimeRange::new(100.into(), 200.into()).unwrap();
         let mut buffer = Vec::new();
         range.serialize_into(&mut buffer);
-        assert_eq!(buffer.len(), 16.into());
+        assert_eq!(buffer.len(), 24); // Phase 2: 2 x 12-byte HybridTimestamp
         let (deserialized, _) = TimeRange::deserialize(&buffer).unwrap();
         assert_eq!(deserialized, range);
     }
 
     #[test]
     fn test_timerange_deserialize_truncated() {
-        let result = TimeRange::deserialize(&[0; 15]);
+        let result = TimeRange::deserialize(&[0; 23]); // Phase 2: 24 bytes needed
         assert!(result.is_err());
     }
 
@@ -704,10 +704,10 @@ mod tests {
         ];
         for interval in intervals {
             let bytes = interval.serialize();
-            assert_eq!(bytes.len(), 32.into());
+            assert_eq!(bytes.len(), 48); // Phase 2: 2 x 24-byte TimeRange
             let (deserialized, consumed) = BiTemporalInterval::deserialize(&bytes).unwrap();
             assert_eq!(deserialized, interval);
-            assert_eq!(consumed, 32.into());
+            assert_eq!(consumed, 48);
         }
     }
 
@@ -719,27 +719,39 @@ mod tests {
         );
         let mut buffer = Vec::new();
         interval.serialize_into(&mut buffer);
-        assert_eq!(buffer.len(), 32.into());
+        assert_eq!(buffer.len(), 48); // Phase 2: 2 x 24-byte TimeRange
         let (deserialized, _) = BiTemporalInterval::deserialize(&buffer).unwrap();
         assert_eq!(deserialized, interval);
     }
 
     #[test]
     fn test_bitemporal_deserialize_truncated() {
-        let result = BiTemporalInterval::deserialize(&[0; 31]);
+        let result = BiTemporalInterval::deserialize(&[0; 47]); // Phase 2: 48 bytes needed
         assert!(result.is_err());
     }
 
     #[test]
     fn test_serialization_endianness() {
-        // Verify little-endian format
+        // Phase 2: Verify HybridTimestamp little-endian format
+        // Format: [start_wallclock:8][start_logical:4][end_wallclock:8][end_logical:4]
         let range = TimeRange::new(0x0102030405060708i64.into(), 0x1112131415161718i64.into()).unwrap();
         let bytes = range.serialize();
-        // Little-endian: least significant byte first
-        assert_eq!(bytes[0], 0x08);
-        assert_eq!(bytes[7], 0x01);
-        assert_eq!(bytes[8], 0x18);
-        assert_eq!(bytes[15], 0x11);
+
+        assert_eq!(bytes.len(), 24); // Total size: 24 bytes
+
+        // Start timestamp wallclock (bytes 0-7) - little-endian
+        assert_eq!(bytes[0], 0x08, "start.wallclock LSB");
+        assert_eq!(bytes[7], 0x01, "start.wallclock MSB");
+
+        // Start timestamp logical (bytes 8-11) - should be 0
+        assert_eq!(&bytes[8..12], &[0, 0, 0, 0], "start.logical should be 0");
+
+        // End timestamp wallclock (bytes 12-19) - little-endian
+        assert_eq!(bytes[12], 0x18, "end.wallclock LSB");
+        assert_eq!(bytes[19], 0x11, "end.wallclock MSB");
+
+        // End timestamp logical (bytes 20-23) - should be 0
+        assert_eq!(&bytes[20..24], &[0, 0, 0, 0], "end.logical should be 0");
     }
 
     // =========================================================================

@@ -331,13 +331,15 @@ impl Checkpoint {
             .map_err(|e| StorageError::IoError(format!("Failed to read LSN: {}", e)))?;
         let lsn = LSN(u64::from_le_bytes(lsn_bytes));
 
-        // Phase 2: Read timestamp as i64 wallclock, convert to HybridTimestamp
-        let mut timestamp_bytes = [0u8; 8];
+        // Phase 2: Read HybridTimestamp (12 bytes: 8 wallclock + 4 logical)
+        let mut timestamp_bytes = [0u8; 12];
         reader
             .read_exact(&mut timestamp_bytes)
             .map_err(|e| StorageError::IoError(format!("Failed to read timestamp: {}", e)))?;
-        let timestamp_i64 = i64::from_le_bytes(timestamp_bytes);
-        let timestamp = crate::core::hlc::HybridTimestamp::new_unchecked(timestamp_i64, 0);
+        let (timestamp, _) = crate::core::hlc::HybridTimestamp::deserialize(&timestamp_bytes)
+            .map_err(|e| {
+                StorageError::CorruptedData(format!("Failed to deserialize timestamp: {}", e))
+            })?;
 
         let mut node_count_bytes = [0u8; 8];
         reader
