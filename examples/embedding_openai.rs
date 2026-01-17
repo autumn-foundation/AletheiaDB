@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Store in GallifreyDB
     println!("💾 Storing in GallifreyDB...");
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new()?;
 
     let mut node_ids = Vec::new();
     for (doc, embedding) in documents.iter().zip(embeddings.iter()) {
