@@ -3135,6 +3135,32 @@ impl GallifreyDB {
         &self.current
     }
 
+    /// Get the current WAL LSN (test-only helper).
+    ///
+    /// This method provides access to the current WAL Log Sequence Number for
+    /// test verification purposes. This is particularly useful for testing index
+    /// persistence where LSN coordination with the WAL is critical for correctness.
+    ///
+    /// **Warning**: This method exposes internal implementation details and
+    /// should only be used in tests.
+    ///
+    /// # Returns
+    ///
+    /// The current LSN from the WAL system.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let db = GallifreyDB::new();
+    /// db.create_node("Person", properties)?;
+    /// let lsn = db.__test_current_wal_lsn();
+    /// assert!(lsn > 0); // LSN advances after operations
+    /// ```
+    #[doc(hidden)]
+    pub fn __test_current_wal_lsn(&self) -> u64 {
+        self.wal.current_lsn().0
+    }
+
     /// Access the internal HistoricalStorage for testing purposes.
     ///
     /// This method provides access to the internal HistoricalStorage for

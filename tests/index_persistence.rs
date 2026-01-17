@@ -2594,9 +2594,8 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
         .unwrap();
     }
 
-    // Get current WAL LSN before persisting
-    // We need to access the WAL through the DB's internal structure
-    // Since this is a test, we'll verify the manifest LSN is > 0
+    // Get current WAL LSN before persisting to verify exact match
+    let expected_lsn = db.__test_current_wal_lsn();
 
     // Persist indexes - this should capture the current WAL LSN
     db.persist_indexes().unwrap();
@@ -2605,22 +2604,23 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
     let manager = IndexPersistenceManager::new(&data_dir);
     let manifest = manager.load_manifest_and_strings().unwrap();
 
-    // The critical assertion: LSN should NOT be 0 (the old hardcoded value)
+    // Critical assertion: LSN should NOT be hardcoded to 0 (the old bug)
     assert_ne!(
         manifest.lsn, 0,
         "LSN should not be hardcoded to 0 - it should reflect actual WAL position"
     );
 
-    // Additionally, verify LSN is reasonable (should be > 0 after creating 10 nodes + 9 edges)
-    assert!(
-        manifest.lsn > 0,
-        "LSN should be greater than 0 after database operations. Got: {}",
-        manifest.lsn
+    // Enhanced assertion: LSN should exactly match WAL LSN at persist time
+    // This is the strongest verification - catches ANY hardcoded value (0, 1, 100, etc.)
+    assert_eq!(
+        manifest.lsn, expected_lsn,
+        "Manifest LSN should exactly match WAL LSN at persist time. Expected: {}, Got: {}",
+        expected_lsn, manifest.lsn
     );
 
     println!(
-        "✓ persist_indexes() correctly uses actual WAL LSN: {}",
-        manifest.lsn
+        "✓ persist_indexes() correctly uses actual WAL LSN: {} (expected: {})",
+        manifest.lsn, expected_lsn
     );
-    println!("✓ Issue #410 fix verified: No hardcoded LSN=0");
+    println!("✓ Issue #410 fix verified: No hardcoded LSN, exact match confirmed");
 }
