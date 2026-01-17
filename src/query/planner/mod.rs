@@ -493,16 +493,16 @@ impl QueryPlanner {
                 property_key,
             } => {
                 // Use specified property or default to "embedding"
-                let effective_property = property_key.as_deref().unwrap_or("embedding").to_string();
+                let effective_property = property_key.as_deref().unwrap_or("embedding");
 
                 // Validate that vector index is enabled for the property
-                if !self.storage.has_vector_index(&effective_property) {
+                if !self.storage.has_vector_index(effective_property) {
                     return Err(Error::Query(QueryError::IndexNotFound {
                         index_type: "vector".to_string(),
-                        property_name: effective_property,
+                        property_name: effective_property.to_string(),
                         hint: Some(format!(
                             "Call db.enable_vector_index(\"{}\", config) first",
-                            property_key.as_deref().unwrap_or("embedding")
+                            effective_property
                         )),
                     }));
                 }

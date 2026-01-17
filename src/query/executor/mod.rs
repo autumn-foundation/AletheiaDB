@@ -156,14 +156,13 @@ impl QueryExecutor {
                 timestamp,
                 property_key,
             } => {
-                let results = match property_key {
-                    // Property-specific temporal search
-                    Some(prop) => self
-                        .current
-                        .find_similar_as_of_in(prop, embedding, *k, *timestamp)?,
-                    // Default property temporal search
-                    None => self.current.find_similar_as_of(embedding, *k, *timestamp)?,
-                };
+                // Always use the multi-property-aware method with explicit property name.
+                // This ensures correctness in multi-property setups and avoids relying on
+                // legacy single-property state (which would use the last enabled index).
+                let prop = property_key.as_deref().unwrap_or("embedding");
+                let results = self
+                    .current
+                    .find_similar_as_of_in(prop, embedding, *k, *timestamp)?;
 
                 Ok(Box::new(iterators::VectorResultIterator::new(
                     results,
