@@ -440,6 +440,94 @@ impl TemporalVersion for EdgeVersion {
     }
 }
 
+/// Trait for version types that support common version chain operations.
+///
+/// This trait extends `TemporalVersion` with methods needed for version chain
+/// management, enabling generic implementations of version creation logic
+/// and reducing code duplication between node and edge version handling.
+pub trait EntityVersion: TemporalVersion {
+    /// Get the version's unique identifier.
+    fn version_id(&self) -> VersionId;
+
+    /// Check if this version is an anchor (full snapshot).
+    fn is_anchor(&self) -> bool;
+
+    /// Get the link to the previous version in the chain.
+    fn prev_version(&self) -> Option<VersionId>;
+
+    /// Set the link to the previous version in the chain.
+    fn set_prev_version(&mut self, version_id: Option<VersionId>);
+
+    /// Get the link to the next version in the chain.
+    fn next_version(&self) -> Option<VersionId>;
+
+    /// Set the link to the next version in the chain.
+    fn set_next_version(&mut self, version_id: Option<VersionId>);
+
+    /// Get a mutable reference to the version data.
+    fn data_mut(&mut self) -> &mut VersionData;
+}
+
+impl EntityVersion for NodeVersion {
+    fn version_id(&self) -> VersionId {
+        self.id
+    }
+
+    fn is_anchor(&self) -> bool {
+        self.data.is_anchor()
+    }
+
+    fn prev_version(&self) -> Option<VersionId> {
+        self.prev_version
+    }
+
+    fn set_prev_version(&mut self, version_id: Option<VersionId>) {
+        self.prev_version = version_id;
+    }
+
+    fn next_version(&self) -> Option<VersionId> {
+        self.next_version
+    }
+
+    fn set_next_version(&mut self, version_id: Option<VersionId>) {
+        self.next_version = version_id;
+    }
+
+    fn data_mut(&mut self) -> &mut VersionData {
+        &mut self.data
+    }
+}
+
+impl EntityVersion for EdgeVersion {
+    fn version_id(&self) -> VersionId {
+        self.id
+    }
+
+    fn is_anchor(&self) -> bool {
+        self.data.is_anchor()
+    }
+
+    fn prev_version(&self) -> Option<VersionId> {
+        self.prev_version
+    }
+
+    fn set_prev_version(&mut self, version_id: Option<VersionId>) {
+        self.prev_version = version_id;
+    }
+
+    fn next_version(&self) -> Option<VersionId> {
+        self.next_version
+    }
+
+    fn set_next_version(&mut self, version_id: Option<VersionId>) {
+        self.next_version = version_id;
+    }
+
+    fn data_mut(&mut self) -> &mut VersionData {
+        &mut self.data
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
