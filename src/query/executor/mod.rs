@@ -150,6 +150,26 @@ impl QueryExecutor {
                 }
             }
 
+            PhysicalOp::TemporalVectorSearch {
+                embedding,
+                k,
+                timestamp,
+                property_key,
+            } => {
+                // Always use the multi-property-aware method with explicit property name.
+                // This ensures correctness in multi-property setups and avoids relying on
+                // legacy single-property state (which would use the last enabled index).
+                let prop = property_key.as_deref().unwrap_or("embedding");
+                let results = self
+                    .current
+                    .find_similar_as_of_in(prop, embedding, *k, *timestamp)?;
+
+                Ok(Box::new(iterators::VectorResultIterator::new(
+                    results,
+                    Arc::clone(&self.current),
+                )))
+            }
+
             PhysicalOp::IndexedTraversal {
                 input,
                 direction,

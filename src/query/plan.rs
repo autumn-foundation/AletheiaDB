@@ -192,6 +192,9 @@ pub enum ScanOp {
         k: usize,
         /// Timestamp for the historical query
         timestamp: Timestamp,
+        /// Property key containing the embedding vector
+        /// If None, uses the default/first indexed property
+        property_key: Option<String>,
     },
     /// Find nodes similar to a specific node by extracting its embedding
     SimilarToNode {

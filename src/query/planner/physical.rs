@@ -123,11 +123,17 @@ impl PhysicalPlan {
                 }
             }
             PhysicalOp::HnswSearch {
-                k, label_filter, ..
+                k,
+                label_filter,
+                property_key,
+                ..
             } => {
                 line.push_str(&format!(" (k={})", k));
                 if let Some(l) = label_filter {
                     line.push_str(&format!(" [label={}]", l));
+                }
+                if let Some(prop) = property_key {
+                    line.push_str(&format!(" [property={}]", prop));
                 }
             }
             PhysicalOp::TemporalNodeLookup {
@@ -137,16 +143,28 @@ impl PhysicalPlan {
             } => {
                 line.push_str(&format!(" (rows: {}, batch={})", node_ids.len(), use_batch));
             }
-            PhysicalOp::TemporalVectorSearch { k, timestamp, .. } => {
+            PhysicalOp::TemporalVectorSearch {
+                k,
+                timestamp,
+                property_key,
+                ..
+            } => {
                 line.push_str(&format!(" (k={}, ts={})", k, timestamp));
+                if let Some(prop) = property_key {
+                    line.push_str(&format!(" [property={}]", prop));
+                }
             }
             PhysicalOp::SimilarToNode {
-                k, label_filter, ..
+                k,
+                label_filter,
+                property_key,
+                ..
             } => {
                 line.push_str(&format!(" (k={})", k));
                 if let Some(l) = label_filter {
                     line.push_str(&format!(" [label={}]", l));
                 }
+                line.push_str(&format!(" [property={}]", property_key));
             }
             PhysicalOp::IndexedTraversal {
                 direction,
@@ -540,9 +558,19 @@ impl PhysicalOp {
                 )
             }
             PhysicalOp::HnswSearch {
-                k, label_filter, ..
+                k,
+                label_filter,
+                property_key,
+                ..
             } => {
-                format!("{prefix}{name} (k: {}, label: {:?})", k, label_filter)
+                let prop_str = property_key
+                    .as_ref()
+                    .map(|p| format!(", prop: {}", p))
+                    .unwrap_or_default();
+                format!(
+                    "{prefix}{name} (k: {}, label: {:?}{})",
+                    k, label_filter, prop_str
+                )
             }
             PhysicalOp::TemporalNodeLookup {
                 node_ids,
@@ -554,6 +582,18 @@ impl PhysicalOp {
                     "{prefix}{name} (ids: {:?}, vt: {}, tt: {}, batch: {})",
                     node_ids, valid_time, transaction_time, use_batch
                 )
+            }
+            PhysicalOp::TemporalVectorSearch {
+                k,
+                timestamp,
+                property_key,
+                ..
+            } => {
+                let prop_str = property_key
+                    .as_ref()
+                    .map(|p| format!(", prop: {}", p))
+                    .unwrap_or_default();
+                format!("{prefix}{name} (k: {}, ts: {}{})", k, timestamp, prop_str)
             }
             PhysicalOp::SimilarToNode {
                 source_node,
@@ -1731,5 +1771,87 @@ mod tests {
         assert!(explanation.contains("cpu=15.5"));
         assert!(explanation.contains("io=2.0"));
         assert!(explanation.contains("mem=1.0KB"));
+    }
+
+    // ==================== Property Key Explain Tests (Issue #411) ====================
+
+    #[test]
+    fn test_explain_hnsw_search_with_property_key() {
+        let plan = PhysicalOp::HnswSearch {
+            embedding: Arc::from([0.1f32; 4].as_slice()),
+            k: 10,
+            label_filter: None,
+            property_key: Some("title_embedding".to_string()),
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("HnswSearch"));
+        assert!(explain.contains("k: 10"));
+        assert!(explain.contains("prop: title_embedding"));
+    }
+
+    #[test]
+    fn test_explain_hnsw_search_without_property_key() {
+        let plan = PhysicalOp::HnswSearch {
+            embedding: Arc::from([0.1f32; 4].as_slice()),
+            k: 10,
+            label_filter: None,
+            property_key: None,
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("HnswSearch"));
+        assert!(explain.contains("k: 10"));
+        // Should not show property key when None
+        assert!(!explain.contains("prop:"));
+    }
+
+    #[test]
+    fn test_explain_temporal_vector_search_with_property_key() {
+        let plan = PhysicalOp::TemporalVectorSearch {
+            embedding: Arc::from([0.1f32; 4].as_slice()),
+            k: 10,
+            timestamp: 42000,
+            property_key: Some("content_embedding".to_string()),
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("TemporalVectorSearch"));
+        assert!(explain.contains("k: 10"));
+        assert!(explain.contains("ts: 42000"));
+        assert!(explain.contains("prop: content_embedding"));
+    }
+
+    #[test]
+    fn test_explain_temporal_vector_search_without_property_key() {
+        let plan = PhysicalOp::TemporalVectorSearch {
+            embedding: Arc::from([0.1f32; 4].as_slice()),
+            k: 10,
+            timestamp: 42000,
+            property_key: None,
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("TemporalVectorSearch"));
+        assert!(explain.contains("k: 10"));
+        assert!(explain.contains("ts: 42000"));
+        // Should not show property key when None
+        assert!(!explain.contains("prop:"));
+    }
+
+    #[test]
+    fn test_explain_similar_to_node_with_property_key() {
+        let plan = PhysicalOp::SimilarToNode {
+            source_node: NodeId::new(42).unwrap(),
+            property_key: "document_embedding".to_string(),
+            k: 5,
+            label_filter: Some("Document".to_string()),
+        };
+
+        let explain = plan.explain();
+        assert!(explain.contains("SimilarToNode"));
+        assert!(explain.contains("k: 5"));
+        assert!(explain.contains("label: Some(\"Document\")"));
+        assert!(explain.contains("prop: document_embedding"));
     }
 }

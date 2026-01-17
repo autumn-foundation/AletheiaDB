@@ -476,32 +476,42 @@ impl QueryPlanner {
                 })
             }
 
+            // TemporalVectorSearch can be created via two paths:
+            // 1. Direct: ScanOp::TemporalVectorSearch (from programmatic logical plan construction)
+            //    - This path is used when code directly creates a LogicalPlan with TemporalVectorSearch
+            //    - Less common, mainly for advanced use cases or internal transformations
+            // 2. Conversion: ScanOp::VectorSearch + temporal_context → PhysicalOp::TemporalVectorSearch
+            //    - This is the primary path used by QueryBuilder when .as_of() or .between() is combined
+            //      with .find_similar() or .find_similar_builder().property("key")
+            //    - Handled above at lines 447-453 where VectorSearch checks temporal_context
+            //    - The property_key from VectorSearch is preserved in the conversion
+            // Both paths validate property_key against enabled vector indexes.
             ScanOp::TemporalVectorSearch {
                 embedding,
                 k,
                 timestamp,
+                property_key,
             } => {
-                // Validate that vector index is enabled for temporal search
-                if !self.storage.is_vector_index_enabled() {
-                    let property_name = self
-                        .storage
-                        .get_indexed_property_name()
-                        .unwrap_or_else(|| "embedding".to_string());
+                // Use specified property or default to "embedding"
+                let effective_property = property_key.as_deref().unwrap_or("embedding");
+
+                // Validate that vector index is enabled for the property
+                if !self.storage.has_vector_index(effective_property) {
                     return Err(Error::Query(QueryError::IndexNotFound {
                         index_type: "vector".to_string(),
-                        property_name,
-                        hint: Some(
-                            "Call db.enable_vector_index(\"embedding\", config) first".to_string(),
-                        ),
+                        property_name: effective_property.to_string(),
+                        hint: Some(format!(
+                            "Call db.enable_vector_index(\"{}\", config) first",
+                            effective_property
+                        )),
                     }));
                 }
 
-                // TODO: Add property_key to ScanOp::TemporalVectorSearch for full multi-property support
                 Ok(PhysicalOp::TemporalVectorSearch {
                     embedding: embedding.clone(),
                     k: *k,
                     timestamp: *timestamp,
-                    property_key: None, // Uses default property for legacy TemporalVectorSearch scan
+                    property_key: property_key.clone(),
                 })
             }
             ScanOp::SimilarToNode {
@@ -1579,5 +1589,146 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(matches!(err, crate::utils::error::Error::Query(_)));
+    }
+
+    // ==================== Multi-Property Temporal Vector Search Tests (Issue #411) ====================
+
+    #[test]
+    fn test_scan_op_temporal_vector_search_with_property_key() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::hnsw::HnswConfig;
+        use crate::storage::CurrentStorage;
+
+        // Create planner with multi-property vector index
+        let storage = Arc::new(CurrentStorage::new());
+        let config = HnswConfig::new(4, DistanceMetric::Cosine);
+        storage
+            .enable_vector_index("embedding", config.clone())
+            .unwrap();
+        storage
+            .enable_vector_index("title_embedding", config)
+            .unwrap();
+        let planner = QueryPlanner::new(Arc::new(Statistics::default()), storage);
+
+        // Create a logical plan with ScanOp::TemporalVectorSearch directly
+        let embedding: Arc<[f32]> = Arc::from([0.1f32; 4].as_slice());
+        let logical_plan = LogicalPlan::new(LogicalOp::Scan(ScanOp::TemporalVectorSearch {
+            embedding,
+            k: 10,
+            timestamp: 1000,
+            property_key: Some("title_embedding".to_string()),
+        }));
+
+        let physical_plan = planner.to_physical_plan(&logical_plan).unwrap();
+        match &physical_plan.root {
+            PhysicalOp::TemporalVectorSearch { property_key, .. } => {
+                assert_eq!(
+                    property_key.as_deref(),
+                    Some("title_embedding"),
+                    "property_key should be extracted from ScanOp::TemporalVectorSearch"
+                );
+            }
+            _ => panic!(
+                "Expected TemporalVectorSearch, got {:?}",
+                physical_plan.root.name()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_vector_search_with_temporal_context_preserves_property_key() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::hnsw::HnswConfig;
+        use crate::storage::CurrentStorage;
+
+        // This tests the existing path: VectorSearch + temporal_context -> TemporalVectorSearch
+        let storage = Arc::new(CurrentStorage::new());
+        let config = HnswConfig::new(4, DistanceMetric::Cosine);
+        storage
+            .enable_vector_index("embedding", config.clone())
+            .unwrap();
+        storage
+            .enable_vector_index("title_embedding", config)
+            .unwrap();
+        let planner = QueryPlanner::new(Arc::new(Statistics::default()), storage);
+
+        let embedding = [0.1f32; 4];
+        let query = QueryBuilder::new()
+            .as_of(1000, 2000)
+            .find_similar_builder(&embedding, 10)
+            .property("title_embedding")
+            .finish()
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::TemporalVectorSearch { property_key, .. } => {
+                assert_eq!(
+                    property_key.as_deref(),
+                    Some("title_embedding"),
+                    "property_key should be preserved through VectorSearch->TemporalVectorSearch conversion"
+                );
+            }
+            _ => panic!("Expected TemporalVectorSearch, got {:?}", plan.root.name()),
+        }
+    }
+
+    #[test]
+    fn test_temporal_vector_search_default_property() {
+        let planner = test_planner();
+        let embedding = [0.1f32; 4];
+        let query = QueryBuilder::new()
+            .as_of(1000, 2000)
+            .find_similar(&embedding, 10)
+            .build();
+
+        let plan = planner.plan(query).unwrap();
+        match &plan.root {
+            PhysicalOp::TemporalVectorSearch { property_key, .. } => {
+                assert_eq!(
+                    property_key, &None,
+                    "property_key should be None when using default property"
+                );
+            }
+            _ => panic!("Expected TemporalVectorSearch, got {:?}", plan.root.name()),
+        }
+    }
+
+    #[test]
+    fn test_temporal_vector_search_invalid_property_error() {
+        use crate::index::vector::DistanceMetric;
+        use crate::index::vector::hnsw::HnswConfig;
+        use crate::storage::CurrentStorage;
+
+        // Create planner with only "embedding" property enabled
+        let storage = Arc::new(CurrentStorage::new());
+        let config = HnswConfig::new(4, DistanceMetric::Cosine);
+        storage.enable_vector_index("embedding", config).unwrap();
+        let planner = QueryPlanner::new(Arc::new(Statistics::default()), storage);
+
+        // Try to use a non-existent property in temporal search
+        let embedding: Arc<[f32]> = Arc::from([0.1f32; 4].as_slice());
+        let logical_plan = LogicalPlan::new(LogicalOp::Scan(ScanOp::TemporalVectorSearch {
+            embedding,
+            k: 10,
+            timestamp: 1000,
+            property_key: Some("nonexistent_property".to_string()),
+        }));
+
+        let result = planner.to_physical_plan(&logical_plan);
+        assert!(result.is_err(), "Should reject invalid property name");
+
+        let err = result.unwrap_err();
+        match err {
+            Error::Query(QueryError::IndexNotFound {
+                index_type,
+                property_name,
+                ..
+            }) => {
+                assert_eq!(index_type, "vector");
+                assert_eq!(property_name, "nonexistent_property");
+            }
+            _ => panic!("Expected IndexNotFound error, got {:?}", err),
+        }
     }
 }
