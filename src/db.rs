@@ -5926,6 +5926,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_wal_creation_failure_propagates_error() {
         // When WAL creation fails, the error should be propagated instead of panicking
@@ -5959,6 +5960,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_unified_config_wal_failure_propagates_error() {
         // When WAL creation fails in with_unified_config, the error should be propagated
