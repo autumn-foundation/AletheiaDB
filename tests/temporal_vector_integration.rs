@@ -353,3 +353,113 @@ fn test_vector_snapshot_id_stored_in_anchors() {
         anchor_count
     );
 }
+
+/// Integration test for multi-property temporal vector search (Issue #411).
+///
+/// Verifies that the multi-property temporal vector search API works end-to-end.
+/// This test verifies that `find_similar_as_of_in()` can successfully target
+/// different vector properties.
+#[test]
+fn test_multi_property_temporal_vector_search_execution() {
+    // Create database with anchors every 1 version for simpler testing
+    let anchor_config = AnchorConfig {
+        anchor_interval: 1,
+        max_delta_chain: 10,
+    };
+    let db = GallifreyDB::with_config(anchor_config);
+
+    // Enable temporal vector indexing for TWO different properties
+    let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
+    let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config.clone());
+
+    db.enable_temporal_vector_index("embedding", temporal_config.clone())
+        .expect("Failed to enable temporal vector index for 'embedding'");
+
+    db.enable_temporal_vector_index("title_embedding", temporal_config)
+        .expect("Failed to enable temporal vector index for 'title_embedding'");
+
+    // Verify both temporal indexes are enabled
+    assert!(
+        db.is_temporal_vector_index_enabled(),
+        "Temporal vector indexing should be enabled"
+    );
+
+    // Create nodes with BOTH embeddings
+    let node1_id = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Rust Programming")
+                .insert_vector("embedding", &[1.0f32, 0.0, 0.0, 0.0])
+                .insert_vector("title_embedding", &[0.0f32, 1.0, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node1");
+
+    let _node2_id = db
+        .create_node(
+            "Document",
+            PropertyMapBuilder::new()
+                .insert("title", "Python Programming")
+                .insert_vector("embedding", &[0.9f32, 0.1, 0.0, 0.0])
+                .insert_vector("title_embedding", &[0.1f32, 0.9, 0.0, 0.0])
+                .build(),
+        )
+        .expect("Failed to create node2");
+
+    // Update nodes a few times to trigger snapshots
+    for i in 1..=3 {
+        db.write(|tx| {
+            tx.update_node(
+                node1_id,
+                PropertyMapBuilder::new()
+                    .insert("title", format!("Rust Programming - v{}", i))
+                    .insert("iteration", i as i64)
+                    .insert_vector(
+                        "embedding",
+                        &[1.0f32 - (i as f32 * 0.1), i as f32 * 0.1, 0.0, 0.0],
+                    )
+                    .insert_vector(
+                        "title_embedding",
+                        &[0.0f32, 1.0 - (i as f32 * 0.1), i as f32 * 0.1, 0.0],
+                    )
+                    .build(),
+            )?;
+            Ok(())
+        })
+        .expect("Failed to update node1");
+    }
+
+    // Test 1: Verify the API accepts property_key parameter for "embedding"
+    let query_vec_1 = vec![1.0f32, 0.0, 0.0, 0.0];
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+
+    let result_embedding = db.find_similar_as_of_in("embedding", &query_vec_1, 10, current_time);
+    assert!(
+        result_embedding.is_ok(),
+        "find_similar_as_of_in should succeed for 'embedding' property"
+    );
+
+    // Test 2: Verify the API accepts property_key parameter for "title_embedding"
+    let query_vec_2 = vec![0.0f32, 1.0, 0.0, 0.0];
+    let result_title = db.find_similar_as_of_in("title_embedding", &query_vec_2, 10, current_time);
+    assert!(
+        result_title.is_ok(),
+        "find_similar_as_of_in should succeed for 'title_embedding' property"
+    );
+
+    // Test 3: Verify invalid property returns error
+    let result_invalid = db.find_similar_as_of_in("nonexistent", &query_vec_1, 10, current_time);
+    assert!(
+        result_invalid.is_err(),
+        "find_similar_as_of_in should fail for invalid property"
+    );
+
+    println!("✓ Multi-property temporal vector search API validated");
+    println!("  - Successfully enabled two temporal vector indexes");
+    println!("  - find_similar_as_of_in() accepts different property keys");
+    println!("  - Invalid property names are properly rejected");
+}
