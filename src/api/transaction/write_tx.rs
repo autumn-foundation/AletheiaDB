@@ -257,10 +257,11 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let ts_lock_start = std::time::Instant::now();
 
-            let mut ts = self
-                .current_timestamp
-                .lock()
-                .expect("timestamp lock poisoned - unrecoverable state");
+            let mut ts = self.current_timestamp.lock_or_err().map_err(|e| {
+                TransactionError::CommitFailed {
+                    reason: format!("timestamp lock poisoned: {}", e),
+                }
+            })?;
 
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
@@ -2664,6 +2665,97 @@ mod tests {
         for i in 0..99 {
             assert_eq!(current.out_degree(nodes[i]), 1);
             assert_eq!(current.in_degree(nodes[i + 1]), 1);
+        }
+    }
+
+    // ==================== Lock Poisoning Tests ====================
+
+    /// Create a test write transaction with a custom timestamp mutex.
+    /// This allows testing lock poisoning scenarios.
+    fn create_test_write_tx_with_timestamp(
+        current_timestamp: Arc<Mutex<Timestamp>>,
+    ) -> (WriteTransaction, TempDir) {
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let tx_id_gen = TxIdGenerator::new();
+
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
+        };
+
+        let tx = WriteTransaction::new(
+            tx_id_gen.next(),
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+        );
+
+        (tx, temp_dir)
+    }
+
+    #[test]
+    fn test_commit_timestamp_lock_poisoning_returns_error() {
+        // Test that commit returns a proper error if the timestamp lock is poisoned
+        // instead of panicking (Issue #342).
+        use std::thread;
+
+        // Create timestamp mutex that we'll poison
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let ts_clone = Arc::clone(&current_timestamp);
+
+        // Poison the lock by panicking while holding it
+        let handle = thread::spawn(move || {
+            let _guard = ts_clone.lock().unwrap();
+            panic!("intentional panic to poison timestamp lock");
+        });
+
+        // Wait for the poisoning thread to complete
+        let _ = handle.join();
+
+        // Create the transaction with the poisoned lock
+        let (mut tx, _temp_dir) = create_test_write_tx_with_timestamp(current_timestamp);
+
+        // Create a node so we have something to commit
+        let props = PropertyMapBuilder::new().insert("name", "Test").build();
+        tx.create_node("TestNode", props).unwrap();
+
+        // Commit should return a CommitFailed error, not panic
+        let result = tx.commit();
+        assert!(result.is_err());
+
+        // Verify it's the correct error type (TransactionError::CommitFailed)
+        if let Err(crate::utils::error::Error::Transaction(
+            crate::utils::error::TransactionError::CommitFailed { reason },
+        )) = result
+        {
+            assert!(
+                reason.contains("timestamp lock poisoned"),
+                "Expected error message to contain 'timestamp lock poisoned', got: {}",
+                reason
+            );
+        } else {
+            panic!(
+                "Expected TransactionError::CommitFailed, got {:?}",
+                result.err()
+            );
         }
     }
 }
