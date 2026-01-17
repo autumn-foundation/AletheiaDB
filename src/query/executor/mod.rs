@@ -150,6 +150,27 @@ impl QueryExecutor {
                 }
             }
 
+            PhysicalOp::TemporalVectorSearch {
+                embedding,
+                k,
+                timestamp,
+                property_key,
+            } => {
+                let results = match property_key {
+                    // Property-specific temporal search
+                    Some(prop) => self
+                        .current
+                        .find_similar_as_of_in(prop, embedding, *k, *timestamp)?,
+                    // Default property temporal search
+                    None => self.current.find_similar_as_of(embedding, *k, *timestamp)?,
+                };
+
+                Ok(Box::new(iterators::VectorResultIterator::new(
+                    results,
+                    Arc::clone(&self.current),
+                )))
+            }
+
             PhysicalOp::IndexedTraversal {
                 input,
                 direction,
