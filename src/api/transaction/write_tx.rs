@@ -257,7 +257,11 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let ts_lock_start = std::time::Instant::now();
 
-            let mut ts = self.current_timestamp.lock_or_err()?;
+            let mut ts = self.current_timestamp.lock_or_err().map_err(|e| {
+                TransactionError::CommitFailed {
+                    reason: format!("timestamp lock poisoned: {}", e),
+                }
+            })?;
 
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
@@ -2666,12 +2670,11 @@ mod tests {
 
     // ==================== Lock Poisoning Tests ====================
 
-    #[test]
-    fn test_commit_timestamp_lock_poisoning_returns_error() {
-        // Test that commit returns a proper error if the timestamp lock is poisoned
-        // instead of panicking (Issue #342).
-        use std::thread;
-
+    /// Create a test write transaction with a custom timestamp mutex.
+    /// This allows testing lock poisoning scenarios.
+    fn create_test_write_tx_with_timestamp(
+        current_timestamp: Arc<Mutex<Timestamp>>,
+    ) -> (WriteTransaction, TempDir) {
         let current = Arc::new(CurrentStorage::new());
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let temporal_indexes = Arc::new(TemporalIndexes::new());
@@ -2680,7 +2683,6 @@ mod tests {
         let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
         let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
 
-        let current_timestamp = Arc::new(Mutex::new(time::now()));
         let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
         let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
@@ -2692,7 +2694,31 @@ mod tests {
             active_transactions: Arc::new(std::collections::HashSet::new()),
         };
 
-        // Clone timestamp mutex for poisoning thread
+        let tx = WriteTransaction::new(
+            tx_id_gen.next(),
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+        );
+
+        (tx, temp_dir)
+    }
+
+    #[test]
+    fn test_commit_timestamp_lock_poisoning_returns_error() {
+        // Test that commit returns a proper error if the timestamp lock is poisoned
+        // instead of panicking (Issue #342).
+        use std::thread;
+
+        // Create timestamp mutex that we'll poison
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
         let ts_clone = Arc::clone(&current_timestamp);
 
         // Poison the lock by panicking while holding it
@@ -2704,38 +2730,30 @@ mod tests {
         // Wait for the poisoning thread to complete
         let _ = handle.join();
 
-        // Create the transaction after the lock is poisoned
-        let mut tx = WriteTransaction::new(
-            tx_id_gen.next(),
-            snapshot,
-            current,
-            historical,
-            temporal_indexes,
-            wal,
-            current_timestamp, // This mutex is now poisoned
-            visibility_manager,
-            node_id_gen,
-            edge_id_gen,
-            version_id_gen,
-        );
+        // Create the transaction with the poisoned lock
+        let (mut tx, _temp_dir) = create_test_write_tx_with_timestamp(current_timestamp);
 
         // Create a node so we have something to commit
         let props = PropertyMapBuilder::new().insert("name", "Test").build();
         tx.create_node("TestNode", props).unwrap();
 
-        // Commit should return a LockPoisoned error, not panic
+        // Commit should return a CommitFailed error, not panic
         let result = tx.commit();
         assert!(result.is_err());
 
-        // Verify it's the correct error type
-        if let Err(crate::utils::error::Error::Storage(
-            crate::utils::error::StorageError::LockPoisoned { lock_type },
+        // Verify it's the correct error type (TransactionError::CommitFailed)
+        if let Err(crate::utils::error::Error::Transaction(
+            crate::utils::error::TransactionError::CommitFailed { reason },
         )) = result
         {
-            assert_eq!(lock_type, "Mutex");
+            assert!(
+                reason.contains("timestamp lock poisoned"),
+                "Expected error message to contain 'timestamp lock poisoned', got: {}",
+                reason
+            );
         } else {
             panic!(
-                "Expected StorageError::LockPoisoned, got {:?}",
+                "Expected TransactionError::CommitFailed, got {:?}",
                 result.err()
             );
         }

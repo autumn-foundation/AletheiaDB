@@ -318,9 +318,21 @@ impl ConcurrentWalSystem {
             // transactions register with GroupCommitCoordinator but their entries
             // were already drained by a previous flush iteration.
             let should_mark_flushed = !entries.is_empty()
-                || group_commit
-                    .as_ref()
-                    .is_some_and(|gc| gc.current_batch_size().unwrap_or(0) > 0);
+                || group_commit.as_ref().is_some_and(|gc| {
+                    match gc.current_batch_size() {
+                        Ok(size) => size > 0,
+                        Err(e) => {
+                            // Lock poisoned - coordinator is in unrecoverable state.
+                            // Log error and assume no pending transactions (conservative).
+                            eprintln!(
+                                "CRITICAL: GroupCommitCoordinator lock poisoned during batch size check: {}. \
+                                 Pending transactions may be lost.",
+                                e
+                            );
+                            false
+                        }
+                    }
+                });
 
             if !entries.is_empty() {
                 // Flush to coordinator
@@ -332,9 +344,16 @@ impl ConcurrentWalSystem {
                         // Reset error counter on success
                         error_counter.store(0, Ordering::Relaxed);
                         if let Some(ref gc) = group_commit {
-                            // Ignore mark_flushed error: if lock is poisoned, coordinator is
-                            // corrupt anyway and waiters will fail on their next operation
-                            let _ = gc.mark_flushed(Ok(()));
+                            // If mark_flushed fails due to lock poisoning, the coordinator is
+                            // in an unrecoverable state. Log the error but continue - waiters
+                            // will fail on their next operation anyway.
+                            if let Err(e) = gc.mark_flushed(Ok(())) {
+                                eprintln!(
+                                    "CRITICAL: GroupCommitCoordinator lock poisoned during mark_flushed: {}. \
+                                     Database is in degraded state, transactions may hang.",
+                                    e
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -353,11 +372,15 @@ impl ConcurrentWalSystem {
                         if let Some(ref gc) = group_commit {
                             // Create a new error from the string representation
                             // (Error doesn't implement Clone, but mark_flushed only stores the string)
-                            // Ignore mark_flushed error: if lock is poisoned, coordinator is
-                            // corrupt anyway and waiters will fail on their next operation
-                            let _ = gc.mark_flushed(Err(crate::utils::error::Error::other(
-                                e.to_string(),
-                            )));
+                            if let Err(poison_err) = gc
+                                .mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
+                            {
+                                eprintln!(
+                                    "CRITICAL: GroupCommitCoordinator lock poisoned during mark_flushed: {}. \
+                                     Database is in degraded state, transactions may hang.",
+                                    poison_err
+                                );
+                            }
                         }
                     }
                 }
@@ -365,9 +388,14 @@ impl ConcurrentWalSystem {
                 // No entries but there are pending transactions - advance epoch anyway
                 // This handles the race where entries were flushed before transactions
                 // called register_transaction()
-                if let Some(ref gc) = group_commit {
-                    // Ignore mark_flushed error: see comment above
-                    let _ = gc.mark_flushed(Ok(()));
+                if let Some(ref gc) = group_commit
+                    && let Err(e) = gc.mark_flushed(Ok(()))
+                {
+                    eprintln!(
+                        "CRITICAL: GroupCommitCoordinator lock poisoned during mark_flushed: {}. \
+                         Database is in degraded state, transactions may hang.",
+                        e
+                    );
                 }
             }
 
@@ -384,17 +412,25 @@ impl ConcurrentWalSystem {
             match result {
                 Ok(_) => {
                     error_counter.store(0, Ordering::Relaxed);
-                    if let Some(ref gc) = group_commit {
-                        // Ignore mark_flushed error: see comment above
-                        let _ = gc.mark_flushed(Ok(()));
+                    if let Some(ref gc) = group_commit
+                        && let Err(e) = gc.mark_flushed(Ok(()))
+                    {
+                        eprintln!(
+                            "CRITICAL: GroupCommitCoordinator lock poisoned during shutdown flush: {}",
+                            e
+                        );
                     }
                 }
                 Err(e) => {
                     error_counter.fetch_add(1, Ordering::Relaxed);
-                    if let Some(ref gc) = group_commit {
-                        // Ignore mark_flushed error: see comment above
-                        let _ =
-                            gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())));
+                    if let Some(ref gc) = group_commit
+                        && let Err(poison_err) =
+                            gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
+                    {
+                        eprintln!(
+                            "CRITICAL: GroupCommitCoordinator lock poisoned during shutdown flush: {}",
+                            poison_err
+                        );
                     }
                 }
             }
