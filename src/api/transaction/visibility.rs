@@ -500,7 +500,7 @@ mod tests {
         // Setup: commit several transactions
         for i in 1..=10 {
             manager.register_active(TxId::new(i));
-            manager.register_commit(TxId::new(i), (i * 10) as i64);
+            manager.register_commit(TxId::new(i), ((i * 10) as i64).into());
         }
 
         // Take snapshot after all commits (timestamp 100 is the last commit)

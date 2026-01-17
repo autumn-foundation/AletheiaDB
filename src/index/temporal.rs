@@ -1374,7 +1374,7 @@ mod tests {
                 (
                     VersionId::new(vid).unwrap(),
                     BiTemporalInterval::new(
-                        TimeRange::new(start, end).unwrap(),
+                        TimeRange::new(start.into(), end.into()).unwrap(),
                         TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                     ),
                 )

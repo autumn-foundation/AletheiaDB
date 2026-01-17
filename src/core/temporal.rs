@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn test_serialization_endianness() {
         // Verify little-endian format
-        let range = TimeRange::new(0x0102030405060708i64, 0x1112131415161718i64).unwrap();
+        let range = TimeRange::new(0x0102030405060708i64.into(), 0x1112131415161718i64.into()).unwrap();
         let bytes = range.serialize();
         // Little-endian: least significant byte first
         assert_eq!(bytes[0], 0x08);
