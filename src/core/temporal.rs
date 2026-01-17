@@ -588,17 +588,17 @@ mod tests {
     fn test_bitemporal_close() {
         let interval = BiTemporalInterval::now(1000.into(), 2000.into());
 
-        let closed_valid = interval.close_valid_time(1500);
+        let closed_valid = interval.close_valid_time(1500.into());
         assert!(!closed_valid.is_currently_valid());
         assert!(closed_valid.is_currently_recorded());
         assert_eq!(closed_valid.valid_time().end(), 1500.into());
 
-        let closed_tx = interval.close_transaction_time(2500);
+        let closed_tx = interval.close_transaction_time(2500.into());
         assert!(closed_tx.is_currently_valid());
         assert!(!closed_tx.is_currently_recorded());
         assert_eq!(closed_tx.transaction_time().end(), 2500.into());
 
-        let closed_both = interval.close_both(1500, 2500);
+        let closed_both = interval.close_both(1500.into(), 2500.into());
         assert!(!closed_both.is_currently_valid());
         assert!(!closed_both.is_currently_recorded());
     }
@@ -663,7 +663,7 @@ mod tests {
             TimeRange::new(100.into(), 200.into()).unwrap(),
             TimeRange::from(1000.into()),
             TimeRange::at(500.into()),
-            TimeRange::new(i64::MIN, i64::MAX).unwrap(),
+            TimeRange::new(i64::MIN.into(), i64::MAX.into()).unwrap(),
             TimeRange::new(0.into(), 0.into()).unwrap(),
         ];
         for range in ranges {
