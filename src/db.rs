@@ -3195,6 +3195,35 @@ impl GallifreyDB {
         &self.historical
     }
 
+    /// Get adaptive over-fetch statistics for a label (test-only helper).
+    ///
+    /// Returns the current statistics (search_count, total_candidates, total_results)
+    /// for the given label, or None if no searches have been performed yet.
+    ///
+    /// This is used for testing to verify that adaptive learning is working correctly.
+    ///
+    /// **Warning**: This method exposes internal implementation details and
+    /// should only be used in tests.
+    ///
+    /// # Returns
+    ///
+    /// Some((search_count, total_candidates, total_results)) if statistics exist,
+    /// None otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let db = GallifreyDB::new()?;
+    /// db.enable_vector_index("embedding", config)?;
+    /// // ... create nodes and perform searches ...
+    /// let (count, candidates, results) = db.__test_get_filter_stats("Person").unwrap();
+    /// assert_eq!(count, 10); // 10 searches performed
+    /// ```
+    #[doc(hidden)]
+    pub fn __test_get_filter_stats(&self, label: &str) -> Option<(u64, u64, u64)> {
+        self.current.get_filter_stats(label)
+    }
+
     /// Get the query optimization statistics.
     ///
     /// Statistics are used for cost-based query optimization and are cached
