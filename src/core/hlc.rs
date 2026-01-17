@@ -257,3 +257,26 @@ impl std::fmt::Display for HybridTimestamp {
         write!(f, "{}.{}", self.wallclock, self.logical)
     }
 }
+
+/// Convert an i64 wallclock timestamp to HybridTimestamp with logical counter = 0.
+///
+/// This enables seamless migration from Phase 1 (i64 timestamps) to Phase 2 (HybridTimestamp).
+/// The conversion is primarily used in:
+/// - Test code using integer literals
+/// - Legacy APIs that accept i64 timestamps
+/// - WAL/storage deserialization where logical counter is unknown
+///
+/// # Examples
+/// ```
+/// # use gallifreydb::core::hlc::HybridTimestamp;
+/// let ts: HybridTimestamp = 1000_i64.into();
+/// assert_eq!(ts.wallclock(), 1000);
+/// assert_eq!(ts.logical(), 0);
+/// ```
+impl From<i64> for HybridTimestamp {
+    fn from(wallclock: i64) -> Self {
+        // Use new_unchecked for performance - caller responsible for validation
+        // In test code and deserialization contexts, values are trusted
+        HybridTimestamp::new_unchecked(wallclock, 0)
+    }
+}

@@ -299,7 +299,9 @@ impl WriteTransaction {
             // This ensures: if wallclock advances, reset logical; otherwise increment logical
             let commit = ts
                 .send(current_wallclock.wallclock())
-                .expect("HLC send should not fail with valid wallclock");
+                .map_err(|e| TransactionError::CommitFailed {
+                    reason: format!("HLC timestamp generation failed: {}", e),
+                })?;
 
             // Observability: Warn about clock skew issues
             #[cfg(feature = "observability")]
