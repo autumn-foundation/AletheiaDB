@@ -47,7 +47,7 @@ fn create_db_with_mode(mode: DurabilityMode) -> (GallifreyDB, TempDir) {
         .unwrap()
         .durability_mode(mode)
         .build();
-    let db = GallifreyDB::with_wal_config(config);
+    let db = GallifreyDB::with_wal_config(config).unwrap();
     (db, temp_dir)
 }
 

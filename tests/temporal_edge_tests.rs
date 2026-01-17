@@ -15,7 +15,8 @@ fn test_temporal_edge_lookup_basic() {
     let db = GallifreyDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
 
     // Increased delay to ensure background flush thread has started (fixes CI race condition)
     // On heavily loaded CI systems, the default 10ms may not be sufficient for thread scheduling.
@@ -155,7 +156,8 @@ fn test_temporal_edge_multiple_updates() {
     let db = GallifreyDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 3,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
 
     // Increased delay to ensure background flush thread has started (fixes CI race condition)
     // On heavily loaded CI systems, the default 10ms may not be sufficient for thread scheduling.
@@ -260,7 +262,8 @@ fn test_temporal_edge_interval_closing() {
     let db = GallifreyDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
 
     // Increased delay to ensure background flush thread has started (fixes CI race condition)
     // On heavily loaded CI systems, the default 10ms may not be sufficient for thread scheduling.
@@ -377,7 +380,8 @@ fn test_temporal_edge_version_chain_integrity() {
     let db = GallifreyDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
 
     // Create nodes
     let alice = db
@@ -466,7 +470,8 @@ fn test_temporal_edge_anchor_delta_pattern() {
     let db = GallifreyDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 3, // Create anchor every 3 versions
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
 
     // Increased delay to ensure background flush thread has started (fixes CI race condition)
     // On heavily loaded CI systems, the default 10ms may not be sufficient for thread scheduling.
@@ -552,7 +557,8 @@ fn test_temporal_edge_with_vector_properties() {
     let db = GallifreyDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
 
     // Create nodes
     let alice = db

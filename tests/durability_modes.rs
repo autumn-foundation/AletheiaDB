@@ -32,7 +32,7 @@ fn create_db_with_mode(mode: DurabilityMode) -> GallifreyDB {
         .unwrap()
         .durability_mode(mode)
         .build();
-    GallifreyDB::with_wal_config(config)
+    GallifreyDB::with_wal_config(config).unwrap()
 }
 
 // =============================================================================
@@ -41,7 +41,7 @@ fn create_db_with_mode(mode: DurabilityMode) -> GallifreyDB {
 
 #[test]
 fn test_synchronous_mode_is_default() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Default mode should be Synchronous
     let node_id = db
@@ -516,7 +516,7 @@ fn test_async_data_flushed_on_shutdown() {
                 flush_interval_ms: 60000, // Very long - won't naturally flush
             })
             .build();
-        let db = GallifreyDB::with_wal_config(config);
+        let db = GallifreyDB::with_wal_config(config).unwrap();
 
         let options = WriteOptions {
             durability_mode: Some(DurabilityMode::Async {
@@ -559,7 +559,7 @@ fn test_write_options_default() {
 
 #[test]
 fn test_write_with_options_closure_semantics() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Test that closure can access outer scope
     let prefix = "test_";
@@ -587,7 +587,7 @@ fn test_write_with_options_closure_semantics() {
 
 #[test]
 fn test_write_options_bulk_import_preset_integration() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Use bulk_import preset for fast loading - all writes in ONE transaction
     let node_ids = db
@@ -621,7 +621,7 @@ fn test_write_options_bulk_import_preset_integration() {
 
 #[test]
 fn test_write_options_critical_preset_integration() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Use critical preset for important data
     let node_id = db
@@ -649,7 +649,7 @@ fn test_write_options_critical_preset_integration() {
 
 #[test]
 fn test_preset_methods_mixed_usage() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Use bulk_import for initial data
     let bulk_node = db
@@ -688,7 +688,7 @@ fn test_preset_methods_mixed_usage() {
 
 #[test]
 fn test_error_in_write_with_options_propagates() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     let result: Result<(), gallifreydb::Error> =
         db.write_with_options(WriteOptions::default(), |_tx| {
@@ -796,7 +796,7 @@ fn test_segment_rotation_with_background_thread() {
         })
         .build();
 
-    let db = GallifreyDB::with_wal_config(config);
+    let db = GallifreyDB::with_wal_config(config).unwrap();
 
     // Write enough data to trigger multiple segment rotations
     // Each node with properties is ~100-200 bytes
@@ -1066,7 +1066,7 @@ fn test_async_batched_graceful_shutdown() {
                 max_batch_size: 10000,
             })
             .build();
-        let db = GallifreyDB::with_wal_config(config);
+        let db = GallifreyDB::with_wal_config(config).unwrap();
 
         let options = WriteOptions {
             durability_mode: Some(DurabilityMode::AsyncBatched {
@@ -1210,7 +1210,7 @@ fn test_async_batched_with_segment_rotation() {
         })
         .build();
 
-    let db = GallifreyDB::with_wal_config(config);
+    let db = GallifreyDB::with_wal_config(config).unwrap();
 
     let options = WriteOptions {
         durability_mode: Some(DurabilityMode::AsyncBatched {

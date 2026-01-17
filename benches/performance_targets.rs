@@ -151,7 +151,7 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
     let mut group = c.benchmark_group("target_time_travel");
 
     // Setup: Create database with anchored versions
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let node_id = db
         .create_node(
             "Person",
@@ -210,7 +210,7 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
 
     // Setup: Create database with 15 updates
     // Anchors at updates 1, 11 (default anchor_interval = 10)
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let node_id = db
         .create_node(
             "Person",
@@ -271,7 +271,7 @@ fn bench_time_travel_worst_case(c: &mut Criterion) {
 
     // Setup: Create database with 19 updates
     // Anchors at updates 1, 11 (default anchor_interval = 10)
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let node_id = db
         .create_node(
             "Person",

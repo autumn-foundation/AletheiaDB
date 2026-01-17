@@ -6,7 +6,7 @@ use std::thread;
 #[test]
 fn test_phantom_delete_violation() {
     // 1. Setup: Create DB and a "Doctor" node
-    let db = Arc::new(GallifreyDB::new());
+    let db = Arc::new(GallifreyDB::new().unwrap());
 
     let node_id = {
         let mut tx = db.write_transaction().unwrap();

@@ -267,7 +267,7 @@ mod tests {
 
     /// Helper to create a test database with vector indexing enabled.
     fn create_test_db() -> GallifreyDB {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let config = HnswConfig::new(4, DistanceMetric::Cosine);
         db.enable_vector_index("embedding", config)
             .expect("Failed to enable vector index");
@@ -703,7 +703,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
         let temporal_config = TemporalVectorConfig {
             snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
