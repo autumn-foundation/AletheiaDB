@@ -106,12 +106,13 @@ impl GroupCommitCoordinator {
     ///
     /// A tuple of (epoch_to_wait_for, should_trigger_flush)
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the coordinator lock is poisoned. This is an unrecoverable state
-    /// indicating the coordinator is broken and cannot safely coordinate commits.
-    pub fn register_transaction(&self) -> (u64, bool) {
-        let mut state = self.state.lock().expect("group commit lock poisoned");
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock was poisoned
+    /// by a panicking thread. This indicates the coordinator is in an inconsistent
+    /// state and cannot safely coordinate commits.
+    pub fn register_transaction(&self) -> Result<(u64, bool), Error> {
+        let mut state = self.state.lock_or_err()?;
 
         state.batch_count += 1;
         let epoch = state.current_epoch;
@@ -119,7 +120,7 @@ impl GroupCommitCoordinator {
         // Check if we should trigger immediate flush (batch full)
         let should_flush = state.batch_count >= self.config.max_batch_size;
 
-        (epoch, should_flush)
+        Ok((epoch, should_flush))
     }
 
     /// Wait for the specified epoch to be flushed.
@@ -161,7 +162,7 @@ impl GroupCommitCoordinator {
             let (new_state, timeout_result) = self
                 .flush_complete
                 .wait_timeout(state, timeout)
-                .expect("group commit lock poisoned");
+                .map_err(|_| StorageError::LockPoisoned { lock_type: "Mutex" })?;
 
             state = new_state;
 
@@ -197,8 +198,13 @@ impl GroupCommitCoordinator {
     ///
     /// * `result` - The result of the flush operation. If `Err`, the error
     ///   is stored and propagated to all waiters.
-    pub fn mark_flushed(&self, result: Result<(), Error>) {
-        let mut state = self.state.lock().expect("group commit lock poisoned");
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock was poisoned
+    /// by a panicking thread.
+    pub fn mark_flushed(&self, result: Result<(), Error>) -> Result<(), Error> {
+        let mut state = self.state.lock_or_err()?;
 
         // Store any error for propagation
         state.last_flush_error = result.err().map(|e| e.to_string());
@@ -214,44 +220,53 @@ impl GroupCommitCoordinator {
 
         // Wake all waiting transactions
         self.flush_complete.notify_all();
+
+        Ok(())
     }
 
     /// Get the current batch size.
     ///
     /// Useful for monitoring and testing.
-    pub fn current_batch_size(&self) -> usize {
-        self.state
-            .lock()
-            .expect("group commit lock poisoned")
-            .batch_count
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock was poisoned.
+    pub fn current_batch_size(&self) -> Result<usize, Error> {
+        Ok(self.state.lock_or_err()?.batch_count)
     }
 
     /// Get the current epoch.
     ///
     /// Useful for monitoring and testing.
-    pub fn current_epoch(&self) -> u64 {
-        self.state
-            .lock()
-            .expect("group commit lock poisoned")
-            .current_epoch
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock was poisoned.
+    pub fn current_epoch(&self) -> Result<u64, Error> {
+        Ok(self.state.lock_or_err()?.current_epoch)
     }
 
     /// Get the last flushed epoch.
     ///
     /// Useful for monitoring and testing.
-    pub fn flushed_epoch(&self) -> u64 {
-        self.state
-            .lock()
-            .expect("group commit lock poisoned")
-            .flushed_epoch
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock was poisoned.
+    pub fn flushed_epoch(&self) -> Result<u64, Error> {
+        Ok(self.state.lock_or_err()?.flushed_epoch)
     }
 
     /// Check if a flush should be triggered based on batch size.
     ///
     /// Called by the flush thread to check if the batch is full.
-    pub fn should_flush(&self) -> bool {
-        let state = self.state.lock().expect("group commit lock poisoned");
-        state.batch_count >= self.config.max_batch_size
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError::LockPoisoned` if the coordinator lock was poisoned.
+    pub fn should_flush(&self) -> Result<bool, Error> {
+        let state = self.state.lock_or_err()?;
+        Ok(state.batch_count >= self.config.max_batch_size)
     }
 
     /// Get the maximum delay for this coordinator.
@@ -266,12 +281,255 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
+    // ==================== TDD Tests for Lock Poisoning Error Handling ====================
+    // These tests verify that methods return proper errors instead of panicking
+    // when mutex locks are poisoned.
+
+    #[test]
+    fn test_register_transaction_returns_result() {
+        // Test that register_transaction returns Result instead of panicking
+        let coord = GroupCommitCoordinator::new(10, 200);
+        let result = coord.register_transaction();
+        assert!(result.is_ok());
+        let (epoch, should_flush) = result.unwrap();
+        assert_eq!(epoch, 0);
+        assert!(!should_flush);
+    }
+
+    #[test]
+    fn test_register_transaction_with_poisoned_lock() {
+        // Test that register_transaction returns LockPoisoned error instead of panicking
+        let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
+        let coord_clone = Arc::clone(&coord);
+
+        // Poison the lock by panicking while holding it
+        let handle = thread::spawn(move || {
+            // We need to access the inner state to poison it
+            let _guard = coord_clone.state.lock().unwrap();
+            panic!("intentional panic to poison lock");
+        });
+
+        let _ = handle.join(); // This will return Err since the thread panicked
+
+        // Now register_transaction should return an error, not panic
+        let result = coord.register_transaction();
+        assert!(result.is_err());
+
+        // Verify it's the correct error type
+        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
+            assert_eq!(lock_type, "Mutex");
+        } else {
+            panic!(
+                "Expected StorageError::LockPoisoned, got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_mark_flushed_returns_result() {
+        // Test that mark_flushed returns Result instead of panicking
+        let coord = GroupCommitCoordinator::new(10, 100);
+        let _ = coord.register_transaction().unwrap();
+        let result = coord.mark_flushed(Ok(()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mark_flushed_with_poisoned_lock() {
+        // Test that mark_flushed returns LockPoisoned error instead of panicking
+        let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
+        let coord_clone = Arc::clone(&coord);
+
+        // Poison the lock
+        let handle = thread::spawn(move || {
+            let _guard = coord_clone.state.lock().unwrap();
+            panic!("intentional panic to poison lock");
+        });
+
+        let _ = handle.join();
+
+        // mark_flushed should return an error, not panic
+        let result = coord.mark_flushed(Ok(()));
+        assert!(result.is_err());
+
+        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
+            assert_eq!(lock_type, "Mutex");
+        } else {
+            panic!(
+                "Expected StorageError::LockPoisoned, got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_current_batch_size_returns_result() {
+        // Test that current_batch_size returns Result
+        let coord = GroupCommitCoordinator::new(10, 200);
+        let result = coord.current_batch_size();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_current_batch_size_with_poisoned_lock() {
+        let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
+        let coord_clone = Arc::clone(&coord);
+
+        let handle = thread::spawn(move || {
+            let _guard = coord_clone.state.lock().unwrap();
+            panic!("intentional panic to poison lock");
+        });
+
+        let _ = handle.join();
+
+        let result = coord.current_batch_size();
+        assert!(result.is_err());
+
+        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
+            assert_eq!(lock_type, "Mutex");
+        } else {
+            panic!(
+                "Expected StorageError::LockPoisoned, got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_current_epoch_returns_result() {
+        // Test that current_epoch returns Result
+        let coord = GroupCommitCoordinator::new(10, 200);
+        let result = coord.current_epoch();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_current_epoch_with_poisoned_lock() {
+        let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
+        let coord_clone = Arc::clone(&coord);
+
+        let handle = thread::spawn(move || {
+            let _guard = coord_clone.state.lock().unwrap();
+            panic!("intentional panic to poison lock");
+        });
+
+        let _ = handle.join();
+
+        let result = coord.current_epoch();
+        assert!(result.is_err());
+
+        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
+            assert_eq!(lock_type, "Mutex");
+        } else {
+            panic!(
+                "Expected StorageError::LockPoisoned, got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_flushed_epoch_returns_result() {
+        // Test that flushed_epoch returns Result
+        let coord = GroupCommitCoordinator::new(10, 200);
+        let result = coord.flushed_epoch();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_flushed_epoch_with_poisoned_lock() {
+        let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
+        let coord_clone = Arc::clone(&coord);
+
+        let handle = thread::spawn(move || {
+            let _guard = coord_clone.state.lock().unwrap();
+            panic!("intentional panic to poison lock");
+        });
+
+        let _ = handle.join();
+
+        let result = coord.flushed_epoch();
+        assert!(result.is_err());
+
+        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
+            assert_eq!(lock_type, "Mutex");
+        } else {
+            panic!(
+                "Expected StorageError::LockPoisoned, got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_flush_returns_result() {
+        // Test that should_flush returns Result
+        let coord = GroupCommitCoordinator::new(10, 200);
+        let result = coord.should_flush();
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_should_flush_with_poisoned_lock() {
+        let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
+        let coord_clone = Arc::clone(&coord);
+
+        let handle = thread::spawn(move || {
+            let _guard = coord_clone.state.lock().unwrap();
+            panic!("intentional panic to poison lock");
+        });
+
+        let _ = handle.join();
+
+        let result = coord.should_flush();
+        assert!(result.is_err());
+
+        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
+            assert_eq!(lock_type, "Mutex");
+        } else {
+            panic!(
+                "Expected StorageError::LockPoisoned, got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_wait_for_flush_condvar_poisoned_lock() {
+        // Test that wait_for_flush returns error if lock is poisoned during wait
+        let coord = Arc::new(GroupCommitCoordinator::new(100, 200));
+
+        // Register a transaction first
+        let (epoch, _) = coord.register_transaction().unwrap();
+        let coord_clone = Arc::clone(&coord);
+
+        // Spawn thread to poison the lock
+        let handle = thread::spawn(move || {
+            let _guard = coord_clone.state.lock().unwrap();
+            panic!("intentional panic to poison lock");
+        });
+
+        let _ = handle.join();
+
+        // wait_for_flush should return error, not panic
+        // Note: This tests that acquiring the lock after condvar wakeup handles poisoning
+        let result = coord.wait_for_flush(epoch);
+        assert!(result.is_err());
+    }
+
+    // ==================== Original Tests (Updated for Result-based API) ====================
+
     #[test]
     fn test_new_coordinator() {
         let coord = GroupCommitCoordinator::new(10, 200);
-        assert_eq!(coord.current_epoch(), 0);
-        assert_eq!(coord.flushed_epoch(), 0);
-        assert_eq!(coord.current_batch_size(), 0);
+        assert_eq!(coord.current_epoch().unwrap(), 0);
+        assert_eq!(coord.flushed_epoch().unwrap(), 0);
+        assert_eq!(coord.current_batch_size().unwrap(), 0);
     }
 
     #[test]
@@ -280,13 +538,13 @@ mod tests {
 
         // Register transactions
         for i in 0..4 {
-            let (epoch, should_flush) = coord.register_transaction();
+            let (epoch, should_flush) = coord.register_transaction().unwrap();
             assert_eq!(epoch, 0);
             assert!(!should_flush, "should not flush at batch size {}", i + 1);
         }
 
         // Fifth transaction should trigger flush
-        let (epoch, should_flush) = coord.register_transaction();
+        let (epoch, should_flush) = coord.register_transaction().unwrap();
         assert_eq!(epoch, 0);
         assert!(should_flush, "should flush when batch is full");
     }
@@ -295,17 +553,17 @@ mod tests {
     fn test_mark_flushed_advances_epoch() {
         let coord = GroupCommitCoordinator::new(10, 100);
 
-        coord.register_transaction();
-        coord.register_transaction();
+        coord.register_transaction().unwrap();
+        coord.register_transaction().unwrap();
 
-        assert_eq!(coord.current_epoch(), 0);
-        assert_eq!(coord.current_batch_size(), 2);
+        assert_eq!(coord.current_epoch().unwrap(), 0);
+        assert_eq!(coord.current_batch_size().unwrap(), 2);
 
-        coord.mark_flushed(Ok(()));
+        coord.mark_flushed(Ok(())).unwrap();
 
-        assert_eq!(coord.current_epoch(), 1);
-        assert_eq!(coord.flushed_epoch(), 1);
-        assert_eq!(coord.current_batch_size(), 0);
+        assert_eq!(coord.current_epoch().unwrap(), 1);
+        assert_eq!(coord.flushed_epoch().unwrap(), 1);
+        assert_eq!(coord.current_batch_size().unwrap(), 0);
     }
 
     #[test]
@@ -313,12 +571,12 @@ mod tests {
         let coord = Arc::new(GroupCommitCoordinator::new(100, 100));
         let coord_clone = Arc::clone(&coord);
 
-        let (epoch, _) = coord.register_transaction();
+        let (epoch, _) = coord.register_transaction().unwrap();
 
         // Spawn a thread to mark flushed after a short delay
         let handle = thread::spawn(move || {
             thread::sleep(Duration::from_millis(10));
-            coord_clone.mark_flushed(Ok(()));
+            coord_clone.mark_flushed(Ok(())).unwrap();
         });
 
         // Wait should succeed
@@ -333,14 +591,16 @@ mod tests {
         let coord = Arc::new(GroupCommitCoordinator::new(100, 100));
         let coord_clone = Arc::clone(&coord);
 
-        let (epoch, _) = coord.register_transaction();
+        let (epoch, _) = coord.register_transaction().unwrap();
 
         // Spawn a thread to mark flushed with error
         let handle = thread::spawn(move || {
             thread::sleep(Duration::from_millis(10));
-            coord_clone.mark_flushed(Err(Error::Storage(StorageError::WalError {
-                reason: "disk full".to_string(),
-            })));
+            coord_clone
+                .mark_flushed(Err(Error::Storage(StorageError::WalError {
+                    reason: "disk full".to_string(),
+                })))
+                .unwrap();
         });
 
         // Wait should return the error
@@ -356,7 +616,7 @@ mod tests {
     fn test_wait_for_flush_timeout() {
         let coord = GroupCommitCoordinator::new(10, 100); // 10ms max delay
 
-        let (epoch, _) = coord.register_transaction();
+        let (epoch, _) = coord.register_transaction().unwrap();
 
         // Wait without anyone calling mark_flushed - should timeout
         let result = coord.wait_for_flush(epoch);
@@ -372,7 +632,7 @@ mod tests {
         // Register multiple transactions
         let mut epochs = Vec::new();
         for _ in 0..5 {
-            let (epoch, _) = coord.register_transaction();
+            let (epoch, _) = coord.register_transaction().unwrap();
             epochs.push(epoch);
         }
 
@@ -390,7 +650,7 @@ mod tests {
         thread::sleep(Duration::from_millis(10));
 
         // Mark flushed
-        coord.mark_flushed(Ok(()));
+        coord.mark_flushed(Ok(())).unwrap();
 
         // All should succeed
         for handle in handles {
@@ -404,34 +664,34 @@ mod tests {
         let coord = GroupCommitCoordinator::new(10, 100);
 
         // First batch
-        coord.register_transaction();
-        coord.register_transaction();
-        coord.mark_flushed(Ok(()));
+        coord.register_transaction().unwrap();
+        coord.register_transaction().unwrap();
+        coord.mark_flushed(Ok(())).unwrap();
 
-        assert_eq!(coord.current_epoch(), 1);
+        assert_eq!(coord.current_epoch().unwrap(), 1);
 
         // Second batch
-        let (epoch, _) = coord.register_transaction();
+        let (epoch, _) = coord.register_transaction().unwrap();
         assert_eq!(epoch, 1);
 
-        coord.mark_flushed(Ok(()));
-        assert_eq!(coord.current_epoch(), 2);
+        coord.mark_flushed(Ok(())).unwrap();
+        assert_eq!(coord.current_epoch().unwrap(), 2);
     }
 
     #[test]
     fn test_should_flush() {
         let coord = GroupCommitCoordinator::new(10, 3);
 
-        assert!(!coord.should_flush());
+        assert!(!coord.should_flush().unwrap());
 
-        coord.register_transaction();
-        assert!(!coord.should_flush());
+        coord.register_transaction().unwrap();
+        assert!(!coord.should_flush().unwrap());
 
-        coord.register_transaction();
-        assert!(!coord.should_flush());
+        coord.register_transaction().unwrap();
+        assert!(!coord.should_flush().unwrap());
 
-        coord.register_transaction();
-        assert!(coord.should_flush());
+        coord.register_transaction().unwrap();
+        assert!(coord.should_flush().unwrap());
     }
 
     #[test]

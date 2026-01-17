@@ -257,10 +257,7 @@ impl WriteTransaction {
             #[cfg(feature = "observability")]
             let ts_lock_start = std::time::Instant::now();
 
-            let mut ts = self
-                .current_timestamp
-                .lock()
-                .expect("timestamp lock poisoned - unrecoverable state");
+            let mut ts = self.current_timestamp.lock_or_err()?;
 
             #[cfg(feature = "observability")]
             let ts_lock_acquired = std::time::Instant::now();
@@ -2664,6 +2661,83 @@ mod tests {
         for i in 0..99 {
             assert_eq!(current.out_degree(nodes[i]), 1);
             assert_eq!(current.in_degree(nodes[i + 1]), 1);
+        }
+    }
+
+    // ==================== Lock Poisoning Tests ====================
+
+    #[test]
+    fn test_commit_timestamp_lock_poisoning_returns_error() {
+        // Test that commit returns a proper error if the timestamp lock is poisoned
+        // instead of panicking (Issue #342).
+        use std::thread;
+
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let tx_id_gen = TxIdGenerator::new();
+
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
+        };
+
+        // Clone timestamp mutex for poisoning thread
+        let ts_clone = Arc::clone(&current_timestamp);
+
+        // Poison the lock by panicking while holding it
+        let handle = thread::spawn(move || {
+            let _guard = ts_clone.lock().unwrap();
+            panic!("intentional panic to poison timestamp lock");
+        });
+
+        // Wait for the poisoning thread to complete
+        let _ = handle.join();
+
+        // Create the transaction after the lock is poisoned
+        let mut tx = WriteTransaction::new(
+            tx_id_gen.next(),
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp, // This mutex is now poisoned
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+        );
+
+        // Create a node so we have something to commit
+        let props = PropertyMapBuilder::new().insert("name", "Test").build();
+        tx.create_node("TestNode", props).unwrap();
+
+        // Commit should return a LockPoisoned error, not panic
+        let result = tx.commit();
+        assert!(result.is_err());
+
+        // Verify it's the correct error type
+        if let Err(crate::utils::error::Error::Storage(
+            crate::utils::error::StorageError::LockPoisoned { lock_type },
+        )) = result
+        {
+            assert_eq!(lock_type, "Mutex");
+        } else {
+            panic!(
+                "Expected StorageError::LockPoisoned, got {:?}",
+                result.err()
+            );
         }
     }
 }

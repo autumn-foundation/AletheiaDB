@@ -320,7 +320,7 @@ impl ConcurrentWalSystem {
             let should_mark_flushed = !entries.is_empty()
                 || group_commit
                     .as_ref()
-                    .is_some_and(|gc| gc.current_batch_size() > 0);
+                    .is_some_and(|gc| gc.current_batch_size().unwrap_or(0) > 0);
 
             if !entries.is_empty() {
                 // Flush to coordinator
@@ -332,7 +332,9 @@ impl ConcurrentWalSystem {
                         // Reset error counter on success
                         error_counter.store(0, Ordering::Relaxed);
                         if let Some(ref gc) = group_commit {
-                            gc.mark_flushed(Ok(()));
+                            // Ignore mark_flushed error: if lock is poisoned, coordinator is
+                            // corrupt anyway and waiters will fail on their next operation
+                            let _ = gc.mark_flushed(Ok(()));
                         }
                     }
                     Err(e) => {
@@ -351,7 +353,11 @@ impl ConcurrentWalSystem {
                         if let Some(ref gc) = group_commit {
                             // Create a new error from the string representation
                             // (Error doesn't implement Clone, but mark_flushed only stores the string)
-                            gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())));
+                            // Ignore mark_flushed error: if lock is poisoned, coordinator is
+                            // corrupt anyway and waiters will fail on their next operation
+                            let _ = gc.mark_flushed(Err(crate::utils::error::Error::other(
+                                e.to_string(),
+                            )));
                         }
                     }
                 }
@@ -360,7 +366,8 @@ impl ConcurrentWalSystem {
                 // This handles the race where entries were flushed before transactions
                 // called register_transaction()
                 if let Some(ref gc) = group_commit {
-                    gc.mark_flushed(Ok(()));
+                    // Ignore mark_flushed error: see comment above
+                    let _ = gc.mark_flushed(Ok(()));
                 }
             }
 
@@ -378,13 +385,16 @@ impl ConcurrentWalSystem {
                 Ok(_) => {
                     error_counter.store(0, Ordering::Relaxed);
                     if let Some(ref gc) = group_commit {
-                        gc.mark_flushed(Ok(()));
+                        // Ignore mark_flushed error: see comment above
+                        let _ = gc.mark_flushed(Ok(()));
                     }
                 }
                 Err(e) => {
                     error_counter.fetch_add(1, Ordering::Relaxed);
                     if let Some(ref gc) = group_commit {
-                        gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())));
+                        // Ignore mark_flushed error: see comment above
+                        let _ =
+                            gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())));
                     }
                 }
             }
@@ -489,7 +499,7 @@ impl ConcurrentWalSystem {
             DurabilityMode::GroupCommit { .. } | DurabilityMode::AsyncBatched { .. } => {
                 // Register with coordinator and return epoch to wait for
                 if let Some(ref gc) = self.group_commit {
-                    let (epoch, should_trigger) = gc.register_transaction();
+                    let (epoch, should_trigger) = gc.register_transaction()?;
 
                     // If batch is full, signal flush thread to wake up immediately
                     if should_trigger {
