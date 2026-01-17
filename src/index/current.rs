@@ -1493,7 +1493,7 @@ mod dirty_flag_optimization_tests {
         // Multiple reads should all use the fast path
         for _ in 0..100 {
             let outgoing = indexes.get_outgoing(NodeId::new(0).unwrap());
-            assert!(outgoing.len() >= 1);
+            assert!(!outgoing.is_empty());
 
             // Dirty flag should remain false (no modifications)
             assert!(!indexes.adjacency_dirty.load(Ordering::Relaxed));
