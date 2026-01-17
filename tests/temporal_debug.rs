@@ -9,7 +9,8 @@ fn test_temporal_lookup_directly() {
     let db = GallifreyDB::with_config(storage::version::AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
 
     // Create a node and get the timestamp AFTER it's committed
     let node_id = db
