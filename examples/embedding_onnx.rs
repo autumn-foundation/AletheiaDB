@@ -14,6 +14,8 @@
 //! cargo run --example embedding_onnx --features embedding-onnx
 //! ```
 
+#![cfg(feature = "embedding-onnx")]
+
 use gallifreydb::embeddings::EmbeddingService;
 use gallifreydb::embeddings::providers::onnx::*;
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
@@ -65,4 +67,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   - Tokenizer implementation");
     println!("   - Tensor processing");
     Ok(())
+}
+
+#[cfg(not(feature = "embedding-onnx"))]
+fn main() {
+    eprintln!("This example requires the 'embedding-onnx' feature.");
+    eprintln!("Run with: cargo run --example embedding_onnx --features embedding-onnx");
+    std::process::exit(1);
 }

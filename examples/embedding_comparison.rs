@@ -22,6 +22,8 @@
 //! cargo run --example embedding_comparison --features embedding-all
 //! ```
 
+#![cfg(feature = "embedding-all")]
+
 use gallifreydb::embeddings::EmbeddingService;
 use gallifreydb::embeddings::providers::{huggingface::*, ollama::*, onnx::*, openai::*};
 use std::sync::Arc;
@@ -93,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(feature = "embedding-all")]
 async fn test_provider_openai(
     text: &str,
 ) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
@@ -107,6 +110,7 @@ async fn test_provider_openai(
     Ok((latency, embedding.len()))
 }
 
+#[cfg(feature = "embedding-all")]
 async fn test_provider_huggingface(
     text: &str,
 ) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
@@ -121,6 +125,7 @@ async fn test_provider_huggingface(
     Ok((latency, embedding.len()))
 }
 
+#[cfg(feature = "embedding-all")]
 async fn test_provider_ollama(
     text: &str,
 ) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {
@@ -135,6 +140,7 @@ async fn test_provider_ollama(
     Ok((latency, embedding.len()))
 }
 
+#[cfg(feature = "embedding-all")]
 async fn test_provider_onnx(
     text: &str,
 ) -> Result<(std::time::Duration, usize), Box<dyn std::error::Error>> {

@@ -15,6 +15,8 @@
 //! cargo run --example embedding_huggingface --features embedding-huggingface
 //! ```
 
+#![cfg(feature = "embedding-huggingface")]
+
 use gallifreydb::embeddings::EmbeddingService;
 use gallifreydb::embeddings::providers::huggingface::*;
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
@@ -61,4 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✨ Example complete!");
     Ok(())
+}
+
+#[cfg(not(feature = "embedding-huggingface"))]
+fn main() {
+    eprintln!("This example requires the 'embedding-huggingface' feature.");
+    eprintln!("Run with: cargo run --example embedding_huggingface --features embedding-huggingface");
+    std::process::exit(1);
 }

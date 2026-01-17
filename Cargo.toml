@@ -133,6 +133,28 @@ exclude = [
     "tests/*",
 ]
 
+# Examples with required features
+# Embedding examples require their respective feature flags
+[[example]]
+name = "embedding_openai"
+required-features = ["embedding-openai"]
+
+[[example]]
+name = "embedding_huggingface"
+required-features = ["embedding-huggingface"]
+
+[[example]]
+name = "embedding_ollama"
+required-features = ["embedding-ollama"]
+
+[[example]]
+name = "embedding_onnx"
+required-features = ["embedding-onnx"]
+
+[[example]]
+name = "embedding_comparison"
+required-features = ["embedding-all"]
+
 # Performance targets - lightweight validation of key performance metrics
 [[bench]]
 name = "performance_targets"
