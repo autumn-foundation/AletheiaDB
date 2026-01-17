@@ -162,7 +162,9 @@ impl GroupCommitCoordinator {
             let (new_state, timeout_result) = self
                 .flush_complete
                 .wait_timeout(state, timeout)
-                .map_err(|_| StorageError::LockPoisoned { lock_type: "Mutex" })?;
+                .map_err(|_| StorageError::LockPoisoned {
+                    lock_type: "Condvar",
+                })?;
 
             state = new_state;
 
@@ -281,13 +283,40 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
+    // ==================== Test Helpers for Lock Poisoning ====================
+
+    /// Poison the coordinator's internal lock by panicking while holding it.
+    /// After this function returns, any lock acquisition will fail with PoisonError.
+    fn poison_coordinator_lock(coord: &Arc<GroupCommitCoordinator>) {
+        let coord_clone = Arc::clone(coord);
+        let handle = thread::spawn(move || {
+            let _guard = coord_clone.state.lock().unwrap();
+            panic!("intentional panic to poison lock");
+        });
+        // Thread panicked, so join returns Err - this is expected
+        assert!(handle.join().is_err(), "Poisoning thread should panic");
+    }
+
+    /// Assert that a Result contains a LockPoisoned error with the expected lock_type.
+    fn assert_is_lock_poisoned<T: std::fmt::Debug>(result: Result<T, Error>, expected_type: &str) {
+        assert!(result.is_err(), "Expected error, got {:?}", result);
+        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
+            assert_eq!(lock_type, expected_type);
+        } else {
+            panic!(
+                "Expected StorageError::LockPoisoned {{ lock_type: \"{}\" }}, got {:?}",
+                expected_type,
+                result.err()
+            );
+        }
+    }
+
     // ==================== TDD Tests for Lock Poisoning Error Handling ====================
     // These tests verify that methods return proper errors instead of panicking
     // when mutex locks are poisoned.
 
     #[test]
     fn test_register_transaction_returns_result() {
-        // Test that register_transaction returns Result instead of panicking
         let coord = GroupCommitCoordinator::new(10, 200);
         let result = coord.register_transaction();
         assert!(result.is_ok());
@@ -298,37 +327,13 @@ mod tests {
 
     #[test]
     fn test_register_transaction_with_poisoned_lock() {
-        // Test that register_transaction returns LockPoisoned error instead of panicking
         let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
-        let coord_clone = Arc::clone(&coord);
-
-        // Poison the lock by panicking while holding it
-        let handle = thread::spawn(move || {
-            // We need to access the inner state to poison it
-            let _guard = coord_clone.state.lock().unwrap();
-            panic!("intentional panic to poison lock");
-        });
-
-        let _ = handle.join(); // This will return Err since the thread panicked
-
-        // Now register_transaction should return an error, not panic
-        let result = coord.register_transaction();
-        assert!(result.is_err());
-
-        // Verify it's the correct error type
-        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
-            assert_eq!(lock_type, "Mutex");
-        } else {
-            panic!(
-                "Expected StorageError::LockPoisoned, got {:?}",
-                result.err()
-            );
-        }
+        poison_coordinator_lock(&coord);
+        assert_is_lock_poisoned(coord.register_transaction(), "Mutex");
     }
 
     #[test]
     fn test_mark_flushed_returns_result() {
-        // Test that mark_flushed returns Result instead of panicking
         let coord = GroupCommitCoordinator::new(10, 100);
         let _ = coord.register_transaction().unwrap();
         let result = coord.mark_flushed(Ok(()));
@@ -337,35 +342,13 @@ mod tests {
 
     #[test]
     fn test_mark_flushed_with_poisoned_lock() {
-        // Test that mark_flushed returns LockPoisoned error instead of panicking
         let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
-        let coord_clone = Arc::clone(&coord);
-
-        // Poison the lock
-        let handle = thread::spawn(move || {
-            let _guard = coord_clone.state.lock().unwrap();
-            panic!("intentional panic to poison lock");
-        });
-
-        let _ = handle.join();
-
-        // mark_flushed should return an error, not panic
-        let result = coord.mark_flushed(Ok(()));
-        assert!(result.is_err());
-
-        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
-            assert_eq!(lock_type, "Mutex");
-        } else {
-            panic!(
-                "Expected StorageError::LockPoisoned, got {:?}",
-                result.err()
-            );
-        }
+        poison_coordinator_lock(&coord);
+        assert_is_lock_poisoned(coord.mark_flushed(Ok(())), "Mutex");
     }
 
     #[test]
     fn test_current_batch_size_returns_result() {
-        // Test that current_batch_size returns Result
         let coord = GroupCommitCoordinator::new(10, 200);
         let result = coord.current_batch_size();
         assert!(result.is_ok());
@@ -375,31 +358,12 @@ mod tests {
     #[test]
     fn test_current_batch_size_with_poisoned_lock() {
         let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
-        let coord_clone = Arc::clone(&coord);
-
-        let handle = thread::spawn(move || {
-            let _guard = coord_clone.state.lock().unwrap();
-            panic!("intentional panic to poison lock");
-        });
-
-        let _ = handle.join();
-
-        let result = coord.current_batch_size();
-        assert!(result.is_err());
-
-        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
-            assert_eq!(lock_type, "Mutex");
-        } else {
-            panic!(
-                "Expected StorageError::LockPoisoned, got {:?}",
-                result.err()
-            );
-        }
+        poison_coordinator_lock(&coord);
+        assert_is_lock_poisoned(coord.current_batch_size(), "Mutex");
     }
 
     #[test]
     fn test_current_epoch_returns_result() {
-        // Test that current_epoch returns Result
         let coord = GroupCommitCoordinator::new(10, 200);
         let result = coord.current_epoch();
         assert!(result.is_ok());
@@ -409,31 +373,12 @@ mod tests {
     #[test]
     fn test_current_epoch_with_poisoned_lock() {
         let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
-        let coord_clone = Arc::clone(&coord);
-
-        let handle = thread::spawn(move || {
-            let _guard = coord_clone.state.lock().unwrap();
-            panic!("intentional panic to poison lock");
-        });
-
-        let _ = handle.join();
-
-        let result = coord.current_epoch();
-        assert!(result.is_err());
-
-        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
-            assert_eq!(lock_type, "Mutex");
-        } else {
-            panic!(
-                "Expected StorageError::LockPoisoned, got {:?}",
-                result.err()
-            );
-        }
+        poison_coordinator_lock(&coord);
+        assert_is_lock_poisoned(coord.current_epoch(), "Mutex");
     }
 
     #[test]
     fn test_flushed_epoch_returns_result() {
-        // Test that flushed_epoch returns Result
         let coord = GroupCommitCoordinator::new(10, 200);
         let result = coord.flushed_epoch();
         assert!(result.is_ok());
@@ -443,31 +388,12 @@ mod tests {
     #[test]
     fn test_flushed_epoch_with_poisoned_lock() {
         let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
-        let coord_clone = Arc::clone(&coord);
-
-        let handle = thread::spawn(move || {
-            let _guard = coord_clone.state.lock().unwrap();
-            panic!("intentional panic to poison lock");
-        });
-
-        let _ = handle.join();
-
-        let result = coord.flushed_epoch();
-        assert!(result.is_err());
-
-        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
-            assert_eq!(lock_type, "Mutex");
-        } else {
-            panic!(
-                "Expected StorageError::LockPoisoned, got {:?}",
-                result.err()
-            );
-        }
+        poison_coordinator_lock(&coord);
+        assert_is_lock_poisoned(coord.flushed_epoch(), "Mutex");
     }
 
     #[test]
     fn test_should_flush_returns_result() {
-        // Test that should_flush returns Result
         let coord = GroupCommitCoordinator::new(10, 200);
         let result = coord.should_flush();
         assert!(result.is_ok());
@@ -477,47 +403,23 @@ mod tests {
     #[test]
     fn test_should_flush_with_poisoned_lock() {
         let coord = Arc::new(GroupCommitCoordinator::new(10, 200));
-        let coord_clone = Arc::clone(&coord);
-
-        let handle = thread::spawn(move || {
-            let _guard = coord_clone.state.lock().unwrap();
-            panic!("intentional panic to poison lock");
-        });
-
-        let _ = handle.join();
-
-        let result = coord.should_flush();
-        assert!(result.is_err());
-
-        if let Err(Error::Storage(StorageError::LockPoisoned { lock_type })) = result {
-            assert_eq!(lock_type, "Mutex");
-        } else {
-            panic!(
-                "Expected StorageError::LockPoisoned, got {:?}",
-                result.err()
-            );
-        }
+        poison_coordinator_lock(&coord);
+        assert_is_lock_poisoned(coord.should_flush(), "Mutex");
     }
 
     #[test]
-    fn test_wait_for_flush_condvar_poisoned_lock() {
-        // Test that wait_for_flush returns error if lock is poisoned during wait
+    fn test_wait_for_flush_with_poisoned_lock() {
+        // Test that wait_for_flush returns an error if the lock is already poisoned on entry.
+        // This tests the initial lock_or_err() call, not the condvar wait_timeout path.
         let coord = Arc::new(GroupCommitCoordinator::new(100, 200));
 
-        // Register a transaction first
+        // Register a transaction first (before poisoning)
         let (epoch, _) = coord.register_transaction().unwrap();
-        let coord_clone = Arc::clone(&coord);
 
-        // Spawn thread to poison the lock
-        let handle = thread::spawn(move || {
-            let _guard = coord_clone.state.lock().unwrap();
-            panic!("intentional panic to poison lock");
-        });
+        // Now poison the lock
+        poison_coordinator_lock(&coord);
 
-        let _ = handle.join();
-
-        // wait_for_flush should return error, not panic
-        // Note: This tests that acquiring the lock after condvar wakeup handles poisoning
+        // wait_for_flush should return error on initial lock acquisition, not panic
         let result = coord.wait_for_flush(epoch);
         assert!(result.is_err());
     }
