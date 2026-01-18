@@ -423,7 +423,7 @@ mod tests {
         assert!(as_of.as_of.is_some());
         assert!(as_of.between.is_none());
 
-        let between = TemporalContext::between(TimeRange::from(0));
+        let between = TemporalContext::between(TimeRange::from(0.into()));
         assert!(between.as_of.is_none());
         assert!(between.between.is_some());
     }

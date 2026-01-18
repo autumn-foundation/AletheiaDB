@@ -2127,7 +2127,7 @@ mod tests {
             let node_id = NodeId::new(i).unwrap();
             let version_id = VersionId::new(i * 100).unwrap();
             let label = GLOBAL_INTERNER.intern("Person").unwrap();
-            let timestamp = (i * 1000) as i64;
+            let timestamp = ((i * 1000) as i64).into();
 
             let props = PropertyMapBuilder::new()
                 .insert("name", format!("Person{}", i).as_str())

@@ -59,7 +59,7 @@ fn test_temporal_edge_lookup_basic() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        version.temporal.valid_time().start() + 1
+        (version.temporal.valid_time().start().wallclock() + 1).into()
     };
     println!("Using query timestamp t1={} (just after first version)", t1);
 
@@ -195,7 +195,7 @@ fn test_temporal_edge_multiple_updates() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        version.temporal.valid_time().start() + 1
+        (version.temporal.valid_time().start().wallclock() + 1).into()
     });
 
     // Update multiple times
@@ -218,7 +218,7 @@ fn test_temporal_edge_multiple_updates() {
             let hist_guard = historical.read();
             let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
             let version = hist_guard.get_edge_version(version_id).unwrap();
-            version.temporal.valid_time().start() + 1
+            (version.temporal.valid_time().start().wallclock() + 1).into()
         });
     }
 
@@ -416,7 +416,7 @@ fn test_temporal_edge_version_chain_integrity() {
 
         let mut current_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let mut version_count = 0;
-        let mut prev_timestamp = i64::MAX;
+        let mut prev_timestamp = i64::MAX.into();
 
         loop {
             let version = hist_guard.get_edge_version(current_id).unwrap();
@@ -425,7 +425,7 @@ fn test_temporal_edge_version_chain_integrity() {
             // Verify timestamp ordering (newer versions have larger timestamps)
             let current_timestamp = version.temporal.valid_time().start();
             assert!(
-                current_timestamp < prev_timestamp || prev_timestamp == i64::MAX,
+                current_timestamp < prev_timestamp || prev_timestamp == i64::MAX.into(),
                 "Version chain should be ordered by decreasing timestamp"
             );
             prev_timestamp = current_timestamp;
@@ -582,7 +582,7 @@ fn test_temporal_edge_with_vector_properties() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        version.temporal.valid_time().start() + 1
+        (version.temporal.valid_time().start().wallclock() + 1).into()
     };
 
     // Update with new vector

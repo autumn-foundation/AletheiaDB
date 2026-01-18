@@ -35,7 +35,7 @@ fn test_replay_delete_node_basic() -> Result<()> {
 
     let node_id = NodeId::new(1).unwrap();
     let timestamp1 = time::now();
-    let timestamp2 = timestamp1 + 1000;
+    let timestamp2 = (timestamp1.wallclock() + 1000).into();
 
     // Create node
     wal.append(WalOperation::CreateNode {

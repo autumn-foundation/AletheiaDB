@@ -64,7 +64,7 @@ fn create_versioned_graph(
         for &node_id in &node_ids {
             let mut tx = db.write_transaction().unwrap();
             let new_props = PropertyMapBuilder::new()
-                .insert("id", node_id.as_u64() as i64)
+                .insert("id", node_id.as_u64( as i64).into()
                 .insert("value", version as i64)
                 .insert("version", version as i64)
                 .build();
@@ -220,7 +220,7 @@ fn bench_time_travel_queries(c: &mut Criterion) {
     group.bench_function("at_anchor_v20", |b| {
         b.iter(|| {
             // Query at version 20 (anchor point)
-            let node = db.get_node_at_time(black_box(node_id), black_box(20), black_box(20));
+            let node = db.get_node_at_time(black_box(node_id), black_box(20.into()), black_box(20.into()));
             black_box(node)
         });
     });
@@ -229,7 +229,7 @@ fn bench_time_travel_queries(c: &mut Criterion) {
     group.bench_function("with_deltas_v15", |b| {
         b.iter(|| {
             // Query at version 15 (anchor@v10 + 5 deltas)
-            let node = db.get_node_at_time(black_box(node_id), black_box(15), black_box(15));
+            let node = db.get_node_at_time(black_box(node_id), black_box(15.into()), black_box(15.into()));
             black_box(node)
         });
     });
@@ -238,7 +238,7 @@ fn bench_time_travel_queries(c: &mut Criterion) {
     group.bench_function("worst_case_v19", |b| {
         b.iter(|| {
             // Query at version 19 (anchor@v10 + 9 deltas, worst case)
-            let node = db.get_node_at_time(black_box(node_id), black_box(19), black_box(19));
+            let node = db.get_node_at_time(black_box(node_id), black_box(19.into()), black_box(19.into()));
             black_box(node)
         });
     });
@@ -247,7 +247,7 @@ fn bench_time_travel_queries(c: &mut Criterion) {
     group.bench_function("deep_history_v5", |b| {
         b.iter(|| {
             // Query at very old version (tests temporal index performance)
-            let node = db.get_node_at_time(black_box(node_id), black_box(5), black_box(5));
+            let node = db.get_node_at_time(black_box(node_id), black_box(5.into()), black_box(5.into()));
             black_box(node)
         });
     });

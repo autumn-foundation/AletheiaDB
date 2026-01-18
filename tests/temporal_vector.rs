@@ -48,8 +48,8 @@ fn test_snapshot_creation_with_transaction_interval() -> Result<()> {
     let vec1 = vec![1.0, 0.0, 0.0, 0.0];
     let vec2 = vec![0.0, 1.0, 0.0, 0.0];
 
-    index.add(node1, &vec1, 1000)?;
-    index.add(node2, &vec2, 2000)?;
+    index.add(node1, &vec1, 1000.into())?;
+    index.add(node2, &vec2, 2000.into())?;
 
     assert_eq!(index.snapshot_count(), 0);
 
@@ -146,7 +146,7 @@ fn test_snapshot_pruning_with_keep_n() -> Result<()> {
     // Create 5 snapshots
     for i in 0..5 {
         let node_id = NodeId::new(i).unwrap();
-        index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], (i * 1000) as i64)?;
+        index.add(node_id, &[i as f32, (0.0, 0.0, 0.0], (i * (1000 as i64).into()).into()?;
         index.on_transaction()?;
     }
 
@@ -175,7 +175,7 @@ fn test_snapshot_pruning_with_keep_duration() -> Result<()> {
     // Create snapshots (all recent)
     for i in 0..3 {
         let node_id = NodeId::new(i).unwrap();
-        index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], (i * 1000) as i64)?;
+        index.add(node_id, &[i as f32, (0.0, 0.0, 0.0], (i * (1000 as i64).into()).into()?;
         index.on_transaction()?;
     }
 
@@ -252,7 +252,7 @@ fn test_temporal_vector_with_different_strategies() -> Result<()> {
     // Change 2 vectors (50% change should trigger snapshot)
     change_threshold_index.add(NodeId::new(0).unwrap(), &[10.0, 0.0, 0.0, 0.0], 2000)?;
     change_threshold_index.add(NodeId::new(1).unwrap(), &[11.0, 0.0, 0.0, 0.0], 2000)?;
-    change_threshold_index.on_transaction_at(2000)?;
+    change_threshold_index.on_transaction_at(2000.into())?;
 
     assert!(change_threshold_index.snapshot_count() >= 1);
 
@@ -287,7 +287,7 @@ fn test_concurrent_snapshot_creation() -> Result<()> {
         let index_clone = Arc::clone(&index);
         let handle = thread::spawn(move || -> Result<()> {
             let node_id = NodeId::new(i).unwrap();
-            index_clone.add(node_id, &[i as f32, 0.0, 0.0, 0.0], (i * 1000) as i64)?;
+            index_clone.add(node_id, &[i as f32, (0.0, 0.0, 0.0], (i * (1000 as i64).into()).into()?;
             Ok(())
         });
         handles.push(handle);
@@ -316,7 +316,7 @@ fn test_vector_dimension_validation() -> Result<()> {
     let wrong_dims = vec![1.0, 2.0]; // 2 dimensions, but index expects 4
 
     // Should fail with dimension mismatch
-    let result = index.add(node_id, &wrong_dims, 1000);
+    let result = index.add(node_id, &wrong_dims, 1000.into());
     assert!(result.is_err());
 
     Ok(())
@@ -350,7 +350,7 @@ fn test_semantic_evolution_end_to_end() -> Result<()> {
 
     // Get semantic evolution
     // Use a very wide time range to capture all snapshots (which use real timestamps)
-    let time_range = TimeRange::between(0, i64::MAX).unwrap();
+    let time_range = TimeRange::between(0.into(), i64::MAX.into()).unwrap();
     let evolution = index.semantic_evolution(node_id, time_range)?;
 
     // Verify we captured all changes
@@ -395,7 +395,7 @@ fn test_track_semantic_drift_over_time() -> Result<()> {
     // Track drift from original vector
     let reference = vec![1.0, 0.0, 0.0, 0.0];
     // Use wide time range to capture all snapshots
-    let time_range = TimeRange::between(0, i64::MAX).unwrap();
+    let time_range = TimeRange::between(0.into(), i64::MAX.into()).unwrap();
     let drift = index.track_semantic_drift(node_id, &reference, time_range)?;
 
     // Should have 4 measurements
@@ -433,7 +433,7 @@ fn test_calculate_consecutive_drift_end_to_end() -> Result<()> {
 
     // Calculate consecutive drift
     // Use wide time range to capture all snapshots
-    let time_range = TimeRange::between(0, i64::MAX).unwrap();
+    let time_range = TimeRange::between(0.into(), i64::MAX.into()).unwrap();
     let drift = index.calculate_consecutive_drift(node_id, time_range)?;
 
     // Should have 3 drift measurements (4 vectors -> 3 pairs)
@@ -476,7 +476,7 @@ fn test_semantic_evolution_with_gaps() -> Result<()> {
 
     // Get evolution for node1
     // Use wide time range to capture all snapshots
-    let time_range = TimeRange::between(0, i64::MAX).unwrap();
+    let time_range = TimeRange::between(0.into(), i64::MAX.into()).unwrap();
     let evolution = index.semantic_evolution(node1, time_range)?;
 
     // Node1 appears in all 3 snapshots:
@@ -541,7 +541,7 @@ fn test_drift_calculation_with_normalized_vectors() -> Result<()> {
 
     // Calculate consecutive drift
     // Use wide time range to capture all snapshots
-    let time_range = TimeRange::between(0, i64::MAX).unwrap();
+    let time_range = TimeRange::between(0.into(), i64::MAX.into()).unwrap();
     let drift = index.calculate_consecutive_drift(node_id, time_range)?;
 
     // Should have 2 drift measurements

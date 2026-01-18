@@ -626,13 +626,13 @@ mod tests {
     fn test_time_range_invalid_returns_error() {
         // TimeRange::new should return an error for invalid ranges (start > end)
         let result = TimeRange::new(200.into(), 100.into());
-        assert!(matches!(
-            result,
-            Err(crate::utils::error::TemporalError::InvalidTimeRange {
-                start: 200.into(),
-                end: 100.into()
-            })
-        ));
+        assert!(result.is_err());
+        if let Err(crate::utils::error::TemporalError::InvalidTimeRange { start, end }) = result {
+            assert_eq!(start, 200.into());
+            assert_eq!(end, 100.into());
+        } else {
+            panic!("Expected InvalidTimeRange error");
+        }
     }
 
     #[test]
@@ -768,7 +768,7 @@ mod tests {
         assert!(ts.wallclock() > 0);
 
         // Should have logical component (starts at 0)
-        assert_eq!(ts.logical(), 0.into());
+        assert_eq!(ts.logical(), 0);
     }
 
     #[test]
@@ -826,7 +826,7 @@ mod tests {
         // HybridTimestamp is 12 bytes (8 wallclock + 4 logical)
         let ts = HybridTimestamp::new(1000, 5).unwrap();
         let serialized = ts.serialize();
-        assert_eq!(serialized.len(), 12.into());
+        assert_eq!(serialized.len(), 12);
 
         // TimeRange with HybridTimestamp should be 24 bytes (2 × 12)
         let range = TimeRange::new(
@@ -835,7 +835,7 @@ mod tests {
         )
         .unwrap();
         let serialized = range.serialize();
-        assert_eq!(serialized.len(), 24.into());
+        assert_eq!(serialized.len(), 24);
 
         // BiTemporalInterval should be 48 bytes (4 × 12)
         let interval = BiTemporalInterval::now(
@@ -843,7 +843,7 @@ mod tests {
             HybridTimestamp::new(2000, 0).unwrap(),
         );
         let serialized = interval.serialize();
-        assert_eq!(serialized.len(), 48.into());
+        assert_eq!(serialized.len(), 48);
     }
 
     #[test]
@@ -851,6 +851,6 @@ mod tests {
         // TIMESTAMP_MAX should be representable as HybridTimestamp
         // It represents "infinity" or "current"
         assert_eq!(TIMESTAMP_MAX.wallclock(), i64::MAX);
-        assert_eq!(TIMESTAMP_MAX.logical(), 0.into());
+        assert_eq!(TIMESTAMP_MAX.logical(), 0);
     }
 }

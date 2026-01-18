@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn test_tx_id_creation() {
         let tx_id = TxId::new(42);
-        assert_eq!(tx_id.as_u64(), 42.into());
+        assert_eq!(tx_id.as_u64(), 42u64);
     }
 
     #[test]
@@ -137,10 +137,10 @@ mod tests {
         let tx2 = generator.next();
         let tx3 = generator.next();
 
-        assert_eq!(tx1.as_u64(), 1.into());
-        assert_eq!(tx2.as_u64(), 2.into());
-        assert_eq!(tx3.as_u64(), 3.into());
-        assert_eq!(generator.current().as_u64(), 3.into());
+        assert_eq!(tx1.as_u64(), 1u64);
+        assert_eq!(tx2.as_u64(), 2u64);
+        assert_eq!(tx3.as_u64(), 3u64);
+        assert_eq!(generator.current().as_u64(), 3u64);
     }
 
     #[test]
@@ -176,10 +176,10 @@ mod tests {
             .iter()
             .collect::<std::collections::HashSet<_>>()
             .len();
-        assert_eq!(unique_count, 1000.into());
+        assert_eq!(unique_count, 1000);
 
         // Final current should be 1000
-        assert_eq!(generator.current().as_u64(), 1000.into());
+        assert_eq!(generator.current().as_u64(), 1000u64);
     }
 
     #[test]

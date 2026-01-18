@@ -362,7 +362,7 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
                             let node = tx.create_node(
                                 "NewNode",
                                 PropertyMapBuilder::new()
-                                    .insert("id", (i + 100000) as i64)
+                                    .insert("id", (i + (100000 as i64).into()
                                     .build(),
                             )?;
                             new_nodes.push(node);
@@ -622,7 +622,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                             tx.create_node(
                                 "NewPerson",
                                 PropertyMapBuilder::new()
-                                    .insert("id", (i + 10000) as i64)
+                                    .insert("id", (i + (10000 as i64).into()
                                     .build(),
                             )?;
                         }
@@ -633,7 +633,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
                                 node_id,
                                 PropertyMapBuilder::new()
                                     .insert("updated", true)
-                                    .insert("age", (i + 20) as i64)
+                                    .insert("age", (i + (20 as i64).into()
                                     .build(),
                             )?;
                         }
@@ -764,7 +764,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
                         "Person",
                         PropertyMapBuilder::new()
                             .insert("name", format!("Person{}", i))
-                            .insert("age", (20 + i) as i64)
+                            .insert("age", (20 + i as i64).into()
                             .insert("active", true)
                             .build(),
                     )?;

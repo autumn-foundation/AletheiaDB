@@ -943,7 +943,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::TemporalTrack {
                 input: Box::new(PhysicalOp::Empty),
-                time_range: TimeRange::new(1000, 2000).unwrap()
+                time_range: TimeRange::new(1000.into(), 2000.into()).unwrap()
             }
             .name(),
             "TemporalTrack"
@@ -1225,7 +1225,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::TemporalTrack {
                 input: Box::new(base.clone()),
-                time_range: TimeRange::new(1000, 2000).unwrap()
+                time_range: TimeRange::new(1000.into(), 2000.into()).unwrap()
             }
             .depth(),
             2
@@ -1485,7 +1485,7 @@ mod tests {
     fn test_explain_temporal_track() {
         let plan = PhysicalOp::TemporalTrack {
             input: Box::new(PhysicalOp::Empty),
-            time_range: TimeRange::new(1000, 2000).unwrap(),
+            time_range: TimeRange::new(1000.into(), 2000.into()).unwrap(),
         };
 
         let explain = plan.explain();
@@ -1530,7 +1530,7 @@ mod tests {
         assert_eq!(
             PhysicalOp::TemporalTrack {
                 input: Box::new(PhysicalOp::Empty),
-                time_range: TimeRange::new(1000, 2000).unwrap(),
+                time_range: TimeRange::new(1000.into(), 2000.into()).unwrap(),
             }
             .name(),
             "TemporalTrack"
@@ -1575,7 +1575,7 @@ mod tests {
             input: Box::new(PhysicalOp::NodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
             }),
-            time_range: TimeRange::new(1000, 2000).unwrap(),
+            time_range: TimeRange::new(1000.into(), 2000.into()).unwrap(),
         };
         assert_eq!(temporal_track.depth(), 2); // 1 + 1
     }
@@ -1588,7 +1588,7 @@ mod tests {
         assert!(
             !PhysicalOp::TemporalTrack {
                 input: Box::new(PhysicalOp::Empty),
-                time_range: TimeRange::new(1000, 2000).unwrap(),
+                time_range: TimeRange::new(1000.into(), 2000.into()).unwrap(),
             }
             .is_leaf()
         );

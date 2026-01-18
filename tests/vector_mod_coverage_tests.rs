@@ -212,8 +212,8 @@ fn test_temporal_search_results_type() {
     // Verify the type alias works correctly
     // Timestamp is a type alias for i64 (milliseconds since epoch)
     let results: TemporalSearchResults = vec![
-        (1000i64, vec![(NodeId::new(1).unwrap(), 0.9)]),
-        (2000i64, vec![(NodeId::new(2).unwrap(), 0.8)]),
+        (1000i64.into(), vec![(NodeId::new(1).unwrap(), 0.9)]),
+        (2000i64.into(), vec![(NodeId::new(2).unwrap(), 0.8)]),
     ];
 
     assert_eq!(results.len(), 2);

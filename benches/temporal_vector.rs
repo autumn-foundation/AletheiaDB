@@ -111,7 +111,7 @@ fn bench_point_in_time_queries(c: &mut Criterion) {
                 b.iter(|| {
                     let _ = index.find_similar_as_of(
                         black_box(&query_vector),
-                        black_box(10),
+                        black_box(10.into()),
                         black_box(query_timestamp),
                     );
                 });
@@ -141,19 +141,19 @@ fn bench_time_range_queries(c: &mut Criterion) {
                         let node_id =
                             NodeId::new((snapshot_idx * vectors_per_snapshot + i) as u64).unwrap();
                         let vector = gen_vector(128, (snapshot_idx + i) as usize);
-                        let timestamp = (snapshot_idx * 10000 + i * 100) as i64;
+                        let timestamp = ((snapshot_idx * 10000 + i * 100) as i64).into();
                         let _ = index.add(node_id, &vector, timestamp);
                     }
                     let _ = index.on_transaction();
                 }
 
                 let query_vector = gen_vector(128, 0);
-                let time_range = TimeRange::between(0, (snapshot_count * 10000) as i64).unwrap();
+                let time_range = TimeRange::between(0.into(), ((snapshot_count * 10000) as i64).into()).unwrap();
 
                 b.iter(|| {
                     let _ = index.find_similar_in_range(
                         black_box(&query_vector),
-                        black_box(10),
+                        black_box(10.into()),
                         black_box(time_range),
                     );
                 });
@@ -260,7 +260,7 @@ fn bench_temporal_vs_current_overhead(c: &mut Criterion) {
         let query_vector = gen_vector(128, 0);
 
         b.iter(|| {
-            let _ = index.search(black_box(&query_vector), black_box(10));
+            let _ = index.search(black_box(&query_vector), black_box(10.into()));
         });
     });
 
@@ -280,7 +280,7 @@ fn bench_temporal_vs_current_overhead(c: &mut Criterion) {
         b.iter(|| {
             let _ = index
                 .current_index()
-                .search(black_box(&query_vector), black_box(10));
+                .search(black_box(&query_vector), black_box(10.into()));
         });
     });
 
@@ -482,7 +482,7 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
                                 let node_id =
                                     NodeId::new((snapshot_idx * vector_count + i) as u64).unwrap();
                                 let _ =
-                                    index.add(node_id, vector, (snapshot_idx * 1000 + i) as i64);
+                                    index.add(node_id, vector, ((snapshot_idx * 1000 + i as i64).into()).into();
                             }
                             let _ = index.on_transaction();
                         }

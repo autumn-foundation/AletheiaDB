@@ -531,7 +531,7 @@ mod tests {
             id: VersionId::new(1).unwrap(),
             node_id: NodeId::new(1).unwrap(),
             temporal: BiTemporalInterval::new(
-                TimeRange::new(1000, 2000).unwrap(),
+                TimeRange::new(1000.into(), 2000.into()).unwrap(),
                 TimeRange::new(1000, crate::core::temporal::TIMESTAMP_MAX).unwrap(),
             ),
             label,
@@ -578,7 +578,7 @@ mod tests {
             id: VersionId::new(2).unwrap(),
             node_id: NodeId::new(1).unwrap(),
             temporal: BiTemporalInterval::new(
-                TimeRange::new(2000, 3000).unwrap(),
+                TimeRange::new(2000.into(), 3000.into()).unwrap(),
                 TimeRange::new(2000, crate::core::temporal::TIMESTAMP_MAX).unwrap(),
             ),
             label,
@@ -616,7 +616,7 @@ mod tests {
             id: VersionId::new(100).unwrap(),
             edge_id: EdgeId::new(10).unwrap(),
             temporal: BiTemporalInterval::new(
-                TimeRange::new(1000, 2000).unwrap(),
+                TimeRange::new(1000.into(), 2000.into()).unwrap(),
                 TimeRange::new(1000, crate::core::temporal::TIMESTAMP_MAX).unwrap(),
             ),
             label,

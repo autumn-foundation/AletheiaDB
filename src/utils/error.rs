@@ -857,7 +857,7 @@ mod tests {
             Err(StorageError::NodeNotFound(NodeId::new(1).unwrap()).into())
         }
 
-        assert_eq!(returns_result().unwrap(), 42.into());
+        assert_eq!(returns_result().unwrap(), 42);
         assert!(returns_error().is_err());
     }
 
@@ -929,8 +929,8 @@ mod tests {
     fn test_all_temporal_error_variants() {
         // Test InvalidTimeRange
         let err = TemporalError::InvalidTimeRange {
-            start: 100,
-            end: 50,
+            start: 100.into(),
+            end: 50.into(),
         };
         assert!(format!("{}", err).contains("Invalid time range"));
         assert!(format!("{}", err).contains("100"));

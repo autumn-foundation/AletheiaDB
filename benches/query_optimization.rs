@@ -37,7 +37,7 @@ fn create_test_graph(node_count: usize) -> Arc<CurrentStorage> {
                 if i % 3 == 0 { "Person" } else { "Document" },
                 PropertyMapBuilder::new()
                     .insert("id", i as i64)
-                    .insert("score", (i * 10) as i64)
+                    .insert("score", (i * (10 as i64).into()
                     .insert("active", i % 2 == 0)
                     .insert_vector("embedding", &embedding)
                     .build(),

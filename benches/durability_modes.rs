@@ -68,7 +68,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
                 tx.create_node(
                     "Benchmark",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -89,7 +89,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
                 tx.create_node(
                     "Benchmark",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -108,7 +108,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
                 tx.create_node(
                     "Benchmark",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -127,7 +127,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
                 tx.create_node(
                     "Benchmark",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -146,7 +146,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
                 tx.create_node(
                     "Benchmark",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -166,7 +166,7 @@ fn bench_single_transaction_latency(c: &mut Criterion) {
                 tx.create_node(
                     "Benchmark",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -217,7 +217,7 @@ fn bench_batch_throughput(c: &mut Criterion) {
                         tx.create_node(
                             "Benchmark",
                             PropertyMapBuilder::new()
-                                .insert("batch_id", black_box(i) as i64)
+                                .insert("batch_id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -315,7 +315,7 @@ fn bench_group_commit_batch_sizes(c: &mut Criterion) {
                         tx.create_node(
                             "BatchTest",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -346,7 +346,7 @@ fn bench_group_commit_delays(c: &mut Criterion) {
                         tx.create_node(
                             "DelayTest",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -378,7 +378,7 @@ fn bench_per_transaction_override(c: &mut Criterion) {
                 tx.create_node(
                     "Override",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -402,7 +402,7 @@ fn bench_per_transaction_override(c: &mut Criterion) {
                 tx.create_node(
                     "Override",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -424,7 +424,7 @@ fn bench_per_transaction_override(c: &mut Criterion) {
                 tx.create_node(
                     "Override",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -446,7 +446,7 @@ fn bench_per_transaction_override(c: &mut Criterion) {
                 tx.create_node(
                     "Override",
                     PropertyMapBuilder::new()
-                        .insert("counter", black_box(counter) as i64)
+                        .insert("counter", black_box(counter as i64).into()
                         .build(),
                 )
             })
@@ -479,7 +479,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                         tx.create_node(
                             "Critical",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -490,7 +490,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                         tx.create_node(
                             "Regular",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -514,7 +514,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                         tx.create_node(
                             "Critical",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -525,7 +525,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                         tx.create_node(
                             "Regular",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -549,7 +549,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                         tx.create_node(
                             "Critical",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -560,7 +560,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                         tx.create_node(
                             "Regular",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -591,7 +591,7 @@ fn bench_async_batched_batch_sizes(c: &mut Criterion) {
                         tx.create_node(
                             "BatchTest",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })
@@ -622,7 +622,7 @@ fn bench_async_batched_delays(c: &mut Criterion) {
                         tx.create_node(
                             "DelayTest",
                             PropertyMapBuilder::new()
-                                .insert("id", black_box(i) as i64)
+                                .insert("id", black_box(i as i64).into()
                                 .build(),
                         )
                     })

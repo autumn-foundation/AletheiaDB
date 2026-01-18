@@ -3177,7 +3177,7 @@ mod tests {
             .unwrap();
 
         let events = collector.events.lock().unwrap();
-        assert_eq!(events.len(), 2.into()); // NodeAnchorCreated + NodeVersionCreated
+        assert_eq!(events.len(), 2); // NodeAnchorCreated + NodeVersionCreated
 
         // Check anchor event
         let anchor_event = events
@@ -3644,7 +3644,7 @@ mod tests {
         let props = result.unwrap();
         assert_eq!(
             props.get("counter").and_then(|v| v.as_int()),
-            Some((MAX_RECONSTRUCTION_DEPTH - 1) as i64)
+            Some(MAX_RECONSTRUCTION_DEPTH - 1)
         );
     }
 
@@ -4080,7 +4080,7 @@ mod tests {
         );
         // We can't directly access cache capacity, but we can verify it works correctly
         // by checking that anchors are cached even with small cache
-        assert_eq!(storage_small.node_property_cache.len(), 0.into());
+        assert_eq!(storage_small.node_property_cache.len(), 0);
 
         // Medium cache: 1000 entries -> anchor cache should be max(1000/5, 100) = 200
         let storage_medium = HistoricalStorage::with_config_retention_and_cache_size(
@@ -4088,7 +4088,7 @@ mod tests {
             RetentionPolicy::default(),
             1000,
         );
-        assert_eq!(storage_medium.node_property_cache.len(), 0.into());
+        assert_eq!(storage_medium.node_property_cache.len(), 0);
 
         // Large cache: 10000 entries -> anchor cache should be max(10000/5, 100) = 2000
         let storage_large = HistoricalStorage::with_config_retention_and_cache_size(
@@ -4096,7 +4096,7 @@ mod tests {
             RetentionPolicy::default(),
             10000,
         );
-        assert_eq!(storage_large.node_property_cache.len(), 0.into());
+        assert_eq!(storage_large.node_property_cache.len(), 0);
 
         // Very small cache: 10 entries -> anchor cache should be max(10/5, 100) = 100 (minimum)
         let storage_tiny = HistoricalStorage::with_config_retention_and_cache_size(
@@ -4104,7 +4104,7 @@ mod tests {
             RetentionPolicy::default(),
             10,
         );
-        assert_eq!(storage_tiny.node_property_cache.len(), 0.into());
+        assert_eq!(storage_tiny.node_property_cache.len(), 0);
     }
 
     // ========================================================================

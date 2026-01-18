@@ -340,8 +340,8 @@ mod tests {
     #[test]
     fn test_visibility_manager_creation() {
         let manager = TxVisibilityManager::new();
-        assert_eq!(manager.active_count(), 0.into());
-        assert_eq!(manager.committed_count(), 0.into());
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.committed_count(), 0);
     }
 
     #[test]
@@ -350,7 +350,7 @@ mod tests {
         manager.register_active(TxId::new(1));
         manager.register_active(TxId::new(2));
 
-        assert_eq!(manager.active_count(), 2.into());
+        assert_eq!(manager.active_count(), 2);
     }
 
     #[test]
@@ -362,7 +362,7 @@ mod tests {
         let snapshot = manager.capture_snapshot(100.into());
 
         assert_eq!(snapshot.snapshot_timestamp, 100.into());
-        assert_eq!(snapshot.active_transactions.len(), 2.into());
+        assert_eq!(snapshot2.active_transactions.len(), 2);
         assert!(snapshot.active_transactions.contains(&TxId::new(1)));
         assert!(snapshot.active_transactions.contains(&TxId::new(2)));
     }
@@ -372,13 +372,13 @@ mod tests {
         let manager = TxVisibilityManager::new();
         manager.register_active(TxId::new(1));
 
-        assert_eq!(manager.active_count(), 1.into());
-        assert_eq!(manager.committed_count(), 0.into());
+        assert_eq!(manager.active_count(), 1);
+        assert_eq!(manager.committed_count(), 0);
 
         manager.register_commit(TxId::new(1), 100.into());
 
-        assert_eq!(manager.active_count(), 0.into());
-        assert_eq!(manager.committed_count(), 1.into());
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.committed_count(), 1);
     }
 
     #[test]
@@ -386,12 +386,12 @@ mod tests {
         let manager = TxVisibilityManager::new();
         manager.register_active(TxId::new(1));
 
-        assert_eq!(manager.active_count(), 1.into());
+        assert_eq!(manager.active_count(), 1);
 
         manager.register_abort(TxId::new(1));
 
-        assert_eq!(manager.active_count(), 0.into());
-        assert_eq!(manager.committed_count(), 0.into());
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.committed_count(), 0);
     }
 
     #[test]
@@ -449,7 +449,7 @@ mod tests {
 
         // Snapshot 1 - sees tx1 as active
         let snapshot1 = manager.capture_snapshot(100.into());
-        assert_eq!(snapshot1.active_transactions.len(), 1.into());
+        assert_eq!(snapshot1.active_transactions.len(), 1);
 
         // Commit tx1, start tx2
         manager.register_commit(TxId::new(1), 110.into());
@@ -457,11 +457,11 @@ mod tests {
 
         // Snapshot 2 - sees tx2 as active, tx1 committed
         let snapshot2 = manager.capture_snapshot(120.into());
-        assert_eq!(snapshot2.active_transactions.len(), 1.into());
+        assert_eq!(snapshot1.active_transactions.len(), 1);
         assert!(snapshot2.active_transactions.contains(&TxId::new(2)));
 
         // Original snapshot1 unchanged
-        assert_eq!(snapshot1.active_transactions.len(), 1.into());
+        assert_eq!(snapshot1.active_transactions.len(), 1);
         assert!(snapshot1.active_transactions.contains(&TxId::new(1)));
     }
 
@@ -470,24 +470,24 @@ mod tests {
         let manager = TxVisibilityManager::new();
 
         // Initially empty
-        assert_eq!(manager.active_count(), 0.into());
-        assert_eq!(manager.committed_count(), 0.into());
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.committed_count(), 0);
 
         // Add active transactions
         manager.register_active(TxId::new(1));
         manager.register_active(TxId::new(2));
-        assert_eq!(manager.active_count(), 2.into());
-        assert_eq!(manager.committed_count(), 0.into());
+        assert_eq!(manager.active_count(), 2);
+        assert_eq!(manager.committed_count(), 0);
 
         // Commit one
         manager.register_commit(TxId::new(1), 100.into());
-        assert_eq!(manager.active_count(), 1.into());
-        assert_eq!(manager.committed_count(), 1.into());
+        assert_eq!(manager.active_count(), 1);
+        assert_eq!(manager.committed_count(), 1);
 
         // Abort the other
         manager.register_abort(TxId::new(2));
-        assert_eq!(manager.active_count(), 0.into());
-        assert_eq!(manager.committed_count(), 1.into());
+        assert_eq!(manager.active_count(), 0);
+        assert_eq!(manager.committed_count(), 1);
     }
 
     #[test]
@@ -529,6 +529,6 @@ mod tests {
         }
 
         // Verify the manager is still in a valid state
-        assert_eq!(manager.committed_count(), 10.into());
+        assert_eq!(manager.committed_count(), 10);
     }
 }

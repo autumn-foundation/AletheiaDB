@@ -465,8 +465,8 @@ mod tests {
 
         let delta = PropertyDelta::from_diff(&old, &new);
 
-        assert_eq!(delta.changed.len(), 2.into()); // age modified, country added
-        assert_eq!(delta.removed.len(), 1.into()); // city removed
+        assert_eq!(delta.changed.len(), 2); // age modified, country added
+        assert_eq!(delta.removed.len(), 1); // city removed
         assert!(
             delta
                 .removed

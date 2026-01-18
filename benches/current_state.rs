@@ -49,7 +49,7 @@ fn create_test_graph(node_count: usize, out_degree: usize) -> CurrentStorage {
                     node_ids[target],
                     if j % 2 == 0 { "KNOWS" } else { "FOLLOWS" },
                     PropertyMapBuilder::new()
-                        .insert("weight", (i + j) as i64)
+                        .insert("weight", (i + j as i64).into()
                         .build(),
                 )
                 .unwrap();

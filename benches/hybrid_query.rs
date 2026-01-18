@@ -315,7 +315,7 @@ fn bench_traverse_and_rank_basic(c: &mut Criterion) {
                             black_box(source),
                             black_box("KNOWS"),
                             black_box(&query_vec),
-                            black_box(10), // k
+                            black_box(10.into()), // k
                         );
                         black_box(results)
                     });
@@ -395,7 +395,7 @@ fn bench_traverse_and_rank_dimensions(c: &mut Criterion) {
                     black_box(start),
                     black_box("KNOWS"),
                     black_box(&query),
-                    black_box(10),
+                    black_box(10.into()),
                 )
             });
         });
@@ -436,7 +436,7 @@ fn bench_find_similar_as_of(c: &mut Criterion) {
                         find_similar_as_of(
                             black_box(&db),
                             black_box(&query),
-                            black_box(10),
+                            black_box(10.into()),
                             black_box(query_timestamp),
                         )
                     });
@@ -479,7 +479,7 @@ fn bench_temporal_vs_current(c: &mut Criterion) {
             find_similar_as_of(
                 black_box(&temporal_db),
                 black_box(&query),
-                black_box(10),
+                black_box(10.into()),
                 black_box(current_timestamp),
             )
         });
@@ -487,12 +487,12 @@ fn bench_temporal_vs_current(c: &mut Criterion) {
 
     // Current-state query on temporal DB (uses current storage path)
     group.bench_function("current_on_temporal_db", |b| {
-        b.iter(|| temporal_db.find_similar_by_embedding(black_box(&query), black_box(10)));
+        b.iter(|| temporal_db.find_similar_by_embedding(black_box(&query), black_box(10.into())));
     });
 
     // Current-state query on non-temporal DB (baseline)
     group.bench_function("current_query", |b| {
-        b.iter(|| current_db.find_similar_by_embedding(black_box(&query), black_box(10)));
+        b.iter(|| current_db.find_similar_by_embedding(black_box(&query), black_box(10.into())));
     });
 
     group.finish();
@@ -635,7 +635,7 @@ fn bench_hybrid_vs_sequential(c: &mut Criterion) {
                 black_box(start),
                 black_box("KNOWS"),
                 black_box(&query),
-                black_box(10),
+                black_box(10.into()),
             )
         });
     });

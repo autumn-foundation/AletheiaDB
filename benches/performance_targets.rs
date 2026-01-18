@@ -160,7 +160,7 @@ fn bench_time_travel_at_anchor(c: &mut Criterion) {
         .expect("Benchmark setup: create_node should succeed with valid input");
 
     // Create 10 updates and capture the commit timestamp at update 10 (anchor)
-    let mut timestamp_at_10 = 0i64;
+    let mut timestamp_at_10 = 0i64.into();
     for i in 1..=10 {
         let commit_ts = db
             .write_with_timestamp(|tx| {
@@ -219,7 +219,7 @@ fn bench_time_travel_with_deltas(c: &mut Criterion) {
         .expect("Benchmark setup: create_node should succeed with valid input");
 
     // Create 15 updates and capture commit timestamp at update 5 (delta)
-    let mut timestamp_at_5 = 0i64;
+    let mut timestamp_at_5 = 0i64.into();
     for i in 1..=15 {
         let commit_ts = db
             .write_with_timestamp(|tx| {
@@ -280,7 +280,7 @@ fn bench_time_travel_worst_case(c: &mut Criterion) {
         .expect("Benchmark setup: create_node should succeed with valid input");
 
     // Create 19 updates and capture commit timestamp at update 9 (worst case delta)
-    let mut timestamp_at_9 = 0i64;
+    let mut timestamp_at_9 = 0i64.into();
     for i in 1..=19 {
         let commit_ts = db
             .write_with_timestamp(|tx| {

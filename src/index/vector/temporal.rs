@@ -60,7 +60,7 @@
 //! // Track semantic drift over time
 //! let node_id = NodeId::new(42).unwrap();
 //! let reference_embedding = vec![0.5f32; 384];
-//! let time_range = TimeRange::new(1000000, 2000000).unwrap();
+//! let time_range = TimeRange::new(1000000.into(), 2000000.into()).unwrap();
 //! let drift = index.track_semantic_drift(node_id, &reference_embedding, time_range)?;
 //! # Ok(())
 //! # }
@@ -1397,7 +1397,7 @@ impl TemporalVectorIndex {
                 // Phase 2: Use wallclock components for arithmetic
                 let elapsed_micros = current_time.wallclock() - metadata.last_snapshot_time.wallclock();
                 let elapsed_secs = elapsed_micros / 1_000_000;
-                let by_time = elapsed_secs >= *time_interval_secs as i64;
+                let by_time = (elapsed_secs >= *time_interval_secs as i64).into();
 
                 let total = self.current.len();
                 let by_change = if total > 0 {
@@ -1510,7 +1510,7 @@ impl TemporalVectorIndex {
             RetentionPolicy::KeepDuration(duration) => {
                 let current_time = Self::current_timestamp()?;
                 // Phase 2: Calculate cutoff using wallclock arithmetic, then create HybridTimestamp
-                let duration_micros = duration.as_micros() as i64;
+                let duration_micros = (duration.as_micros() as i64).into();
                 let cutoff_wallclock = current_time.wallclock().saturating_sub(duration_micros);
                 use crate::core::hlc::HybridTimestamp;
                 let cutoff_time = HybridTimestamp::new_unchecked(cutoff_wallclock, 0);
@@ -1658,7 +1658,7 @@ impl TemporalVectorIndex {
     ///
     /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
     /// let query = vec![0.1f32; 384];
-    /// let time_range = TimeRange::new(1672531200000000, 1704067200000000).unwrap(); // 2023-2024
+    /// let time_range = TimeRange::new(1672531200000000.into(), 1704067200000000.into()).unwrap(); // 2023-2024
     ///
     /// let results = index.find_similar_in_range(&query, 10, time_range)?;
     ///
@@ -1759,7 +1759,7 @@ impl TemporalVectorIndex {
     /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
     /// let node_id = NodeId::new(42).unwrap();
     /// let reference = vec![0.5f32; 384];
-    /// let time_range = TimeRange::new(1000000, 2000000).unwrap();
+    /// let time_range = TimeRange::new(1000000.into(), 2000000.into()).unwrap();
     ///
     /// let drift_timeline = index.track_semantic_drift(node_id, &reference, time_range)?;
     ///
@@ -1853,7 +1853,7 @@ impl TemporalVectorIndex {
     /// use gallifreydb::core::temporal::TimeRange;
     ///
     /// # fn example(index: &TemporalVectorIndex) -> gallifreydb::utils::Result<()> {
-    /// let time_range = TimeRange::new(1000000, 2000000).unwrap();
+    /// let time_range = TimeRange::new(1000000.into(), 2000000.into()).unwrap();
     ///
     /// // Find documents that changed significantly (cosine distance > 0.3)
     /// let drifted = index.find_semantic_drift(0.3, time_range, DriftMetric::Cosine)?;
@@ -2360,10 +2360,10 @@ mod tests {
 
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
         index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
 
         let query = vec![0.9, 0.1, 0.0, 0.0];
-        let results = index.find_similar_as_of(&query, 2, 1000)?;
+        let results = index.find_similar_as_of(&query, 2, 1000.into())?;
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, NodeId::new(1).unwrap());
@@ -2383,16 +2383,16 @@ mod tests {
         let index = TemporalVectorIndex::new(config)?;
 
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
 
         index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 2000)?;
-        index.on_transaction_at(2000)?;
+        index.on_transaction_at(2000.into())?;
 
         index.add(NodeId::new(3).unwrap(), &[0.0, 0.0, 1.0, 0.0], 3000)?;
-        index.on_transaction_at(3000)?;
+        index.on_transaction_at(3000.into())?;
 
         let query = vec![1.0, 0.0, 0.0, 0.0];
-        let time_range = TimeRange::new(1000, 3000).unwrap();
+        let time_range = TimeRange::new(1000.into(), 3000.into()).unwrap();
         let results = index.find_similar_in_range(&query, 5, time_range)?;
 
         assert!(!results.is_empty());
@@ -2450,7 +2450,7 @@ mod tests {
 
         for i in 0..10 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
-            index.on_transaction_at(1000)?;
+            index.on_transaction_at(1000.into())?;
         }
         assert_eq!(index.snapshot_count(), 1);
 
@@ -2469,7 +2469,7 @@ mod tests {
         let index = TemporalVectorIndex::new(config)?;
 
         for i in 0..5 {
-            let timestamp = (1000 * (i + 1)) as i64;
+            let timestamp = ((1000 * (i + 1)) as i64).into();
             index.add(
                 NodeId::new(i).unwrap(),
                 &[i as f32, 0.0, 0.0, 0.0],
@@ -2498,7 +2498,7 @@ mod tests {
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
         for i in 0..5 {
-            let timestamp = (1000 * (i + 1)) as i64;
+            let timestamp = ((1000 * (i + 1)) as i64).into();
             index.add(
                 NodeId::new(i).unwrap(),
                 &[i as f32, 0.0, 0.0, 0.0],
@@ -2533,7 +2533,7 @@ mod tests {
         let index = TemporalVectorIndex::new(config)?;
 
         for i in 0..3 {
-            let timestamp = (1000 * (i + 1)) as i64;
+            let timestamp = ((1000 * (i + 1)) as i64).into();
             index.add(
                 NodeId::new(i).unwrap(),
                 &[i as f32, 0.0, 0.0, 0.0],
@@ -2623,19 +2623,19 @@ mod tests {
 
         let node_id = NodeId::new(42).unwrap();
 
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
         assert_eq!(index.snapshot_count(), 1);
 
-        index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 2000)?;
-        index.on_transaction_at(2000)?;
+        index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 2000.into())?;
+        index.on_transaction_at(2000.into())?;
         assert_eq!(index.snapshot_count(), 2);
 
-        index.add(node_id, &[0.0, 0.0, 1.0, 0.0], 3000)?;
-        index.on_transaction_at(3000)?;
+        index.add(node_id, &[0.0, 0.0, 1.0, 0.0], 3000.into())?;
+        index.on_transaction_at(3000.into())?;
         assert_eq!(index.snapshot_count(), 3);
 
-        let time_range = TimeRange::new(1000, 3000).unwrap();
+        let time_range = TimeRange::new(1000.into(), 3000.into()).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 3);
@@ -2666,7 +2666,7 @@ mod tests {
             index.on_transaction_at(timestamp)?;
         }
 
-        let time_range = TimeRange::new(2000, 4000).unwrap();
+        let time_range = TimeRange::new(2000.into(), 4000.into()).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 3);
@@ -2689,11 +2689,11 @@ mod tests {
         let index = TemporalVectorIndex::new_at(config, 1000)?;
 
         let other_node = NodeId::new(1).unwrap();
-        index.add(other_node, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(other_node, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
 
         let node_id = NodeId::new(42).unwrap();
-        let time_range = TimeRange::new(1000, 2000).unwrap();
+        let time_range = TimeRange::new(1000.into(), 2000.into()).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 0);
@@ -2714,17 +2714,17 @@ mod tests {
 
         let node_id = NodeId::new(42).unwrap();
 
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
 
-        index.add(node_id, &[0.9, 0.1, 0.0, 0.0], 2000)?;
-        index.on_transaction_at(2000)?;
+        index.add(node_id, &[0.9, 0.1, 0.0, 0.0], 2000.into())?;
+        index.on_transaction_at(2000.into())?;
 
-        index.add(node_id, &[0.5, 0.5, 0.0, 0.0], 3000)?;
-        index.on_transaction_at(3000)?;
+        index.add(node_id, &[0.5, 0.5, 0.0, 0.0], 3000.into())?;
+        index.on_transaction_at(3000.into())?;
 
         let reference = vec![1.0, 0.0, 0.0, 0.0];
-        let time_range = TimeRange::new(1000, 3000).unwrap();
+        let time_range = TimeRange::new(1000.into(), 3000.into()).unwrap();
         let drift = index.track_semantic_drift(node_id, &reference, time_range)?;
 
         assert_eq!(drift.len(), 3);
@@ -2748,19 +2748,19 @@ mod tests {
 
         let node_id = NodeId::new(42).unwrap();
 
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
 
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 2000)?;
-        index.on_transaction_at(2000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 2000.into())?;
+        index.on_transaction_at(2000.into())?;
 
-        index.add(node_id, &[0.707, 0.707, 0.0, 0.0], 3000)?;
-        index.on_transaction_at(3000)?;
+        index.add(node_id, &[0.707, 0.707, 0.0, 0.0], 3000.into())?;
+        index.on_transaction_at(3000.into())?;
 
-        index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 4000)?;
-        index.on_transaction_at(4000)?;
+        index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 4000.into())?;
+        index.on_transaction_at(4000.into())?;
 
-        let time_range = TimeRange::new(1000, 4000).unwrap();
+        let time_range = TimeRange::new(1000.into(), 4000.into()).unwrap();
         let drift = index.calculate_consecutive_drift(node_id, time_range)?;
 
         assert_eq!(drift.len(), 3);
@@ -2784,10 +2784,10 @@ mod tests {
 
         let node_id = NodeId::new(42).unwrap();
 
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
 
-        let time_range = TimeRange::new(1000, 2000).unwrap();
+        let time_range = TimeRange::new(1000.into(), 2000.into()).unwrap();
         let drift = index.calculate_consecutive_drift(node_id, time_range)?;
 
         assert_eq!(drift.len(), 0);
@@ -2808,13 +2808,13 @@ mod tests {
 
         let node_id = NodeId::new(42).unwrap();
 
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
 
-        index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 2000)?;
-        index.on_transaction_at(2000)?;
+        index.add(node_id, &[0.0, 1.0, 0.0, 0.0], 2000.into())?;
+        index.on_transaction_at(2000.into())?;
 
-        let time_range = TimeRange::new(1000, 2000).unwrap();
+        let time_range = TimeRange::new(1000.into(), 2000.into()).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 2);
@@ -2845,7 +2845,7 @@ mod tests {
 
         assert_eq!(index.snapshot_count(), 3);
 
-        let time_range = TimeRange::new(1000, 5000).unwrap();
+        let time_range = TimeRange::new(1000.into(), 5000.into()).unwrap();
         let evolution = index.semantic_evolution(node_id, time_range)?;
 
         assert_eq!(evolution.len(), 3);
@@ -2869,11 +2869,11 @@ mod tests {
 
         let node_id = NodeId::new(42).unwrap();
 
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
 
         let wrong_dimension_ref = vec![1.0, 0.0, 0.0];
-        let time_range = TimeRange::new(1000, 2000).unwrap();
+        let time_range = TimeRange::new(1000.into(), 2000.into()).unwrap();
 
         let result = index.track_semantic_drift(node_id, &wrong_dimension_ref, time_range);
 
@@ -2940,7 +2940,7 @@ mod tests {
         )?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
         let results = index.find_semantic_drift(0.2, time_range, DriftMetric::Cosine)?;
 
@@ -3002,7 +3002,7 @@ mod tests {
         )?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
 
         assert_eq!(results.len(), 3);
@@ -3041,7 +3041,7 @@ mod tests {
         index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
 
         assert_eq!(results.len(), 1);
@@ -3067,7 +3067,7 @@ mod tests {
         index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, 100).unwrap();
+        let time_range = TimeRange::new(0.into(), 100.into()).unwrap();
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
 
         assert_eq!(results.len(), 0);
@@ -3096,7 +3096,7 @@ mod tests {
         index.add(node1, &[0.9, 0.1, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
         assert_eq!(results.len(), 1);
@@ -3128,7 +3128,7 @@ mod tests {
         index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
         let cosine_results = index.find_semantic_drift(0.5, time_range, DriftMetric::Cosine)?;
         assert_eq!(cosine_results.len(), 1);
@@ -3164,7 +3164,7 @@ mod tests {
         index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
         index.on_transaction_at(ts)?;
 
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
         let cosine_results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
         assert_eq!(cosine_results[0].1, 1.0);
@@ -3202,12 +3202,12 @@ mod tests {
         for i in 0..100 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
         assert_eq!(index.snapshot_count(), 1);
 
         // Modify only 5 vectors - snapshots 1-9 should be deltas
         for snapshot_num in 1..10 {
-            let timestamp = 1000 + (snapshot_num * 1000) as i64;
+            let timestamp = (1000 + (snapshot_num * 1000) as i64).into();
             // Only modify 5 vectors
             for i in 0..5 {
                 index.add(
@@ -3223,7 +3223,7 @@ mod tests {
 
         // Snapshot 10 should be full again (after 10 snapshots)
         index.add(NodeId::new(0).unwrap(), &[100.0, 0.0, 0.0, 0.0], 11000)?;
-        index.on_transaction_at(11000)?;
+        index.on_transaction_at(11000.into())?;
         assert_eq!(index.snapshot_count(), 11);
 
         // Verify we can query all snapshots successfully
@@ -3256,17 +3256,17 @@ mod tests {
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
         index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 1000)?;
         index.add(NodeId::new(3).unwrap(), &[0.0, 0.0, 1.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
         assert_eq!(index.snapshot_count(), 1);
 
         // Update vector 2 to be very similar to vector 3 in delta snapshot
         index.add(NodeId::new(2).unwrap(), &[0.0, 0.0, 1.0, 0.0], 2000)?;
-        index.on_transaction_at(2000)?;
+        index.on_transaction_at(2000.into())?;
         assert_eq!(index.snapshot_count(), 2);
 
         // Query for [0.0, 0.0, 1.0, 0.0] at new timestamp - should find both 2 and 3
         let query = vec![0.0, 0.0, 1.0, 0.0];
-        let results = index.find_similar_as_of(&query, 3, 2000)?;
+        let results = index.find_similar_as_of(&query, 3, 2000.into())?;
 
         // Both vectors 2 and 3 should be top results with high similarity
         let top_ids: Vec<NodeId> = results.iter().take(2).map(|(id, _)| *id).collect();
@@ -3275,7 +3275,7 @@ mod tests {
 
         // Query at old timestamp for [0.0, 1.0, 0.0, 0.0] - should find OLD vector 2
         let query_old = vec![0.0, 1.0, 0.0, 0.0];
-        let results_old = index.find_similar_as_of(&query_old, 3, 1000)?;
+        let results_old = index.find_similar_as_of(&query_old, 3, 1000.into())?;
         // At timestamp 1000, vector 2 was [0.0, 1.0, 0.0, 0.0]
         assert_eq!(results_old[0].0, NodeId::new(2).unwrap());
         assert!(results_old[0].1 > 0.99, "Should match old version exactly");
@@ -3298,24 +3298,24 @@ mod tests {
         for i in 0..5 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
         assert_eq!(index.current_index().len(), 5);
 
         // Remove vector 2 in delta snapshot
-        index.remove(NodeId::new(2).unwrap(), 2000)?;
-        index.on_transaction_at(2000)?;
+        index.remove(NodeId::new(2).unwrap(), 2000.into())?;
+        index.on_transaction_at(2000.into())?;
         assert_eq!(index.current_index().len(), 4);
 
         // Query at new timestamp should not return removed vector
         let query = vec![2.0, 0.0, 0.0, 0.0];
-        let results = index.find_similar_as_of(&query, 5, 2000)?;
+        let results = index.find_similar_as_of(&query, 5, 2000.into())?;
 
         // Should only have 4 results (vector 2 was removed)
         assert_eq!(results.len(), 4);
         assert!(!results.iter().any(|(id, _)| *id == NodeId::new(2).unwrap()));
 
         // Query at old timestamp should still return it
-        let results_old = index.find_similar_as_of(&query, 5, 1000)?;
+        let results_old = index.find_similar_as_of(&query, 5, 1000.into())?;
         assert_eq!(results_old.len(), 5);
         assert!(
             results_old
@@ -3375,7 +3375,7 @@ mod tests {
 
         // Verify we can query without errors
         let query = vec![0.0, 0.0, 0.0, 0.0];
-        let results = index.find_similar_as_of(&query, 10, 10000)?;
+        let results = index.find_similar_as_of(&query, 10, 10000.into())?;
         assert!(!results.is_empty());
 
         Ok(())
@@ -3411,9 +3411,9 @@ mod tests {
                 for i in 0..3 {
                     let t = ts.fetch_add(100, Ordering::SeqCst);
                     let node_id = NodeId::new((thread_id * 10 + i) as u64).unwrap();
-                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], t as i64)
+                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], (t as i64).into())
                         .unwrap();
-                    idx.on_transaction_at(t as i64).unwrap();
+                    idx.on_transaction_at((t as i64).into()).unwrap();
                 }
             }));
         }
@@ -3454,7 +3454,7 @@ mod tests {
         for i in 0..10 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
         assert_eq!(index.snapshot_count(), 1);
 
         // Create delta snapshots at t=2000, 3000 (both reference t=1000)
@@ -3485,7 +3485,7 @@ mod tests {
 
         // Verify we can still query the remaining snapshots
         let query = vec![0.0, 0.0, 0.0, 0.0];
-        let results = index.find_similar_as_of(&query, 5, 6000)?;
+        let results = index.find_similar_as_of(&query, 5, 6000.into())?;
         assert!(
             !results.is_empty(),
             "Should still be able to query after pruning base"
@@ -3554,7 +3554,7 @@ mod tests {
         for i in 0..100 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
 
         // Get snapshot info for full snapshot
         let snapshots = index.get_snapshot_info()?;
@@ -3569,7 +3569,7 @@ mod tests {
                 2000,
             )?;
         }
-        index.on_transaction_at(2000)?;
+        index.on_transaction_at(2000.into())?;
 
         // Check delta snapshot reports correct count
         let snapshots = index.get_snapshot_info()?;
@@ -3598,8 +3598,8 @@ mod tests {
 
         // Create initial full snapshot
         let node_id = NodeId::new(1).unwrap();
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
 
         // Create 15 delta snapshots (exceeds MAX_DELTA_CHAIN_DEPTH of 10)
         for i in 1..=15 {
@@ -3611,7 +3611,7 @@ mod tests {
         // Query at a timestamp that would require traversing > 10 deltas
         // This should either return None or force a full snapshot
         let query = vec![1.0, 0.0, 0.0, 0.0];
-        let result = index.find_similar_as_of(&query, 5, 2500);
+        let result = index.find_similar_as_of(&query, 5, 2500.into());
 
         // Test passes if it doesn't panic and handles the deep chain gracefully
         assert!(
@@ -3674,8 +3674,8 @@ mod tests {
 
         // Create initial full snapshot
         let node_id = NodeId::new(1).unwrap();
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
 
         // Create several delta snapshots
         for i in 1..=5 {
@@ -3774,7 +3774,7 @@ mod tests {
 
         // Add vectors and create snapshots normally
         for i in 0..5 {
-            let timestamp = 1000 + (i * 100) as i64;
+            let timestamp = (1000 + (i * 100) as i64).into();
             index.add(
                 NodeId::new(i).unwrap(),
                 &[i as f32, 0.0, 0.0, 0.0],
@@ -3809,7 +3809,7 @@ mod tests {
         for i in 0..3 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
 
         // Verify base snapshot has 3 nodes
         let snapshot_info = index.get_snapshot_info()?;
@@ -3820,7 +3820,7 @@ mod tests {
         for i in 3..5 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000)?;
         }
-        index.on_transaction_at(2000)?;
+        index.on_transaction_at(2000.into())?;
 
         // Verify delta snapshot reports correct count
         let snapshot_info = index.get_snapshot_info()?;
@@ -3836,7 +3836,7 @@ mod tests {
 
         // Verify we can actually query and find all 5 nodes
         let query = vec![0.0, 0.0, 0.0, 0.0];
-        let results = index.find_similar_as_of(&query, 10, 2000)?;
+        let results = index.find_similar_as_of(&query, 10, 2000.into())?;
         assert_eq!(
             results.len(),
             5,
@@ -3862,7 +3862,7 @@ mod tests {
         for i in 0..10 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
         assert_eq!(index.get_snapshot_info()?[0].vector_count, 10);
 
         // At t=2000: update 3 nodes, add 2 new nodes, remove 1 node
@@ -3879,8 +3879,8 @@ mod tests {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000)?;
         }
         // Removal: node 9
-        index.remove(NodeId::new(9).unwrap(), 2000)?;
-        index.on_transaction_at(2000)?;
+        index.remove(NodeId::new(9).unwrap(), 2000.into())?;
+        index.on_transaction_at(2000.into())?;
 
         // Expected final count: 10 - 1 (removed) + 2 (added) = 11
         // Updates don't change count (old version replaced by new)
@@ -3893,7 +3893,7 @@ mod tests {
 
         // Verify query results match
         let query = vec![0.0, 0.0, 0.0, 0.0];
-        let results = index.find_similar_as_of(&query, 20, 2000)?;
+        let results = index.find_similar_as_of(&query, 20, 2000.into())?;
         assert_eq!(results.len(), 11, "Should find 11 nodes when querying");
 
         // Verify removed node 9 is not in results
@@ -3922,7 +3922,7 @@ mod tests {
         for i in 1..=10 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
 
         // Add new vectors at [1.5, 0, 0, 0], [2.5, 0, 0, 0], ..., [10.5, 0, 0, 0]
         for i in 1..=10 {
@@ -3932,7 +3932,7 @@ mod tests {
                 2000,
             )?;
         }
-        index.on_transaction_at(2000)?;
+        index.on_transaction_at(2000.into())?;
 
         // Query for [5.5, 0, 0, 0] with k=5
         // Expected top-5 (by cosine similarity to 5.5):
@@ -3941,7 +3941,7 @@ mod tests {
         // The key test is that we get INTERLEAVED results from both indexes,
         // not just top-5 from added or top-5 from base
         let query = vec![5.5, 0.0, 0.0, 0.0];
-        let results = index.find_similar_as_of(&query, 5, 2000)?;
+        let results = index.find_similar_as_of(&query, 5, 2000.into())?;
 
         assert_eq!(results.len(), 5, "Should return exactly k=5 results");
 
@@ -3993,15 +3993,15 @@ mod tests {
         for i in 2..=5 {
             index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
         }
-        index.on_transaction_at(1000)?;
+        index.on_transaction_at(1000.into())?;
 
         // Update node 1 to [1.5, 0, 0, 0]
         index.add(NodeId::new(1).unwrap(), &[1.5, 0.0, 0.0, 0.0], 2000)?;
-        index.on_transaction_at(2000)?;
+        index.on_transaction_at(2000.into())?;
 
         // Search for [1.5, 0, 0, 0] - should find updated node 1 ONCE
         let query = vec![1.5, 0.0, 0.0, 0.0];
-        let results = index.find_similar_as_of(&query, 10, 2000)?;
+        let results = index.find_similar_as_of(&query, 10, 2000.into())?;
 
         // Count how many times node 1 appears
         let node1_count = results
@@ -4046,8 +4046,8 @@ mod tests {
 
         // Create initial full snapshot
         let node_id = NodeId::new(1).unwrap();
-        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.on_transaction_at(1000)?;
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.on_transaction_at(1000.into())?;
 
         // Create 15 delta snapshots (exceeds MAX_DELTA_CHAIN_DEPTH of 10)
         for i in 1..=15 {
@@ -4107,7 +4107,7 @@ mod tests {
         // With full_snapshot_interval=10, we get full snapshots at 0 and 10,
         // so max delta chain is 5 (snapshots 11-15), well under MAX_DELTA_CHAIN_DEPTH
         use crate::core::temporal::TimeRange;
-        let time_range = TimeRange::new(1000, 2500).unwrap();
+        let time_range = TimeRange::new(1000.into(), 2500.into()).unwrap();
         let result = index.find_semantic_drift(
             0.1, // threshold
             time_range,
@@ -4251,7 +4251,7 @@ mod tests {
 
         // Test NaN rejection
         let vec_with_nan = vec![1.0, f32::NAN, 0.0, 0.0];
-        let result = index.add(node_id, &vec_with_nan, 1000);
+        let result = index.add(node_id, &vec_with_nan, 1000.into());
         assert!(result.is_err(), "Should reject vector with NaN");
         if let Err(err) = result {
             let err_msg = err.to_string();
@@ -4263,12 +4263,12 @@ mod tests {
 
         // Test infinite rejection
         let vec_with_inf = vec![1.0, f32::INFINITY, 0.0, 0.0];
-        let result = index.add(node_id, &vec_with_inf, 1000);
+        let result = index.add(node_id, &vec_with_inf, 1000.into());
         assert!(result.is_err(), "Should reject vector with infinity");
 
         // Test negative infinite rejection
         let vec_with_neg_inf = vec![1.0, f32::NEG_INFINITY, 0.0, 0.0];
-        let result = index.add(node_id, &vec_with_neg_inf, 1000);
+        let result = index.add(node_id, &vec_with_neg_inf, 1000.into());
         assert!(
             result.is_err(),
             "Should reject vector with negative infinity"
@@ -4276,7 +4276,7 @@ mod tests {
 
         // Test valid vector still works
         let vec_valid = vec![1.0, 0.0, 0.0, 0.0];
-        let result = index.add(node_id, &vec_valid, 1000);
+        let result = index.add(node_id, &vec_valid, 1000.into());
         assert!(result.is_ok(), "Should accept valid vector");
 
         Ok(())
