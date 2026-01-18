@@ -82,28 +82,18 @@ impl FilterStats {
     ///
     /// # Overflow Safety
     ///
-    /// Uses saturating addition to prevent overflow in long-running systems.
-    /// If saturation occurs, statistics become less accurate but remain safe.
+    /// Overflow after 2^64 operations is not a realistic concern in practice.
+    /// At 1 million searches/second, overflow would take ~584,000 years.
+    /// Standard wrapping arithmetic is used for simplicity and performance.
     fn record_search(&self, candidates_fetched: usize, results_returned: usize) {
         use std::sync::atomic::Ordering;
 
-        // SAFETY: Saturating add prevents overflow. In the unlikely event of
-        // saturation after 2^64 operations, stats become frozen but safe.
-        let _ = self
-            .search_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_add(1))
-            });
-        let _ = self
-            .total_candidates
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_add(candidates_fetched as u64))
-            });
-        let _ = self
-            .total_results
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_add(results_returned as u64))
-            });
+        // Simple atomic increments - wrapping overflow at 2^64 is not a realistic concern
+        self.search_count.fetch_add(1, Ordering::Relaxed);
+        self.total_candidates
+            .fetch_add(candidates_fetched as u64, Ordering::Relaxed);
+        self.total_results
+            .fetch_add(results_returned as u64, Ordering::Relaxed);
     }
 
     /// Calculate the adaptive over-fetch multiplier based on historical pass rate.
