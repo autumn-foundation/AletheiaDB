@@ -37,6 +37,122 @@ pub struct CurrentStats {
     pub edge_count: usize,
 }
 
+/// Statistics for adaptive over-fetch heuristic in filtered vector search.
+///
+/// Tracks the historical pass rate of label filters to dynamically adjust
+/// the over-fetch multiplier. This improves performance by:
+/// - Reducing over-fetch for dense labels (high pass rate)
+/// - Increasing over-fetch for sparse labels (low pass rate)
+///
+/// Issue #334: Adaptive over-fetch strategy
+#[derive(Debug)]
+struct FilterStats {
+    /// Number of searches performed for this label
+    search_count: std::sync::atomic::AtomicU64,
+    /// Total number of candidates fetched across all searches
+    total_candidates: std::sync::atomic::AtomicU64,
+    /// Total number of results returned after filtering
+    total_results: std::sync::atomic::AtomicU64,
+}
+
+impl FilterStats {
+    /// Create new filter statistics with zero counts.
+    fn new() -> Self {
+        FilterStats {
+            search_count: std::sync::atomic::AtomicU64::new(0),
+            total_candidates: std::sync::atomic::AtomicU64::new(0),
+            total_results: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Record a search operation and its results.
+    ///
+    /// # Arguments
+    ///
+    /// * `candidates_fetched` - Number of candidates retrieved from HNSW
+    /// * `results_returned` - Number of results after label filtering
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses `Relaxed` ordering because:
+    /// - These are simple counters with no synchronization requirements
+    /// - Exact ordering between increments doesn't affect correctness
+    /// - Pass rate calculation tolerates slightly stale reads
+    /// - Performance is critical (called on every filtered search)
+    ///
+    /// # Overflow Safety
+    ///
+    /// Overflow after 2^64 operations is not a realistic concern in practice.
+    /// At 1 million searches/second, overflow would take ~584,000 years.
+    /// Standard wrapping arithmetic is used for simplicity and performance.
+    fn record_search(&self, candidates_fetched: usize, results_returned: usize) {
+        use std::sync::atomic::Ordering;
+
+        // Simple atomic increments - wrapping overflow at 2^64 is not a realistic concern
+        self.search_count.fetch_add(1, Ordering::Relaxed);
+        self.total_candidates
+            .fetch_add(candidates_fetched as u64, Ordering::Relaxed);
+        self.total_results
+            .fetch_add(results_returned as u64, Ordering::Relaxed);
+    }
+
+    /// Calculate the adaptive over-fetch multiplier based on historical pass rate.
+    ///
+    /// # Returns
+    ///
+    /// A multiplier to apply to k (e.g., 10.0 means fetch k * 10 candidates).
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Start with default multiplier (10.0) for first few searches
+    /// 2. Calculate historical pass rate = results / candidates
+    /// 3. Adjust multiplier inversely to pass rate:
+    ///    - High pass rate (90%+) → lower multiplier (5-7)
+    ///    - Medium pass rate (50%) → medium multiplier (10-15)
+    ///    - Low pass rate (10%-) → higher multiplier (20-30)
+    /// 4. Cap multiplier at reasonable bounds (5.0 - 50.0)
+    fn get_adaptive_multiplier(&self) -> f64 {
+        use std::sync::atomic::Ordering;
+
+        const MIN_SEARCHES_FOR_ADAPTATION: u64 = 3;
+        const DEFAULT_MULTIPLIER: f64 = 10.0;
+        const MIN_MULTIPLIER: f64 = 5.0;
+        const MAX_MULTIPLIER: f64 = 50.0;
+
+        let search_count = self.search_count.load(Ordering::Relaxed);
+
+        // Use default until we have enough data
+        if search_count < MIN_SEARCHES_FOR_ADAPTATION {
+            return DEFAULT_MULTIPLIER;
+        }
+
+        let total_candidates = self.total_candidates.load(Ordering::Relaxed);
+        let total_results = self.total_results.load(Ordering::Relaxed);
+
+        // Avoid division by zero
+        if total_candidates == 0 {
+            return DEFAULT_MULTIPLIER;
+        }
+
+        // Calculate historical pass rate
+        // Clamp to 1.0 to handle race conditions where results might temporarily
+        // exceed candidates due to concurrent atomic operations
+        let pass_rate = (total_results as f64 / total_candidates as f64).min(1.0);
+
+        // Adaptive formula: higher multiplier for lower pass rates
+        // multiplier = base / sqrt(pass_rate)
+        // This gives smooth adaptation:
+        // - pass_rate=1.0 (100%) → multiplier=5
+        // - pass_rate=0.5 (50%)  → multiplier=7
+        // - pass_rate=0.1 (10%)  → multiplier=16
+        // - pass_rate=0.01 (1%)  → multiplier=50
+        let multiplier = MIN_MULTIPLIER / pass_rate.sqrt();
+
+        // Clamp to reasonable bounds
+        multiplier.clamp(MIN_MULTIPLIER, MAX_MULTIPLIER)
+    }
+}
+
 /// Entry for a single vector index on a specific property.
 ///
 /// Each property can have its own HNSW index with independent configuration
@@ -142,6 +258,17 @@ pub struct CurrentStorage {
     temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>,
     /// Legacy temporal vector index state (for backward compatibility)
     temporal_vector_index_state: Arc<RwLock<TemporalVectorIndexState>>,
+    /// Adaptive over-fetch statistics per label (Issue #334)
+    /// Maps label -> FilterStats for tracking label-specific filter pass rates
+    ///
+    /// **Memory Considerations**: This map grows unbounded as new labels are encountered.
+    /// For workloads with bounded label sets (typical case), memory usage is negligible
+    /// (~100 bytes per unique label). For unbounded labels (e.g., using UUIDs as labels),
+    /// memory usage scales linearly with unique label count (~50MB per 1M labels).
+    ///
+    /// **Recommendation**: Use a bounded set of labels for optimal performance.
+    /// Future enhancement could add LRU eviction for unbounded scenarios.
+    filter_stats: DashMap<String, Arc<FilterStats>>,
 }
 
 impl CurrentStorage {
@@ -156,6 +283,7 @@ impl CurrentStorage {
             vector_index_state: Arc::new(RwLock::new(VectorIndexState::new())),
             temporal_vector_indexes: DashMap::new(),
             temporal_vector_index_state: Arc::new(RwLock::new(TemporalVectorIndexState::new())),
+            filter_stats: DashMap::new(),
         }
     }
 
@@ -856,6 +984,72 @@ impl CurrentStorage {
         Ok((index, query_vector))
     }
 
+    /// Get or create filter statistics for a label (Issue #334).
+    ///
+    /// Returns an Arc to the FilterStats for the given label, creating it if needed.
+    /// This enables adaptive over-fetch multiplier calculation based on historical
+    /// filter pass rates.
+    fn get_or_create_filter_stats(&self, label: &str) -> Arc<FilterStats> {
+        self.filter_stats
+            .entry(label.to_string())
+            .or_insert_with(|| Arc::new(FilterStats::new()))
+            .value()
+            .clone()
+    }
+
+    /// Calculate adaptive over-fetch candidates for filtered search (Issue #334).
+    ///
+    /// Returns the number of candidates to fetch and the FilterStats for recording results.
+    /// This method centralizes the adaptive over-fetch logic used by all filtered search methods.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - Number of results requested by the user
+    /// * `label` - Label to filter by
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (candidates_to_fetch, stats) where:
+    /// - `candidates_to_fetch` is the adaptive number of candidates to retrieve from HNSW
+    /// - `stats` is the FilterStats for recording search results
+    ///
+    /// # Algorithm
+    ///
+    /// - Uses adaptive multiplier based on historical pass rate (5x to 50x)
+    /// - Guarantees minimum of k + 20 candidates
+    /// - Caps maximum at k + 1000 to prevent excessive memory usage
+    fn calculate_adaptive_candidates(&self, k: usize, label: &str) -> (usize, Arc<FilterStats>) {
+        const MIN_ABSOLUTE_OVERFETCH: usize = 20;
+        const MAX_ABSOLUTE_OVERFETCH: usize = 1000;
+
+        let stats = self.get_or_create_filter_stats(label);
+        let multiplier = stats.get_adaptive_multiplier();
+        let candidates = ((k as f64 * multiplier) as usize)
+            .max(k + MIN_ABSOLUTE_OVERFETCH)
+            .min(k + MAX_ABSOLUTE_OVERFETCH);
+
+        (candidates, stats)
+    }
+
+    /// Get filter statistics for a label (test-only helper).
+    ///
+    /// Returns the current statistics (search_count, total_candidates, total_results)
+    /// for the given label, or None if no searches have been performed yet.
+    ///
+    /// This is used for testing to verify that adaptive learning is working correctly.
+    pub(crate) fn get_filter_stats(&self, label: &str) -> Option<(u64, u64, u64)> {
+        use std::sync::atomic::Ordering;
+
+        self.filter_stats.get(label).map(|entry| {
+            let stats = entry.value();
+            (
+                stats.search_count.load(Ordering::Relaxed),
+                stats.total_candidates.load(Ordering::Relaxed),
+                stats.total_results.load(Ordering::Relaxed),
+            )
+        })
+    }
+
     /// Find k most similar nodes to the query node based on vector similarity.
     ///
     /// Returns a list of (NodeId, score) pairs sorted by similarity (highest first).
@@ -890,9 +1084,8 @@ impl CurrentStorage {
         let (index, query_vector) = self.prepare_vector_search(query_node_id)?;
         let label_id = GLOBAL_INTERNER.intern(label)?;
 
-        // Fetch a multiple of k candidates to increase the chance of finding enough matches.
-        // Cap the over-fetch to prevent excessive memory usage with large k.
-        let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
+        let (candidates_to_fetch, stats) = self.calculate_adaptive_candidates(k, label);
+
         let mut results =
             index.search_with_filter(&query_vector, candidates_to_fetch, |node_id| {
                 self.indexes
@@ -902,7 +1095,12 @@ impl CurrentStorage {
             })?;
 
         results.retain(|(id, _)| *id != query_node_id);
+        let results_count = results.len();
         results.truncate(k);
+
+        // Record search statistics for adaptive learning (Issue #334)
+        stats.record_search(candidates_to_fetch, results_count);
+
         Ok(results)
     }
 
@@ -967,8 +1165,7 @@ impl CurrentStorage {
         // Intern the label for efficient comparison
         let label_id = GLOBAL_INTERNER.intern(label)?;
 
-        // Use adaptive over-fetch heuristic for filtered search
-        let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
+        let (candidates_to_fetch, stats) = self.calculate_adaptive_candidates(k, label);
 
         // Filter during HNSW traversal for better performance
         let mut results = index.search_with_filter(embedding, candidates_to_fetch, |node_id| {
@@ -977,8 +1174,13 @@ impl CurrentStorage {
                 .is_some_and(|n| n.label == label_id)
         })?;
 
+        let results_count = results.len();
         // Truncate to requested k (search_with_filter may return more)
         results.truncate(k);
+
+        // Record search statistics for adaptive learning (Issue #334)
+        stats.record_search(candidates_to_fetch, results_count);
+
         Ok(results)
     }
 
@@ -1070,7 +1272,8 @@ impl CurrentStorage {
         }
 
         let label_id = GLOBAL_INTERNER.intern(label)?;
-        let candidates_to_fetch = (k * 10).max(k + 20).min(k + 1000);
+
+        let (candidates_to_fetch, stats) = self.calculate_adaptive_candidates(k, label);
 
         let mut results =
             entry
@@ -1082,7 +1285,12 @@ impl CurrentStorage {
                         .is_some_and(|n| n.label == label_id)
                 })?;
 
+        let results_count = results.len();
         results.truncate(k);
+
+        // Record search statistics for adaptive learning (Issue #334)
+        stats.record_search(candidates_to_fetch, results_count);
+
         Ok(results)
     }
 
