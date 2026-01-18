@@ -1029,7 +1029,7 @@ mod tests {
         // Query a small range in the middle - should be fast
         let results = indexes.find_node_versions_in_valid_time_range(
             node_id,
-            TimeRange::new(5_000_000, 5_001_000).unwrap(),
+            TimeRange::new(5_000_000.into(), 5_001_000.into()).unwrap(),
         );
 
         // Should find ~10 versions in this range
@@ -1441,7 +1441,7 @@ mod tests {
                 }
 
                 // Query the range
-                let query_time_range = TimeRange::new(query_range.0, query_range.1).unwrap();
+                let query_time_range = TimeRange::new(query_range.0.into(), query_range.1.into()).unwrap();
                 let results = indexes.find_node_versions_in_valid_time_range(node_id, query_time_range);
 
                 // Manually compute expected results
@@ -1450,7 +1450,7 @@ mod tests {
                     .filter(|(_, temporal)| {
                         let valid = temporal.valid_time();
                         // Check overlap: version.end > query.start && version.start < query.end
-                        valid.end() > query_range.0 && valid.start() < query_range.1
+                        valid.end() > query_range.0.into() && valid.start() < query_range.1.into()
                     })
                     .map(|(vid, _)| *vid)
                     .collect();
@@ -1541,13 +1541,13 @@ mod tests {
                 // Point query
                 let point_results = indexes.find_node_versions_in_valid_time_range(
                     node_id,
-                    TimeRange::new(point, point + 1).unwrap()
+                    TimeRange::new(point.into(), (point + 1).into()).unwrap()
                 );
 
                 // Range query covering the point
                 let range_results = indexes.find_node_versions_in_valid_time_range(
                     node_id,
-                    TimeRange::new(point - 1000, point + 1000).unwrap()
+                    TimeRange::new((point - 1000).into(), (point + 1000).into()).unwrap()
                 );
 
                 // Every version from point query should be in range query

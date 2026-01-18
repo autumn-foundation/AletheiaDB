@@ -155,7 +155,7 @@ pub fn restore_node_version(
     let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
     let valid_end = entry.valid_to.map(|t| HybridTimestamp::new_unchecked(t, 0)).unwrap_or(TIMESTAMP_MAX);
 
-    let valid_time = TimeRange::new(valid_start, valid_end)
+    let valid_time = TimeRange::new(valid_start.into(), valid_end.into())
         .map_err(|e| {
             IndexPersistenceError::Serialization(format!(
                 "Invalid valid time range [{}, {:?}]: {}",
@@ -254,7 +254,7 @@ pub fn restore_edge_version(
     let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
     let valid_end = entry.valid_to.map(|t| HybridTimestamp::new_unchecked(t, 0)).unwrap_or(TIMESTAMP_MAX);
 
-    let valid_time = TimeRange::new(valid_start, valid_end)
+    let valid_time = TimeRange::new(valid_start.into(), valid_end.into())
         .map_err(|e| {
             IndexPersistenceError::Serialization(format!(
                 "Invalid valid time range [{}, {:?}]: {}",
@@ -532,7 +532,7 @@ mod tests {
             node_id: NodeId::new(1).unwrap(),
             temporal: BiTemporalInterval::new(
                 TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                TimeRange::new(1000, crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+                TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX.into()).unwrap(),
             ),
             label,
             data: VersionData::Anchor {
@@ -579,7 +579,7 @@ mod tests {
             node_id: NodeId::new(1).unwrap(),
             temporal: BiTemporalInterval::new(
                 TimeRange::new(2000.into(), 3000.into()).unwrap(),
-                TimeRange::new(2000, crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX.into()).unwrap(),
             ),
             label,
             data: VersionData::Delta { delta },
@@ -617,7 +617,7 @@ mod tests {
             edge_id: EdgeId::new(10).unwrap(),
             temporal: BiTemporalInterval::new(
                 TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                TimeRange::new(1000, crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+                TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX.into()).unwrap(),
             ),
             label,
             source: NodeId::new(1).unwrap(),

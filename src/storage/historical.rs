@@ -1972,8 +1972,8 @@ mod tests {
                 limit,
             }) => {
                 assert!(resource.contains("node"));
-                assert_eq!(current, 3.into());
-                assert_eq!(limit, 3.into());
+                assert_eq!(current, 3);
+                assert_eq!(limit, 3);
             }
             _ => panic!("Expected CapacityExceeded error"),
         }
@@ -2026,8 +2026,8 @@ mod tests {
                 limit,
             }) => {
                 assert!(resource.contains("edge"));
-                assert_eq!(current, 2.into());
-                assert_eq!(limit, 2.into());
+                assert_eq!(current, 2);
+                assert_eq!(limit, 2);
             }
             _ => panic!("Expected CapacityExceeded error"),
         }
@@ -2056,10 +2056,10 @@ mod tests {
         }
 
         let stats = storage.stats();
-        assert_eq!(stats.total_node_versions, 3.into());
-        assert_eq!(stats.node_anchor_count, 2.into());
-        assert_eq!(stats.node_delta_count, 1.into());
-        assert_eq!(stats.unique_nodes, 1.into());
+        assert_eq!(stats.total_node_versions, 3);
+        assert_eq!(stats.node_anchor_count, 2);
+        assert_eq!(stats.node_delta_count, 1);
+        assert_eq!(stats.unique_nodes, 1);
 
         // Compression ratio should be 2/3 ≈ 0.67
         assert!((stats.compression_ratio() - 0.6666).abs() < 0.01);
@@ -2502,7 +2502,7 @@ mod tests {
                     node_id,
                     VersionId::new(i as u64).unwrap(),
                     BiTemporalInterval::new(
-                        TimeRange::new(*start, *end).unwrap(),
+                        TimeRange::new(*start.into(), *end.into()).unwrap(),
                         TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                     ),
                     label,
@@ -2717,7 +2717,7 @@ mod tests {
 
         // Check cache was populated
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 1.into());
+        assert_eq!(stats.node_cache_entries, 1);
 
         // Second read - should hit cache
         let result2 = storage.reconstruct_node_properties(version_id).unwrap();
@@ -2725,7 +2725,7 @@ mod tests {
 
         // Cache size shouldn't change
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 1.into());
+        assert_eq!(stats.node_cache_entries, 1);
     }
 
     #[test]
@@ -2797,8 +2797,8 @@ mod tests {
         );
 
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 0.into());
-        assert_eq!(stats.edge_cache_entries, 0.into());
+        assert_eq!(stats.node_cache_entries, 0);
+        assert_eq!(stats.edge_cache_entries, 0);
     }
 
     #[test]
@@ -2822,7 +2822,7 @@ mod tests {
 
         // Check cache was populated
         let stats = storage.stats();
-        assert_eq!(stats.edge_cache_entries, 1.into());
+        assert_eq!(stats.edge_cache_entries, 1);
 
         // Second read - should hit cache
         let result2 = storage.reconstruct_edge_properties(version_id).unwrap();
@@ -2830,7 +2830,7 @@ mod tests {
 
         // Cache size shouldn't change
         let stats = storage.stats();
-        assert_eq!(stats.edge_cache_entries, 1.into());
+        assert_eq!(stats.edge_cache_entries, 1);
     }
 
     #[test]
@@ -2876,8 +2876,8 @@ mod tests {
         }
 
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 5.into());
-        assert_eq!(stats.edge_cache_entries, 3.into());
+        assert_eq!(stats.node_cache_entries, 5);
+        assert_eq!(stats.edge_cache_entries, 3);
     }
 
     #[test]
@@ -2920,7 +2920,7 @@ mod tests {
         assert_eq!(result1.get("title"), result2.get("title"));
 
         let stats = storage.stats();
-        assert_eq!(stats.node_cache_entries, 1.into());
+        assert_eq!(stats.node_cache_entries, 1);
     }
 
     #[test]
@@ -3068,9 +3068,9 @@ mod tests {
         }
 
         // Should have 2 anchors (v0 and v3)
-        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2.into());
+        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2);
         // Should have 5 total version events
-        assert_eq!(observer.version_count.load(Ordering::SeqCst), 5.into());
+        assert_eq!(observer.version_count.load(Ordering::SeqCst), 5);
     }
 
     #[test]
@@ -3107,7 +3107,7 @@ mod tests {
         }
 
         // Should have 2 anchors
-        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2.into());
+        assert_eq!(observer.anchor_count.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -3149,7 +3149,7 @@ mod tests {
             .unwrap();
 
         // Should only count node anchor (not edge anchor)
-        assert_eq!(observer.count.load(Ordering::SeqCst), 1.into());
+        assert_eq!(observer.count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -3229,8 +3229,8 @@ mod tests {
             .unwrap();
 
         // Both observers should be notified
-        assert_eq!(observer1.anchor_count.load(Ordering::SeqCst), 1.into());
-        assert_eq!(observer2.anchor_count.load(Ordering::SeqCst), 1.into());
+        assert_eq!(observer1.anchor_count.load(Ordering::SeqCst), 1);
+        assert_eq!(observer2.anchor_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -3286,7 +3286,7 @@ mod tests {
         let hook: PreAnchorHook =
             Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
                 hook_called_clone.store(true, Ordering::SeqCst);
-                Ok(Some(42.into()))
+                Ok(Some(42))
             });
 
         storage.register_pre_node_anchor_hook(hook);
@@ -3315,7 +3315,7 @@ mod tests {
 
         // Hook that returns snapshot ID 123
         let hook: PreAnchorHook =
-            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| Ok(Some(123.into())));
+            Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| Ok(Some(123)));
 
         storage.register_pre_node_anchor_hook(hook);
 
@@ -3427,7 +3427,7 @@ mod tests {
         let hook: PreAnchorHook =
             Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
                 hook_call_count_clone.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(42.into()))
+                Ok(Some(42))
             });
 
         storage.register_pre_node_anchor_hook(hook);
@@ -3449,7 +3449,7 @@ mod tests {
         }
 
         // Hook should be called only for anchors (v0 and v3)
-        assert_eq!(hook_call_count.load(Ordering::SeqCst), 2.into());
+        assert_eq!(hook_call_count.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -3463,7 +3463,7 @@ mod tests {
         let node_hook: PreAnchorHook =
             Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
                 node_hook_count_clone.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(1.into()))
+                Ok(Some(1))
             });
 
         let edge_hook_count = Arc::new(AtomicUsize::new(0));
@@ -3471,7 +3471,7 @@ mod tests {
         let edge_hook: PreAnchorHook =
             Arc::new(move |_entity_type, _entity_id, _timestamp, _properties| {
                 edge_hook_count_clone.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(2.into()))
+                Ok(Some(2))
             });
 
         storage.register_pre_node_anchor_hook(node_hook);
@@ -3507,8 +3507,8 @@ mod tests {
             .unwrap();
 
         // Each hook should be called once
-        assert_eq!(node_hook_count.load(Ordering::SeqCst), 1.into());
-        assert_eq!(edge_hook_count.load(Ordering::SeqCst), 1.into());
+        assert_eq!(node_hook_count.load(Ordering::SeqCst), 1);
+        assert_eq!(edge_hook_count.load(Ordering::SeqCst), 1);
 
         // Verify snapshot IDs are different
         let node_version = storage

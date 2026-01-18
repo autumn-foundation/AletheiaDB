@@ -1328,7 +1328,7 @@ mod tests {
         let now = crate::core::temporal::time::now();
         let query = Query {
             ops: vec![QueryOp::Between {
-                time_range: crate::core::temporal::TimeRange::new(now, now).unwrap(),
+                time_range: crate::core::temporal::TimeRange::new(now.into(), now.into()).unwrap(),
             }],
             temporal_context: None,
             hints: QueryHints::default(),
@@ -1344,7 +1344,7 @@ mod tests {
         let now = crate::core::temporal::time::now();
         let query = Query {
             ops: vec![QueryOp::TrackChanges {
-                time_range: crate::core::temporal::TimeRange::new(now, now).unwrap(),
+                time_range: crate::core::temporal::TimeRange::new(now.into(), now.into()).unwrap(),
             }],
             temporal_context: None,
             hints: QueryHints::default(),

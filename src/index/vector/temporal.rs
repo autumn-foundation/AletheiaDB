@@ -2229,7 +2229,7 @@ mod tests {
         let vec1 = vec![1.0, 0.0, 0.0, 0.0];
         let timestamp = 1000000;
 
-        index.add(node1, &vec1, timestamp)?;
+        index.add(node1, &vec1, timestamp.into())?;
 
         assert_eq!(index.current_index().len(), 1);
         Ok(())
@@ -2268,7 +2268,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, base_time)?;
+        let index = TemporalVectorIndex::new_at(config, base_time.into())?;
 
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], base_time)?;
         assert_eq!(index.snapshot_count(), 0);
@@ -2278,7 +2278,7 @@ mod tests {
             &[0.0, 1.0, 0.0, 0.0],
             base_time + 2_000_000,
         )?;
-        index.on_transaction_at(base_time + 2_000_000)?;
+        index.on_transaction_at((base_time + 2_000_000).into())?;
         assert_eq!(index.snapshot_count(), 1);
 
         Ok(())
@@ -2337,7 +2337,7 @@ mod tests {
             index.add(
                 NodeId::new(i).unwrap(),
                 &[i as f32, 0.0, 0.0, 0.0],
-                (i * 1000) as Timestamp,
+                ((i * 1000) as i64).into(),
             )?;
             index.on_transaction()?;
         }
@@ -2398,7 +2398,7 @@ mod tests {
         assert!(!results.is_empty());
 
         for (timestamp, similar_nodes) in results {
-            assert!((1000..=3000).contains(&timestamp));
+            assert!((1000..=3000).contains(&timestamp.wallclock()));
             assert!(!similar_nodes.is_empty());
         }
 
@@ -2415,7 +2415,7 @@ mod tests {
         let info = index.get_snapshot_info()?;
         assert_eq!(info.len(), 1);
         assert_eq!(info[0].snapshot_id, 0);
-        assert!(info[0].timestamp > 0);
+        assert!(info[0].timestamp.wallclock() > 0);
 
         Ok(())
     }
@@ -2568,21 +2568,21 @@ mod tests {
         index.add(
             NodeId::new(1).unwrap(),
             &[1.0, 0.0, 0.0, 0.0],
-            current_time - 10_000_000,
+            (current_time.wallclock() - 10_000_000).into(),
         )?;
         index.create_manual_snapshot()?;
 
         index.add(
             NodeId::new(2).unwrap(),
             &[0.0, 1.0, 0.0, 0.0],
-            current_time - 7_000_000,
+            (current_time.wallclock() - 7_000_000).into(),
         )?;
         index.create_manual_snapshot()?;
 
         index.add(
             NodeId::new(3).unwrap(),
             &[0.0, 0.0, 1.0, 0.0],
-            current_time - 3_000_000,
+            (current_time.wallclock() - 3_000_000).into(),
         )?;
         index.create_manual_snapshot()?;
 

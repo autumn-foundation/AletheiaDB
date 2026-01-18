@@ -2740,7 +2740,7 @@ impl GallifreyDB {
     /// use gallifreydb::core::temporal::TimeRange;
     /// use gallifreydb::index::vector::temporal::DriftMetric;
     ///
-    /// let time_range = TimeRange::new(start_ts, end_ts).unwrap();
+    /// let time_range = TimeRange::new(start_ts.into(), end_ts.into()).unwrap();
     /// let drifted = db.find_drift_in(
     ///     "content_embedding",
     ///     0.3,  // threshold

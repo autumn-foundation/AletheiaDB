@@ -780,7 +780,7 @@ mod tests {
         let ts2 = HybridTimestamp::new(2000, 0).unwrap();
 
         // TimeRange should work with HybridTimestamp
-        let range = TimeRange::new(ts1, ts2).unwrap();
+        let range = TimeRange::new(ts1.into(), ts2.into()).unwrap();
 
         assert_eq!(range.start(), ts1);
         assert_eq!(range.end(), ts2);
@@ -800,7 +800,7 @@ mod tests {
         assert!(ts2 < ts3);
 
         // TimeRange should respect this ordering
-        let range = TimeRange::new(ts1, ts3).unwrap();
+        let range = TimeRange::new(ts1.into(), ts3.into()).unwrap();
         assert!(range.contains(ts1));
         assert!(range.contains(ts2));
         assert!(!range.contains(ts3)); // Exclusive end

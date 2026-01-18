@@ -362,7 +362,7 @@ mod tests {
         let snapshot = manager.capture_snapshot(100.into());
 
         assert_eq!(snapshot.snapshot_timestamp, 100.into());
-        assert_eq!(snapshot2.active_transactions.len(), 2);
+        assert_eq!(snapshot.active_transactions.len(), 2);
         assert!(snapshot.active_transactions.contains(&TxId::new(1)));
         assert!(snapshot.active_transactions.contains(&TxId::new(2)));
     }
