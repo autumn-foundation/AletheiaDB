@@ -2493,7 +2493,7 @@ mod tests {
         let embeddings = [
             (0, 500, vec![0.1f32, 0.0]),               // valid 0-500
             (500, 1000, vec![0.2f32, 0.0]),            // valid 500-1000
-            (1000, TIMESTAMP_MAX, vec![0.3f32, 0.0]), // valid 1000+
+            (1000, TIMESTAMP_MAX.wallclock(), vec![0.3f32, 0.0]), // valid 1000+
         ];
 
         for (i, (start, end, emb)) in embeddings.iter().enumerate() {
@@ -2502,7 +2502,7 @@ mod tests {
                     node_id,
                     VersionId::new(i as u64).unwrap(),
                     BiTemporalInterval::new(
-                        TimeRange::new(*start.into(), *end.into()).unwrap(),
+                        TimeRange::new((*start).into(), (*end).into()).unwrap(),
                         TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                     ),
                     label,
@@ -3170,7 +3170,7 @@ mod tests {
             .add_node_version(
                 node_id,
                 version_id,
-                BiTemporalInterval::current(timestamp),
+                BiTemporalInterval::current(timestamp.into()),
                 label,
                 PropertyMapBuilder::new().build(),
             )
@@ -3193,7 +3193,7 @@ mod tests {
             } => {
                 assert_eq!(*vid, version_id);
                 assert_eq!(*nid, node_id);
-                assert_eq!(*ts, timestamp);
+                assert_eq!(*ts, timestamp.into());
             }
             _ => panic!("Wrong event type"),
         }
@@ -3338,7 +3338,7 @@ mod tests {
             .get_node_version(VersionId::new(1).unwrap())
             .unwrap();
         assert!(version.is_anchor());
-        assert_eq!(version.data.get_vector_snapshot_id(), Some(123.into()));
+        assert_eq!(version.data.get_vector_snapshot_id(), Some(123));
     }
 
     #[test]
@@ -3517,8 +3517,8 @@ mod tests {
         let edge_version = storage
             .get_edge_version(VersionId::new(2).unwrap())
             .unwrap();
-        assert_eq!(node_version.data.get_vector_snapshot_id(), Some(1.into()));
-        assert_eq!(edge_version.data.get_vector_snapshot_id(), Some(2.into()));
+        assert_eq!(node_version.data.get_vector_snapshot_id(), Some(1));
+        assert_eq!(edge_version.data.get_vector_snapshot_id(), Some(2));
     }
 
     // ========================================================================
@@ -3563,7 +3563,7 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current(i as i64 * 1000),
+                    BiTemporalInterval::current((i as i64 * 1000).into()),
                     label,
                     PropertyMapBuilder::new()
                         .insert("counter", i as i64)
@@ -3624,7 +3624,7 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current(i as i64 * 1000),
+                    BiTemporalInterval::current((i as i64 * 1000).into()),
                     label,
                     PropertyMapBuilder::new()
                         .insert("counter", i as i64)
@@ -3644,7 +3644,7 @@ mod tests {
         let props = result.unwrap();
         assert_eq!(
             props.get("counter").and_then(|v| v.as_int()),
-            Some(MAX_RECONSTRUCTION_DEPTH - 1)
+            Some((MAX_RECONSTRUCTION_DEPTH - 1) as i64)
         );
     }
 
@@ -3688,7 +3688,7 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     vid,
-                    BiTemporalInterval::current(i as i64 * 1000),
+                    BiTemporalInterval::current((i as i64 * 1000).into()),
                     label,
                     source,
                     target,
@@ -3753,7 +3753,7 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     vid,
-                    BiTemporalInterval::current(i as i64 * 1000),
+                    BiTemporalInterval::current((i as i64 * 1000).into()),
                     label,
                     source,
                     target,
@@ -3891,7 +3891,7 @@ mod tests {
         // Create 11 versions (will create anchors at v0, v5, v10)
         for i in 0..11 {
             let version_id = VersionId::new(i).unwrap();
-            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let temporal = BiTemporalInterval::current((i as i64 * 1000).into());
             let props = PropertyMapBuilder::new()
                 .insert("counter", i as i64)
                 .build();
@@ -3949,7 +3949,7 @@ mod tests {
         // Create 21 versions (anchors at v0, v10, v20 + 18 deltas)
         for i in 0..21 {
             let version_id = VersionId::new(i).unwrap();
-            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let temporal = BiTemporalInterval::current((i as i64 * 1000).into());
             let props = PropertyMapBuilder::new()
                 .insert("counter", i as i64)
                 .build();
@@ -4005,7 +4005,7 @@ mod tests {
         // Create 8 versions (anchor at v0, v5, deltas at v1-v4, v6-v7)
         for i in 0..8 {
             let version_id = VersionId::new(i).unwrap();
-            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let temporal = BiTemporalInterval::current((i as i64 * 1000).into());
             let props = PropertyMapBuilder::new()
                 .insert("version", i as i64)
                 .insert("data", format!("content_{}", i))
@@ -4047,7 +4047,7 @@ mod tests {
         // Create 10 versions (anchors at v0, v5)
         for i in 0..10 {
             let version_id = VersionId::new(i).unwrap();
-            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let temporal = BiTemporalInterval::current((i as i64 * 1000).into());
             let props = PropertyMapBuilder::new().insert("value", i as i64).build();
 
             storage
@@ -4130,7 +4130,7 @@ mod tests {
         // Create many versions to stress the cache
         for i in 0..50 {
             let version_id = VersionId::new(i).unwrap();
-            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let temporal = BiTemporalInterval::current((i as i64 * 1000).into());
             let props = PropertyMapBuilder::new()
                 .insert("counter", i as i64)
                 .insert("data", format!("value_{}", i))
@@ -4188,7 +4188,7 @@ mod tests {
         // Create some versions
         for i in 0..20 {
             let version_id = VersionId::new(i).unwrap();
-            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let temporal = BiTemporalInterval::current((i as i64 * 1000).into());
             let props = PropertyMapBuilder::new().insert("value", i as i64).build();
 
             storage
@@ -4237,7 +4237,7 @@ mod tests {
         // Create test data
         for i in 0..30 {
             let version_id = VersionId::new(i).unwrap();
-            let temporal = BiTemporalInterval::current(i as i64 * 1000);
+            let temporal = BiTemporalInterval::current((i as i64 * 1000).into());
             let props = PropertyMapBuilder::new()
                 .insert("id", i as i64)
                 .insert("name", format!("item_{}", i))

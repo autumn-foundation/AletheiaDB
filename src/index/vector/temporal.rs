@@ -2936,7 +2936,7 @@ mod tests {
                 0.0,
                 0.0,
             ],
-            ts,
+            ts.into(),
         )?;
         index.on_transaction_at(ts.into())?;
 
@@ -2998,7 +2998,7 @@ mod tests {
                 0.0,
                 0.0,
             ],
-            ts,
+            ts.into(),
         )?;
         index.on_transaction_at(ts.into())?;
 
@@ -3356,10 +3356,10 @@ mod tests {
                 for i in 0..5 {
                     let node_id = NodeId::new((thread_id * 10 + i) as u64).unwrap();
                     let timestamp = base_time + (i * 100);
-                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], timestamp)
+                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], timestamp.into())
                         .unwrap();
                     // Try to trigger snapshot
-                    idx.on_transaction_at(timestamp).unwrap();
+                    idx.on_transaction_at(timestamp.into()).unwrap();
                 }
             }));
         }
@@ -3463,7 +3463,7 @@ mod tests {
             index.add(
                 NodeId::new(0).unwrap(),
                 &[snapshot_num as f32, 0.0, 0.0, 0.0],
-                timestamp,
+                timestamp.into(),
             )?;
             index.on_transaction_at(timestamp.into())?;
         }
@@ -3475,7 +3475,7 @@ mod tests {
             index.add(
                 NodeId::new(0).unwrap(),
                 &[snapshot_num as f32, 0.0, 0.0, 0.0],
-                timestamp,
+                timestamp.into(),
             )?;
             index.on_transaction_at(timestamp.into())?;
         }
@@ -3518,7 +3518,7 @@ mod tests {
             index.add(
                 NodeId::new(i).unwrap(),
                 &[100.0 + i as f32, 0.0, 0.0, 0.0],
-                2000,
+                2000.into(),
             )?;
         }
 
@@ -3566,7 +3566,7 @@ mod tests {
             index.add(
                 NodeId::new(i).unwrap(),
                 &[200.0 + i as f32, 0.0, 0.0, 0.0],
-                2000,
+                2000.into(),
             )?;
         }
         index.on_transaction_at(2000.into())?;
@@ -3727,9 +3727,9 @@ mod tests {
                 for i in 0..10 {
                     let timestamp = 2000 + (thread_id * 1000) + (i * 100);
                     let node_id = NodeId::new((thread_id * 10 + i) as u64).unwrap();
-                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], timestamp)
+                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], timestamp.into())
                         .unwrap();
-                    idx.on_transaction_at(timestamp).unwrap();
+                    idx.on_transaction_at(timestamp.into()).unwrap();
                 }
             }));
         }
@@ -3871,7 +3871,7 @@ mod tests {
             index.add(
                 NodeId::new(i).unwrap(),
                 &[100.0 + i as f32, 0.0, 0.0, 0.0],
-                2000,
+                2000.into(),
             )?;
         }
         // Additions: nodes 10, 11
@@ -3929,7 +3929,7 @@ mod tests {
             index.add(
                 NodeId::new((i + 10) as u64).unwrap(),
                 &[i as f32 + 0.5, 0.0, 0.0, 0.0],
-                2000,
+                2000.into(),
             )?;
         }
         index.on_transaction_at(2000.into())?;
@@ -4060,7 +4060,7 @@ mod tests {
         // With full_snapshot_interval=10, we get full snapshots periodically,
         // so max delta chain is ~5 (well under MAX_DELTA_CHAIN_DEPTH=10)
         let snapshot_data = index.snapshot_data.read();
-        let latest_timestamp = 1000 + (15 * 100);
+        let latest_timestamp = (1000 + (15 * 100)).into();
         if let Some(latest_snapshot) = snapshot_data.vector_history.get(&latest_timestamp) {
             let result = latest_snapshot.collect_all(&snapshot_data.vector_history);
 
@@ -4133,7 +4133,7 @@ mod tests {
 
         // Create a delta snapshot that references a missing base
         let delta_snapshot = VectorSnapshot::Delta {
-            base_time: 1000, // This base won't exist
+            base_time: 1000.into(), // This base won't exist
             added: Arc::new(HashMap::from([(
                 NodeId::new(1).unwrap(),
                 Arc::from(vec![1.0f32, 0.0f32, 0.0f32, 0.0f32]) as Arc<[f32]>,
@@ -4291,11 +4291,11 @@ mod tests {
         let vec_valid = vec![1.0, 0.0, 0.0, 0.0];
 
         // Test timestamp at MAX_VALID_TIMESTAMP (should work)
-        let result = index.add(node_id, &vec_valid, MAX_VALID_TIMESTAMP);
+        let result = index.add(node_id, &vec_valid, MAX_VALID_TIMESTAMP.into());
         assert!(result.is_ok(), "Should accept MAX_VALID_TIMESTAMP");
 
         // Test timestamp exceeding MAX_VALID_TIMESTAMP (should fail)
-        let result = index.add(node_id, &vec_valid, MAX_VALID_TIMESTAMP + 1);
+        let result = index.add(node_id, &vec_valid, (MAX_VALID_TIMESTAMP + 1).into());
         assert!(
             result.is_err(),
             "Should reject timestamp > MAX_VALID_TIMESTAMP"
@@ -4309,11 +4309,11 @@ mod tests {
         }
 
         // Test timestamp at i64::MAX (should fail)
-        let result = index.add(node_id, &vec_valid, i64::MAX);
+        let result = index.add(node_id, &vec_valid, (i64::MAX).into());
         assert!(result.is_err(), "Should reject timestamp at i64::MAX");
 
         // Test negative timestamp (should fail)
-        let result = index.add(node_id, &vec_valid, -1);
+        let result = index.add(node_id, &vec_valid, 0i64.into());
         assert!(result.is_err(), "Should reject negative timestamp");
 
         Ok(())

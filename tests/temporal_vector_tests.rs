@@ -163,8 +163,8 @@ fn test_prune_snapshots() -> Result<()> {
     for i in 1..=5 {
         let node = NodeId::new(i).unwrap();
         let vec = vec![i as f32, 0.0, 0.0, 0.0];
-        index.add(node, &vec, ((i * (1000 as i64).into()).into()?;
-        index.on_transaction_at((i * (1000 as i64).into()?; // Create snapshot
+        index.add(node, &vec, ((i * 1000) as i64).into())?;
+        index.on_transaction_at(((i * 1000) as i64).into())?; // Create snapshot
     }
 
     // Prune snapshots (should keep only 2 most recent)

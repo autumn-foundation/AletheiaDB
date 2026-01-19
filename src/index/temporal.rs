@@ -952,8 +952,8 @@ mod tests {
                             version_id,
                             BiTemporalInterval::new(
                                 TimeRange::new(
-                                    ((thread_id * versions_per_thread + v) * 100) as i64,
-                                    (((thread_id * versions_per_thread + v) + 1) * 100) as i64,
+                                    (((thread_id * versions_per_thread + v) * 100) as i64).into(),
+                                    ((((thread_id * versions_per_thread + v) + 1) * 100) as i64).into(),
                                 )
                                 .unwrap(),
                                 TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),

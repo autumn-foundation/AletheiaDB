@@ -986,7 +986,7 @@ mod tests {
     fn test_temporal_planning() {
         let planner = test_planner();
         let query = QueryBuilder::new()
-            .as_of(1000, 2000)
+            .as_of(1000.into(), 2000.into())
             .start(NodeId::new(1).unwrap())
             .build();
 
@@ -1000,7 +1000,7 @@ mod tests {
         let planner = test_planner();
         let embedding = [0.1f32; 4];
         let query = QueryBuilder::new()
-            .as_of(1000, 2000)
+            .as_of(1000.into(), 2000.into())
             .find_similar(&embedding, 10)
             .build();
 
@@ -1580,7 +1580,7 @@ mod tests {
 
         let embedding = [0.1f32; 4];
         let query = QueryBuilder::new()
-            .as_of(1000, 2000)
+            .as_of(1000.into(), 2000.into())
             .find_similar(&embedding, 10)
             .build();
 
@@ -1615,7 +1615,7 @@ mod tests {
         let logical_plan = LogicalPlan::new(LogicalOp::Scan(ScanOp::TemporalVectorSearch {
             embedding,
             k: 10,
-            timestamp: 1000,
+            timestamp: 1000.into(),
             property_key: Some("title_embedding".to_string()),
         }));
 
@@ -1654,7 +1654,7 @@ mod tests {
 
         let embedding = [0.1f32; 4];
         let query = QueryBuilder::new()
-            .as_of(1000, 2000)
+            .as_of(1000.into(), 2000.into())
             .find_similar_builder(&embedding, 10)
             .property("title_embedding")
             .finish()
@@ -1678,7 +1678,7 @@ mod tests {
         let planner = test_planner();
         let embedding = [0.1f32; 4];
         let query = QueryBuilder::new()
-            .as_of(1000, 2000)
+            .as_of(1000.into(), 2000.into())
             .find_similar(&embedding, 10)
             .build();
 
@@ -1711,7 +1711,7 @@ mod tests {
         let logical_plan = LogicalPlan::new(LogicalOp::Scan(ScanOp::TemporalVectorSearch {
             embedding,
             k: 10,
-            timestamp: 1000,
+            timestamp: 1000.into(),
             property_key: Some("nonexistent_property".to_string()),
         }));
 

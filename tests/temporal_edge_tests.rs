@@ -341,7 +341,7 @@ fn test_temporal_edge_interval_closing() {
     let hist_guard = historical.read();
 
     // Query at t1 (during v1)
-    let t1 = v1_start + 1;
+    let t1 = (v1_start.wallclock() + 1).into();
     let v1_lookup = hist_guard
         .find_edge_version_at_time(edge_id, t1, t1)
         .unwrap();
@@ -358,7 +358,7 @@ fn test_temporal_edge_interval_closing() {
     );
 
     // Query at t2 (during v2)
-    let t2 = v2_start + 1;
+    let t2 = (v2_start.wallclock() + 1).into();
     let v2_lookup = hist_guard
         .find_edge_version_at_time(edge_id, t2, t2)
         .unwrap();

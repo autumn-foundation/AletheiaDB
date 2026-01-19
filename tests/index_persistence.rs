@@ -1074,7 +1074,7 @@ fn test_delta_encoding_reduces_incremental_save_size() {
     for i in 10..20 {
         let props = PropertyMapBuilder::new()
             .insert("name", format!("Modified_Node_{}", i))
-            .insert("value", (i * (1000 as i64).into() // Changed value
+            .insert("value", (i * 1000) as i64) // Changed value
             .insert("modified", true) // New property
             .build();
 
@@ -1112,7 +1112,7 @@ fn test_delta_encoding_reduces_incremental_save_size() {
     // 2. MODIFICATIONS: Modify edges 10-19 (change their properties)
     for i in 10..20 {
         let props = PropertyMapBuilder::new()
-            .insert("weight", (i * (2000 as i64).into() // Changed weight
+            .insert("weight", (i * 2000) as i64) // Changed weight
             .insert("modified_edge", true) // New property
             .build();
 
@@ -1206,7 +1206,7 @@ fn test_delta_encoding_reduces_incremental_save_size() {
         );
         assert_eq!(
             restored_props.get("value").and_then(|v| v.as_int()),
-            Some((i * (1000 as i64).into(),
+            Some((i * 1000) as i64),
             "Node {} should have modified value",
             i
         );
@@ -1265,7 +1265,7 @@ fn test_delta_encoding_reduces_incremental_save_size() {
         let restored_props = restore_property_map(&edge.properties).unwrap();
         assert_eq!(
             restored_props.get("weight").and_then(|v| v.as_int()),
-            Some((i * (2000 as i64).into(),
+            Some((i * 2000) as i64),
             "Edge {} should have modified weight",
             i
         );
@@ -2282,7 +2282,7 @@ fn test_delta_removed_properties_persistence() {
     let _anchor_version = NodeVersion {
         id: VersionId::new(1).unwrap(),
         node_id: NodeId::new(100).unwrap(),
-        temporal: BiTemporalInterval::now(1000i64, 2000i64),
+        temporal: BiTemporalInterval::now(1000i64.into(), 2000i64.into()),
         label: person_label,
         data: VersionData::Anchor {
             properties: anchor_props,
@@ -2305,7 +2305,7 @@ fn test_delta_removed_properties_persistence() {
     let delta_version = NodeVersion {
         id: VersionId::new(2).unwrap(),
         node_id: NodeId::new(100).unwrap(),
-        temporal: BiTemporalInterval::now(1000i64, 3000i64),
+        temporal: BiTemporalInterval::now(1000i64.into(), 3000i64.into()),
         label: person_label,
         data: VersionData::Delta {
             delta: delta.clone(),
@@ -2588,7 +2588,7 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
             node_ids[i + 1],
             "LINKS_TO",
             PropertyMapBuilder::new()
-                .insert("weight", (i + (1 as i64).into()
+                .insert("weight", (i + 1) as i64)
                 .build(),
         )
         .unwrap();

@@ -196,7 +196,7 @@ fn test_property_delta_large_scale_memory_efficiency() {
             let interned_key = GLOBAL_INTERNER.intern(key).unwrap();
             delta.changed.insert(
                 interned_key,
-                PropertyValue::Int((entity_id * 1000 + version as i64).into(),
+                PropertyValue::Int((entity_id * 1000 + version) as i64),
             );
 
             all_deltas.push(delta);

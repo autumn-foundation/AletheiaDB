@@ -191,7 +191,7 @@ fn test_query_builder_temporal() {
     let (alice, _bob, _carol, _dave) = create_social_graph(&db);
 
     // Build temporal query
-    let query = QueryBuilder::new().as_of(1000, 1000).start(alice).build();
+    let query = QueryBuilder::new().as_of(1000.into(), 1000.into()).start(alice).build();
 
     assert!(query.is_temporal());
     println!("✓ Query builder with temporal context works");
@@ -283,7 +283,7 @@ fn test_planner_temporal_lookup() {
     let db = create_test_db();
     let (alice, _bob, _carol, _dave) = create_social_graph(&db);
 
-    let query = QueryBuilder::new().as_of(1000, 1000).start(alice).build();
+    let query = QueryBuilder::new().as_of(1000.into(), 1000.into()).start(alice).build();
 
     let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");
@@ -926,7 +926,7 @@ fn test_execute_temporal_node_lookup_returns_historical_state() {
         // Use a timestamp in the middle of the first version's interval
         let start = prev_version.temporal.valid_time().start();
         let end = prev_version.temporal.valid_time().end();
-        let midpoint = (start + end) / 2;
+        let midpoint = ((start.wallclock() + end.wallclock()) / 2).into();
         println!("DEBUG: Using midpoint timestamp: {}", midpoint);
         midpoint
     };
