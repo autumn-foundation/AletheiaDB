@@ -13,7 +13,7 @@
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
-use crate::core::temporal::{BiTemporalInterval, Timestamp, TIMESTAMP_MAX};
+use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
 use crate::storage::observer::{Observer, StorageEvent, notify_observers};
 use crate::storage::version::{
     AnchorConfig, EdgeVersion, NodeVersion, TemporalVersion, VersionData,
@@ -1747,7 +1747,7 @@ mod tests {
     use super::*;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::{TimeRange, TIMESTAMP_MAX};
+    use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
     use crate::storage::{StorageEvent, StorageObserver};
 
     #[test]
@@ -2491,8 +2491,8 @@ mod tests {
 
         // Create versions at different times with different embeddings
         let embeddings = [
-            (0, 500, vec![0.1f32, 0.0]),               // valid 0-500
-            (500, 1000, vec![0.2f32, 0.0]),            // valid 500-1000
+            (0, 500, vec![0.1f32, 0.0]),                          // valid 0-500
+            (500, 1000, vec![0.2f32, 0.0]),                       // valid 500-1000
             (1000, TIMESTAMP_MAX.wallclock(), vec![0.3f32, 0.0]), // valid 1000+
         ];
 
@@ -2818,7 +2818,10 @@ mod tests {
 
         // First read - cache miss
         let result1 = storage.reconstruct_edge_properties(version_id).unwrap();
-        assert_eq!(result1.get("since").and_then(|v| v.as_int()), Some(2020.into()));
+        assert_eq!(
+            result1.get("since").and_then(|v| v.as_int()),
+            Some(2020.into())
+        );
 
         // Check cache was populated
         let stats = storage.stats();
@@ -2826,7 +2829,10 @@ mod tests {
 
         // Second read - should hit cache
         let result2 = storage.reconstruct_edge_properties(version_id).unwrap();
-        assert_eq!(result2.get("since").and_then(|v| v.as_int()), Some(2020.into()));
+        assert_eq!(
+            result2.get("since").and_then(|v| v.as_int()),
+            Some(2020.into())
+        );
 
         // Cache size shouldn't change
         let stats = storage.stats();
@@ -2976,7 +2982,10 @@ mod tests {
         // Verify data
         match data {
             VersionData::Anchor { properties, .. } => {
-                assert_eq!(properties.get("since").and_then(|v| v.as_int()), Some(2021.into()));
+                assert_eq!(
+                    properties.get("since").and_then(|v| v.as_int()),
+                    Some(2021.into())
+                );
             }
             _ => panic!("Expected anchor"),
         }
@@ -3981,9 +3990,18 @@ mod tests {
         let props10 = storage.reconstruct_node_properties(anchor_v10).unwrap();
         let props20 = storage.reconstruct_node_properties(anchor_v20).unwrap();
 
-        assert_eq!(props0.get("counter").and_then(|v| v.as_int()), Some(0.into()));
-        assert_eq!(props10.get("counter").and_then(|v| v.as_int()), Some(10.into()));
-        assert_eq!(props20.get("counter").and_then(|v| v.as_int()), Some(20.into()));
+        assert_eq!(
+            props0.get("counter").and_then(|v| v.as_int()),
+            Some(0.into())
+        );
+        assert_eq!(
+            props10.get("counter").and_then(|v| v.as_int()),
+            Some(10.into())
+        );
+        assert_eq!(
+            props20.get("counter").and_then(|v| v.as_int()),
+            Some(20.into())
+        );
     }
 
     #[test]
@@ -4026,7 +4044,10 @@ mod tests {
         // Reconstruct a delta version (v7) - should use anchor cache for v5
         let v7 = VersionId::new(7).unwrap();
         let props = storage.reconstruct_node_properties(v7).unwrap();
-        assert_eq!(props.get("version").and_then(|v| v.as_int()), Some(7.into()));
+        assert_eq!(
+            props.get("version").and_then(|v| v.as_int()),
+            Some(7.into())
+        );
         assert_eq!(
             props.get("data").and_then(|v| v.as_str()),
             Some("content_7")
