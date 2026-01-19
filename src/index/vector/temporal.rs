@@ -55,7 +55,7 @@
 //! // Find similar vectors at specific point in time
 //! let query = vec![0.1f32; 384];
 //! let timestamp = 1234567890000000; // microseconds since epoch
-//! let results = index.find_similar_as_of(&query, 10, timestamp)?;
+//! let results = index.find_similar_as_of(&query, 10, timestamp.into())?;
 //!
 //! // Track semantic drift over time
 //! let node_id = NodeId::new(42).unwrap();
@@ -2246,11 +2246,11 @@ mod tests {
         };
         let index = TemporalVectorIndex::new(config)?;
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
         index.on_transaction()?;
         assert_eq!(index.snapshot_count(), 0);
 
-        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 2000)?;
+        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 2000.into())?;
         index.on_transaction()?;
         assert_eq!(index.snapshot_count(), 1);
 
@@ -2270,7 +2270,7 @@ mod tests {
         };
         let index = TemporalVectorIndex::new_at(config, base_time.into())?;
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], base_time)?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], base_time.into())?;
         assert_eq!(index.snapshot_count(), 0);
 
         index.add(
@@ -2296,12 +2296,12 @@ mod tests {
         let index = TemporalVectorIndex::new(config)?;
 
         for i in 0..4 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         assert_eq!(index.snapshot_count(), 0);
 
-        index.add(NodeId::new(0).unwrap(), &[10.0, 0.0, 0.0, 0.0], 2000)?;
-        index.add(NodeId::new(1).unwrap(), &[11.0, 0.0, 0.0, 0.0], 2000)?;
+        index.add(NodeId::new(0).unwrap(), &[10.0, 0.0, 0.0, 0.0], 2000.into())?;
+        index.add(NodeId::new(1).unwrap(), &[11.0, 0.0, 0.0, 0.0], 2000.into())?;
         index.on_transaction()?;
         assert_eq!(index.snapshot_count(), 1);
 
@@ -2312,7 +2312,7 @@ mod tests {
     fn test_manual_snapshot() -> Result<()> {
         let index = create_test_index()?;
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
 
         assert_eq!(index.snapshot_count(), 0);
 
@@ -2358,8 +2358,8 @@ mod tests {
         };
         let index = TemporalVectorIndex::new(config)?;
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 1000)?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 1000.into())?;
         index.on_transaction_at(1000.into())?;
 
         let query = vec![0.9, 0.1, 0.0, 0.0];
@@ -2382,13 +2382,13 @@ mod tests {
         };
         let index = TemporalVectorIndex::new(config)?;
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
         index.on_transaction_at(1000.into())?;
 
-        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 2000)?;
+        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 2000.into())?;
         index.on_transaction_at(2000.into())?;
 
-        index.add(NodeId::new(3).unwrap(), &[0.0, 0.0, 1.0, 0.0], 3000)?;
+        index.add(NodeId::new(3).unwrap(), &[0.0, 0.0, 1.0, 0.0], 3000.into())?;
         index.on_transaction_at(3000.into())?;
 
         let query = vec![1.0, 0.0, 0.0, 0.0];
@@ -2409,7 +2409,7 @@ mod tests {
     fn test_snapshot_info() -> Result<()> {
         let index = create_test_index()?;
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
         index.create_manual_snapshot()?;
 
         let info = index.get_snapshot_info()?;
@@ -2449,7 +2449,7 @@ mod tests {
         let index = TemporalVectorIndex::new(config)?;
 
         for i in 0..10 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
             index.on_transaction_at(1000.into())?;
         }
         assert_eq!(index.snapshot_count(), 1);
@@ -2475,7 +2475,7 @@ mod tests {
                 &[i as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp)?;
+            index.on_transaction_at(timestamp.into())?;
         }
         assert_eq!(index.snapshot_count(), 5);
 
@@ -2495,7 +2495,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         for i in 0..5 {
             let timestamp = ((1000 * (i + 1)) as i64).into();
@@ -2504,7 +2504,7 @@ mod tests {
                 &[i as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp)?;
+            index.on_transaction_at(timestamp.into())?;
         }
         assert_eq!(index.snapshot_count(), 5);
 
@@ -2539,7 +2539,7 @@ mod tests {
                 &[i as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp)?;
+            index.on_transaction_at(timestamp.into())?;
         }
         assert_eq!(index.snapshot_count(), 3);
 
@@ -2619,7 +2619,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let node_id = NodeId::new(42).unwrap();
 
@@ -2656,14 +2656,14 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let node_id = NodeId::new(42).unwrap();
 
         for i in 1..=5 {
             let timestamp = i * 1000;
-            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
-            index.on_transaction_at(timestamp)?;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp.into())?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         let time_range = TimeRange::new(2000.into(), 4000.into()).unwrap();
@@ -2686,7 +2686,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let other_node = NodeId::new(1).unwrap();
         index.add(other_node, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
@@ -2710,7 +2710,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let node_id = NodeId::new(42).unwrap();
 
@@ -2744,7 +2744,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let node_id = NodeId::new(42).unwrap();
 
@@ -2780,7 +2780,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let node_id = NodeId::new(42).unwrap();
 
@@ -2804,7 +2804,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let node_id = NodeId::new(42).unwrap();
 
@@ -2833,14 +2833,14 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let node_id = NodeId::new(42).unwrap();
 
         for i in 1..=5 {
             let timestamp = i * 1000;
-            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
-            index.on_transaction_at(timestamp)?;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp.into())?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         assert_eq!(index.snapshot_count(), 3);
@@ -2865,7 +2865,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let node_id = NodeId::new(42).unwrap();
 
@@ -3196,11 +3196,11 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create initial vectors - this will be snapshot 0 (full)
         for i in 0..100 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         index.on_transaction_at(1000.into())?;
         assert_eq!(index.snapshot_count(), 1);
@@ -3216,13 +3216,13 @@ mod tests {
                     timestamp,
                 )?;
             }
-            index.on_transaction_at(timestamp)?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         assert_eq!(index.snapshot_count(), 10);
 
         // Snapshot 10 should be full again (after 10 snapshots)
-        index.add(NodeId::new(0).unwrap(), &[100.0, 0.0, 0.0, 0.0], 11000)?;
+        index.add(NodeId::new(0).unwrap(), &[100.0, 0.0, 0.0, 0.0], 11000.into())?;
         index.on_transaction_at(11000.into())?;
         assert_eq!(index.snapshot_count(), 11);
 
@@ -3230,7 +3230,7 @@ mod tests {
         for snapshot_num in 0..11 {
             let timestamp = 1000 + (snapshot_num * 1000);
             let query = vec![0.0, 0.0, 0.0, 0.0];
-            let results = index.find_similar_as_of(&query, 10, timestamp)?;
+            let results = index.find_similar_as_of(&query, 10, timestamp.into())?;
             assert!(
                 !results.is_empty(),
                 "Snapshot {} should have results",
@@ -3250,17 +3250,17 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create full snapshot with distinct vectors
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
-        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 1000)?;
-        index.add(NodeId::new(3).unwrap(), &[0.0, 0.0, 1.0, 0.0], 1000)?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
+        index.add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0], 1000.into())?;
+        index.add(NodeId::new(3).unwrap(), &[0.0, 0.0, 1.0, 0.0], 1000.into())?;
         index.on_transaction_at(1000.into())?;
         assert_eq!(index.snapshot_count(), 1);
 
         // Update vector 2 to be very similar to vector 3 in delta snapshot
-        index.add(NodeId::new(2).unwrap(), &[0.0, 0.0, 1.0, 0.0], 2000)?;
+        index.add(NodeId::new(2).unwrap(), &[0.0, 0.0, 1.0, 0.0], 2000.into())?;
         index.on_transaction_at(2000.into())?;
         assert_eq!(index.snapshot_count(), 2);
 
@@ -3292,11 +3292,11 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create full snapshot with 5 vectors
         for i in 0..5 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         index.on_transaction_at(1000.into())?;
         assert_eq!(index.current_index().len(), 5);
@@ -3340,11 +3340,11 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = Arc::new(TemporalVectorIndex::new_at(config, 1000)?);
+        let index = Arc::new(TemporalVectorIndex::new_at(config, 1000.into())?);
 
         // Add initial vectors
         for i in 0..50 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
 
         // Spawn multiple threads that concurrently trigger snapshots
@@ -3394,12 +3394,12 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = Arc::new(TemporalVectorIndex::new_at(config, 1000)?);
+        let index = Arc::new(TemporalVectorIndex::new_at(config, 1000.into())?);
         let timestamp = Arc::new(AtomicU64::new(1000));
 
         // Add initial vectors
         for i in 0..50 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
 
         // Spawn threads that all try to create the 10th transaction
@@ -3448,11 +3448,11 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create full snapshot at t=1000
         for i in 0..10 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         index.on_transaction_at(1000.into())?;
         assert_eq!(index.snapshot_count(), 1);
@@ -3465,7 +3465,7 @@ mod tests {
                 &[snapshot_num as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp)?;
+            index.on_transaction_at(timestamp.into())?;
         }
         assert_eq!(index.snapshot_count(), 3);
 
@@ -3477,7 +3477,7 @@ mod tests {
                 &[snapshot_num as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp)?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         // Should still have 3 snapshots (max limit)
@@ -3503,11 +3503,11 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create initial full snapshot manually
         for i in 0..100 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         index.create_manual_snapshot()?;
         let first_snapshot_count = index.snapshot_count();
@@ -3548,11 +3548,11 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create full snapshot with 100 vectors
         for i in 0..100 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         index.on_transaction_at(1000.into())?;
 
@@ -3594,7 +3594,7 @@ mod tests {
             full_snapshot_interval: 10, // Set to MAX_DELTA_CHAIN_DEPTH
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create initial full snapshot
         let node_id = NodeId::new(1).unwrap();
@@ -3604,8 +3604,8 @@ mod tests {
         // Create 15 delta snapshots (exceeds MAX_DELTA_CHAIN_DEPTH of 10)
         for i in 1..=15 {
             let timestamp = 1000 + (i * 100);
-            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
-            index.on_transaction_at(timestamp)?;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp.into())?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         // Query at a timestamp that would require traversing > 10 deltas
@@ -3632,15 +3632,15 @@ mod tests {
             full_snapshot_interval: 5, // Create full snapshot every 5 snapshots
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         let node_id = NodeId::new(1).unwrap();
 
         // Create snapshots and track which are full vs delta
         for i in 0..10 {
             let timestamp = 1000 + (i * 100);
-            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
-            index.on_transaction_at(timestamp)?;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp.into())?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         // Verify we created snapshots (should be 10)
@@ -3670,7 +3670,7 @@ mod tests {
             full_snapshot_interval: 3,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create initial full snapshot
         let node_id = NodeId::new(1).unwrap();
@@ -3680,15 +3680,15 @@ mod tests {
         // Create several delta snapshots
         for i in 1..=5 {
             let timestamp = 1000 + (i * 100);
-            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
-            index.on_transaction_at(timestamp)?;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp.into())?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         // Verify all queries work correctly (this implicitly tests base validation)
         for i in 1..=5 {
             let timestamp = 1000 + (i * 100);
             let query = vec![i as f32, 0.0, 0.0, 0.0];
-            let result = index.find_similar_as_of(&query, 5, timestamp)?;
+            let result = index.find_similar_as_of(&query, 5, timestamp.into())?;
             assert!(
                 !result.is_empty(),
                 "Should find results at timestamp {}",
@@ -3712,11 +3712,11 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = Arc::new(TemporalVectorIndex::new_at(config, 1000)?);
+        let index = Arc::new(TemporalVectorIndex::new_at(config, 1000.into())?);
 
         // Add initial vectors
         for i in 0..20 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
 
         // Spawn threads that will trigger both snapshot creation and pruning
@@ -3770,7 +3770,7 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Add vectors and create snapshots normally
         for i in 0..5 {
@@ -3780,7 +3780,7 @@ mod tests {
                 &[i as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp)?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         // Verify snapshots were created successfully
@@ -3803,11 +3803,11 @@ mod tests {
             full_snapshot_interval: 10, // Set to MAX_DELTA_CHAIN_DEPTH to ensure delta snapshots
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create full snapshot with 3 nodes at t=1000
         for i in 0..3 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         index.on_transaction_at(1000.into())?;
 
@@ -3818,7 +3818,7 @@ mod tests {
 
         // Add 2 NEW nodes at t=2000 (pure additions, not updates)
         for i in 3..5 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000.into())?;
         }
         index.on_transaction_at(2000.into())?;
 
@@ -3856,11 +3856,11 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create full snapshot with 10 nodes at t=1000
         for i in 0..10 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         index.on_transaction_at(1000.into())?;
         assert_eq!(index.get_snapshot_info()?[0].vector_count, 10);
@@ -3876,7 +3876,7 @@ mod tests {
         }
         // Additions: nodes 10, 11
         for i in 10..12 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000.into())?;
         }
         // Removal: node 9
         index.remove(NodeId::new(9).unwrap(), 2000.into())?;
@@ -3916,11 +3916,11 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create base with vectors at [1.0, 0, 0, 0], [2.0, 0, 0, 0], ..., [10.0, 0, 0, 0]
         for i in 1..=10 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         index.on_transaction_at(1000.into())?;
 
@@ -3986,17 +3986,17 @@ mod tests {
             full_snapshot_interval: 10,
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create base with node 1 at [1.0, 0, 0, 0]
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000)?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
         for i in 2..=5 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000)?;
+            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
         }
         index.on_transaction_at(1000.into())?;
 
         // Update node 1 to [1.5, 0, 0, 0]
-        index.add(NodeId::new(1).unwrap(), &[1.5, 0.0, 0.0, 0.0], 2000)?;
+        index.add(NodeId::new(1).unwrap(), &[1.5, 0.0, 0.0, 0.0], 2000.into())?;
         index.on_transaction_at(2000.into())?;
 
         // Search for [1.5, 0, 0, 0] - should find updated node 1 ONCE
@@ -4042,7 +4042,7 @@ mod tests {
             full_snapshot_interval: 10, // Valid config
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create initial full snapshot
         let node_id = NodeId::new(1).unwrap();
@@ -4052,8 +4052,8 @@ mod tests {
         // Create 15 delta snapshots (exceeds MAX_DELTA_CHAIN_DEPTH of 10)
         for i in 1..=15 {
             let timestamp = 1000 + (i * 100);
-            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
-            index.on_transaction_at(timestamp)?;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp.into())?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         // Call collect_all() which uses to_hashmap() - should succeed without panicking
@@ -4091,15 +4091,15 @@ mod tests {
             full_snapshot_interval: 10, // Valid config
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Create node with gradual drift over 15 snapshots
         let node_id = NodeId::new(1).unwrap();
         for i in 0..=15 {
             let timestamp = 1000 + (i * 100);
             let drift = i as f32 * 0.1; // Gradual drift from [1.0, 0, 0, 0] to [2.5, 0, 0, 0]
-            index.add(node_id, &[1.0 + drift, 0.0, 0.0, 0.0], timestamp)?;
-            index.on_transaction_at(timestamp)?;
+            index.add(node_id, &[1.0 + drift, 0.0, 0.0, 0.0], timestamp.into())?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         // Call find_semantic_drift which internally uses collect_all/to_hashmap
@@ -4330,14 +4330,14 @@ mod tests {
             full_snapshot_interval: 10, // Full snapshot every 10 transactions
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Add many unique vectors to grow changes_accumulated
         for i in 0..25 {
             let node_id = NodeId::new(i as u64).unwrap();
             let timestamp = 1000 + (i * 100);
-            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
-            index.on_transaction_at(timestamp)?;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp.into())?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         // Check memory stats
@@ -4397,14 +4397,14 @@ mod tests {
             full_snapshot_interval: 10, // Valid
             hnsw_config: Some(HnswConfig::new(4, DistanceMetric::Cosine)),
         };
-        let index = TemporalVectorIndex::new_at(config, 1000)?;
+        let index = TemporalVectorIndex::new_at(config, 1000.into())?;
 
         // Add vectors - with full_snapshot_interval=10, we get full snapshots periodically
         for i in 0..15 {
             let node_id = NodeId::new(i as u64).unwrap();
             let timestamp = 1000 + (i * 100);
-            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp)?;
-            index.on_transaction_at(timestamp)?;
+            index.add(node_id, &[i as f32, 0.0, 0.0, 0.0], timestamp.into())?;
+            index.on_transaction_at(timestamp.into())?;
         }
 
         let stats = index.memory_stats();
