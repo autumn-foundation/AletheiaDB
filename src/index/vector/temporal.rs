@@ -2276,7 +2276,7 @@ mod tests {
         index.add(
             NodeId::new(2).unwrap(),
             &[0.0, 1.0, 0.0, 0.0],
-            base_time + 2_000_000,
+            (base_time + 2_000_000).into(),
         )?;
         index.on_transaction_at((base_time + 2_000_000).into())?;
         assert_eq!(index.snapshot_count(), 1);
@@ -2904,30 +2904,30 @@ mod tests {
         let mut ts = 1000i64;
 
         let node1 = NodeId::new(1).unwrap();
-        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
-        index.remove(node1, ts)?;
-        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.remove(node1, ts.into())?;
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
 
         ts += 1000;
         let node2 = NodeId::new(2).unwrap();
-        index.add(node2, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node2, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
-        index.remove(node2, ts)?;
-        index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.remove(node2, ts.into())?;
+        index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
 
         ts += 1000;
         let node3 = NodeId::new(3).unwrap();
-        index.add(node3, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node3, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
-        index.remove(node3, ts)?;
+        index.remove(node3, ts.into())?;
         index.add(
             node3,
             &[
@@ -2938,7 +2938,7 @@ mod tests {
             ],
             ts,
         )?;
-        index.on_transaction_at(ts)?;
+        index.on_transaction_at(ts.into())?;
 
         let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
@@ -2968,28 +2968,28 @@ mod tests {
         let node2 = NodeId::new(2).unwrap();
         let node3 = NodeId::new(3).unwrap();
 
-        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
-        index.remove(node1, ts)?;
-        index.add(node1, &[0.9, 0.1, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
-        ts += 1000;
-
-        ts += 1000;
-        index.add(node2, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
-        ts += 1000;
-        index.remove(node2, ts)?;
-        index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.remove(node1, ts.into())?;
+        index.add(node1, &[0.9, 0.1, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
 
         ts += 1000;
-        index.add(node3, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node2, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
-        index.remove(node3, ts)?;
+        index.remove(node2, ts.into())?;
+        index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
+        ts += 1000;
+
+        ts += 1000;
+        index.add(node3, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
+        ts += 1000;
+        index.remove(node3, ts.into())?;
         index.add(
             node3,
             &[
@@ -3000,7 +3000,7 @@ mod tests {
             ],
             ts,
         )?;
-        index.on_transaction_at(ts)?;
+        index.on_transaction_at(ts.into())?;
 
         let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
@@ -3028,18 +3028,18 @@ mod tests {
         let mut ts = 1000i64;
 
         let node1 = NodeId::new(1).unwrap();
-        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
 
         ts += 1000;
         let node2 = NodeId::new(2).unwrap();
-        index.add(node2, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node2, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
-        index.remove(node2, ts)?;
-        index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.remove(node2, ts.into())?;
+        index.add(node2, &[0.0, 1.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
 
         let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
@@ -3064,8 +3064,8 @@ mod tests {
         let ts = 10000i64;
 
         let node1 = NodeId::new(1).unwrap();
-        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
 
         let time_range = TimeRange::new(0.into(), 100.into()).unwrap();
         let results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;
@@ -3089,12 +3089,12 @@ mod tests {
         let mut ts = 1000i64;
 
         let node1 = NodeId::new(1).unwrap();
-        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
-        index.remove(node1, ts)?;
-        index.add(node1, &[0.9, 0.1, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.remove(node1, ts.into())?;
+        index.add(node1, &[0.9, 0.1, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
 
         let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
@@ -3121,12 +3121,12 @@ mod tests {
         let mut ts = 1000i64;
 
         let node1 = NodeId::new(1).unwrap();
-        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
-        index.remove(node1, ts)?;
-        index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.remove(node1, ts.into())?;
+        index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
 
         let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
@@ -3157,12 +3157,12 @@ mod tests {
         let mut ts = 1000i64;
 
         let node1 = NodeId::new(1).unwrap();
-        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
         ts += 1000;
-        index.remove(node1, ts)?;
-        index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts)?;
-        index.on_transaction_at(ts)?;
+        index.remove(node1, ts.into())?;
+        index.add(node1, &[0.0, 1.0, 0.0, 0.0], ts.into())?;
+        index.on_transaction_at(ts.into())?;
 
         let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
