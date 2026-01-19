@@ -464,7 +464,7 @@ mod tests {
         let event = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            timestamp: 1000,
+            timestamp: 1000.into(),
         };
 
         notify_observers(&observers, &event);
@@ -489,7 +489,7 @@ mod tests {
         let event = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            timestamp: 1000,
+            timestamp: 1000.into(),
         };
 
         notify_observers(&observers, &event);
@@ -510,7 +510,7 @@ mod tests {
         let anchor_event = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            timestamp: 1000,
+            timestamp: 1000.into(),
         };
         notify_observers(&observers, &anchor_event);
         assert_eq!(anchor_observer.count.load(Ordering::SeqCst), 1);
@@ -519,7 +519,7 @@ mod tests {
         let version_event = StorageEvent::NodeVersionCreated {
             version_id: VersionId::new(2).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            timestamp: 2000,
+            timestamp: 2000.into(),
             is_anchor: false,
         };
         notify_observers(&observers, &version_event);
@@ -531,10 +531,10 @@ mod tests {
         let event = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            timestamp: 12345,
+            timestamp: 12345.into(),
         };
 
-        assert_eq!(event.timestamp(), 12345);
+        assert_eq!(event.timestamp().wallclock(), 12345);
     }
 
     #[test]
@@ -548,12 +548,12 @@ mod tests {
         let event1 = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(1).unwrap(),
             node_id: NodeId::new(1).unwrap(),
-            timestamp: 1000,
+            timestamp: 1000.into(),
         };
         let event2 = StorageEvent::NodeAnchorCreated {
             version_id: VersionId::new(2).unwrap(),
             node_id: NodeId::new(2).unwrap(),
-            timestamp: 2000,
+            timestamp: 2000.into(),
         };
 
         notify_observers(&observers, &event1);

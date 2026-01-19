@@ -676,9 +676,9 @@ mod tests {
 
         assert_eq!(version.id.as_u64(), 100);
         assert_eq!(version.node_id.as_u64(), 1);
-        assert_eq!(version.temporal.valid_time().start(), 1000);
-        assert_eq!(version.temporal.valid_time().end(), 2000);
-        assert_eq!(version.temporal.transaction_time().start(), 1000);
+        assert_eq!(version.temporal.valid_time().start().wallclock(), 1000);
+        assert_eq!(version.temporal.valid_time().end().wallclock(), 2000);
+        assert_eq!(version.temporal.transaction_time().start().wallclock(), 1000);
         assert!(version.data.is_anchor());
         assert_eq!(version.data.get_vector_snapshot_id(), Some(42));
 
@@ -765,8 +765,8 @@ mod tests {
         assert_eq!(version.edge_id.as_u64(), 10);
         assert_eq!(version.source.as_u64(), 1);
         assert_eq!(version.target.as_u64(), 2);
-        assert_eq!(version.temporal.valid_time().start(), 1000);
-        assert_eq!(version.temporal.valid_time().end(), 2000);
+        assert_eq!(version.temporal.valid_time().start().wallclock(), 1000);
+        assert_eq!(version.temporal.valid_time().end().wallclock(), 2000);
         assert!(version.data.is_anchor());
 
         // Check properties were restored
@@ -837,8 +837,8 @@ mod tests {
 
         let version = versions.values().next().unwrap();
         assert_eq!(version.node_id.as_u64(), 1);
-        assert_eq!(version.temporal.valid_time().start(), 1000);
-        assert_eq!(version.temporal.valid_time().end(), 2000);
+        assert_eq!(version.temporal.valid_time().start().wallclock(), 1000);
+        assert_eq!(version.temporal.valid_time().end().wallclock(), 2000);
         assert!(version.data.is_anchor());
     }
 }
