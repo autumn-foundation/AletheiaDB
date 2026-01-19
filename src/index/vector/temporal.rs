@@ -4308,12 +4308,12 @@ mod tests {
             );
         }
 
-        // Test timestamp at i64::MAX (should fail)
+        // Test timestamp at i64::MAX (should fail - exceeds MAX_VALID_TIMESTAMP)
         let result = index.add(node_id, &vec_valid, (i64::MAX).into());
         assert!(result.is_err(), "Should reject timestamp at i64::MAX");
 
-        // Test negative timestamp (should fail)
-        let result = index.add(node_id, &vec_valid, 0i64.into());
+        // Test negative timestamp (should fail - timestamps must be non-negative)
+        let result = index.add(node_id, &vec_valid, (-1i64).into());
         assert!(result.is_err(), "Should reject negative timestamp");
 
         Ok(())

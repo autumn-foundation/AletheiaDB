@@ -240,7 +240,8 @@ impl HybridTimestamp {
         let logical = u32::from_le_bytes(logical_bytes.try_into().unwrap());
 
         // Validate wallclock to prevent corrupted data from injecting invalid timestamps
-        if wallclock > MAX_VALID_TIMESTAMP {
+        // Allow i64::MAX as a special sentinel value for TIMESTAMP_MAX (represents infinity/"still current")
+        if wallclock > MAX_VALID_TIMESTAMP && wallclock != i64::MAX {
             return Err(StorageError::CorruptedData(format!(
                 "Deserialized wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
                 wallclock, MAX_VALID_TIMESTAMP
