@@ -727,7 +727,7 @@ mod tests {
             root: PhysicalOp::Empty,
             estimated_cost: Cost::default(),
             temporal_context: Some(TemporalContext {
-                as_of: Some((1000, 2000)),
+                as_of: Some((1000.into(), 2000.into())),
                 between: None,
             }),
             parallel: false,
@@ -814,8 +814,8 @@ mod tests {
         assert_eq!(
             PhysicalOp::TemporalNodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
-                valid_time: 1000,
-                transaction_time: 2000,
+                valid_time: 1000.into(),
+                transaction_time: 2000.into(),
                 use_batch: false,
             }
             .name(),
@@ -825,7 +825,7 @@ mod tests {
             PhysicalOp::TemporalVectorSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                timestamp: 1000,
+                timestamp: 1000.into(),
                 property_key: None,
             }
             .name(),
@@ -1001,8 +1001,8 @@ mod tests {
         assert!(
             PhysicalOp::TemporalNodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
-                valid_time: 1000,
-                transaction_time: 2000,
+                valid_time: 1000.into(),
+                transaction_time: 2000.into(),
                 use_batch: false,
             }
             .is_leaf()
@@ -1011,7 +1011,7 @@ mod tests {
             PhysicalOp::TemporalVectorSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                timestamp: 1000,
+                timestamp: 1000.into(),
                 property_key: None,
             }
             .is_leaf()
@@ -1118,8 +1118,8 @@ mod tests {
         assert_eq!(
             PhysicalOp::TemporalNodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
-                valid_time: 1000,
-                transaction_time: 2000,
+                valid_time: 1000.into(),
+                transaction_time: 2000.into(),
                 use_batch: false,
             }
             .depth(),
@@ -1129,7 +1129,7 @@ mod tests {
             PhysicalOp::TemporalVectorSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                timestamp: 1000,
+                timestamp: 1000.into(),
                 property_key: None,
             }
             .depth(),
@@ -1292,8 +1292,8 @@ mod tests {
     fn test_explain_temporal_node_lookup() {
         let plan = PhysicalOp::TemporalNodeLookup {
             node_ids: vec![NodeId::new(42).unwrap()],
-            valid_time: 1000,
-            transaction_time: 2000,
+            valid_time: 1000.into(),
+            transaction_time: 2000.into(),
             use_batch: false,
         };
 
@@ -1442,7 +1442,7 @@ mod tests {
         let plan = PhysicalOp::TemporalVectorSearch {
             embedding: Arc::from([0.1f32; 4].as_slice()),
             k: 10,
-            timestamp: 42000,
+            timestamp: 42000.into(),
             property_key: None,
         };
 
@@ -1502,7 +1502,7 @@ mod tests {
             PhysicalOp::TemporalVectorSearch {
                 embedding: Arc::from([0.1f32; 4].as_slice()),
                 k: 10,
-                timestamp: 1000,
+                timestamp: 1000.into(),
                 property_key: None,
             }
             .name(),
@@ -1686,8 +1686,8 @@ mod tests {
         let plan = PhysicalPlan {
             root: PhysicalOp::TemporalNodeLookup {
                 node_ids: vec![NodeId::new(1).unwrap()],
-                valid_time: 1000,
-                transaction_time: 2000,
+                valid_time: 1000.into(),
+                transaction_time: 2000.into(),
                 use_batch: false,
             },
             estimated_cost: Cost {
@@ -1697,7 +1697,7 @@ mod tests {
                 network: 0.0,
             },
             temporal_context: Some(TemporalContext {
-                as_of: Some((1000, 2000)),
+                as_of: Some((1000.into(), 2000.into())),
                 between: None,
             }),
             parallel: false,
@@ -1811,7 +1811,7 @@ mod tests {
         let plan = PhysicalOp::TemporalVectorSearch {
             embedding: Arc::from([0.1f32; 4].as_slice()),
             k: 10,
-            timestamp: 42000,
+            timestamp: 42000.into(),
             property_key: Some("content_embedding".to_string()),
         };
 
@@ -1827,7 +1827,7 @@ mod tests {
         let plan = PhysicalOp::TemporalVectorSearch {
             embedding: Arc::from([0.1f32; 4].as_slice()),
             k: 10,
-            timestamp: 42000,
+            timestamp: 42000.into(),
             property_key: None,
         };
 
