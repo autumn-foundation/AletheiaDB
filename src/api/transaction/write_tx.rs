@@ -297,11 +297,11 @@ impl WriteTransaction {
 
             // Phase 2: Use HLC .send() method for monotonic timestamp generation
             // This ensures: if wallclock advances, reset logical; otherwise increment logical
-            let commit = ts
-                .send(current_wallclock.wallclock())
-                .map_err(|e| TransactionError::CommitFailed {
+            let commit = ts.send(current_wallclock.wallclock()).map_err(|e| {
+                TransactionError::CommitFailed {
                     reason: format!("HLC timestamp generation failed: {}", e),
-                })?;
+                }
+            })?;
 
             // Observability: Warn about clock skew issues
             #[cfg(feature = "observability")]

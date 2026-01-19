@@ -153,15 +153,17 @@ pub fn restore_node_version(
     // Phase 2: Convert i64 from persistence format to HybridTimestamp
     use crate::core::hlc::HybridTimestamp;
     let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
-    let valid_end = entry.valid_to.map(|t| HybridTimestamp::new_unchecked(t, 0)).unwrap_or(TIMESTAMP_MAX);
+    let valid_end = entry
+        .valid_to
+        .map(|t| HybridTimestamp::new_unchecked(t, 0))
+        .unwrap_or(TIMESTAMP_MAX);
 
-    let valid_time = TimeRange::new(valid_start.into(), valid_end.into())
-        .map_err(|e| {
-            IndexPersistenceError::Serialization(format!(
-                "Invalid valid time range [{}, {:?}]: {}",
-                entry.valid_from, entry.valid_to, e
-            ))
-        })?;
+    let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
+        IndexPersistenceError::Serialization(format!(
+            "Invalid valid time range [{}, {:?}]: {}",
+            entry.valid_from, entry.valid_to, e
+        ))
+    })?;
 
     let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(entry.tx_time, 0));
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
@@ -252,15 +254,17 @@ pub fn restore_edge_version(
     // Phase 2: Convert i64 from persistence format to HybridTimestamp
     use crate::core::hlc::HybridTimestamp;
     let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
-    let valid_end = entry.valid_to.map(|t| HybridTimestamp::new_unchecked(t, 0)).unwrap_or(TIMESTAMP_MAX);
+    let valid_end = entry
+        .valid_to
+        .map(|t| HybridTimestamp::new_unchecked(t, 0))
+        .unwrap_or(TIMESTAMP_MAX);
 
-    let valid_time = TimeRange::new(valid_start.into(), valid_end.into())
-        .map_err(|e| {
-            IndexPersistenceError::Serialization(format!(
-                "Invalid valid time range [{}, {:?}]: {}",
-                entry.valid_from, entry.valid_to, e
-            ))
-        })?;
+    let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
+        IndexPersistenceError::Serialization(format!(
+            "Invalid valid time range [{}, {:?}]: {}",
+            entry.valid_from, entry.valid_to, e
+        ))
+    })?;
 
     let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(entry.tx_time, 0));
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
@@ -532,7 +536,7 @@ mod tests {
             node_id: NodeId::new(1).unwrap(),
             temporal: BiTemporalInterval::new(
                 TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX.into()).unwrap(),
+                TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
             ),
             label,
             data: VersionData::Anchor {
@@ -579,7 +583,7 @@ mod tests {
             node_id: NodeId::new(1).unwrap(),
             temporal: BiTemporalInterval::new(
                 TimeRange::new(2000.into(), 3000.into()).unwrap(),
-                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX.into()).unwrap(),
+                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
             ),
             label,
             data: VersionData::Delta { delta },
@@ -617,7 +621,7 @@ mod tests {
             edge_id: EdgeId::new(10).unwrap(),
             temporal: BiTemporalInterval::new(
                 TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX.into()).unwrap(),
+                TimeRange::new(1000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
             ),
             label,
             source: NodeId::new(1).unwrap(),
@@ -678,7 +682,10 @@ mod tests {
         assert_eq!(version.node_id.as_u64(), 1);
         assert_eq!(version.temporal.valid_time().start().wallclock(), 1000);
         assert_eq!(version.temporal.valid_time().end().wallclock(), 2000);
-        assert_eq!(version.temporal.transaction_time().start().wallclock(), 1000);
+        assert_eq!(
+            version.temporal.transaction_time().start().wallclock(),
+            1000
+        );
         assert!(version.data.is_anchor());
         assert_eq!(version.data.get_vector_snapshot_id(), Some(42));
 

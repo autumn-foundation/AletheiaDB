@@ -734,7 +734,8 @@ mod tests {
     fn test_serialization_endianness() {
         // Phase 2: Verify HybridTimestamp little-endian format
         // Format: [start_wallclock:8][start_logical:4][end_wallclock:8][end_logical:4]
-        let range = TimeRange::new(0x0102030405060708i64.into(), 0x1112131415161718i64.into()).unwrap();
+        let range =
+            TimeRange::new(0x0102030405060708i64.into(), 0x1112131415161718i64.into()).unwrap();
         let bytes = range.serialize();
 
         assert_eq!(bytes.len(), 24); // Total size: 24 bytes
@@ -780,7 +781,7 @@ mod tests {
         let ts2 = HybridTimestamp::new(2000, 0).unwrap();
 
         // TimeRange should work with HybridTimestamp
-        let range = TimeRange::new(ts1.into(), ts2.into()).unwrap();
+        let range = TimeRange::new(ts1, ts2).unwrap();
 
         assert_eq!(range.start(), ts1);
         assert_eq!(range.end(), ts2);
@@ -800,7 +801,7 @@ mod tests {
         assert!(ts2 < ts3);
 
         // TimeRange should respect this ordering
-        let range = TimeRange::new(ts1.into(), ts3.into()).unwrap();
+        let range = TimeRange::new(ts1, ts3).unwrap();
         assert!(range.contains(ts1));
         assert!(range.contains(ts2));
         assert!(!range.contains(ts3)); // Exclusive end

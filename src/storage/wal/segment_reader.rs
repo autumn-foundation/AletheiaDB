@@ -134,8 +134,9 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         offset += 8;
 
         // Read timestamp (12 bytes: Phase 2 HybridTimestamp)
-        let (timestamp, _) = HybridTimestamp::deserialize(&buffer[offset..])
-            .map_err(|e| StorageError::CorruptedData(format!("Failed to deserialize timestamp: {}", e)))?;
+        let (timestamp, _) = HybridTimestamp::deserialize(&buffer[offset..]).map_err(|e| {
+            StorageError::CorruptedData(format!("Failed to deserialize timestamp: {}", e))
+        })?;
         offset += 12;
 
         // Read checksum (4 bytes)

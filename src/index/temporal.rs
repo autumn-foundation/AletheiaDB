@@ -486,8 +486,10 @@ mod tests {
         // Test overlap logic: Query [500, 1500)
         // v1 overlaps (500 to 1000)
         // v2 overlaps (1000 to 1500)
-        let results = indexes
-            .find_node_versions_in_valid_time_range(node_id, TimeRange::new(500.into(), 1500.into()).unwrap());
+        let results = indexes.find_node_versions_in_valid_time_range(
+            node_id,
+            TimeRange::new(500.into(), 1500.into()).unwrap(),
+        );
 
         assert_eq!(results.len(), 2);
         assert!(results.contains(&v1));
@@ -507,30 +509,39 @@ mod tests {
             .insert_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::new(TimeRange::new(0.into(), 2000.into()).unwrap(), TimeRange::from(0.into())),
+                BiTemporalInterval::new(
+                    TimeRange::new(0.into(), 2000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
             )
             .unwrap();
         indexes
             .insert_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::new(TimeRange::new(1000.into(), 3000.into()).unwrap(), TimeRange::from(0.into())),
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 3000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
             )
             .unwrap();
 
         // Query point at 1500 (both should match)
-        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(1500.into()));
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(1500.into()));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&v1));
         assert!(results.contains(&v2));
 
         // Query point at 500 (only v1)
-        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(500.into()));
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(500.into()));
         assert_eq!(results.len(), 1);
         assert!(results.contains(&v1));
 
         // Query point at 2500 (only v2)
-        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(2500.into()));
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(2500.into()));
         assert_eq!(results.len(), 1);
         assert!(results.contains(&v2));
     }
@@ -547,27 +558,37 @@ mod tests {
             .insert_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::new(TimeRange::new(0.into(), 1000.into()).unwrap(), TimeRange::from(0.into())),
+                BiTemporalInterval::new(
+                    TimeRange::new(0.into(), 1000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
             )
             .unwrap();
         indexes
             .insert_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::new(TimeRange::new(1000.into(), 2000.into()).unwrap(), TimeRange::from(0.into())),
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
             )
             .unwrap();
 
         // Query point at 1000 (only v2 because [start, end) is inclusive-exclusive)
         // Use [1000, 1001) to represent the point 1000
-        let results = indexes
-            .find_node_versions_in_valid_time_range(node_id, TimeRange::new(1000.into(), 1001.into()).unwrap());
+        let results = indexes.find_node_versions_in_valid_time_range(
+            node_id,
+            TimeRange::new(1000.into(), 1001.into()).unwrap(),
+        );
         assert_eq!(results.len(), 1);
         assert!(results.contains(&v2));
 
         // Query range [500, 1000) (only v1 because 1000 is exclusive)
-        let results = indexes
-            .find_node_versions_in_valid_time_range(node_id, TimeRange::new(500.into(), 1000.into()).unwrap());
+        let results = indexes.find_node_versions_in_valid_time_range(
+            node_id,
+            TimeRange::new(500.into(), 1000.into()).unwrap(),
+        );
         assert_eq!(results.len(), 1);
         assert!(results.contains(&v1));
     }
@@ -580,15 +601,24 @@ mod tests {
         let versions = vec![
             (
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::new(TimeRange::new(0.into(), 10.into()).unwrap(), TimeRange::from(0.into())),
+                BiTemporalInterval::new(
+                    TimeRange::new(0.into(), 10.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
             ),
             (
                 VersionId::new(3).unwrap(),
-                BiTemporalInterval::new(TimeRange::new(20.into(), 30.into()).unwrap(), TimeRange::from(0.into())),
+                BiTemporalInterval::new(
+                    TimeRange::new(20.into(), 30.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
             ),
             (
                 VersionId::new(2).unwrap(),
-                BiTemporalInterval::new(TimeRange::new(10.into(), 20.into()).unwrap(), TimeRange::from(0.into())),
+                BiTemporalInterval::new(
+                    TimeRange::new(10.into(), 20.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
             ),
         ];
 
@@ -596,8 +626,10 @@ mod tests {
             .insert_node_versions_batch(node_id, versions)
             .unwrap();
 
-        let results =
-            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::new(5.into(), 25.into()).unwrap());
+        let results = indexes.find_node_versions_in_valid_time_range(
+            node_id,
+            TimeRange::new(5.into(), 25.into()).unwrap(),
+        );
         assert_eq!(results.len(), 3);
 
         // Verify sort order internally (though opaque to API)
@@ -666,8 +698,10 @@ mod tests {
             .insert_node_version(node2, v2, BiTemporalInterval::current(1000.into()))
             .unwrap();
 
-        let results =
-            indexes.find_node_versions_in_valid_time_range(node1, TimeRange::new(0.into(), 2000.into()).unwrap());
+        let results = indexes.find_node_versions_in_valid_time_range(
+            node1,
+            TimeRange::new(0.into(), 2000.into()).unwrap(),
+        );
 
         assert_eq!(results.len(), 1);
         assert!(results.contains(&v1));
@@ -699,8 +733,10 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
 
         // Query an entity with no versions
-        let results = indexes
-            .find_node_versions_in_valid_time_range(node_id, TimeRange::new(0.into(), 1000.into()).unwrap());
+        let results = indexes.find_node_versions_in_valid_time_range(
+            node_id,
+            TimeRange::new(0.into(), 1000.into()).unwrap(),
+        );
 
         assert_eq!(results.len(), 0, "Empty timeline should return no results");
     }
@@ -756,7 +792,8 @@ mod tests {
 
         assert_eq!(timelines.valid.versions.len(), 3, "Should have 3 versions");
         assert_eq!(
-            timelines.valid.versions[0].start, 0.into(),
+            timelines.valid.versions[0].start,
+            0.into(),
             "First version should start at 0"
         );
         assert_eq!(
@@ -764,7 +801,8 @@ mod tests {
             "First version should be v1"
         );
         assert_eq!(
-            timelines.valid.versions[1].start, 10000.into(),
+            timelines.valid.versions[1].start,
+            10000.into(),
             "Second version should start at 10000"
         );
         assert_eq!(
@@ -772,7 +810,8 @@ mod tests {
             "Second version should be v2"
         );
         assert_eq!(
-            timelines.valid.versions[2].start, 20000.into(),
+            timelines.valid.versions[2].start,
+            20000.into(),
             "Third version should start at 20000"
         );
         assert_eq!(
@@ -781,8 +820,10 @@ mod tests {
         );
 
         // Verify queries work correctly with retroactively inserted versions
-        let results = indexes
-            .find_node_versions_in_valid_time_range(node_id, TimeRange::new(9000.into(), 11000.into()).unwrap());
+        let results = indexes.find_node_versions_in_valid_time_range(
+            node_id,
+            TimeRange::new(9000.into(), 11000.into()).unwrap(),
+        );
         assert_eq!(results.len(), 1, "Should find 1 version in range");
         assert_eq!(results[0], v2, "Should find v2 in the middle");
     }
@@ -860,7 +901,8 @@ mod tests {
             .find(|e| e.version_id == v1)
             .unwrap();
         assert_eq!(
-            v1_entry.end, 1000.into(),
+            v1_entry.end,
+            1000.into(),
             "Should keep first occurrence (end=1000)"
         );
     }
@@ -887,7 +929,11 @@ mod tests {
                             node_id,
                             version_id,
                             BiTemporalInterval::new(
-                                TimeRange::new(((v * 1000) as i64).into(), (((v + 1) * 1000) as i64).into()).unwrap(),
+                                TimeRange::new(
+                                    ((v * 1000) as i64).into(),
+                                    (((v + 1) * 1000) as i64).into(),
+                                )
+                                .unwrap(),
                                 TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                             ),
                         )
@@ -953,7 +999,8 @@ mod tests {
                             BiTemporalInterval::new(
                                 TimeRange::new(
                                     (((thread_id * versions_per_thread + v) * 100) as i64).into(),
-                                    ((((thread_id * versions_per_thread + v) + 1) * 100) as i64).into(),
+                                    ((((thread_id * versions_per_thread + v) + 1) * 100) as i64)
+                                        .into(),
                                 )
                                 .unwrap(),
                                 TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
@@ -975,7 +1022,11 @@ mod tests {
         // Verify all versions were indexed correctly
         let results = indexes.find_node_versions_in_valid_time_range(
             node_id,
-            TimeRange::new(0.into(), (((num_threads * versions_per_thread) * 100) as i64).into()).unwrap(),
+            TimeRange::new(
+                0.into(),
+                (((num_threads * versions_per_thread) * 100) as i64).into(),
+            )
+            .unwrap(),
         );
 
         assert_eq!(
@@ -1019,7 +1070,8 @@ mod tests {
                     node_id,
                     version_id,
                     BiTemporalInterval::new(
-                        TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into()).unwrap(),
+                        TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into())
+                            .unwrap(),
                         TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                     ),
                 )
@@ -1064,19 +1116,26 @@ mod tests {
             .insert_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::new(TimeRange::new(1000.into(), 2000.into()).unwrap(), TimeRange::from(0.into())),
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
             )
             .unwrap();
         indexes
             .insert_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::new(TimeRange::new(1000.into(), 3000.into()).unwrap(), TimeRange::from(0.into())),
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 3000.into()).unwrap(),
+                    TimeRange::from(0.into()),
+                ),
             )
             .unwrap();
 
         // Query at time 1500 should return both versions
-        let results = indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(1500.into()));
+        let results =
+            indexes.find_node_versions_in_valid_time_range(node_id, TimeRange::at(1500.into()));
         assert_eq!(
             results.len(),
             2,
@@ -1114,7 +1173,8 @@ mod tests {
                 node_id,
                 version_id,
                 BiTemporalInterval::new(
-                    TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into()).unwrap(),
+                    TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into())
+                        .unwrap(),
                     TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                 ),
             );
@@ -1172,7 +1232,8 @@ mod tests {
                 edge_id,
                 version_id,
                 BiTemporalInterval::new(
-                    TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into()).unwrap(),
+                    TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into())
+                        .unwrap(),
                     TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                 ),
             );
@@ -1217,7 +1278,8 @@ mod tests {
                     node1,
                     VersionId::new(i).unwrap(),
                     BiTemporalInterval::new(
-                        TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into()).unwrap(),
+                        TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into())
+                            .unwrap(),
                         TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                     ),
                 )
@@ -1230,7 +1292,8 @@ mod tests {
                 node2,
                 VersionId::new(100 + i).unwrap(),
                 BiTemporalInterval::new(
-                    TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into()).unwrap(),
+                    TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into())
+                        .unwrap(),
                     TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                 ),
             );
@@ -1268,7 +1331,8 @@ mod tests {
                     node_id,
                     VersionId::new(i).unwrap(),
                     BiTemporalInterval::new(
-                        TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into()).unwrap(),
+                        TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into())
+                            .unwrap(),
                         TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                     ),
                 )
@@ -1340,7 +1404,8 @@ mod tests {
                 node_id,
                 VersionId::new(i).unwrap(),
                 BiTemporalInterval::new(
-                    TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into()).unwrap(),
+                    TimeRange::new(((i * 100) as i64).into(), (((i + 1) * 100) as i64).into())
+                        .unwrap(),
                     TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
                 ),
             );

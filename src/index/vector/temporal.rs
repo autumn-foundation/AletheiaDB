@@ -1373,7 +1373,8 @@ impl TemporalVectorIndex {
 
             SnapshotStrategy::TimeInterval(interval_secs) => {
                 // Phase 2: Use wallclock components for arithmetic
-                let elapsed_micros = current_time.wallclock() - metadata.last_snapshot_time.wallclock();
+                let elapsed_micros =
+                    current_time.wallclock() - metadata.last_snapshot_time.wallclock();
                 let elapsed_secs = elapsed_micros / 1_000_000;
                 Ok(elapsed_secs >= *interval_secs as i64)
             }
@@ -1395,9 +1396,10 @@ impl TemporalVectorIndex {
                 let by_txn = metadata.transactions_since_snapshot >= *transaction_interval;
 
                 // Phase 2: Use wallclock components for arithmetic
-                let elapsed_micros = current_time.wallclock() - metadata.last_snapshot_time.wallclock();
+                let elapsed_micros =
+                    current_time.wallclock() - metadata.last_snapshot_time.wallclock();
                 let elapsed_secs = elapsed_micros / 1_000_000;
-                let by_time = (elapsed_secs >= *time_interval_secs as i64).into();
+                let by_time = elapsed_secs >= *time_interval_secs as i64;
 
                 let total = self.current.len();
                 let by_change = if total > 0 {
@@ -1510,7 +1512,7 @@ impl TemporalVectorIndex {
             RetentionPolicy::KeepDuration(duration) => {
                 let current_time = Self::current_timestamp()?;
                 // Phase 2: Calculate cutoff using wallclock arithmetic, then create HybridTimestamp
-                let duration_micros = (duration.as_micros() as i64).into();
+                let duration_micros = duration.as_micros() as i64;
                 let cutoff_wallclock = current_time.wallclock().saturating_sub(duration_micros);
                 use crate::core::hlc::HybridTimestamp;
                 let cutoff_time = HybridTimestamp::new_unchecked(cutoff_wallclock, 0);
@@ -2270,7 +2272,11 @@ mod tests {
         };
         let index = TemporalVectorIndex::new_at(config, base_time.into())?;
 
-        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], base_time.into())?;
+        index.add(
+            NodeId::new(1).unwrap(),
+            &[1.0, 0.0, 0.0, 0.0],
+            base_time.into(),
+        )?;
         assert_eq!(index.snapshot_count(), 0);
 
         index.add(
@@ -2296,7 +2302,11 @@ mod tests {
         let index = TemporalVectorIndex::new(config)?;
 
         for i in 0..4 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         assert_eq!(index.snapshot_count(), 0);
 
@@ -2449,7 +2459,11 @@ mod tests {
         let index = TemporalVectorIndex::new(config)?;
 
         for i in 0..10 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
             index.on_transaction_at(1000.into())?;
         }
         assert_eq!(index.snapshot_count(), 1);
@@ -2475,7 +2489,7 @@ mod tests {
                 &[i as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp.into())?;
+            index.on_transaction_at(timestamp)?;
         }
         assert_eq!(index.snapshot_count(), 5);
 
@@ -2504,7 +2518,7 @@ mod tests {
                 &[i as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp.into())?;
+            index.on_transaction_at(timestamp)?;
         }
         assert_eq!(index.snapshot_count(), 5);
 
@@ -2539,7 +2553,7 @@ mod tests {
                 &[i as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp.into())?;
+            index.on_transaction_at(timestamp)?;
         }
         assert_eq!(index.snapshot_count(), 3);
 
@@ -3200,7 +3214,11 @@ mod tests {
 
         // Create initial vectors - this will be snapshot 0 (full)
         for i in 0..100 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         index.on_transaction_at(1000.into())?;
         assert_eq!(index.snapshot_count(), 1);
@@ -3216,13 +3234,17 @@ mod tests {
                     timestamp,
                 )?;
             }
-            index.on_transaction_at(timestamp.into())?;
+            index.on_transaction_at(timestamp)?;
         }
 
         assert_eq!(index.snapshot_count(), 10);
 
         // Snapshot 10 should be full again (after 10 snapshots)
-        index.add(NodeId::new(0).unwrap(), &[100.0, 0.0, 0.0, 0.0], 11000.into())?;
+        index.add(
+            NodeId::new(0).unwrap(),
+            &[100.0, 0.0, 0.0, 0.0],
+            11000.into(),
+        )?;
         index.on_transaction_at(11000.into())?;
         assert_eq!(index.snapshot_count(), 11);
 
@@ -3296,7 +3318,11 @@ mod tests {
 
         // Create full snapshot with 5 vectors
         for i in 0..5 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         index.on_transaction_at(1000.into())?;
         assert_eq!(index.current_index().len(), 5);
@@ -3344,7 +3370,11 @@ mod tests {
 
         // Add initial vectors
         for i in 0..50 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
 
         // Spawn multiple threads that concurrently trigger snapshots
@@ -3356,8 +3386,12 @@ mod tests {
                 for i in 0..5 {
                     let node_id = NodeId::new((thread_id * 10 + i) as u64).unwrap();
                     let timestamp = base_time + (i * 100);
-                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], timestamp.into())
-                        .unwrap();
+                    idx.add(
+                        node_id,
+                        &[thread_id as f32, i as f32, 0.0, 0.0],
+                        timestamp.into(),
+                    )
+                    .unwrap();
                     // Try to trigger snapshot
                     idx.on_transaction_at(timestamp.into()).unwrap();
                 }
@@ -3399,7 +3433,11 @@ mod tests {
 
         // Add initial vectors
         for i in 0..50 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
 
         // Spawn threads that all try to create the 10th transaction
@@ -3411,8 +3449,12 @@ mod tests {
                 for i in 0..3 {
                     let t = ts.fetch_add(100, Ordering::SeqCst);
                     let node_id = NodeId::new((thread_id * 10 + i) as u64).unwrap();
-                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], (t as i64).into())
-                        .unwrap();
+                    idx.add(
+                        node_id,
+                        &[thread_id as f32, i as f32, 0.0, 0.0],
+                        (t as i64).into(),
+                    )
+                    .unwrap();
                     idx.on_transaction_at((t as i64).into()).unwrap();
                 }
             }));
@@ -3452,7 +3494,11 @@ mod tests {
 
         // Create full snapshot at t=1000
         for i in 0..10 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         index.on_transaction_at(1000.into())?;
         assert_eq!(index.snapshot_count(), 1);
@@ -3507,7 +3553,11 @@ mod tests {
 
         // Create initial full snapshot manually
         for i in 0..100 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         index.create_manual_snapshot()?;
         let first_snapshot_count = index.snapshot_count();
@@ -3552,7 +3602,11 @@ mod tests {
 
         // Create full snapshot with 100 vectors
         for i in 0..100 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         index.on_transaction_at(1000.into())?;
 
@@ -3716,7 +3770,11 @@ mod tests {
 
         // Add initial vectors
         for i in 0..20 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
 
         // Spawn threads that will trigger both snapshot creation and pruning
@@ -3727,8 +3785,12 @@ mod tests {
                 for i in 0..10 {
                     let timestamp = 2000 + (thread_id * 1000) + (i * 100);
                     let node_id = NodeId::new((thread_id * 10 + i) as u64).unwrap();
-                    idx.add(node_id, &[thread_id as f32, i as f32, 0.0, 0.0], timestamp.into())
-                        .unwrap();
+                    idx.add(
+                        node_id,
+                        &[thread_id as f32, i as f32, 0.0, 0.0],
+                        timestamp.into(),
+                    )
+                    .unwrap();
                     idx.on_transaction_at(timestamp.into()).unwrap();
                 }
             }));
@@ -3780,7 +3842,7 @@ mod tests {
                 &[i as f32, 0.0, 0.0, 0.0],
                 timestamp,
             )?;
-            index.on_transaction_at(timestamp.into())?;
+            index.on_transaction_at(timestamp)?;
         }
 
         // Verify snapshots were created successfully
@@ -3807,7 +3869,11 @@ mod tests {
 
         // Create full snapshot with 3 nodes at t=1000
         for i in 0..3 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         index.on_transaction_at(1000.into())?;
 
@@ -3818,7 +3884,11 @@ mod tests {
 
         // Add 2 NEW nodes at t=2000 (pure additions, not updates)
         for i in 3..5 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                2000.into(),
+            )?;
         }
         index.on_transaction_at(2000.into())?;
 
@@ -3860,7 +3930,11 @@ mod tests {
 
         // Create full snapshot with 10 nodes at t=1000
         for i in 0..10 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         index.on_transaction_at(1000.into())?;
         assert_eq!(index.get_snapshot_info()?[0].vector_count, 10);
@@ -3876,7 +3950,11 @@ mod tests {
         }
         // Additions: nodes 10, 11
         for i in 10..12 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 2000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                2000.into(),
+            )?;
         }
         // Removal: node 9
         index.remove(NodeId::new(9).unwrap(), 2000.into())?;
@@ -3920,7 +3998,11 @@ mod tests {
 
         // Create base with vectors at [1.0, 0, 0, 0], [2.0, 0, 0, 0], ..., [10.0, 0, 0, 0]
         for i in 1..=10 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         index.on_transaction_at(1000.into())?;
 
@@ -3991,7 +4073,11 @@ mod tests {
         // Create base with node 1 at [1.0, 0, 0, 0]
         index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
         for i in 2..=5 {
-            index.add(NodeId::new(i).unwrap(), &[i as f32, 0.0, 0.0, 0.0], 1000.into())?;
+            index.add(
+                NodeId::new(i).unwrap(),
+                &[i as f32, 0.0, 0.0, 0.0],
+                1000.into(),
+            )?;
         }
         index.on_transaction_at(1000.into())?;
 
