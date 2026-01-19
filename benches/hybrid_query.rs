@@ -59,7 +59,7 @@ fn gen_clustered_vector(dim: usize, cluster_id: usize, variance: f32) -> Vec<f32
 /// connectivity, representing knowledge graphs or databases with
 /// predictable relationship patterns.
 fn build_uniform_graph(node_count: usize, fan_out: usize, dim: usize) -> GallifreyDB {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let config = HnswConfig::new(dim, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config).unwrap();
 
@@ -97,7 +97,7 @@ fn build_uniform_graph(node_count: usize, fan_out: usize, dim: usize) -> Gallifr
 ///
 /// Uses clustered embeddings to simulate semantic similarity within communities.
 fn build_power_law_graph(node_count: usize, dim: usize) -> GallifreyDB {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let config = HnswConfig::new(dim, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config).unwrap();
 
@@ -144,7 +144,7 @@ fn build_power_law_graph(node_count: usize, dim: usize) -> GallifreyDB {
 /// This represents minimalist graphs where connections are selective,
 /// such as expert networks or curated knowledge bases.
 fn build_sparse_graph(node_count: usize, dim: usize) -> GallifreyDB {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let config = HnswConfig::new(dim, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config).unwrap();
 
@@ -183,7 +183,7 @@ fn build_temporal_graph_core(
     snapshot_count: usize,
     dim: usize,
 ) -> (GallifreyDB, Vec<i64>) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let hnsw_config = HnswConfig::new(dim, DistanceMetric::Cosine);
     let temporal_config = TemporalVectorConfig {
         snapshot_strategy: SnapshotStrategy::TransactionInterval(1),

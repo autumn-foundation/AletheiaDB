@@ -108,13 +108,13 @@ struct DemoData {
 }
 
 impl DemoData {
-    fn new() -> Self {
-        Self {
+    fn new() -> Result<Self> {
+        Ok(Self {
             nodes: HashMap::new(),
-            db: GallifreyDB::new(),
+            db: GallifreyDB::new()?,
             regenerations: Vec::new(),
             creation_time: now_timestamp(),
-        }
+        })
     }
 
     fn get(&self, name: &str) -> Option<NodeId> {
@@ -1012,7 +1012,7 @@ fn main() -> Result<()> {
 "#
     );
 
-    let mut demo = DemoData::new();
+    let mut demo = DemoData::new()?;
     populate_database(&mut demo)?;
 
     print_help();

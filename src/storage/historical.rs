@@ -16,7 +16,7 @@ use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
 use crate::storage::observer::{Observer, StorageEvent, notify_observers};
 use crate::storage::version::{
-    AnchorConfig, EdgeVersion, NodeVersion, TemporalVersion, VersionData,
+    AnchorConfig, EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData,
 };
 use crate::utils::error::{Result, StorageError, TemporalError};
 use quick_cache::sync::Cache;
@@ -120,6 +120,21 @@ pub type PreAnchorHook = Arc<
         + Send
         + Sync,
 >;
+
+/// Context for pre-anchor hook invocation.
+///
+/// Groups the parameters needed to invoke a pre-anchor hook, improving
+/// readability and reducing the number of function parameters.
+struct AnchorHookContext<'a> {
+    /// Entity type ("node" or "edge")
+    entity_type: &'a str,
+    /// Entity ID as u64
+    entity_id: u64,
+    /// Transaction timestamp
+    timestamp: Timestamp,
+    /// Properties being stored in the anchor
+    properties: &'a PropertyMap,
+}
 
 /// Default cache size for reconstructed properties (10,000 entries)
 const DEFAULT_RECONSTRUCTION_CACHE_SIZE: usize = 10_000;
@@ -458,25 +473,24 @@ impl HistoricalStorage {
         // Check if this node already has versions
         let prev_version_id = self.node_version_heads.get(&node_id).copied();
 
-        // Clone properties for hook call (since new_anchor takes ownership)
+        // Clone properties for hook call and caching (since new_anchor takes ownership)
         let properties_for_hook = properties.clone();
 
+        // Create version (anchor or delta based on chain length)
         let mut version = if let Some(prev_id) = prev_version_id {
-            // Get the previous version (verify it exists)
-            let _prev_version = self
-                .node_versions
-                .get(&prev_id)
-                .ok_or(StorageError::VersionNotFound(prev_id))?;
+            // Verify previous version exists (properties reconstructed later via reconstruct_node_properties)
+            if !self.node_versions.contains_key(&prev_id) {
+                return Err(StorageError::VersionNotFound(prev_id).into());
+            }
 
             // Count versions since last anchor (including this new version)
             let versions_since_anchor = self.count_versions_since_anchor_node(prev_id) + 1;
 
-            // Decide whether to create anchor or delta
             if versions_since_anchor >= self.config.anchor_interval as usize {
-                // Create anchor (but we'll set prev_version manually below to maintain the chain)
+                // Create anchor with link to previous version
                 let mut anchor =
                     NodeVersion::new_anchor(version_id, node_id, temporal, label, properties);
-                anchor.prev_version = Some(prev_id); // Link to previous version
+                anchor.prev_version = Some(prev_id);
                 anchor
             } else {
                 // Create delta from previous version
@@ -496,115 +510,64 @@ impl HistoricalStorage {
             NodeVersion::new_anchor(version_id, node_id, temporal, label, properties)
         };
 
-        // Call pre-anchor hook if this is an anchor (BEFORE storing)
+        // Handle pre-anchor hook (BEFORE storing)
         if version.is_anchor() {
-            let timestamp = temporal.transaction_time().start();
-            if let Some(ref hook) = self.pre_node_anchor_hook {
-                match hook("node", node_id.as_u64(), timestamp, &properties_for_hook) {
-                    Ok(Some(snapshot_id)) => {
-                        // Set snapshot ID in anchor data (strong consistency)
-                        version.data.set_vector_snapshot_id(snapshot_id);
-                        #[cfg(feature = "observability")]
-                        tracing::debug!(
-                            "Pre-anchor hook returned snapshot ID {} for node {}",
-                            snapshot_id,
-                            node_id
-                        );
-                    }
-                    Ok(None) => {
-                        // Hook returned None, no snapshot needed (e.g., empty index)
-                        #[cfg(feature = "observability")]
-                        tracing::debug!(
-                            "Pre-anchor hook returned None for node {} (no snapshot needed)",
-                            node_id
-                        );
-                    }
-                    Err(_e) => {
-                        // Hook failed - log but don't block anchor creation (graceful degradation)
-                        #[cfg(feature = "observability")]
-                        tracing::warn!(
-                            "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
-                            "node",
-                            node_id,
-                            timestamp,
-                            _e
-                        );
-                    }
-                }
-            }
+            Self::handle_pre_anchor_hook(
+                AnchorHookContext {
+                    entity_type: "node",
+                    entity_id: node_id.as_u64(),
+                    timestamp: temporal.transaction_time().start(),
+                    properties: &properties_for_hook,
+                },
+                &mut version.data,
+                &self.pre_node_anchor_hook,
+            );
         }
 
-        // Link the previous version to this one and close its temporal interval if needed
+        // Link previous version to this one and close its temporal intervals
         if let Some(prev_id) = prev_version_id
             && let Some(prev) = self.node_versions.get_mut(&prev_id)
         {
-            prev.next_version = Some(version_id);
-
-            // Close the previous version's temporal interval at the new version's start time
-            // Only close if the interval is currently open and the new start time is after the previous start time
-            let new_start_time = temporal.valid_time().start();
-            let new_tx_time = temporal.transaction_time().start();
-
-            if prev.temporal.is_currently_valid()
-                && new_start_time > prev.temporal.valid_time().start()
-            {
-                prev.temporal = prev.temporal.close_valid_time(new_start_time);
-            }
-            if prev.temporal.is_currently_recorded()
-                && new_tx_time > prev.temporal.transaction_time().start()
-            {
-                prev.temporal = prev.temporal.close_transaction_time(new_tx_time);
-            }
+            Self::close_previous_version_intervals(prev, version_id, &temporal);
         }
 
-        // Check if this is an anchor before storing (for observer notification)
+        // Check if anchor before storing (for notifications and caching)
         let is_anchor = version.is_anchor();
 
-        // Store the version
+        // Store the version and update indexes
         self.node_versions.insert(version_id, version);
         self.node_version_heads.insert(node_id, version_id);
-
-        // Increment cached version count (for O(1) capacity checks)
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
 
-        // Improvements #1 & #2: Cache Pre-population with Dedicated Anchor Cache
-        // If this is an anchor, immediately cache its properties in the dedicated anchor cache
-        // for zero reconstruction overhead. The dedicated cache ensures anchors are never evicted
-        // by delta cache pressure, providing guaranteed O(1) access even under heavy load.
-        //
-        // THREAD SAFETY: Sequential insertion into both caches is safe because:
-        // 1. add_node_version requires &mut self, ensuring exclusive access during insertion
-        // 2. Both caches hold immutable Arc<PropertyMap>, so concurrent reads are safe
-        // 3. Any race between insertion and reconstruction affects only performance (redundant
-        //    cache population), not correctness - both operations work with the same Arc data
-        if is_anchor {
-            let props_arc = Arc::new(properties_for_hook);
-            // Add to dedicated anchor cache (Improvement #1: guaranteed isolation)
-            self.node_anchor_cache.insert(version_id, props_arc.clone());
-            // Also add to regular cache for backward compatibility and immediate access
-            self.node_property_cache.insert(version_id, props_arc);
-        }
-
-        // Notify observers - emit appropriate events
-        let timestamp = temporal.transaction_time().start();
-
-        // Emit version created event (for all versions)
-        let version_event = StorageEvent::NodeVersionCreated {
-            version_id,
-            node_id,
-            timestamp,
+        // Populate caches for anchors (O(1) reconstruction)
+        Self::populate_anchor_caches(
             is_anchor,
-        };
-        notify_observers(&self.observers, &version_event);
+            version_id,
+            properties_for_hook,
+            &self.node_property_cache,
+            &self.node_anchor_cache,
+        );
 
-        // Emit anchor created event (only for anchors)
-        if is_anchor {
-            let anchor_event = StorageEvent::NodeAnchorCreated {
+        // Notify observers
+        let timestamp = temporal.transaction_time().start();
+        notify_observers(
+            &self.observers,
+            &StorageEvent::NodeVersionCreated {
                 version_id,
                 node_id,
                 timestamp,
-            };
-            notify_observers(&self.observers, &anchor_event);
+                is_anchor,
+            },
+        );
+        if is_anchor {
+            notify_observers(
+                &self.observers,
+                &StorageEvent::NodeAnchorCreated {
+                    version_id,
+                    node_id,
+                    timestamp,
+                },
+            );
         }
 
         Ok(())
@@ -634,27 +597,31 @@ impl HistoricalStorage {
             .into());
         }
 
+        // Check if this edge already has versions
         let prev_version_id = self.edge_version_heads.get(&edge_id).copied();
 
-        // Clone properties for hook call (since new_anchor takes ownership)
+        // Clone properties for hook call and caching (since new_anchor takes ownership)
         let properties_for_hook = properties.clone();
 
+        // Create version (anchor or delta based on chain length)
         let mut version = if let Some(prev_id) = prev_version_id {
-            let _prev_version = self
-                .edge_versions
-                .get(&prev_id)
-                .ok_or(StorageError::VersionNotFound(prev_id))?;
+            // Verify previous version exists (properties reconstructed later via reconstruct_edge_properties)
+            if !self.edge_versions.contains_key(&prev_id) {
+                return Err(StorageError::VersionNotFound(prev_id).into());
+            }
 
+            // Count versions since last anchor (including this new version)
             let versions_since_anchor = self.count_versions_since_anchor_edge(prev_id) + 1;
 
             if versions_since_anchor >= self.config.anchor_interval as usize {
-                // Create anchor (but we'll set prev_version manually to maintain the chain)
+                // Create anchor with link to previous version
                 let mut anchor = EdgeVersion::new_anchor(
                     version_id, edge_id, temporal, label, source, target, properties,
                 );
-                anchor.prev_version = Some(prev_id); // Link to previous version
+                anchor.prev_version = Some(prev_id);
                 anchor
             } else {
+                // Create delta from previous version
                 let old_properties = self.reconstruct_edge_properties(prev_id)?;
                 EdgeVersion::new_delta(
                     version_id,
@@ -669,119 +636,70 @@ impl HistoricalStorage {
                 )
             }
         } else {
+            // First version is always an anchor
             EdgeVersion::new_anchor(
                 version_id, edge_id, temporal, label, source, target, properties,
             )
         };
 
-        // Call pre-anchor hook if this is an anchor (BEFORE storing)
+        // Handle pre-anchor hook (BEFORE storing)
         if version.is_anchor() {
-            let timestamp = temporal.transaction_time().start();
-            if let Some(ref hook) = self.pre_edge_anchor_hook {
-                match hook("edge", edge_id.as_u64(), timestamp, &properties_for_hook) {
-                    Ok(Some(snapshot_id)) => {
-                        // Set snapshot ID in anchor data (strong consistency)
-                        version.data.set_vector_snapshot_id(snapshot_id);
-                        #[cfg(feature = "observability")]
-                        tracing::debug!(
-                            "Pre-anchor hook returned snapshot ID {} for edge {}",
-                            snapshot_id,
-                            edge_id
-                        );
-                    }
-                    Ok(None) => {
-                        // Hook returned None, no snapshot needed (e.g., empty index)
-                        #[cfg(feature = "observability")]
-                        tracing::debug!(
-                            "Pre-anchor hook returned None for edge {} (no snapshot needed)",
-                            edge_id
-                        );
-                    }
-                    Err(_e) => {
-                        // Hook failed - log but don't block anchor creation (graceful degradation)
-                        #[cfg(feature = "observability")]
-                        tracing::warn!(
-                            "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
-                            "edge",
-                            edge_id,
-                            timestamp,
-                            _e
-                        );
-                    }
-                }
-            }
+            Self::handle_pre_anchor_hook(
+                AnchorHookContext {
+                    entity_type: "edge",
+                    entity_id: edge_id.as_u64(),
+                    timestamp: temporal.transaction_time().start(),
+                    properties: &properties_for_hook,
+                },
+                &mut version.data,
+                &self.pre_edge_anchor_hook,
+            );
         }
 
-        // Link the previous version to this one and close its temporal interval if needed
+        // Link previous version to this one and close its temporal intervals
         if let Some(prev_id) = prev_version_id
             && let Some(prev) = self.edge_versions.get_mut(&prev_id)
         {
-            prev.next_version = Some(version_id);
-
-            // Close the previous version's temporal interval at the new version's start time
-            // Only close if the interval is currently open and the new start time is after the previous start time
-            let new_start_time = temporal.valid_time().start();
-            let new_tx_time = temporal.transaction_time().start();
-
-            if prev.temporal.is_currently_valid()
-                && new_start_time > prev.temporal.valid_time().start()
-            {
-                prev.temporal = prev.temporal.close_valid_time(new_start_time);
-            }
-            if prev.temporal.is_currently_recorded()
-                && new_tx_time > prev.temporal.transaction_time().start()
-            {
-                prev.temporal = prev.temporal.close_transaction_time(new_tx_time);
-            }
+            Self::close_previous_version_intervals(prev, version_id, &temporal);
         }
 
-        // Check if this is an anchor before storing (for observer notification)
+        // Check if anchor before storing (for notifications and caching)
         let is_anchor = version.is_anchor();
 
+        // Store the version and update indexes
         self.edge_versions.insert(version_id, version);
         self.edge_version_heads.insert(edge_id, version_id);
-
-        // Increment cached version count (for O(1) capacity checks)
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
 
-        // Improvements #1 & #2: Cache Pre-population with Dedicated Anchor Cache
-        // If this is an anchor, immediately cache its properties in the dedicated anchor cache
-        // for zero reconstruction overhead. The dedicated cache ensures anchors are never evicted
-        // by delta cache pressure, providing guaranteed O(1) access even under heavy load.
-        //
-        // THREAD SAFETY: Sequential insertion into both caches is safe because:
-        // 1. add_edge_version requires &mut self, ensuring exclusive access during insertion
-        // 2. Both caches hold immutable Arc<PropertyMap>, so concurrent reads are safe
-        // 3. Any race between insertion and reconstruction affects only performance (redundant
-        //    cache population), not correctness - both operations work with the same Arc data
-        if is_anchor {
-            let props_arc = Arc::new(properties_for_hook);
-            // Add to dedicated anchor cache (Improvement #1: guaranteed isolation)
-            self.edge_anchor_cache.insert(version_id, props_arc.clone());
-            // Also add to regular cache for backward compatibility and immediate access
-            self.edge_property_cache.insert(version_id, props_arc);
-        }
-
-        // Notify observers - emit appropriate events
-        let timestamp = temporal.transaction_time().start();
-
-        // Emit version created event (for all versions)
-        let version_event = StorageEvent::EdgeVersionCreated {
-            version_id,
-            edge_id,
-            timestamp,
+        // Populate caches for anchors (O(1) reconstruction)
+        Self::populate_anchor_caches(
             is_anchor,
-        };
-        notify_observers(&self.observers, &version_event);
+            version_id,
+            properties_for_hook,
+            &self.edge_property_cache,
+            &self.edge_anchor_cache,
+        );
 
-        // Emit anchor created event (only for anchors)
-        if is_anchor {
-            let anchor_event = StorageEvent::EdgeAnchorCreated {
+        // Notify observers
+        let timestamp = temporal.transaction_time().start();
+        notify_observers(
+            &self.observers,
+            &StorageEvent::EdgeVersionCreated {
                 version_id,
                 edge_id,
                 timestamp,
-            };
-            notify_observers(&self.observers, &anchor_event);
+                is_anchor,
+            },
+        );
+        if is_anchor {
+            notify_observers(
+                &self.observers,
+                &StorageEvent::EdgeAnchorCreated {
+                    version_id,
+                    edge_id,
+                    timestamp,
+                },
+            );
         }
 
         Ok(())
@@ -1102,23 +1020,28 @@ impl HistoricalStorage {
         }
     }
 
-    /// Count how many versions exist since the last anchor (for a node).
-    fn count_versions_since_anchor_node(&self, version_id: VersionId) -> usize {
+    /// Count versions since the last anchor using a generic version lookup function.
+    ///
+    /// This is a generic helper that works for both nodes and edges, reducing code duplication.
+    /// The `get_version` closure provides type-specific version lookup.
+    fn count_versions_since_anchor<'a, V: EntityVersion + 'a>(
+        &'a self,
+        version_id: VersionId,
+        get_version: impl Fn(VersionId) -> Option<&'a V>,
+    ) -> usize {
         let mut count = 0;
         let mut current_id = version_id;
 
         loop {
-            if let Some(version) = self.node_versions.get(&current_id) {
+            if let Some(version) = get_version(current_id) {
                 if version.is_anchor() {
                     return count;
                 }
                 count += 1;
 
-                // Move to previous version
-                if let Some(prev_id) = version.prev_version {
+                if let Some(prev_id) = version.prev_version() {
                     current_id = prev_id;
                 } else {
-                    // Reached the beginning without finding an anchor
                     return count;
                 }
             } else {
@@ -1127,26 +1050,116 @@ impl HistoricalStorage {
         }
     }
 
+    /// Count how many versions exist since the last anchor (for a node).
+    ///
+    /// Note: The closure overhead is negligible and typically optimized away by LLVM.
+    /// If profiling shows this is a hotspot, consider monomorphizing.
+    fn count_versions_since_anchor_node(&self, version_id: VersionId) -> usize {
+        self.count_versions_since_anchor(version_id, |vid| self.node_versions.get(&vid))
+    }
+
     /// Count how many versions exist since the last anchor (for an edge).
+    ///
+    /// Note: The closure overhead is negligible and typically optimized away by LLVM.
+    /// If profiling shows this is a hotspot, consider monomorphizing.
     fn count_versions_since_anchor_edge(&self, version_id: VersionId) -> usize {
-        let mut count = 0;
-        let mut current_id = version_id;
+        self.count_versions_since_anchor(version_id, |vid| self.edge_versions.get(&vid))
+    }
 
-        loop {
-            if let Some(version) = self.edge_versions.get(&current_id) {
-                if version.is_anchor() {
-                    return count;
+    /// Handle pre-anchor hook invocation with proper logging.
+    ///
+    /// This helper method encapsulates the common pattern of calling pre-anchor hooks
+    /// and handling their results (success with snapshot ID, success without snapshot,
+    /// or graceful degradation on failure).
+    fn handle_pre_anchor_hook(
+        context: AnchorHookContext<'_>,
+        version_data: &mut VersionData,
+        hook: &Option<PreAnchorHook>,
+    ) {
+        if let Some(hook_fn) = hook {
+            match hook_fn(
+                context.entity_type,
+                context.entity_id,
+                context.timestamp,
+                context.properties,
+            ) {
+                Ok(Some(snapshot_id)) => {
+                    version_data.set_vector_snapshot_id(snapshot_id);
+                    #[cfg(feature = "observability")]
+                    tracing::debug!(
+                        "Pre-anchor hook returned snapshot ID {} for {} {}",
+                        snapshot_id,
+                        context.entity_type,
+                        context.entity_id
+                    );
                 }
-                count += 1;
-
-                if let Some(prev_id) = version.prev_version {
-                    current_id = prev_id;
-                } else {
-                    return count;
+                Ok(None) => {
+                    #[cfg(feature = "observability")]
+                    tracing::debug!(
+                        "Pre-anchor hook returned None for {} {} (no snapshot needed)",
+                        context.entity_type,
+                        context.entity_id
+                    );
                 }
-            } else {
-                return count;
+                Err(_e) => {
+                    #[cfg(feature = "observability")]
+                    tracing::warn!(
+                        "Pre-anchor hook failed for {} {} at timestamp {}: {} (anchor will still be created)",
+                        context.entity_type,
+                        context.entity_id,
+                        context.timestamp,
+                        _e
+                    );
+                }
             }
+        }
+    }
+
+    /// Close the temporal intervals of a previous version when a new version is created.
+    ///
+    /// This helper handles the common logic of linking versions together and closing
+    /// the temporal intervals of the previous version at the new version's start time.
+    fn close_previous_version_intervals<V: EntityVersion>(
+        prev_version: &mut V,
+        new_version_id: VersionId,
+        new_temporal: &BiTemporalInterval,
+    ) {
+        prev_version.set_next_version(Some(new_version_id));
+
+        // Work on a local copy, apply modifications, then write back
+        let mut prev_temporal = *prev_version.temporal();
+
+        if prev_temporal.is_currently_valid()
+            && new_temporal.valid_time().start() > prev_temporal.valid_time().start()
+        {
+            prev_temporal = prev_temporal.close_valid_time(new_temporal.valid_time().start());
+        }
+
+        if prev_temporal.is_currently_recorded()
+            && new_temporal.transaction_time().start() > prev_temporal.transaction_time().start()
+        {
+            prev_temporal =
+                prev_temporal.close_transaction_time(new_temporal.transaction_time().start());
+        }
+
+        *prev_version.temporal_mut() = prev_temporal;
+    }
+
+    /// Populate caches for an anchor version.
+    ///
+    /// If the version is an anchor, immediately cache its properties in both the
+    /// dedicated anchor cache and the regular property cache for optimal performance.
+    fn populate_anchor_caches(
+        is_anchor: bool,
+        version_id: VersionId,
+        properties: PropertyMap,
+        property_cache: &Arc<Cache<VersionId, Arc<PropertyMap>>>,
+        anchor_cache: &Arc<Cache<VersionId, Arc<PropertyMap>>>,
+    ) {
+        if is_anchor {
+            let props_arc = Arc::new(properties);
+            anchor_cache.insert(version_id, props_arc.clone());
+            property_cache.insert(version_id, props_arc);
         }
     }
 
@@ -4291,5 +4304,444 @@ mod tests {
         if let Some(hit_rate) = storage.cache_hit_rate() {
             println!("Cache hit rate: {:.2}%", hit_rate * 100.0);
         }
+    }
+
+    // ============================================================
+    // Edge Version Chain Tests (TDD for Issue #345)
+    // ============================================================
+    // These tests ensure edge version functionality has parity with
+    // node version functionality before refactoring to eliminate
+    // duplicate code.
+
+    #[test]
+    fn test_edge_version_chain() {
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        });
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Create 5 versions
+        let mut version_ids = Vec::new();
+        for i in 0..5 {
+            let version_id = VersionId::new(100 + i).unwrap();
+            let temporal = BiTemporalInterval::current(1000 + (i as i64) * 100);
+            let props = PropertyMapBuilder::new()
+                .insert("weight", i as i64)
+                .insert("since", "2024")
+                .build();
+
+            storage
+                .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+                .unwrap();
+
+            version_ids.push(version_id);
+        }
+
+        // Check version types - should follow same pattern as nodes:
+        // v0: anchor (first)
+        // v1: delta
+        // v2: delta
+        // v3: anchor (interval = 3)
+        // v4: delta
+
+        assert!(
+            storage
+                .get_edge_version(version_ids[0])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(storage.get_edge_version(version_ids[1]).unwrap().is_delta());
+        assert!(storage.get_edge_version(version_ids[2]).unwrap().is_delta());
+        assert!(
+            storage
+                .get_edge_version(version_ids[3])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(storage.get_edge_version(version_ids[4]).unwrap().is_delta());
+    }
+
+    #[test]
+    fn test_edge_property_reconstruction() {
+        let mut storage = HistoricalStorage::new();
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Version 1: weight=10, since=2020
+        let v1 = VersionId::new(1).unwrap();
+        storage
+            .add_edge_version(
+                edge_id,
+                v1,
+                BiTemporalInterval::current(1000),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new()
+                    .insert("weight", 10i64)
+                    .insert("since", "2020")
+                    .build(),
+            )
+            .unwrap();
+
+        // Version 2: weight=20, since=2020 (delta - only weight changes)
+        let v2 = VersionId::new(2).unwrap();
+        storage
+            .add_edge_version(
+                edge_id,
+                v2,
+                BiTemporalInterval::current(2000),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new()
+                    .insert("weight", 20i64)
+                    .insert("since", "2020")
+                    .build(),
+            )
+            .unwrap();
+
+        // Reconstruct v1 properties
+        let props_v1 = storage.reconstruct_edge_properties(v1).unwrap();
+        assert_eq!(props_v1.get("weight").and_then(|v| v.as_int()), Some(10));
+        assert_eq!(props_v1.get("since").and_then(|v| v.as_str()), Some("2020"));
+
+        // Reconstruct v2 properties
+        let props_v2 = storage.reconstruct_edge_properties(v2).unwrap();
+        assert_eq!(props_v2.get("weight").and_then(|v| v.as_int()), Some(20));
+        assert_eq!(props_v2.get("since").and_then(|v| v.as_str()), Some("2020"));
+    }
+
+    #[test]
+    fn test_edge_find_version_at_time() {
+        let mut storage = HistoricalStorage::new();
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Create versions at different times
+        let v1 = VersionId::new(1).unwrap();
+        let v2 = VersionId::new(2).unwrap();
+        let v3 = VersionId::new(3).unwrap();
+
+        storage
+            .add_edge_version(
+                edge_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(0, 1000).unwrap(),
+                    TimeRange::new(0, Timestamp::MAX).unwrap(),
+                ),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new().insert("weight", 10i64).build(),
+            )
+            .unwrap();
+
+        storage
+            .add_edge_version(
+                edge_id,
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000, 2000).unwrap(),
+                    TimeRange::new(0, Timestamp::MAX).unwrap(),
+                ),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new().insert("weight", 20i64).build(),
+            )
+            .unwrap();
+
+        storage
+            .add_edge_version(
+                edge_id,
+                v3,
+                BiTemporalInterval::new(
+                    TimeRange::new(2000, Timestamp::MAX).unwrap(),
+                    TimeRange::new(0, Timestamp::MAX).unwrap(),
+                ),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new().insert("weight", 30i64).build(),
+            )
+            .unwrap();
+
+        // Query at different times
+        assert_eq!(
+            storage.find_edge_version_at_time(edge_id, 500, 100),
+            Some(v1)
+        );
+        assert_eq!(
+            storage.find_edge_version_at_time(edge_id, 1500, 100),
+            Some(v2)
+        );
+        assert_eq!(
+            storage.find_edge_version_at_time(edge_id, 2500, 100),
+            Some(v3)
+        );
+    }
+
+    #[test]
+    fn test_edge_version_chain_links() {
+        // Test that version chains are properly linked (prev/next)
+        let mut storage = HistoricalStorage::new();
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        let v1 = VersionId::new(1).unwrap();
+        let v2 = VersionId::new(2).unwrap();
+        let v3 = VersionId::new(3).unwrap();
+
+        for (i, vid) in [v1, v2, v3].iter().enumerate() {
+            storage
+                .add_edge_version(
+                    edge_id,
+                    *vid,
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    source,
+                    target,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        // Check linking
+        let version1 = storage.get_edge_version(v1).unwrap();
+        assert_eq!(version1.prev_version, None);
+        assert_eq!(version1.next_version, Some(v2));
+
+        let version2 = storage.get_edge_version(v2).unwrap();
+        assert_eq!(version2.prev_version, Some(v1));
+        assert_eq!(version2.next_version, Some(v3));
+
+        let version3 = storage.get_edge_version(v3).unwrap();
+        assert_eq!(version3.prev_version, Some(v2));
+        assert_eq!(version3.next_version, None);
+    }
+
+    #[test]
+    fn test_first_edge_version_is_anchor() {
+        let mut storage = HistoricalStorage::new();
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let temporal = BiTemporalInterval::current(1000);
+        let props = PropertyMapBuilder::new().insert("weight", 5i64).build();
+
+        storage
+            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .unwrap();
+
+        // First version should always be an anchor
+        let version = storage.get_edge_version(version_id).unwrap();
+        assert!(version.is_anchor());
+        assert_eq!(version.edge_id, edge_id);
+        assert_eq!(version.prev_version, None);
+        assert_eq!(version.source, source);
+        assert_eq!(version.target, target);
+    }
+
+    #[test]
+    fn test_independent_node_edge_anchor_intervals() {
+        // Verify that node and edge version chains maintain separate anchor counters
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        });
+
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(2).unwrap();
+        let target = NodeId::new(3).unwrap();
+        let node_label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let edge_label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Create interleaved node and edge versions to ensure they don't interfere
+        // Node pattern: anchor(0), delta(1), delta(2), anchor(3), delta(4)
+        // Edge pattern: anchor(100), delta(101), delta(102), anchor(103), delta(104)
+        let mut node_version_ids = Vec::new();
+        let mut edge_version_ids = Vec::new();
+
+        for i in 0..5 {
+            // Add node version
+            let node_vid = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    node_vid,
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    node_label,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+            node_version_ids.push(node_vid);
+
+            // Add edge version (interleaved)
+            let edge_vid = VersionId::new(100 + i).unwrap();
+            storage
+                .add_edge_version(
+                    edge_id,
+                    edge_vid,
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    edge_label,
+                    source,
+                    target,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+            edge_version_ids.push(edge_vid);
+        }
+
+        // Verify node version pattern: anchor, delta, delta, anchor, delta
+        assert!(
+            storage
+                .get_node_version(node_version_ids[0])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(
+            storage
+                .get_node_version(node_version_ids[1])
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_node_version(node_version_ids[2])
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_node_version(node_version_ids[3])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(
+            storage
+                .get_node_version(node_version_ids[4])
+                .unwrap()
+                .is_delta()
+        );
+
+        // Verify edge version pattern is the same (independent counter)
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[0])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[1])
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[2])
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[3])
+                .unwrap()
+                .is_anchor()
+        );
+        assert!(
+            storage
+                .get_edge_version(edge_version_ids[4])
+                .unwrap()
+                .is_delta()
+        );
+    }
+
+    #[test]
+    fn test_count_versions_since_anchor_generic() {
+        // Direct test of the generic count_versions_since_anchor helper
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        });
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Create anchor(0), delta(1), delta(2)
+        let mut version_ids = Vec::new();
+        for i in 0..3 {
+            let vid = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+            version_ids.push(vid);
+        }
+
+        // Test counting from version 2 (delta) - should find 2 deltas before anchor
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[2]), 2);
+
+        // Test counting from version 1 (delta) - should find 1 delta before anchor
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[1]), 1);
+
+        // Test counting from version 0 (anchor) - should find 0 deltas
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[0]), 0);
+
+        // Create more versions to get anchor(3), delta(4)
+        for i in 3..5 {
+            let vid = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current(1000 + (i as i64) * 100),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+            version_ids.push(vid);
+        }
+
+        // Test counting from version 4 (delta after new anchor) - should find 1 delta
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[4]), 1);
+
+        // Test counting from version 3 (new anchor) - should find 0 deltas
+        assert_eq!(storage.count_versions_since_anchor_node(version_ids[3]), 0);
     }
 }

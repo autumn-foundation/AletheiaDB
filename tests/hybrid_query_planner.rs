@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 /// Helper to create a test database with vector indexing enabled.
 fn create_test_db() -> GallifreyDB {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
@@ -432,7 +432,8 @@ fn test_temporal_context_preserved() {
     let db = GallifreyDB::with_config(AnchorConfig {
         anchor_interval: 3,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
@@ -487,7 +488,8 @@ fn test_full_hybrid_temporal_graph_vector() {
     let db = GallifreyDB::with_config(AnchorConfig {
         anchor_interval: 3,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
@@ -868,7 +870,8 @@ fn test_execute_temporal_node_lookup_returns_historical_state() {
     let db = GallifreyDB::with_config(AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");
@@ -1170,7 +1173,8 @@ fn test_temporal_vector_query() {
     let db = GallifreyDB::with_config(AnchorConfig {
         anchor_interval: 2,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
 
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
     let temporal_config = TemporalVectorConfig {
@@ -1243,7 +1247,7 @@ fn test_temporal_vector_query() {
 
 #[test]
 fn test_query_with_missing_vector_index() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     // Note: NOT enabling vector index
 
     // Create a node
@@ -1358,7 +1362,8 @@ fn test_all_query_dimension_combinations() {
     let db = GallifreyDB::with_config(AnchorConfig {
         anchor_interval: 3,
         max_delta_chain: 10,
-    });
+    })
+    .unwrap();
     let config = HnswConfig::new(4, DistanceMetric::Cosine);
     db.enable_vector_index("embedding", config)
         .expect("Failed to enable vector index");

@@ -15,7 +15,7 @@ fn test_full_temporal_vector_lifecycle() {
         anchor_interval: 3,
         max_delta_chain: 10,
     };
-    let db = GallifreyDB::with_config(anchor_config);
+    let db = GallifreyDB::with_config(anchor_config).unwrap();
 
     // Enable temporal vector indexing
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
@@ -75,7 +75,7 @@ fn test_multiple_nodes_with_temporal_vectors() {
         anchor_interval: 2,
         max_delta_chain: 10,
     };
-    let db = GallifreyDB::with_config(anchor_config);
+    let db = GallifreyDB::with_config(anchor_config).unwrap();
 
     // Enable temporal vector indexing
     let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine);
@@ -133,7 +133,7 @@ fn test_multiple_nodes_with_temporal_vectors() {
 #[test]
 fn test_temporal_vector_index_without_anchors() {
     // Test that temporal vector indexing works even when no anchors are created
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
     let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
@@ -172,7 +172,7 @@ fn test_observer_graceful_degradation() {
         anchor_interval: 2,
         max_delta_chain: 10,
     };
-    let db = GallifreyDB::with_config(anchor_config);
+    let db = GallifreyDB::with_config(anchor_config).unwrap();
 
     // Enable temporal vector indexing with default config
     let hnsw_config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(5); // Small capacity
@@ -209,7 +209,7 @@ fn test_edge_versions_with_temporal_vectors() {
         anchor_interval: 2,
         max_delta_chain: 10,
     };
-    let db = GallifreyDB::with_config(anchor_config);
+    let db = GallifreyDB::with_config(anchor_config).unwrap();
 
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
     let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
@@ -277,7 +277,7 @@ fn test_vector_snapshot_id_stored_in_anchors() {
         anchor_interval: 3,
         max_delta_chain: 10,
     };
-    let db = GallifreyDB::with_config(anchor_config);
+    let db = GallifreyDB::with_config(anchor_config).unwrap();
 
     // Enable temporal vector indexing
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
@@ -362,7 +362,7 @@ fn test_vector_snapshot_id_stored_in_anchors() {
 /// is identical, and this avoids the complexity of temporal snapshot infrastructure.
 #[test]
 fn test_multi_property_temporal_vector_search_execution() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Enable vector indexing for TWO different properties (non-temporal for simplicity)
     let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);

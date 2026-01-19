@@ -261,7 +261,7 @@ fn test_db_persist_indexes_mvp() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         // Add some nodes
         let node1_id = db
@@ -371,7 +371,7 @@ fn test_full_persistence_lifecycle() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         // Add nodes with properties
         node1_id = db
@@ -431,7 +431,7 @@ fn test_full_persistence_lifecycle() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         // Verify counts
         assert_eq!(db.node_count(), 2, "Should have restored 2 nodes from disk");
@@ -553,7 +553,7 @@ fn test_automatic_persistence_integration() {
         .persistence(persistence_config)
         .build();
 
-    let db = GallifreyDB::with_unified_config(config);
+    let db = GallifreyDB::with_unified_config(config).unwrap();
 
     // Create test data - enough to trigger automatic persistence
     println!("Creating 10 nodes to trigger automatic persistence...");
@@ -631,7 +631,7 @@ fn test_automatic_persistence_integration() {
         .persistence(persistence_config)
         .build();
 
-    let db2 = GallifreyDB::with_unified_config(config);
+    let db2 = GallifreyDB::with_unified_config(config).unwrap();
 
     // Verify all nodes were restored
     println!("Verifying restored data...");
@@ -676,7 +676,7 @@ fn test_automatic_persistence_integration() {
         .build();
 
     // This should not panic - should start with empty database
-    let db3 = GallifreyDB::with_unified_config(config);
+    let db3 = GallifreyDB::with_unified_config(config).unwrap();
 
     // Verify database started (even if empty due to corruption)
     let test_node = db3
@@ -1412,7 +1412,7 @@ fn test_invalid_id_detection() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         // Add node
         db.create_node(
@@ -1458,7 +1458,7 @@ fn test_invalid_id_detection() {
         .build();
 
     // Should not panic, may log warnings
-    let _db = GallifreyDB::with_unified_config(config);
+    let _db = GallifreyDB::with_unified_config(config).unwrap();
 
     println!("✓ Invalid ID detection test passed");
 }
@@ -1485,7 +1485,7 @@ fn test_missing_interner_entries() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         db.create_node(
             "Person",
@@ -1512,7 +1512,7 @@ fn test_missing_interner_entries() {
         .build();
 
     // Should not panic - may start with empty DB or skip invalid entries
-    let db = GallifreyDB::with_unified_config(config);
+    let db = GallifreyDB::with_unified_config(config).unwrap();
 
     // Verify database is functional even if data was lost
     let node_id = db
@@ -1604,7 +1604,7 @@ fn test_multiple_restoration_errors() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         // Add several nodes
         for i in 0..10 {
@@ -1663,7 +1663,7 @@ fn test_multiple_restoration_errors() {
         })
         .build();
 
-    let db = GallifreyDB::with_unified_config(config);
+    let db = GallifreyDB::with_unified_config(config).unwrap();
 
     // Should have loaded the valid nodes (10) and skipped the invalid ones (2)
     // Note: Exact count may vary depending on restoration logic
@@ -1720,7 +1720,7 @@ fn test_vector_index_persistence() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         // Enable vector index for "embedding" property
         db.vector_index("embedding")
@@ -1855,7 +1855,7 @@ fn test_vector_index_persistence() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         println!("✓ Database restarted, loading indexes...");
 
@@ -2118,7 +2118,7 @@ fn test_temporal_persistence_with_database() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         // Create nodes (each node creation creates a temporal version)
         node1_id = db
@@ -2219,7 +2219,7 @@ fn test_temporal_persistence_with_database() {
             })
             .build();
 
-        let db = GallifreyDB::with_unified_config(config);
+        let db = GallifreyDB::with_unified_config(config).unwrap();
 
         println!("✓ Database restarted with load_on_startup=true");
 
@@ -2564,7 +2564,7 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
         })
         .build();
 
-    let db = GallifreyDB::with_unified_config(config);
+    let db = GallifreyDB::with_unified_config(config).unwrap();
 
     // Create multiple nodes and edges to advance WAL LSN significantly
     let mut node_ids = Vec::new();

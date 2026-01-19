@@ -20,7 +20,7 @@ use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 /// - Verifying correct historical state reconstruction
 #[test]
 fn test_anchor_creation_matches_benchmark_assumptions() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Create initial node
     let node_id = db
@@ -85,7 +85,7 @@ fn test_anchor_creation_matches_benchmark_assumptions() {
 /// validation requires deeper investigation of get_node_at_time semantics.
 #[test]
 fn test_delta_reconstruction_produces_correct_state() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     let node_id = db
         .create_node(
@@ -186,7 +186,7 @@ fn test_delta_reconstruction_produces_correct_state() {
 /// which requires explicit closing of previous versions before adding new ones.
 #[test]
 fn test_multiple_updates_same_transaction() {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     let node_id = db
         .create_node(
@@ -263,7 +263,7 @@ fn test_performance_targets_benchmark_runtime() {
     let start = Instant::now();
 
     // Simulate the benchmark setup (without criterion overhead)
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let node_id = db
         .create_node(
             "Person",

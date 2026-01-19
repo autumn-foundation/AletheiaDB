@@ -636,7 +636,7 @@ fn bench_cache_miss(c: &mut Criterion) {
 
 /// Setup helper: Create a database with `count` versioned nodes.
 fn setup_database_with_versions(count: usize) -> GallifreyDB {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Batch writes if possible, otherwise individual
     for i in 0..count {

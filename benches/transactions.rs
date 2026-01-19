@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread;
 
 fn bench_read_transaction_creation(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     c.bench_function("read_transaction_creation", |b| {
         b.iter(|| {
@@ -21,7 +21,7 @@ fn bench_read_transaction_creation(c: &mut Criterion) {
 }
 
 fn bench_write_transaction_creation(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     c.bench_function("write_transaction_creation", |b| {
         b.iter(|| {
@@ -31,7 +31,7 @@ fn bench_write_transaction_creation(c: &mut Criterion) {
 }
 
 fn bench_closure_based_write_empty(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     c.bench_function("closure_write_empty_commit", |b| {
         b.iter(|| {
@@ -41,7 +41,7 @@ fn bench_closure_based_write_empty(c: &mut Criterion) {
 }
 
 fn bench_closure_based_write_single_node(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     c.bench_function("closure_write_single_node", |b| {
         b.iter(|| {
@@ -60,7 +60,7 @@ fn bench_closure_based_write_single_node(c: &mut Criterion) {
 }
 
 fn bench_closure_based_write_10_ops(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     c.bench_function("closure_write_10_operations", |b| {
         b.iter(|| {
@@ -91,7 +91,7 @@ fn bench_closure_based_write_10_ops(c: &mut Criterion) {
 }
 
 fn bench_explicit_transaction_commit(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     c.bench_function("explicit_transaction_commit", |b| {
         b.iter(|| {
@@ -107,7 +107,7 @@ fn bench_explicit_transaction_commit(c: &mut Criterion) {
 }
 
 fn bench_implicit_vs_explicit(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     let mut group = c.benchmark_group("implicit_vs_explicit");
 
@@ -137,7 +137,7 @@ fn bench_implicit_vs_explicit(c: &mut Criterion) {
 }
 
 fn bench_read_transaction_overhead(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Create a node to read
     let node_id = db
@@ -178,7 +178,7 @@ fn bench_batch_edge_insertions(c: &mut Criterion) {
     for batch_size in [100, 1000, 10000] {
         group.bench_function(format!("batch_{}_edges", batch_size), |b| {
             b.iter(|| {
-                let db = GallifreyDB::new();
+                let db = GallifreyDB::new().unwrap();
 
                 db.write(|tx| {
                     // Create nodes first
@@ -217,7 +217,7 @@ fn bench_batch_edge_updates(c: &mut Criterion) {
         b.iter_batched(
             || {
                 // Setup: Create DB with 1000 edges
-                let db = GallifreyDB::new();
+                let db = GallifreyDB::new().unwrap();
                 let edge_ids: Vec<_> = db
                     .write(|tx| {
                         let mut nodes = Vec::new();
@@ -270,7 +270,7 @@ fn bench_batch_edge_deletions(c: &mut Criterion) {
         b.iter_batched(
             || {
                 // Setup: create DB with 1000 edges
-                let db = GallifreyDB::new();
+                let db = GallifreyDB::new().unwrap();
                 let edge_ids: Vec<_> = db
                     .write(|tx| {
                         let mut nodes = Vec::new();
@@ -326,7 +326,7 @@ fn bench_batch_insertions_with_prepopulated_graph(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: create DB with existing edges
-                    let db = GallifreyDB::new();
+                    let db = GallifreyDB::new().unwrap();
 
                     // Pre-populate with existing edges
                     db.write(|tx| {
@@ -395,7 +395,7 @@ fn bench_read_during_rebuild(c: &mut Criterion) {
     // Pre-populate a database with 4K nodes + 4K edges
     // Note: stays under DEFAULT_MAX_OPERATIONS (50K) limit defined in
     // src/api/transaction/write_buffer.rs for DoS protection
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
     let node_ids: Vec<_> = db
         .write(|tx| {
             let mut nodes = Vec::new();
@@ -444,7 +444,7 @@ fn bench_concurrent_visibility_checks(c: &mut Criterion) {
     // Pre-populate database with committed data (500 nodes)
     // Note: stays under DEFAULT_MAX_OPERATIONS (50K) limit defined in
     // src/api/transaction/write_buffer.rs for DoS protection
-    let db = Arc::new(GallifreyDB::new());
+    let db = Arc::new(GallifreyDB::new().unwrap());
     let node_ids: Vec<_> = db
         .write(|tx| {
             let mut nodes = Vec::new();
@@ -489,7 +489,7 @@ fn bench_concurrent_visibility_checks(c: &mut Criterion) {
 
 /// Benchmark single-threaded visibility check performance (baseline).
 fn bench_sequential_visibility_checks(c: &mut Criterion) {
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new().unwrap();
 
     // Pre-populate with 500 nodes
     // Note: stays under DEFAULT_MAX_OPERATIONS (50K) limit defined in
@@ -536,7 +536,7 @@ fn bench_concurrent_transaction_creation_with_active_txs(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: create DB and start many active write transactions
-                    let db = Arc::new(GallifreyDB::new());
+                    let db = Arc::new(GallifreyDB::new().unwrap());
                     let mut active_txs = Vec::new();
 
                     for _ in 0..active_count {
@@ -580,7 +580,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: create DB with some existing data for updates/deletes
-                    let db = GallifreyDB::new();
+                    let db = GallifreyDB::new().unwrap();
                     let (nodes, edges) = db
                         .write(|tx| {
                             let mut nodes = Vec::new();
@@ -659,7 +659,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
         // Create-heavy workload
         group.bench_function(format!("creates_{}_ops", size), |b| {
             b.iter(|| {
-                let db = GallifreyDB::new();
+                let db = GallifreyDB::new().unwrap();
                 db.write(|tx| {
                     for i in 0..size {
                         tx.create_node(
@@ -681,7 +681,7 @@ fn bench_apply_changes_large_tx(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: create DB with nodes and edges to delete
-                    let db = GallifreyDB::new();
+                    let db = GallifreyDB::new().unwrap();
                     let (nodes, edges) = db
                         .write(|tx| {
                             let mut nodes = Vec::new();
@@ -756,7 +756,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     // Benchmark 1: Non-vector transaction (should be optimized)
     group.bench_function("commit_without_vectors", |b| {
         b.iter(|| {
-            let db = GallifreyDB::new();
+            let db = GallifreyDB::new().unwrap();
             db.write(|tx| {
                 // Create nodes with scalar properties only (no vectors)
                 for i in 0..10 {
@@ -778,7 +778,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     // Benchmark 2: Vector transaction (will call vector notification)
     group.bench_function("commit_with_vectors", |b| {
         b.iter(|| {
-            let db = GallifreyDB::new();
+            let db = GallifreyDB::new().unwrap();
             db.write(|tx| {
                 // Create nodes with vector properties
                 let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
@@ -800,7 +800,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     // Benchmark 3: Large non-vector transaction (amplifies the optimization benefit)
     group.bench_function("commit_100_ops_without_vectors", |b| {
         b.iter(|| {
-            let db = GallifreyDB::new();
+            let db = GallifreyDB::new().unwrap();
             db.write(|tx| {
                 // Create 100 nodes with scalar properties only
                 for i in 0..100 {
@@ -821,7 +821,7 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     // Benchmark 4: Large vector transaction
     group.bench_function("commit_100_ops_with_vectors", |b| {
         b.iter(|| {
-            let db = GallifreyDB::new();
+            let db = GallifreyDB::new().unwrap();
             db.write(|tx| {
                 let embedding = vec![0.1f32; 128]; // Realistic embedding size
                 for i in 0..100 {

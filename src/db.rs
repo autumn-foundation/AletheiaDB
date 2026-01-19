@@ -827,18 +827,30 @@ pub struct GallifreyDB {
 
 impl GallifreyDB {
     /// Create a new empty database with default configuration.
-    pub fn new() -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
+    pub fn new() -> Result<Self> {
         Self::with_config(AnchorConfig::default())
     }
 
     /// Create a new database with custom anchor configuration.
-    pub fn with_config(config: AnchorConfig) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
+    pub fn with_config(config: AnchorConfig) -> Result<Self> {
         Self::with_full_config(config, crate::config::WalConfig::default())
     }
 
     /// Create a new database with custom WAL configuration.
     ///
     /// This allows configuring the durability mode and other WAL settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
     ///
     /// # Example
     ///
@@ -849,15 +861,15 @@ impl GallifreyDB {
     /// let wal_config = WalConfigBuilder::new()
     ///     .durability_mode(DurabilityMode::group_commit(10, 200))
     ///     .build();
-    /// let db = GallifreyDB::with_wal_config(wal_config);
+    /// let db = GallifreyDB::with_wal_config(wal_config)?;
     ///
     /// // Bulk loading mode with async durability
     /// let wal_config = WalConfigBuilder::new()
     ///     .durability_mode(DurabilityMode::async_mode(100))
     ///     .build();
-    /// let db = GallifreyDB::with_wal_config(wal_config);
+    /// let db = GallifreyDB::with_wal_config(wal_config)?;
     /// ```
-    pub fn with_wal_config(wal_config: crate::config::WalConfig) -> Self {
+    pub fn with_wal_config(wal_config: crate::config::WalConfig) -> Result<Self> {
         Self::with_full_config(AnchorConfig::default(), wal_config)
     }
 
@@ -865,6 +877,10 @@ impl GallifreyDB {
     ///
     /// This method accepts a [`GallifreyDBConfig`] which consolidates all configuration
     /// settings for the database, including WAL, historical storage, and vector indexes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
     ///
     /// # Example
     ///
@@ -877,9 +893,9 @@ impl GallifreyDB {
     ///         .build())
     ///     .build();
     ///
-    /// let db = GallifreyDB::with_unified_config(config);
+    /// let db = GallifreyDB::with_unified_config(config)?;
     /// ```
-    pub fn with_unified_config(config: GallifreyDBConfig) -> Self {
+    pub fn with_unified_config(config: GallifreyDBConfig) -> Result<Self> {
         let durability_mode = config.wal.durability_mode;
 
         // Create ConcurrentWalSystem config from unified WalConfig
@@ -899,7 +915,7 @@ impl GallifreyDB {
             write_buffer_size: config.wal.write_buffer_size,
         };
 
-        let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");
+        let wal = ConcurrentWalSystem::new(wal_system_config)?;
         let wal = Arc::new(wal);
 
         // Create persistence manager if enabled
@@ -1276,17 +1292,21 @@ impl GallifreyDB {
             );
         }
 
-        db
+        Ok(db)
     }
 
     /// Create a new database with both anchor and WAL configuration.
     ///
     /// This maintains backward compatibility with the old API.
     /// For new code, prefer using [`with_unified_config`](Self::with_unified_config).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).
     pub fn with_full_config(
         anchor_config: AnchorConfig,
         wal_config: crate::config::WalConfig,
-    ) -> Self {
+    ) -> Result<Self> {
         let durability_mode = wal_config.durability_mode;
 
         // Create ConcurrentWalSystem config from unified WalConfig
@@ -1306,10 +1326,10 @@ impl GallifreyDB {
             write_buffer_size: wal_config.write_buffer_size,
         };
 
-        let wal = ConcurrentWalSystem::new(wal_system_config).expect("Failed to create WAL");
+        let wal = ConcurrentWalSystem::new(wal_system_config)?;
         let wal = Arc::new(wal);
 
-        GallifreyDB {
+        Ok(GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::with_config(anchor_config))),
             temporal_indexes: Arc::new(TemporalIndexes::new()),
@@ -1326,7 +1346,7 @@ impl GallifreyDB {
             persistence_manager: None,
             persistence_tracker: None,
             persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
+        })
     }
 
     /// Get the default durability mode for this database.
@@ -1363,7 +1383,7 @@ impl GallifreyDB {
         let checkpoint = Checkpoint::load(checkpoint_path.as_ref())?;
 
         // Create new database with default config
-        let db = Self::new();
+        let db = Self::new()?;
 
         // Restore vector index if it was enabled
         if let Some(ref vector_config) = checkpoint.metadata.vector_index_config
@@ -3175,6 +3195,35 @@ impl GallifreyDB {
         &self.historical
     }
 
+    /// Get adaptive over-fetch statistics for a label (test-only helper).
+    ///
+    /// Returns the current statistics (search_count, total_candidates, total_results)
+    /// for the given label, or None if no searches have been performed yet.
+    ///
+    /// This is used for testing to verify that adaptive learning is working correctly.
+    ///
+    /// **Warning**: This method exposes internal implementation details and
+    /// should only be used in tests.
+    ///
+    /// # Returns
+    ///
+    /// Some((search_count, total_candidates, total_results)) if statistics exist,
+    /// None otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let db = GallifreyDB::new()?;
+    /// db.enable_vector_index("embedding", config)?;
+    /// // ... create nodes and perform searches ...
+    /// let (count, candidates, results) = db.__test_get_filter_stats("Person").unwrap();
+    /// assert_eq!(count, 10); // 10 searches performed
+    /// ```
+    #[doc(hidden)]
+    pub fn __test_get_filter_stats(&self, label: &str) -> Option<(u64, u64, u64)> {
+        self.current.get_filter_stats(label)
+    }
+
     /// Get the query optimization statistics.
     ///
     /// Statistics are used for cost-based query optimization and are cached
@@ -3257,11 +3306,10 @@ impl Drop for GallifreyDB {
     }
 }
 
-impl Default for GallifreyDB {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default is intentionally NOT implemented for GallifreyDB because:
+// 1. Construction can fail (WAL initialization may fail)
+// 2. Users should explicitly call GallifreyDB::new()? to handle potential errors
+// 3. This follows CODING_STANDARDS.md which prohibits .expect() in production code
 
 /// Builder for configuring and enabling a vector index on a property.
 ///
@@ -3410,7 +3458,7 @@ mod tests {
 
     #[test]
     fn test_create_node() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let props = PropertyMapBuilder::new()
             .insert("name", "Alice")
@@ -3431,7 +3479,7 @@ mod tests {
 
     #[test]
     fn test_create_edge() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let alice = db
             .create_node("Person", PropertyMapBuilder::new().build())
@@ -3458,7 +3506,7 @@ mod tests {
 
     #[test]
     fn test_time_travel_query() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create a node at time T1
         let props_v1 = PropertyMapBuilder::new()
@@ -3492,7 +3540,7 @@ mod tests {
 
     #[test]
     fn test_time_travel_after_deletion() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create a node
         let props = PropertyMapBuilder::new()
@@ -3546,7 +3594,7 @@ mod tests {
 
     #[test]
     fn test_graph_traversal() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let n0 = db
             .create_node("Person", PropertyMapBuilder::new().build())
@@ -3572,7 +3620,7 @@ mod tests {
 
     #[test]
     fn test_historical_stats() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         db.create_node("Person", PropertyMapBuilder::new().build())
             .unwrap();
@@ -3588,7 +3636,7 @@ mod tests {
 
     #[test]
     fn test_closure_based_write_api() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Use closure-based API for multiple operations
         let (node_id, edge_id) = db
@@ -3627,7 +3675,7 @@ mod tests {
 
     #[test]
     fn test_closure_based_read_api() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let node_id = db
             .create_node(
@@ -3652,7 +3700,7 @@ mod tests {
 
     #[test]
     fn test_explicit_write_transaction() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let mut tx = db.write_transaction().unwrap();
         let n1 = tx
@@ -3683,7 +3731,7 @@ mod tests {
 
     #[test]
     fn test_explicit_read_transaction() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let node_id = db
             .create_node(
@@ -3701,7 +3749,7 @@ mod tests {
 
     #[test]
     fn test_transaction_atomicity() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create a valid node first
         let valid_node = db
@@ -3733,7 +3781,7 @@ mod tests {
 
     #[test]
     fn test_transaction_rollback_on_error() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Closure returns an error - should auto-rollback
         let result: Result<()> = db.write(|tx| {
@@ -3755,7 +3803,7 @@ mod tests {
 
     #[test]
     fn test_multiple_transactions() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Transaction 1
         let n1 = db
@@ -3777,7 +3825,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_isolation() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let node_id = db
             .create_node(
@@ -3824,7 +3872,7 @@ mod tests {
     fn test_enable_vector_index() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -3839,7 +3887,7 @@ mod tests {
     fn test_find_similar_basic() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -3895,7 +3943,7 @@ mod tests {
     fn test_find_similar_with_label() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -3940,7 +3988,7 @@ mod tests {
 
     #[test]
     fn test_vector_index_not_enabled() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create node with vector
         let node_id = db
@@ -3960,7 +4008,7 @@ mod tests {
     fn test_vector_index_with_euclidean_distance() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index with Euclidean distance
         let config = HnswConfig::new(3, DistanceMetric::Euclidean).with_capacity(100);
@@ -4008,7 +4056,7 @@ mod tests {
     fn test_vector_index_with_large_k() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -4045,7 +4093,7 @@ mod tests {
     fn test_transaction_nodes_are_indexed() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -4090,7 +4138,7 @@ mod tests {
     fn test_find_similar_by_embedding() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -4142,7 +4190,7 @@ mod tests {
     fn test_find_similar_by_embedding_with_label() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -4193,7 +4241,7 @@ mod tests {
     fn test_find_similar_by_embedding_dimension_mismatch() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index with 3 dimensions
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -4220,7 +4268,7 @@ mod tests {
     fn test_find_similar_empty_database() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index but don't add any nodes
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -4237,7 +4285,7 @@ mod tests {
     fn test_find_similar_k_zero() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index and add some nodes
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -4264,7 +4312,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let db = Arc::new(GallifreyDB::new());
+        let db = Arc::new(GallifreyDB::new().unwrap());
 
         // Enable vector index
         let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(1000);
@@ -4328,7 +4376,7 @@ mod tests {
 
     #[test]
     fn test_get_nodes_at_time_basic() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create multiple nodes at time T1
         let props1 = PropertyMapBuilder::new()
@@ -4392,7 +4440,7 @@ mod tests {
 
     #[test]
     fn test_get_nodes_at_time_mixed_results() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create two nodes
         let node1 = db
@@ -4433,7 +4481,7 @@ mod tests {
 
     #[test]
     fn test_get_nodes_at_time_empty_batch() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let t1 = *db.current_timestamp.lock().unwrap();
 
@@ -4446,7 +4494,7 @@ mod tests {
 
     #[test]
     fn test_get_nodes_at_time_after_deletion() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create nodes
         let node1 = db
@@ -4495,7 +4543,7 @@ mod tests {
 
     #[test]
     fn test_get_edges_at_time_basic() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create nodes
         let alice = db
@@ -4584,7 +4632,7 @@ mod tests {
 
     #[test]
     fn test_get_edges_at_time_mixed_results() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create nodes and edges
         let alice = db
@@ -4624,7 +4672,7 @@ mod tests {
 
     #[test]
     fn test_get_edges_at_time_empty_batch() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let t1 = *db.current_timestamp.lock().unwrap();
 
@@ -4637,7 +4685,7 @@ mod tests {
 
     #[test]
     fn test_get_edges_at_time_after_deletion() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create nodes and edges
         let alice = db
@@ -4687,7 +4735,7 @@ mod tests {
 
     #[test]
     fn test_get_nodes_at_time_large_batch() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create 100 nodes
         let node_ids: Vec<_> = (0..100)
@@ -4717,7 +4765,7 @@ mod tests {
 
     #[test]
     fn test_get_nodes_at_time_duplicate_ids() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let node1 = db
             .create_node(
@@ -4743,7 +4791,7 @@ mod tests {
 
     #[test]
     fn test_get_edges_at_time_large_batch() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Create nodes
         let source = db
@@ -4783,7 +4831,7 @@ mod tests {
 
     #[test]
     fn test_get_edges_at_time_duplicate_ids() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         let source = db
             .create_node("Node", PropertyMapBuilder::new().build())
@@ -4815,7 +4863,7 @@ mod tests {
     fn test_find_similar_with_missing_property() {
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index on "embedding" property
         let config = HnswConfig::new(3, DistanceMetric::Cosine).with_capacity(100);
@@ -4866,7 +4914,7 @@ mod tests {
     fn test_vector_index_builder_basic() {
         use crate::index::vector::DistanceMetric;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Builder pattern API
         db.vector_index("embedding")
@@ -4883,7 +4931,7 @@ mod tests {
     fn test_vector_index_builder_multiple_properties() {
         use crate::index::vector::DistanceMetric;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable two indexes via builder
         db.vector_index("title_embedding")
@@ -4908,7 +4956,7 @@ mod tests {
     /// Test builder pattern without calling hnsw() fails.
     #[test]
     fn test_vector_index_builder_missing_hnsw_fails() {
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Calling enable() without hnsw() should fail
         let result = db.vector_index("embedding").enable();
@@ -4926,7 +4974,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
         // Single call enables both current and temporal indexing
@@ -4954,7 +5002,7 @@ mod tests {
     fn test_vector_index_builder_functional() {
         use crate::index::vector::DistanceMetric;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         db.vector_index("embedding")
             .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
@@ -4992,7 +5040,7 @@ mod tests {
     fn test_vector_index_builder_same_property_twice_fails() {
         use crate::index::vector::DistanceMetric;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         db.vector_index("embedding")
             .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
@@ -5020,7 +5068,7 @@ mod tests {
     fn test_find_similar_in_explicit_property() {
         use crate::index::vector::DistanceMetric;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable two different indexes
         db.vector_index("title_embedding")
@@ -5073,7 +5121,7 @@ mod tests {
     fn test_search_vectors_in_explicit_property() {
         use crate::index::vector::DistanceMetric;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         db.vector_index("embedding")
             .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
@@ -5111,7 +5159,7 @@ mod tests {
     fn test_find_similar_in_nonexistent_property_fails() {
         use crate::index::vector::DistanceMetric;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         db.vector_index("embedding")
             .hnsw(HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100))
@@ -5145,7 +5193,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
         // Enable temporal vector index for a specific property
@@ -5193,7 +5241,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
         // Enable temporal index for "embedding" property
@@ -5225,7 +5273,7 @@ mod tests {
     fn test_find_similar_as_of_in_no_temporal_index() {
         use crate::index::vector::DistanceMetric;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Only enable regular HNSW index, not temporal
         db.vector_index("embedding")
@@ -5253,7 +5301,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
         // Enable temporal vector index for a specific property
@@ -5302,7 +5350,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
         // Enable temporal index for "embedding" property
@@ -5336,7 +5384,7 @@ mod tests {
         use crate::core::temporal::TimeRange;
         use crate::index::vector::DistanceMetric;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Only enable regular HNSW index, not temporal
         db.vector_index("embedding")
@@ -5365,7 +5413,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
         db.vector_index("content_embedding")
@@ -5405,7 +5453,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
         db.vector_index("embedding")
@@ -5439,7 +5487,7 @@ mod tests {
             DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
         db.vector_index("content_embedding")
@@ -5479,7 +5527,7 @@ mod tests {
             DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
 
         db.vector_index("embedding")
@@ -5517,7 +5565,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable temporal index for FIRST property
         let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
@@ -5613,7 +5661,7 @@ mod tests {
             RetentionPolicy, SnapshotStrategy, TemporalVectorConfig,
         };
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable temporal index for one property
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
@@ -5653,7 +5701,7 @@ mod tests {
         use crate::index::vector::temporal::TemporalVectorConfig;
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Enable vector index first
         let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
@@ -5675,7 +5723,7 @@ mod tests {
         // when no vector index exists
         use crate::index::vector::temporal::TemporalVectorConfig;
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Try to enable temporal vector index WITHOUT providing hnsw_config
         // AND without an existing vector index - this should fail
@@ -5714,7 +5762,7 @@ mod tests {
         };
         use crate::index::vector::{DistanceMetric, HnswConfig};
 
-        let db = GallifreyDB::new();
+        let db = GallifreyDB::new().unwrap();
 
         // Initially empty
         assert!(db.list_temporal_vector_indexes().is_empty());
@@ -5766,7 +5814,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let db = Arc::new(GallifreyDB::new());
+        let db = Arc::new(GallifreyDB::new().unwrap());
 
         // Enable two vector indexes for different properties
         let hnsw_config1 = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
@@ -5851,13 +5899,130 @@ mod tests {
         let _ = node_ids; // Use node_ids to suppress unused warning
     }
 
+    // ==================== Constructor Error Handling Tests ====================
+    // These tests verify that database constructors return Result and properly
+    // propagate WAL creation errors (Issue #343)
+
+    #[test]
+    fn test_new_returns_result() {
+        // GallifreyDB::new() should return Result<Self> and succeed with default config
+        let result = GallifreyDB::new();
+        assert!(result.is_ok(), "new() should succeed with default config");
+    }
+
+    #[test]
+    fn test_with_config_returns_result() {
+        // GallifreyDB::with_config() should return Result<Self>
+        let result = GallifreyDB::with_config(crate::storage::version::AnchorConfig::default());
+        assert!(
+            result.is_ok(),
+            "with_config() should succeed with default config"
+        );
+    }
+
+    #[test]
+    fn test_with_wal_config_returns_result() {
+        // GallifreyDB::with_wal_config() should return Result<Self>
+        let wal_config = crate::config::WalConfig::default();
+        let result = GallifreyDB::with_wal_config(wal_config);
+        assert!(
+            result.is_ok(),
+            "with_wal_config() should succeed with default config"
+        );
+    }
+
+    #[test]
+    fn test_with_full_config_returns_result() {
+        // GallifreyDB::with_full_config() should return Result<Self>
+        let result = GallifreyDB::with_full_config(
+            crate::storage::version::AnchorConfig::default(),
+            crate::config::WalConfig::default(),
+        );
+        assert!(
+            result.is_ok(),
+            "with_full_config() should succeed with default config"
+        );
+    }
+
+    #[test]
+    fn test_with_unified_config_returns_result() {
+        // GallifreyDB::with_unified_config() should return Result<Self>
+        let config = crate::config::GallifreyDBConfig::default();
+        let result = GallifreyDB::with_unified_config(config);
+        assert!(
+            result.is_ok(),
+            "with_unified_config() should succeed with default config"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wal_creation_failure_propagates_error() {
+        // When WAL creation fails, the error should be propagated instead of panicking
+        use std::path::PathBuf;
+
+        // Use /dev/null/wal - /dev/null is a character device, not a directory,
+        // so any attempt to create subdirectories under it will fail
+        let invalid_wal_dir = PathBuf::from("/dev/null/wal");
+
+        let wal_config = crate::config::WalConfigBuilder::new()
+            .wal_dir(invalid_wal_dir)
+            .build();
+
+        let result = GallifreyDB::with_wal_config(wal_config);
+
+        // Should return Err instead of panicking
+        assert!(
+            result.is_err(),
+            "with_wal_config() should return Err when WAL directory cannot be created"
+        );
+
+        // Error should mention an I/O issue
+        let err = result.err().expect("Expected an error");
+        let err_msg = err.to_string().to_lowercase();
+        assert!(
+            err_msg.contains("i/o")
+                || err_msg.contains("directory")
+                || err_msg.contains("not a directory"),
+            "Error message should indicate I/O issue, got: {}",
+            err
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unified_config_wal_failure_propagates_error() {
+        // When WAL creation fails in with_unified_config, the error should be propagated
+        use std::path::PathBuf;
+
+        // Use /dev/null/wal - /dev/null is a character device, not a directory,
+        // so any attempt to create subdirectories under it will fail
+        let invalid_wal_dir = PathBuf::from("/dev/null/wal");
+
+        let config = crate::config::GallifreyDBConfigBuilder::new()
+            .wal(
+                crate::config::WalConfigBuilder::new()
+                    .wal_dir(invalid_wal_dir)
+                    .build(),
+            )
+            .build();
+
+        let result = GallifreyDB::with_unified_config(config);
+
+        // Should return Err instead of panicking
+        assert!(
+            result.is_err(),
+            "with_unified_config() should return Err when WAL directory cannot be created"
+        );
+    }
+
     #[test]
     fn test_max_vector_properties_limit() {
         // Test that the maximum number of vector properties is enforced
         use crate::index::vector::{DistanceMetric, HnswConfig};
         use crate::storage::current::DEFAULT_MAX_VECTOR_PROPERTIES;
 
-        let db = crate::GallifreyDB::new();
+        let db = crate::GallifreyDB::new().unwrap();
 
         // Enable indexes up to the limit
         for i in 0..DEFAULT_MAX_VECTOR_PROPERTIES {

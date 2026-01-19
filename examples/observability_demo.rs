@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("ℹ️  Running without observability (zero overhead mode)");
 
     println!("\n🚀 Creating GallifreyDB instance...");
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new()?;
 
     println!("📝 Creating sample nodes and edges...");
 
