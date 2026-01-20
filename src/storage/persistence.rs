@@ -470,15 +470,12 @@ impl PersistenceManager {
         // Restore vector index configuration BEFORE WAL replay (Issue #292)
         // This ensures that vectors are automatically indexed during node creation.
         // If vector index restoration fails, recovery fails to maintain data integrity.
-        if let Some(cp) = &checkpoint {
-            if let Some(vector_config) = &cp.metadata.vector_index_config {
-                if vector_config.enabled {
-                    current.enable_vector_index(
-                        &vector_config.property_name,
-                        vector_config.config.clone(),
-                    )?;
-                }
-            }
+        if let Some(cp) = &checkpoint
+            && let Some(vector_config) = &cp.metadata.vector_index_config
+            && vector_config.enabled
+        {
+            current
+                .enable_vector_index(&vector_config.property_name, vector_config.config.clone())?;
         }
 
         let start_lsn = if let Some(cp) = checkpoint {
