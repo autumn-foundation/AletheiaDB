@@ -205,6 +205,316 @@ impl From<VectorDimension> for usize {
 }
 
 // ============================================================================
+// Sparse Vector Type
+// ============================================================================
+
+/// A sparse vector representation optimized for vectors with many zero values.
+///
+/// Sparse vectors store only non-zero values along with their indices, making them
+/// memory-efficient for high-dimensional vectors where most values are zero.
+/// This is particularly useful for algorithms like BM25 and SPLADE.
+///
+/// # Format
+///
+/// - `indices`: Sorted array of non-zero element positions
+/// - `values`: Corresponding non-zero values
+/// - `dimension`: Total vector dimension (including zeros)
+///
+/// # Invariants
+///
+/// The struct maintains these invariants:
+/// 1. `indices.len() == values.len()` (each index has a corresponding value)
+/// 2. `indices` are sorted in ascending order
+/// 3. All indices are `< dimension`
+/// 4. No duplicate indices
+/// 5. All values are non-zero (no stored zeros)
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::SparseVec;
+///
+/// // Sparse vector: [0.0, 1.5, 0.0, 0.0, 2.3, 0.0, 0.0, 0.8]
+/// let sparse = SparseVec::new(
+///     vec![1, 4, 7],        // indices of non-zero values
+///     vec![1.5, 2.3, 0.8],  // corresponding values
+///     8                      // total dimension
+/// ).unwrap();
+///
+/// assert_eq!(sparse.nnz(), 3);  // 3 non-zero elements
+/// assert_eq!(sparse.dimension(), 8);
+/// ```
+///
+/// # Use Cases
+///
+/// - **BM25**: Text retrieval using term frequency vectors
+/// - **SPLADE**: Sparse learned embeddings for information retrieval
+/// - **One-hot encodings**: Categorical features with single non-zero value
+/// - **TF-IDF**: Document vectors with few non-zero terms
+///
+/// # Performance
+///
+/// - Space complexity: O(nnz) where nnz = number of non-zero elements
+/// - Dense equivalent would be: O(dimension)
+/// - Memory savings can be 10-1000x for sparse data
+#[derive(Debug, Clone, PartialEq)]
+pub struct SparseVec {
+    /// Indices of non-zero elements (sorted, unique, all < dimension).
+    indices: Vec<u32>,
+    /// Non-zero values corresponding to indices.
+    values: Vec<f32>,
+    /// Total dimension of the vector (including zeros).
+    dimension: u32,
+}
+
+impl SparseVec {
+    /// Creates a new sparse vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `indices` - Positions of non-zero elements (will be sorted if not already)
+    /// * `values` - Non-zero values corresponding to indices
+    /// * `dimension` - Total vector dimension (must be > max(indices))
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(SparseVec)` if the input is valid
+    /// - `Err` if validation fails (see Errors section)
+    ///
+    /// # Errors
+    ///
+    /// Returns `VectorError::DimensionMismatch` if:
+    /// - `indices.len() != values.len()`
+    /// - Any index >= dimension
+    ///
+    /// Returns `VectorError::InvalidSparseVector` if:
+    /// - Duplicate indices found
+    /// - Zero values found (sparse vectors should only store non-zero values)
+    ///
+    /// Returns `VectorError::DimensionTooLarge` if dimension exceeds MAX_VECTOR_DIMENSIONS.
+    ///
+    /// Returns `VectorError::ContainsNaN` if any value is NaN.
+    ///
+    /// Returns `VectorError::ContainsInfinity` if any value is infinite.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// // Valid sparse vector
+    /// let sparse = SparseVec::new(vec![0, 2, 5], vec![1.0, 2.0, 3.0], 10).unwrap();
+    /// assert_eq!(sparse.nnz(), 3);
+    ///
+    /// // Error: mismatched lengths
+    /// let result = SparseVec::new(vec![0, 1], vec![1.0], 10);
+    /// assert!(result.is_err());
+    ///
+    /// // Error: index out of bounds
+    /// let result = SparseVec::new(vec![0, 10], vec![1.0, 2.0], 10);
+    /// assert!(result.is_err());
+    /// ```
+    pub fn new(mut indices: Vec<u32>, mut values: Vec<f32>, dimension: u32) -> Result<Self> {
+        // Validate dimension
+        if dimension as usize > MAX_VECTOR_DIMENSIONS {
+            return Err(VectorError::DimensionTooLarge {
+                dimension: dimension as usize,
+                max_allowed: MAX_VECTOR_DIMENSIONS,
+            }
+            .into());
+        }
+
+        // Validate lengths match
+        if indices.len() != values.len() {
+            return Err(VectorError::DimensionMismatch {
+                expected: indices.len(),
+                actual: values.len(),
+            }
+            .into());
+        }
+
+        // Validate and normalize data
+        if !indices.is_empty() {
+            // Sort by indices (if not already sorted)
+            let mut index_value_pairs: Vec<(u32, f32)> = indices.into_iter().zip(values).collect();
+            index_value_pairs.sort_by_key(|(idx, _)| *idx);
+
+            // Check for duplicates and out-of-bounds indices
+            let mut prev_idx = None;
+            for (idx, val) in &index_value_pairs {
+                // Check NaN
+                if val.is_nan() {
+                    return Err(VectorError::ContainsNaN { count: 1 }.into());
+                }
+                // Check Infinity
+                if val.is_infinite() {
+                    return Err(VectorError::ContainsInfinity { count: 1 }.into());
+                }
+                // Check for zero values (sparse vectors should not store zeros)
+                if *val == 0.0 {
+                    return Err(Error::Vector(VectorError::InvalidSparseVector {
+                        reason: "Sparse vector contains zero value".to_string(),
+                    }));
+                }
+                // Check index bounds
+                if *idx >= dimension {
+                    return Err(VectorError::DimensionMismatch {
+                        expected: dimension as usize,
+                        actual: (*idx + 1) as usize,
+                    }
+                    .into());
+                }
+                // Check for duplicates
+                if let Some(prev) = prev_idx
+                    && prev == *idx
+                {
+                    return Err(Error::Vector(VectorError::InvalidSparseVector {
+                        reason: format!("Duplicate index {} found", idx),
+                    }));
+                }
+                prev_idx = Some(*idx);
+            }
+
+            // Unzip back to separate vectors
+            let (sorted_indices, sorted_values): (Vec<u32>, Vec<f32>) =
+                index_value_pairs.into_iter().unzip();
+            indices = sorted_indices;
+            values = sorted_values;
+        }
+
+        Ok(Self {
+            indices,
+            values,
+            dimension,
+        })
+    }
+
+    /// Returns the number of non-zero elements.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// let sparse = SparseVec::new(vec![1, 3, 5], vec![1.0, 2.0, 3.0], 10).unwrap();
+    /// assert_eq!(sparse.nnz(), 3);
+    /// ```
+    #[inline]
+    pub fn nnz(&self) -> usize {
+        self.indices.len()
+    }
+
+    /// Returns the total dimension of the vector (including zeros).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// let sparse = SparseVec::new(vec![0], vec![1.0], 100).unwrap();
+    /// assert_eq!(sparse.dimension(), 100);
+    /// ```
+    #[inline]
+    pub fn dimension(&self) -> usize {
+        self.dimension as usize
+    }
+
+    /// Returns a slice of the non-zero indices.
+    ///
+    /// The indices are guaranteed to be sorted in ascending order.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// let sparse = SparseVec::new(vec![5, 1, 3], vec![1.0, 2.0, 3.0], 10).unwrap();
+    /// // Indices are sorted during construction
+    /// assert_eq!(sparse.indices(), &[1, 3, 5]);
+    /// ```
+    #[inline]
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
+    /// Returns a slice of the non-zero values.
+    ///
+    /// The values correspond to the indices returned by [`indices()`](Self::indices).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// let sparse = SparseVec::new(vec![5, 1, 3], vec![1.0, 2.0, 3.0], 10).unwrap();
+    /// let indices = sparse.indices();
+    /// let values = sparse.values();
+    /// // values[i] corresponds to indices[i]
+    /// assert_eq!(values.len(), indices.len());
+    /// ```
+    #[inline]
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    /// Converts this sparse vector to a dense vector representation.
+    ///
+    /// Creates a new vector of length `dimension()` with zeros everywhere
+    /// except at the specified indices.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// let sparse = SparseVec::new(vec![1, 3], vec![1.5, 2.5], 5).unwrap();
+    /// let dense = sparse.to_dense();
+    /// assert_eq!(dense, vec![0.0, 1.5, 0.0, 2.5, 0.0]);
+    /// ```
+    pub fn to_dense(&self) -> Vec<f32> {
+        let mut dense = vec![0.0; self.dimension as usize];
+        for (&idx, &val) in self.indices.iter().zip(self.values.iter()) {
+            dense[idx as usize] = val;
+        }
+        dense
+    }
+
+    /// Computes the squared magnitude (L2 norm squared) of this sparse vector.
+    ///
+    /// This is more efficient than computing the full magnitude when you only
+    /// need to compare magnitudes (since sqrt is monotonic for positive values).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// let sparse = SparseVec::new(vec![0, 1, 2], vec![1.0, 2.0, 2.0], 5).unwrap();
+    /// // magnitude² = 1² + 2² + 2² = 1 + 4 + 4 = 9
+    /// assert_eq!(sparse.squared_magnitude(), 9.0);
+    /// ```
+    pub fn squared_magnitude(&self) -> f32 {
+        self.values.iter().map(|v| v * v).sum()
+    }
+
+    /// Computes the magnitude (L2 norm) of this sparse vector.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// let sparse = SparseVec::new(vec![0, 1], vec![3.0, 4.0], 5).unwrap();
+    /// // magnitude = sqrt(3² + 4²) = sqrt(9 + 16) = 5.0
+    /// assert_eq!(sparse.magnitude(), 5.0);
+    /// ```
+    #[inline]
+    pub fn magnitude(&self) -> f32 {
+        self.squared_magnitude().sqrt()
+    }
+}
+
+// ============================================================================
 // Constants
 // ============================================================================
 
@@ -1674,6 +1984,230 @@ pub fn validate_vector_with_bounds(v: &[f32], max_dimension: usize) -> Result<()
 
     // Then validate contents
     validate_vector(v)
+}
+
+// ============================================================================
+// Sparse Vector Similarity Functions
+// ============================================================================
+
+/// Computes the dot product between two sparse vectors.
+///
+/// The dot product is computed efficiently by iterating only over non-zero
+/// elements. Vectors with different dimensions are handled gracefully by
+/// only considering indices that exist in both vectors.
+///
+/// # Arguments
+///
+/// * `a` - First sparse vector
+/// * `b` - Second sparse vector
+///
+/// # Returns
+///
+/// * `Ok(f32)` - The dot product
+/// * `Err` - Never returns an error (kept for API consistency with dense vectors)
+///
+/// # Algorithm
+///
+/// Uses a merge-like algorithm since indices are sorted:
+/// 1. Maintain pointers to both index arrays
+/// 2. When indices match, multiply values and add to sum
+/// 3. Advance pointer with smaller index
+/// 4. Time complexity: O(nnz_a + nnz_b)
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::{SparseVec, sparse_dot_product};
+///
+/// // Sparse vectors: [1, 0, 2, 0, 0] and [0, 0, 3, 0, 4]
+/// let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+/// let b = SparseVec::new(vec![2, 4], vec![3.0, 4.0], 5).unwrap();
+///
+/// // Only index 2 overlaps: 2.0 * 3.0 = 6.0
+/// let dot = sparse_dot_product(&a, &b).unwrap();
+/// assert_eq!(dot, 6.0);
+/// ```
+///
+/// # Performance
+///
+/// For vectors with nnz_a and nnz_b non-zero elements:
+/// - Time: O(nnz_a + nnz_b) - linear in sparsity
+/// - Space: O(1) - no allocations
+/// - Much faster than dense dot product when vectors are sparse
+pub fn sparse_dot_product(a: &SparseVec, b: &SparseVec) -> Result<f32> {
+    let mut sum = 0.0f32;
+    let mut i = 0;
+    let mut j = 0;
+
+    let a_indices = a.indices();
+    let a_values = a.values();
+    let b_indices = b.indices();
+    let b_values = b.values();
+
+    // Merge-like algorithm since indices are sorted
+    while i < a_indices.len() && j < b_indices.len() {
+        if a_indices[i] == b_indices[j] {
+            // Indices match - multiply and add
+            sum += a_values[i] * b_values[j];
+            i += 1;
+            j += 1;
+        } else if a_indices[i] < b_indices[j] {
+            // a's index is smaller, advance a
+            i += 1;
+        } else {
+            // b's index is smaller, advance b
+            j += 1;
+        }
+    }
+
+    Ok(sum)
+}
+
+/// Computes cosine similarity between two sparse vectors.
+///
+/// Cosine similarity measures the angle between vectors, ranging from -1 (opposite)
+/// to 1 (identical direction). For sparse vectors, this is computed efficiently
+/// by only considering non-zero elements.
+///
+/// # Arguments
+///
+/// * `a` - First sparse vector
+/// * `b` - Second sparse vector
+///
+/// # Returns
+///
+/// * `Ok(f32)` - Cosine similarity in range [-1, 1]
+/// * `Err` - If either vector has zero magnitude
+///
+/// # Formula
+///
+/// ```text
+/// cosine_similarity = dot(a, b) / (||a|| * ||b||)
+/// ```
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::{SparseVec, sparse_cosine_similarity};
+///
+/// let a = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
+/// let b = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
+///
+/// // Identical vectors have cosine similarity = 1.0
+/// let sim = sparse_cosine_similarity(&a, &b).unwrap();
+/// assert!((sim - 1.0).abs() < 1e-6);
+/// ```
+///
+/// # Performance
+///
+/// - Time: O(nnz_a + nnz_b) for dot product + O(nnz_a + nnz_b) for magnitudes
+/// - Space: O(1)
+/// - Much faster than dense cosine for sparse data
+pub fn sparse_cosine_similarity(a: &SparseVec, b: &SparseVec) -> Result<f32> {
+    let dot = sparse_dot_product(a, b)?;
+    let mag_a = a.magnitude();
+    let mag_b = b.magnitude();
+
+    // Handle zero magnitude vectors
+    if mag_a < SQUARED_MAGNITUDE_THRESHOLD || mag_b < SQUARED_MAGNITUDE_THRESHOLD {
+        return Ok(0.0);
+    }
+
+    let similarity = dot / (mag_a * mag_b);
+
+    // Clamp to [-1, 1] to handle floating-point errors
+    Ok(similarity.clamp(-1.0, 1.0))
+}
+
+/// Computes squared Euclidean distance between two sparse vectors.
+///
+/// The squared distance is more efficient than computing the full Euclidean
+/// distance since it avoids the square root operation. For comparing distances,
+/// squared distance preserves ordering.
+///
+/// # Arguments
+///
+/// * `a` - First sparse vector
+/// * `b` - Second sparse vector
+///
+/// # Returns
+///
+/// * `Ok(f32)` - Squared Euclidean distance
+/// * `Err(VectorError::DimensionMismatch)` - If vectors have different dimensions
+///
+/// # Formula
+///
+/// ```text
+/// squared_distance = ||a - b||² = Σ(a_i - b_i)²
+/// ```
+///
+/// For sparse vectors, we only need to compute:
+/// - ||a||² + ||b||² - 2*dot(a,b)
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::{SparseVec, sparse_squared_euclidean_distance};
+///
+/// let a = SparseVec::new(vec![0], vec![3.0], 5).unwrap();
+/// let b = SparseVec::new(vec![0], vec![0.0], 5).unwrap();
+///
+/// // Distance from [3,0,0,0,0] to [0,0,0,0,0] = 9
+/// let dist_sq = sparse_squared_euclidean_distance(&a, &b).unwrap();
+/// assert_eq!(dist_sq, 9.0);
+/// ```
+///
+/// # Performance
+///
+/// - Time: O(nnz_a + nnz_b)
+/// - Space: O(1)
+pub fn sparse_squared_euclidean_distance(a: &SparseVec, b: &SparseVec) -> Result<f32> {
+    // Check dimensions match
+    if a.dimension() != b.dimension() {
+        return Err(VectorError::DimensionMismatch {
+            expected: a.dimension(),
+            actual: b.dimension(),
+        }
+        .into());
+    }
+
+    // ||a - b||² = ||a||² + ||b||² - 2*dot(a,b)
+    let dot = sparse_dot_product(a, b)?;
+    let mag_a_sq = a.squared_magnitude();
+    let mag_b_sq = b.squared_magnitude();
+
+    Ok(mag_a_sq + mag_b_sq - 2.0 * dot)
+}
+
+/// Computes Euclidean distance between two sparse vectors.
+///
+/// This is the L2 distance - the straight-line distance between two points.
+///
+/// # Arguments
+///
+/// * `a` - First sparse vector
+/// * `b` - Second sparse vector
+///
+/// # Returns
+///
+/// * `Ok(f32)` - Euclidean distance
+/// * `Err(VectorError::DimensionMismatch)` - If vectors have different dimensions
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::core::vector::{SparseVec, sparse_euclidean_distance};
+///
+/// let a = SparseVec::new(vec![0], vec![3.0], 5).unwrap();
+/// let b = SparseVec::new(vec![0], vec![0.0], 5).unwrap();
+///
+/// // Distance from [3,0,0,0,0] to [0,0,0,0,0] = 3.0
+/// let dist = sparse_euclidean_distance(&a, &b).unwrap();
+/// assert_eq!(dist, 3.0);
+/// ```
+#[inline]
+pub fn sparse_euclidean_distance(a: &SparseVec, b: &SparseVec) -> Result<f32> {
+    sparse_squared_euclidean_distance(a, b).map(|sq| sq.sqrt())
 }
 
 // ============================================================================
@@ -4196,5 +4730,406 @@ mod proptests {
                 );
             }
         }
+    }
+
+    // ========================================================================
+    // SparseVec Tests
+    // ========================================================================
+
+    #[test]
+    fn test_sparse_vec_creation_valid() {
+        let sparse = SparseVec::new(vec![0, 2, 5], vec![1.0, 2.0, 3.0], 10).unwrap();
+        assert_eq!(sparse.nnz(), 3);
+        assert_eq!(sparse.dimension(), 10);
+        assert_eq!(sparse.indices(), &[0, 2, 5]);
+        assert_eq!(sparse.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_sparse_vec_empty() {
+        let sparse = SparseVec::new(vec![], vec![], 10).unwrap();
+        assert_eq!(sparse.nnz(), 0);
+        assert_eq!(sparse.dimension(), 10);
+        assert_eq!(sparse.indices(), &[]);
+        assert_eq!(sparse.values(), &[]);
+    }
+
+    #[test]
+    fn test_sparse_vec_sorts_indices() {
+        // Provide unsorted indices - should be sorted after construction
+        let sparse = SparseVec::new(vec![5, 1, 3], vec![1.0, 2.0, 3.0], 10).unwrap();
+        assert_eq!(sparse.indices(), &[1, 3, 5]);
+        assert_eq!(sparse.values(), &[2.0, 3.0, 1.0]); // Values reordered to match sorted indices
+    }
+
+    #[test]
+    fn test_sparse_vec_dimension_mismatch() {
+        // indices.len() != values.len()
+        let result = SparseVec::new(vec![0, 1], vec![1.0], 10);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Vector(VectorError::DimensionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_sparse_vec_index_out_of_bounds() {
+        // Index 10 is out of bounds for dimension 10 (valid indices: 0-9)
+        let result = SparseVec::new(vec![0, 10], vec![1.0, 2.0], 10);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Vector(VectorError::DimensionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_sparse_vec_duplicate_indices() {
+        let result = SparseVec::new(vec![0, 1, 1], vec![1.0, 2.0, 3.0], 10);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Vector(VectorError::InvalidSparseVector { .. })
+        ));
+    }
+
+    #[test]
+    fn test_sparse_vec_zero_value() {
+        // Sparse vectors should not store zero values
+        let result = SparseVec::new(vec![0, 1, 2], vec![1.0, 0.0, 3.0], 10);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Vector(VectorError::InvalidSparseVector { .. })
+        ));
+    }
+
+    #[test]
+    fn test_sparse_vec_nan_value() {
+        let result = SparseVec::new(vec![0, 1], vec![1.0, f32::NAN], 10);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Vector(VectorError::ContainsNaN { .. })
+        ));
+    }
+
+    #[test]
+    fn test_sparse_vec_infinity_value() {
+        let result = SparseVec::new(vec![0, 1], vec![1.0, f32::INFINITY], 10);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Vector(VectorError::ContainsInfinity { .. })
+        ));
+    }
+
+    #[test]
+    fn test_sparse_vec_dimension_too_large() {
+        let result = SparseVec::new(vec![0], vec![1.0], MAX_VECTOR_DIMENSIONS as u32 + 1);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Vector(VectorError::DimensionTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn test_sparse_vec_to_dense() {
+        let sparse = SparseVec::new(vec![1, 3, 5], vec![1.5, 2.5, 3.5], 7).unwrap();
+        let dense = sparse.to_dense();
+        assert_eq!(dense, vec![0.0, 1.5, 0.0, 2.5, 0.0, 3.5, 0.0]);
+    }
+
+    #[test]
+    fn test_sparse_vec_to_dense_empty() {
+        let sparse = SparseVec::new(vec![], vec![], 5).unwrap();
+        let dense = sparse.to_dense();
+        assert_eq!(dense, vec![0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_sparse_vec_squared_magnitude() {
+        let sparse = SparseVec::new(vec![0, 1, 2], vec![1.0, 2.0, 2.0], 5).unwrap();
+        // magnitude² = 1² + 2² + 2² = 1 + 4 + 4 = 9
+        assert_eq!(sparse.squared_magnitude(), 9.0);
+    }
+
+    #[test]
+    fn test_sparse_vec_magnitude() {
+        let sparse = SparseVec::new(vec![0, 1], vec![3.0, 4.0], 5).unwrap();
+        // magnitude = sqrt(3² + 4²) = sqrt(9 + 16) = 5.0
+        assert_eq!(sparse.magnitude(), 5.0);
+    }
+
+    #[test]
+    fn test_sparse_vec_magnitude_empty() {
+        let sparse = SparseVec::new(vec![], vec![], 10).unwrap();
+        assert_eq!(sparse.magnitude(), 0.0);
+        assert_eq!(sparse.squared_magnitude(), 0.0);
+    }
+
+    #[test]
+    fn test_sparse_vec_clone() {
+        let sparse1 = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+        let sparse2 = sparse1.clone();
+        assert_eq!(sparse1, sparse2);
+        assert_eq!(sparse1.indices(), sparse2.indices());
+        assert_eq!(sparse1.values(), sparse2.values());
+    }
+
+    #[test]
+    fn test_sparse_vec_debug() {
+        let sparse = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+        let debug_str = format!("{:?}", sparse);
+        assert!(debug_str.contains("SparseVec"));
+    }
+
+    #[test]
+    fn test_sparse_vec_single_element() {
+        let sparse = SparseVec::new(vec![5], vec![1.0], 10).unwrap();
+        assert_eq!(sparse.nnz(), 1);
+        assert_eq!(sparse.dimension(), 10);
+        let dense = sparse.to_dense();
+        assert_eq!(
+            dense,
+            vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn test_sparse_vec_bm25_like() {
+        // Simulate a BM25-style sparse vector (typical for information retrieval)
+        // Only a few terms are present in a document out of a large vocabulary
+        let sparse = SparseVec::new(
+            vec![10, 42, 100, 257],
+            vec![2.5, 1.8, 3.2, 1.2],
+            10000, // Large vocabulary size
+        )
+        .unwrap();
+
+        assert_eq!(sparse.nnz(), 4);
+        assert_eq!(sparse.dimension(), 10000);
+        // Verify memory efficiency: only storing 4 non-zero values instead of 10000
+    }
+
+    #[test]
+    fn test_sparse_vec_negative_values() {
+        // Sparse vectors can have negative values
+        let sparse = SparseVec::new(vec![0, 2, 4], vec![-1.0, 2.0, -3.0], 5).unwrap();
+        assert_eq!(sparse.values(), &[-1.0, 2.0, -3.0]);
+        let dense = sparse.to_dense();
+        assert_eq!(dense, vec![-1.0, 0.0, 2.0, 0.0, -3.0]);
+    }
+
+    // ========================================================================
+    // Sparse Vector Similarity Function Tests
+    // ========================================================================
+
+    #[test]
+    fn test_sparse_dot_product_basic() {
+        // Sparse vectors: [1, 0, 2, 0, 0] and [0, 0, 3, 0, 4]
+        let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+        let b = SparseVec::new(vec![2, 4], vec![3.0, 4.0], 5).unwrap();
+
+        // Only index 2 overlaps: 2.0 * 3.0 = 6.0
+        let dot = sparse_dot_product(&a, &b).unwrap();
+        assert_eq!(dot, 6.0);
+    }
+
+    #[test]
+    fn test_sparse_dot_product_no_overlap() {
+        // Sparse vectors with no overlapping indices
+        let a = SparseVec::new(vec![0, 1], vec![1.0, 2.0], 10).unwrap();
+        let b = SparseVec::new(vec![5, 6], vec![3.0, 4.0], 10).unwrap();
+
+        let dot = sparse_dot_product(&a, &b).unwrap();
+        assert_eq!(dot, 0.0);
+    }
+
+    #[test]
+    fn test_sparse_dot_product_complete_overlap() {
+        // Sparse vectors with complete overlap
+        let a = SparseVec::new(vec![0, 2, 4], vec![1.0, 2.0, 3.0], 5).unwrap();
+        let b = SparseVec::new(vec![0, 2, 4], vec![2.0, 3.0, 4.0], 5).unwrap();
+
+        // 1*2 + 2*3 + 3*4 = 2 + 6 + 12 = 20
+        let dot = sparse_dot_product(&a, &b).unwrap();
+        assert_eq!(dot, 20.0);
+    }
+
+    #[test]
+    fn test_sparse_dot_product_empty() {
+        let a = SparseVec::new(vec![], vec![], 10).unwrap();
+        let b = SparseVec::new(vec![0, 5], vec![1.0, 2.0], 10).unwrap();
+
+        let dot = sparse_dot_product(&a, &b).unwrap();
+        assert_eq!(dot, 0.0);
+    }
+
+    #[test]
+    fn test_sparse_dot_product_different_dimensions() {
+        // Vectors with different dimensions still work for dot product
+        // Only common indices contribute
+        let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+        let b = SparseVec::new(vec![2, 4], vec![3.0, 4.0], 10).unwrap();
+
+        // Index 2 overlaps: 2.0 * 3.0 = 6.0
+        let dot = sparse_dot_product(&a, &b).unwrap();
+        assert_eq!(dot, 6.0);
+    }
+
+    #[test]
+    fn test_sparse_cosine_similarity_identical() {
+        let a = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
+        let b = SparseVec::new(vec![0, 2], vec![1.0, 1.0], 5).unwrap();
+
+        // Identical vectors have cosine similarity = 1.0
+        let sim = sparse_cosine_similarity(&a, &b).unwrap();
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sparse_cosine_similarity_orthogonal() {
+        // Orthogonal sparse vectors (no overlapping indices)
+        let a = SparseVec::new(vec![0, 1], vec![1.0, 1.0], 5).unwrap();
+        let b = SparseVec::new(vec![3, 4], vec![1.0, 1.0], 5).unwrap();
+
+        // Orthogonal vectors have cosine similarity = 0.0
+        let sim = sparse_cosine_similarity(&a, &b).unwrap();
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn test_sparse_cosine_similarity_opposite() {
+        let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+        let b = SparseVec::new(vec![0, 2], vec![-1.0, -2.0], 5).unwrap();
+
+        // Opposite vectors have cosine similarity = -1.0
+        let sim = sparse_cosine_similarity(&a, &b).unwrap();
+        assert!((sim + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sparse_cosine_similarity_zero_magnitude() {
+        let a = SparseVec::new(vec![], vec![], 10).unwrap(); // Zero vector
+        let b = SparseVec::new(vec![0, 1], vec![1.0, 2.0], 10).unwrap();
+
+        // Zero magnitude should return 0.0
+        let sim = sparse_cosine_similarity(&a, &b).unwrap();
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn test_sparse_squared_euclidean_distance_basic() {
+        let a = SparseVec::new(vec![0], vec![3.0], 5).unwrap();
+        let b = SparseVec::new(vec![], vec![], 5).unwrap(); // Zero vector (all zeros)
+
+        // Distance from [3,0,0,0,0] to [0,0,0,0,0] = 9
+        let dist_sq = sparse_squared_euclidean_distance(&a, &b).unwrap();
+        assert_eq!(dist_sq, 9.0);
+    }
+
+    #[test]
+    fn test_sparse_squared_euclidean_distance_identical() {
+        let a = SparseVec::new(vec![0, 2, 4], vec![1.0, 2.0, 3.0], 5).unwrap();
+        let b = a.clone();
+
+        let dist_sq = sparse_squared_euclidean_distance(&a, &b).unwrap();
+        assert_eq!(dist_sq, 0.0);
+    }
+
+    #[test]
+    fn test_sparse_squared_euclidean_distance_dimension_mismatch() {
+        let a = SparseVec::new(vec![0], vec![1.0], 5).unwrap();
+        let b = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
+
+        let result = sparse_squared_euclidean_distance(&a, &b);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::Vector(VectorError::DimensionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_sparse_euclidean_distance_basic() {
+        let a = SparseVec::new(vec![0], vec![3.0], 5).unwrap();
+        let b = SparseVec::new(vec![], vec![], 5).unwrap(); // Zero vector (all zeros)
+
+        // Distance from [3,0,0,0,0] to [0,0,0,0,0] = 3.0
+        let dist = sparse_euclidean_distance(&a, &b).unwrap();
+        assert_eq!(dist, 3.0);
+    }
+
+    #[test]
+    fn test_sparse_euclidean_distance_pythagorean() {
+        // Test Pythagorean triple: 3-4-5
+        let a = SparseVec::new(vec![0, 1], vec![3.0, 4.0], 5).unwrap();
+        let b = SparseVec::new(vec![], vec![], 5).unwrap(); // Zero vector
+
+        // Distance should be 5.0
+        let dist = sparse_euclidean_distance(&a, &b).unwrap();
+        assert_eq!(dist, 5.0);
+    }
+
+    #[test]
+    fn test_sparse_similarity_with_bm25_like_vectors() {
+        // Simulate BM25 document vectors
+        let doc1 = SparseVec::new(vec![10, 42, 100, 257], vec![2.5, 1.8, 3.2, 1.2], 10000).unwrap();
+        let doc2 = SparseVec::new(vec![10, 50, 100, 300], vec![2.3, 1.5, 3.0, 1.0], 10000).unwrap();
+
+        // These documents overlap at indices 10 and 100
+        let dot = sparse_dot_product(&doc1, &doc2).unwrap();
+        assert!(dot > 0.0); // Should have positive dot product
+
+        let sim = sparse_cosine_similarity(&doc1, &doc2).unwrap();
+        assert!(sim > 0.0); // Should have positive similarity
+        assert!(sim <= 1.0); // Should be <= 1.0
+    }
+
+    #[test]
+    fn test_sparse_vs_dense_dot_product_equivalence() {
+        // Verify sparse and dense implementations give same results
+        let sparse_a = SparseVec::new(vec![1, 3, 5], vec![1.0, 2.0, 3.0], 7).unwrap();
+        let sparse_b = SparseVec::new(vec![0, 1, 5], vec![2.0, 3.0, 4.0], 7).unwrap();
+
+        let sparse_dot = sparse_dot_product(&sparse_a, &sparse_b).unwrap();
+
+        // Convert to dense and compute
+        let dense_a = sparse_a.to_dense();
+        let dense_b = sparse_b.to_dense();
+        let dense_dot = dot_product(&dense_a, &dense_b).unwrap();
+
+        assert!((sparse_dot - dense_dot).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sparse_vs_dense_cosine_similarity_equivalence() {
+        let sparse_a = SparseVec::new(vec![0, 2, 4], vec![1.0, 2.0, 3.0], 6).unwrap();
+        let sparse_b = SparseVec::new(vec![1, 2, 5], vec![1.0, 3.0, 2.0], 6).unwrap();
+
+        let sparse_sim = sparse_cosine_similarity(&sparse_a, &sparse_b).unwrap();
+
+        let dense_a = sparse_a.to_dense();
+        let dense_b = sparse_b.to_dense();
+        let dense_sim = cosine_similarity(&dense_a, &dense_b).unwrap();
+
+        assert!((sparse_sim - dense_sim).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sparse_vs_dense_euclidean_distance_equivalence() {
+        let sparse_a = SparseVec::new(vec![0, 3], vec![1.0, 2.0], 5).unwrap();
+        let sparse_b = SparseVec::new(vec![1, 3], vec![1.0, 4.0], 5).unwrap();
+
+        let sparse_dist = sparse_euclidean_distance(&sparse_a, &sparse_b).unwrap();
+
+        let dense_a = sparse_a.to_dense();
+        let dense_b = sparse_b.to_dense();
+        let dense_dist = euclidean_distance(&dense_a, &dense_b).unwrap();
+
+        assert!((sparse_dist - dense_dist).abs() < 1e-5);
     }
 }

@@ -44,6 +44,14 @@ pub fn persist_property_value(value: &PropertyValue) -> Result<PersistedProperty
                     .to_string(),
             ));
         }
+        // SparseVector variant exists but is not yet supported in index persistence
+        PropertyValue::SparseVector(_) => {
+            return Err(IndexPersistenceError::Serialization(
+                "SparseVector properties are not yet supported for index persistence. \
+                 This prevents silent data loss. Support will be added in a future update."
+                    .to_string(),
+            ));
+        }
     })
 }
 

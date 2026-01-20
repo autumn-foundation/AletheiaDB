@@ -11,6 +11,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
+use crate::core::vector::SparseVec;
 use crate::utils::error::{Result, StorageError};
 
 // ============================================================================
@@ -35,6 +36,8 @@ pub const TAG_BYTES: u8 = 5;
 pub const TAG_ARRAY: u8 = 6;
 /// Type tag for Vector (dense f32 array) value.
 pub const TAG_VECTOR: u8 = 7;
+/// Type tag for SparseVector value.
+pub const TAG_SPARSE_VECTOR: u8 = 8;
 
 // ============================================================================
 // Serialization Limits
@@ -85,6 +88,22 @@ pub enum PropertyValue {
     /// rather than equality. This limitation will be revisited in Phase 3 when
     /// vectors are used in temporal storage for deduplication.
     Vector(Arc<[f32]>),
+    /// Sparse vector for high-dimensional sparse embeddings (reference counted).
+    /// Stores only non-zero values along with their indices, making it memory-efficient
+    /// for vectors where most values are zero (e.g., BM25, SPLADE).
+    ///
+    /// # Use Cases
+    /// - BM25 text retrieval vectors
+    /// - SPLADE sparse learned embeddings
+    /// - TF-IDF document vectors
+    /// - One-hot categorical encodings
+    ///
+    /// # Memory Efficiency
+    /// For a 10,000-dimensional vector with 10 non-zero values:
+    /// - Dense: 40KB (10,000 * 4 bytes)
+    /// - Sparse: ~80 bytes (10 * 8 bytes for index+value pairs)
+    /// - Space savings: ~500x
+    SparseVector(Arc<SparseVec>),
 }
 
 impl PropertyValue {
@@ -239,6 +258,76 @@ impl PropertyValue {
         }
     }
 
+    /// Create a sparse vector property value from a SparseVec.
+    ///
+    /// Sparse vectors store only non-zero values along with their indices,
+    /// making them memory-efficient for high-dimensional vectors where most
+    /// values are zero (e.g., BM25, SPLADE).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::PropertyValue;
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// // Create a sparse vector: [0.0, 1.5, 0.0, 0.0, 2.3, 0.0]
+    /// let sparse = SparseVec::new(vec![1, 4], vec![1.5, 2.3], 6).unwrap();
+    /// let prop = PropertyValue::sparse_vector(sparse);
+    ///
+    /// // Retrieve the sparse vector
+    /// assert!(prop.as_sparse_vector().is_some());
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// - Cloning a `PropertyValue::SparseVector` is O(1) (just increments Arc refcount)
+    /// - Memory usage: O(nnz) where nnz = number of non-zero elements
+    /// - Can save 10-1000x memory compared to dense vectors for sparse data
+    ///
+    /// # See Also
+    ///
+    /// - [`as_sparse_vector`](Self::as_sparse_vector) for retrieving the sparse vector
+    /// - [`SparseVec`] for creating sparse vectors from indices and values
+    #[inline]
+    pub fn sparse_vector(sparse: SparseVec) -> Self {
+        PropertyValue::SparseVector(Arc::new(sparse))
+    }
+
+    /// Try to get this value as a sparse vector.
+    ///
+    /// Returns `Some(&SparseVec)` if this is a `SparseVector` variant, `None` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::PropertyValue;
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// let sparse = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+    /// let prop = PropertyValue::sparse_vector(sparse);
+    ///
+    /// if let Some(sv) = prop.as_sparse_vector() {
+    ///     assert_eq!(sv.nnz(), 2);
+    ///     assert_eq!(sv.dimension(), 5);
+    /// }
+    ///
+    /// // Returns None for non-sparse-vector types
+    /// let int_prop = PropertyValue::Int(42);
+    /// assert!(int_prop.as_sparse_vector().is_none());
+    /// ```
+    ///
+    /// # See Also
+    ///
+    /// - [`sparse_vector`](Self::sparse_vector) for creating sparse vector properties
+    /// - [`SparseVec`] for sparse vector operations
+    #[inline]
+    pub fn as_sparse_vector(&self) -> Option<&SparseVec> {
+        match self {
+            PropertyValue::SparseVector(sv) => Some(sv.as_ref()),
+            _ => None,
+        }
+    }
+
     /// Get the type name of this value.
     pub const fn type_name(&self) -> &'static str {
         match self {
@@ -250,6 +339,7 @@ impl PropertyValue {
             PropertyValue::Bytes(_) => "bytes",
             PropertyValue::Array(_) => "array",
             PropertyValue::Vector(_) => "vector",
+            PropertyValue::SparseVector(_) => "sparse_vector",
         }
     }
 
@@ -320,6 +410,9 @@ impl PropertyValue {
             }
             PropertyValue::Vector(v) => {
                 serialize_vector_into(v, buffer);
+            }
+            PropertyValue::SparseVector(sv) => {
+                serialize_sparse_vector_into(sv, buffer);
             }
         }
     }
@@ -464,6 +557,11 @@ impl PropertyValue {
                 Ok((PropertyValue::Vector(vector), consumed))
             }
 
+            TAG_SPARSE_VECTOR => {
+                let (sparse_vector, consumed) = deserialize_sparse_vector(bytes)?;
+                Ok((PropertyValue::SparseVector(sparse_vector), consumed))
+            }
+
             _ => Err(StorageError::CorruptedData(format!(
                 "Unknown PropertyValue type tag: {}",
                 tag
@@ -600,6 +698,145 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
     Ok((Arc::from(values.into_boxed_slice()), total_len))
 }
 
+// ============================================================================
+// Sparse Vector Serialization Functions
+// ============================================================================
+
+/// Serialize a sparse vector to bytes.
+///
+/// # Binary Format
+/// ```text
+/// [tag:1][dimension:4][nnz:4][index_0:4]...[index_n:4][value_0:4]...[value_n:4]
+/// ```
+///
+/// - Tag: TAG_SPARSE_VECTOR (8)
+/// - Dimension: u32 little-endian, total vector dimension
+/// - NNZ: u32 little-endian, number of non-zero elements
+/// - Indices: u32 little-endian array of non-zero positions
+/// - Values: f32 little-endian array of non-zero values
+///
+/// # Arguments
+/// * `sv` - The sparse vector to serialize
+///
+/// # Returns
+/// A Vec<u8> containing the serialized sparse vector
+pub fn serialize_sparse_vector(sv: &SparseVec) -> Vec<u8> {
+    let mut buffer = Vec::with_capacity(1 + 4 + 4 + sv.nnz() * 8);
+    serialize_sparse_vector_into(sv, &mut buffer);
+    buffer
+}
+
+/// Serialize a sparse vector into an existing buffer.
+///
+/// This is more efficient when serializing as part of a larger structure.
+pub fn serialize_sparse_vector_into(sv: &SparseVec, buffer: &mut Vec<u8>) {
+    buffer.push(TAG_SPARSE_VECTOR);
+    buffer.extend_from_slice(&(sv.dimension() as u32).to_le_bytes());
+    buffer.extend_from_slice(&(sv.nnz() as u32).to_le_bytes());
+
+    // Serialize indices
+    for &idx in sv.indices() {
+        buffer.extend_from_slice(&idx.to_le_bytes());
+    }
+
+    // Serialize values
+    for &val in sv.values() {
+        buffer.extend_from_slice(&val.to_le_bytes());
+    }
+}
+
+/// Deserialize a sparse vector from bytes.
+///
+/// # Binary Format
+/// Expects the format produced by `serialize_sparse_vector`:
+/// ```text
+/// [tag:1][dimension:4][nnz:4][indices:nnz*4][values:nnz*4]
+/// ```
+///
+/// # Arguments
+/// * `bytes` - The byte slice to deserialize from
+///
+/// # Returns
+/// * `Ok((Arc<SparseVec>, usize))` - The deserialized sparse vector and bytes consumed
+/// * `Err` - If the data is malformed or truncated
+///
+/// # Errors
+/// - `StorageError::CorruptedData` if buffer is too short
+/// - `StorageError::CorruptedData` if type tag is not TAG_SPARSE_VECTOR
+/// - `VectorError` variants if sparse vector construction fails
+pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)> {
+    // Need at least tag (1) + dimension (4) + nnz (4) = 9 bytes
+    if bytes.len() < 9 {
+        return Err(StorageError::CorruptedData(
+            "Buffer too short for sparse vector header".to_string(),
+        )
+        .into());
+    }
+
+    let tag = bytes[0];
+    if tag != TAG_SPARSE_VECTOR {
+        return Err(StorageError::CorruptedData(format!(
+            "Expected sparse vector type tag {}, got {}",
+            TAG_SPARSE_VECTOR, tag
+        ))
+        .into());
+    }
+
+    let dimension = u32::from_le_bytes(bytes[1..5].try_into().unwrap());
+    let nnz = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+
+    // Validate nnz doesn't exceed dimension
+    if nnz > dimension as usize {
+        return Err(StorageError::CorruptedData(format!(
+            "Sparse vector nnz {} exceeds dimension {}",
+            nnz, dimension
+        ))
+        .into());
+    }
+
+    // Calculate required size
+    let data_start: usize = 9;
+    let indices_len = nnz
+        .checked_mul(4)
+        .ok_or_else(|| StorageError::CorruptedData("Sparse vector nnz overflow".to_string()))?;
+    let values_len = indices_len; // Same size for values
+    let total_len = data_start
+        .checked_add(indices_len)
+        .and_then(|x: usize| x.checked_add(values_len))
+        .ok_or_else(|| StorageError::CorruptedData("Sparse vector size overflow".to_string()))?;
+
+    // Validate buffer size
+    if bytes.len() < total_len {
+        return Err(StorageError::CorruptedData(format!(
+            "Buffer too short for sparse vector data: need {} bytes, have {}",
+            total_len,
+            bytes.len()
+        ))
+        .into());
+    }
+
+    // Deserialize indices
+    let indices_end = data_start + indices_len;
+    let indices_slice = &bytes[data_start..indices_end];
+    let mut indices = Vec::with_capacity(nnz);
+    for chunk in indices_slice.chunks_exact(4) {
+        indices.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+
+    // Deserialize values
+    let values_end = indices_end + values_len;
+    let values_slice = &bytes[indices_end..values_end];
+    let mut values = Vec::with_capacity(nnz);
+    for chunk in values_slice.chunks_exact(4) {
+        values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+
+    // Construct SparseVec (this will validate the data)
+    let sparse_vec = SparseVec::new(indices, values, dimension)?;
+
+    Ok((Arc::new(sparse_vec), total_len))
+}
+
 impl fmt::Display for PropertyValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -620,6 +857,14 @@ impl fmt::Display for PropertyValue {
                 write!(f, "]")
             }
             PropertyValue::Vector(v) => write!(f, "<vector[{}]>", v.len()),
+            PropertyValue::SparseVector(sv) => {
+                write!(
+                    f,
+                    "<sparse_vector[dim={}, nnz={}]>",
+                    sv.dimension(),
+                    sv.nnz()
+                )
+            }
         }
     }
 }
@@ -689,6 +934,12 @@ impl From<Vec<f32>> for PropertyValue {
 impl From<&[f32]> for PropertyValue {
     fn from(v: &[f32]) -> Self {
         PropertyValue::Vector(Arc::from(v))
+    }
+}
+
+impl From<SparseVec> for PropertyValue {
+    fn from(sv: SparseVec) -> Self {
+        PropertyValue::SparseVector(Arc::new(sv))
     }
 }
 
@@ -792,7 +1043,7 @@ impl PropertyMap {
         PropertyMapBuilder::from_map(self)
     }
 
-    /// Check if this property map contains any vector properties.
+    /// Check if this property map contains any vector properties (dense or sparse).
     ///
     /// This is used to optimize the transaction commit path by only triggering
     /// temporal vector index updates when vector data is actually present.
@@ -804,7 +1055,7 @@ impl PropertyMap {
     pub fn contains_vector(&self) -> bool {
         self.inner
             .values()
-            .any(|v| matches!(v, PropertyValue::Vector(_)))
+            .any(|v| matches!(v, PropertyValue::Vector(_) | PropertyValue::SparseVector(_)))
     }
 
     // ========================================================================
@@ -1926,5 +2177,275 @@ mod tests {
 
         // Both methods should return the same result
         assert_eq!(value1, value2);
+    }
+
+    // ========================================================================
+    // SparseVector PropertyValue Tests
+    // ========================================================================
+
+    #[test]
+    fn test_sparse_vector_property_value_creation() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![0, 2, 5], vec![1.0, 2.0, 3.0], 10).unwrap();
+        let prop = PropertyValue::sparse_vector(sparse);
+
+        assert_eq!(prop.type_name(), "sparse_vector");
+        assert!(prop.as_sparse_vector().is_some());
+        assert!(prop.as_vector().is_none()); // Should not match dense vector
+    }
+
+    #[test]
+    fn test_sparse_vector_property_value_accessors() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![1, 4], vec![1.5, 2.5], 6).unwrap();
+        let prop = PropertyValue::sparse_vector(sparse);
+
+        let retrieved = prop.as_sparse_vector().unwrap();
+        assert_eq!(retrieved.nnz(), 2);
+        assert_eq!(retrieved.dimension(), 6);
+        assert_eq!(retrieved.indices(), &[1, 4]);
+        assert_eq!(retrieved.values(), &[1.5, 2.5]);
+    }
+
+    #[test]
+    fn test_sparse_vector_from_conversion() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![0, 3], vec![1.0, 2.0], 5).unwrap();
+        let prop: PropertyValue = sparse.into();
+
+        assert_eq!(prop.type_name(), "sparse_vector");
+        assert!(prop.as_sparse_vector().is_some());
+    }
+
+    #[test]
+    fn test_sparse_vector_display() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 10).unwrap();
+        let prop = PropertyValue::sparse_vector(sparse);
+
+        let display = format!("{}", prop);
+        assert_eq!(display, "<sparse_vector[dim=10, nnz=2]>");
+    }
+
+    #[test]
+    fn test_sparse_vector_arc_sharing() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![0, 50, 100], vec![1.0, 2.0, 3.0], 1000).unwrap();
+        let prop1 = PropertyValue::sparse_vector(sparse);
+        let prop2 = prop1.clone();
+
+        // Both should point to the same Arc (cheap clone)
+        if let (PropertyValue::SparseVector(sv1), PropertyValue::SparseVector(sv2)) =
+            (&prop1, &prop2)
+        {
+            assert!(
+                Arc::ptr_eq(sv1, sv2),
+                "SparseVector Arc should be shared after clone"
+            );
+        } else {
+            panic!("Expected SparseVector variants");
+        }
+
+        assert_eq!(prop1, prop2);
+    }
+
+    #[test]
+    fn test_sparse_vector_in_property_map() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![10, 42, 100], vec![2.5, 1.8, 3.2], 1000).unwrap();
+        let map = PropertyMapBuilder::new()
+            .insert("name", "document1")
+            .insert("sparse_embedding", PropertyValue::sparse_vector(sparse))
+            .build();
+
+        assert_eq!(map.len(), 2);
+        let retrieved_sparse = map
+            .get("sparse_embedding")
+            .and_then(|v| v.as_sparse_vector());
+        assert!(retrieved_sparse.is_some());
+        assert_eq!(retrieved_sparse.unwrap().nnz(), 3);
+        assert_eq!(retrieved_sparse.unwrap().dimension(), 1000);
+    }
+
+    #[test]
+    fn test_property_map_contains_vector_with_sparse() {
+        use crate::core::vector::SparseVec;
+
+        // Map with sparse vector
+        let sparse = SparseVec::new(vec![0], vec![1.0], 10).unwrap();
+        let map = PropertyMapBuilder::new()
+            .insert("sparse", PropertyValue::sparse_vector(sparse))
+            .build();
+        assert!(map.contains_vector());
+
+        // Map with dense vector
+        let map = PropertyMapBuilder::new()
+            .insert("dense", PropertyValue::vector([1.0f32, 2.0, 3.0]))
+            .build();
+        assert!(map.contains_vector());
+
+        // Map without vectors
+        let map = PropertyMapBuilder::new()
+            .insert("name", "test")
+            .insert("count", 42i64)
+            .build();
+        assert!(!map.contains_vector());
+    }
+
+    // ========================================================================
+    // SparseVector Serialization Tests
+    // ========================================================================
+
+    #[test]
+    fn test_serialize_sparse_vector_basic() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![0, 2, 4], vec![1.0, 2.0, 3.0], 5).unwrap();
+        let prop = PropertyValue::sparse_vector(sparse);
+        let bytes = prop.serialize();
+
+        assert_eq!(bytes[0], TAG_SPARSE_VECTOR);
+
+        let (deserialized, consumed) = PropertyValue::deserialize(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len());
+
+        match deserialized {
+            PropertyValue::SparseVector(sv) => {
+                assert_eq!(sv.nnz(), 3);
+                assert_eq!(sv.dimension(), 5);
+                assert_eq!(sv.indices(), &[0, 2, 4]);
+                assert_eq!(sv.values(), &[1.0, 2.0, 3.0]);
+            }
+            _ => panic!("Expected SparseVector"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_sparse_vector_empty() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![], vec![], 100).unwrap();
+        let bytes = serialize_sparse_vector(&sparse);
+
+        // Should be tag (1) + dimension (4) + nnz (4) = 9 bytes
+        assert_eq!(bytes.len(), 9);
+        assert_eq!(bytes[0], TAG_SPARSE_VECTOR);
+
+        let (deserialized, consumed) = deserialize_sparse_vector(&bytes).unwrap();
+        assert!(deserialized.indices().is_empty());
+        assert_eq!(deserialized.dimension(), 100);
+        assert_eq!(consumed, 9);
+    }
+
+    #[test]
+    fn test_serialize_sparse_vector_round_trip() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(
+            vec![1, 10, 42, 99, 256],
+            vec![1.5, 2.3, 0.8, 4.2, 1.1],
+            1000,
+        )
+        .unwrap();
+
+        let bytes = serialize_sparse_vector(&sparse);
+        let (deserialized, consumed) = deserialize_sparse_vector(&bytes).unwrap();
+
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(deserialized.nnz(), sparse.nnz());
+        assert_eq!(deserialized.dimension(), sparse.dimension());
+        assert_eq!(deserialized.indices(), sparse.indices());
+        assert_eq!(deserialized.values(), sparse.values());
+    }
+
+    #[test]
+    fn test_serialize_sparse_vector_in_property_map() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![0, 5, 10], vec![1.0, 2.0, 3.0], 20).unwrap();
+        let map = PropertyMapBuilder::new()
+            .insert("id", 123i64)
+            .insert("sparse_vec", PropertyValue::sparse_vector(sparse))
+            .build();
+
+        let bytes = map.serialize().expect("Serialization should succeed");
+        let (deserialized, _) = PropertyMap::deserialize(&bytes).unwrap();
+
+        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized.get("id").and_then(|v| v.as_int()), Some(123));
+
+        let sparse_result = deserialized
+            .get("sparse_vec")
+            .and_then(|v| v.as_sparse_vector());
+        assert!(sparse_result.is_some());
+        let sv = sparse_result.unwrap();
+        assert_eq!(sv.nnz(), 3);
+        assert_eq!(sv.dimension(), 20);
+    }
+
+    #[test]
+    fn test_deserialize_sparse_vector_errors() {
+        // Empty buffer
+        let result = deserialize_sparse_vector(&[]);
+        assert!(result.is_err());
+
+        // Buffer too short for header
+        let result = deserialize_sparse_vector(&[TAG_SPARSE_VECTOR, 1, 0, 0]);
+        assert!(result.is_err());
+
+        // Wrong type tag
+        let result = deserialize_sparse_vector(&[TAG_INT, 5, 0, 0, 0, 2, 0, 0, 0]);
+        assert!(result.is_err());
+
+        // nnz > dimension
+        let mut bytes = vec![TAG_SPARSE_VECTOR];
+        bytes.extend_from_slice(&5u32.to_le_bytes()); // dimension = 5
+        bytes.extend_from_slice(&10u32.to_le_bytes()); // nnz = 10 (invalid!)
+        let result = deserialize_sparse_vector(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serialize_sparse_vector_bm25_like() {
+        use crate::core::vector::SparseVec;
+
+        // Simulate BM25 sparse vector for a document
+        let sparse = SparseVec::new(
+            vec![42, 157, 891, 1023, 5000],
+            vec![2.3, 1.8, 0.9, 3.1, 1.5],
+            10000, // Large vocabulary
+        )
+        .unwrap();
+
+        let bytes = serialize_sparse_vector(&sparse);
+
+        // Calculate expected size:
+        // tag (1) + dimension (4) + nnz (4) + 5 indices (20) + 5 values (20) = 49 bytes
+        assert_eq!(bytes.len(), 49);
+
+        // Verify it can be deserialized
+        let (deserialized, _) = deserialize_sparse_vector(&bytes).unwrap();
+        assert_eq!(deserialized.nnz(), 5);
+        assert_eq!(deserialized.dimension(), 10000);
+    }
+
+    #[test]
+    fn test_sparse_vector_type_mismatch() {
+        use crate::core::vector::SparseVec;
+
+        let sparse = SparseVec::new(vec![0, 1], vec![1.0, 2.0], 5).unwrap();
+        let prop = PropertyValue::sparse_vector(sparse);
+
+        // Sparse vector should not match other types
+        assert!(prop.as_int().is_none());
+        assert!(prop.as_str().is_none());
+        assert!(prop.as_vector().is_none()); // Should not match dense vector
+        assert!(prop.as_array().is_none());
     }
 }
