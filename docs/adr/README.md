@@ -70,6 +70,9 @@ What other options were evaluated?
 | [ADR-0019](0019-hybrid-query-planner.md) | Hybrid Query Planner | 2026-01-09 | query-engine, performance |
 | [ADR-0020](0020-concurrent-wal-architecture.md) | Concurrent WAL Architecture | 2026-01-10 | storage, concurrency, durability |
 | [ADR-0021](0021-hybrid-query-execution.md) | Hybrid Query Execution Engine | 2026-01-14 | query-engine, performance |
+| [ADR-0022](0022-multi-property-vector-index.md) | Multi-Property Vector Index | 2026-01-15 | vector, index |
+| [ADR-0023](0023-index-persistence-layer.md) | Index Persistence Layer | 2026-01-16 | storage, performance |
+| [ADR-0024](0024-hybrid-logical-clock-timestamps.md) | Hybrid Logical Clock Timestamps | 2026-01-20 | core, temporal, distributed |
 
 ### Proposed
 
