@@ -467,6 +467,17 @@ impl PersistenceManager {
         let current = CurrentStorage::new();
         let mut historical = HistoricalStorage::new();
 
+        // Restore vector index configuration BEFORE WAL replay (Issue #292)
+        // This ensures that vectors are automatically indexed during node creation.
+        // If vector index restoration fails, recovery fails to maintain data integrity.
+        if let Some(cp) = &checkpoint
+            && let Some(vector_config) = &cp.metadata.vector_index_config
+            && vector_config.enabled
+        {
+            current
+                .enable_vector_index(&vector_config.property_name, vector_config.config.clone())?;
+        }
+
         let start_lsn = if let Some(cp) = checkpoint {
             cp.metadata.lsn.next()
         } else {
@@ -977,6 +988,9 @@ impl PersistenceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::graph::Node;
+    use crate::storage::version::VersionMetadata;
+    use crate::{PropertyMapBuilder, api::transaction::types::TxId};
     use tempfile::TempDir;
 
     #[test]
@@ -1474,6 +1488,463 @@ mod tests {
                 // Recovery not fully implemented - document expected behavior
                 let err_str = e.to_string();
                 assert!(err_str.contains("not implemented") || err_str.contains("stub"));
+            }
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Vector Index Recovery Tests (Issue #292)
+    // ========================================================================
+
+    /// Test that vector index configuration is restored from checkpoint.
+    ///
+    /// This test verifies that when a database with an enabled vector index
+    /// crashes and recovers, the vector index configuration is properly restored.
+    #[test]
+    fn test_recovery_restores_vector_index_config() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let checkpoint_dir = temp_dir.path().join("checkpoints");
+
+        // Phase 1: Setup database with vector index
+        let wal_config = ConcurrentWalSystemConfig::new(wal_dir.clone());
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        // Enable vector index with specific configuration
+        let vector_config = HnswConfig::new(384, DistanceMetric::Cosine)
+            .with_m(16)
+            .with_ef_construction(200);
+        current.enable_vector_index("embedding", vector_config.clone())?;
+
+        // Create checkpoint with vector index enabled
+        let checkpoint = Checkpoint::new(LSN(1), &current, &historical);
+        std::fs::create_dir_all(&checkpoint_dir)?;
+        let checkpoint_path = checkpoint_dir.join("checkpoint_000001.dat");
+        checkpoint.save(&checkpoint_path)?;
+
+        // Phase 2: Simulate crash and recovery
+        drop(current);
+        drop(historical);
+
+        let config = CheckpointConfig {
+            checkpoint_dir: checkpoint_dir.clone(),
+            ..Default::default()
+        };
+        let mut manager = PersistenceManager::new(config)?;
+        let (recovered_current, _recovered_historical, _lsn) = manager.recover(&wal)?;
+
+        // Verify vector index is enabled after recovery
+        assert!(
+            recovered_current.is_vector_index_enabled(),
+            "Vector index should be enabled after recovery"
+        );
+
+        // Verify configuration matches original
+        let recovered_config = recovered_current.get_hnsw_config_for("embedding");
+        assert!(
+            recovered_config.is_some(),
+            "Vector index config should exist"
+        );
+        let recovered_config = recovered_config.unwrap();
+        assert_eq!(recovered_config.dimensions, 384);
+        assert_eq!(recovered_config.metric, DistanceMetric::Cosine);
+        assert_eq!(recovered_config.m, 16);
+        assert_eq!(recovered_config.ef_construction, 200);
+
+        Ok(())
+    }
+
+    /// Test crash-and-recover with 10 nodes containing vector embeddings.
+    ///
+    /// This is the main acceptance test from Issue #292. It verifies that:
+    /// 1. Vector indexes restore when enabled in checkpoints
+    /// 2. All vectors get re-indexed during recovery
+    /// 3. Similarity queries function properly post-recovery
+    #[test]
+    fn test_recovery_with_vector_embeddings() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use crate::storage::wal::WalOperation;
+        use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let checkpoint_dir = temp_dir.path().join("checkpoints");
+
+        // Phase 1: Create database with vector index and 10 embedded nodes
+        let wal_config = ConcurrentWalSystemConfig::new(wal_dir.clone());
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        // Enable vector index for embeddings (4D for simplicity)
+        let vector_config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        current.enable_vector_index("embedding", vector_config)?;
+
+        // Create 10 nodes with embeddings and write to WAL
+        let embeddings = vec![
+            vec![1.0f32, 0.0, 0.0, 0.0],
+            vec![0.9f32, 0.1, 0.0, 0.0],
+            vec![0.8f32, 0.2, 0.0, 0.0],
+            vec![0.0f32, 1.0, 0.0, 0.0],
+            vec![0.0f32, 0.9, 0.1, 0.0],
+            vec![0.0f32, 0.0, 1.0, 0.0],
+            vec![0.0f32, 0.0, 0.9, 0.1],
+            vec![0.0f32, 0.0, 0.0, 1.0],
+            vec![0.5f32, 0.5, 0.0, 0.0],
+            vec![0.0f32, 0.5, 0.5, 0.0],
+        ];
+
+        let mut node_ids = Vec::new();
+        for (i, embedding) in embeddings.iter().enumerate() {
+            let props = PropertyMapBuilder::new()
+                .insert("name", format!("Node{}", i))
+                .insert_vector("embedding", embedding)
+                .build();
+
+            let node_id = NodeId::new(i as u64 + 1)?;
+            let temporal = BiTemporalInterval::current(time::now());
+
+            // Write to WAL
+            wal.append(WalOperation::CreateNode {
+                node_id,
+                label: "Document".to_string(),
+                properties: props.clone(),
+                temporal,
+            })?;
+
+            // Create in storage for checkpoint
+            let interned_label = GLOBAL_INTERNER.intern("Document")?;
+            let version_id = VersionId::new(i as u64 + 1)?;
+            let commit_timestamp = temporal.transaction_time().start();
+            let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+            let node =
+                Node::with_metadata(node_id, interned_label, props.clone(), version_id, metadata);
+            current.insert_node_direct(node, commit_timestamp)?;
+
+            node_ids.push(node_id);
+        }
+
+        wal.flush()?;
+
+        // Create checkpoint at LSN 0 to force WAL replay of all node operations.
+        // Nodes are already in memory/WAL, but checkpoint LSN=0 ensures recovery
+        // will replay all entries starting from the beginning.
+        let checkpoint = Checkpoint::new(LSN(0), &current, &historical);
+        std::fs::create_dir_all(&checkpoint_dir)?;
+        let checkpoint_path = checkpoint_dir.join("checkpoint_000000.dat");
+        checkpoint.save(&checkpoint_path)?;
+
+        // Phase 2: Simulate crash - drop all storage
+        drop(current);
+        drop(historical);
+
+        // Phase 3: Recovery
+        let config = CheckpointConfig {
+            checkpoint_dir: checkpoint_dir.clone(),
+            ..Default::default()
+        };
+        let mut manager = PersistenceManager::new(config)?;
+        let (recovered_current, _recovered_historical, _lsn) = manager.recover(&wal)?;
+
+        // Phase 4: Verify recovery
+        // 4.1: All 10 nodes should exist
+        assert_eq!(
+            recovered_current.node_count(),
+            10,
+            "All 10 nodes should be recovered"
+        );
+
+        // 4.2: Vector index should be enabled
+        assert!(
+            recovered_current.is_vector_index_enabled(),
+            "Vector index should be enabled after recovery"
+        );
+
+        // 4.3: Similarity queries should work
+        // Query with first embedding - should find similar nodes
+        let query_embedding = vec![1.0f32, 0.0, 0.0, 0.0];
+        let results = recovered_current.search_vectors_in("embedding", &query_embedding, 3)?;
+
+        assert!(
+            results.len() >= 2,
+            "Should find at least 2 similar nodes (self + similar)"
+        );
+
+        // The first two nodes (indices 0, 1, 2) should be most similar to query
+        let result_ids: Vec<NodeId> = results.iter().map(|(id, _)| *id).collect();
+        assert!(
+            result_ids.contains(&node_ids[0]) || result_ids.contains(&node_ids[1]),
+            "Should find nodes with similar embeddings"
+        );
+
+        // 4.4: Verify individual node embeddings are preserved
+        for (i, node_id) in node_ids.iter().enumerate() {
+            let node = recovered_current.get_node(*node_id)?;
+            let recovered_embedding = node
+                .get_property("embedding")
+                .and_then(|v| v.as_vector())
+                .expect("Node should have embedding property");
+
+            assert_eq!(
+                recovered_embedding,
+                &embeddings[i][..],
+                "Embedding for Node{} should match original",
+                i
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Test that disabled vector indexes don't cause errors during recovery.
+    ///
+    /// This test verifies graceful handling when no vector index exists
+    /// in the checkpoint (acceptance criteria from Issue #292).
+    #[test]
+    fn test_recovery_without_vector_index() -> Result<()> {
+        use crate::storage::wal::WalOperation;
+        use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let checkpoint_dir = temp_dir.path().join("checkpoints");
+
+        // Phase 1: Create database WITHOUT vector index
+        let wal_config = ConcurrentWalSystemConfig::new(wal_dir.clone());
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        // Note: No vector index enabled
+
+        // Create a few nodes without embeddings
+        for i in 0..3 {
+            let props = PropertyMapBuilder::new()
+                .insert("name", format!("Node{}", i))
+                .build();
+
+            let node_id = NodeId::new(i + 1)?;
+            let temporal = BiTemporalInterval::current(time::now());
+
+            wal.append(WalOperation::CreateNode {
+                node_id,
+                label: "Document".to_string(),
+                properties: props.clone(),
+                temporal,
+            })?;
+
+            let interned_label = GLOBAL_INTERNER.intern("Document")?;
+            let version_id = VersionId::new(i + 1)?;
+            let commit_timestamp = temporal.transaction_time().start();
+            let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+            let node = Node::with_metadata(node_id, interned_label, props, version_id, metadata);
+            current.insert_node_direct(node, commit_timestamp)?;
+        }
+
+        wal.flush()?;
+
+        // Create checkpoint at LSN 0 (without vector index) to ensure all node
+        // creations are replayed from WAL during recovery.
+        let checkpoint = Checkpoint::new(LSN(0), &current, &historical);
+        std::fs::create_dir_all(&checkpoint_dir)?;
+        let checkpoint_path = checkpoint_dir.join("checkpoint_000000.dat");
+        checkpoint.save(&checkpoint_path)?;
+
+        // Phase 2: Simulate crash
+        drop(current);
+        drop(historical);
+
+        // Phase 3: Recovery should succeed without errors
+        let config = CheckpointConfig {
+            checkpoint_dir: checkpoint_dir.clone(),
+            ..Default::default()
+        };
+        let mut manager = PersistenceManager::new(config)?;
+        let (recovered_current, _recovered_historical, _lsn) = manager.recover(&wal)?;
+
+        // Verify recovery succeeded
+        assert_eq!(recovered_current.node_count(), 3);
+        assert!(!recovered_current.is_vector_index_enabled());
+
+        Ok(())
+    }
+
+    /// Test that vector index is rebuilt by iterating through recovered nodes.
+    ///
+    /// This test specifically verifies that the HNSW index is populated
+    /// with all vectors during recovery, not just the configuration.
+    #[test]
+    fn test_recovery_rebuilds_vector_index() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use crate::storage::wal::WalOperation;
+        use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let checkpoint_dir = temp_dir.path().join("checkpoints");
+
+        // Phase 1: Create nodes with embeddings
+        let wal_config = ConcurrentWalSystemConfig::new(wal_dir.clone());
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        let vector_config = HnswConfig::new(3, DistanceMetric::Euclidean).with_capacity(50);
+        current.enable_vector_index("vec", vector_config)?;
+
+        // Create 5 nodes with embeddings
+        let embeddings = [
+            vec![1.0f32, 0.0, 0.0],
+            vec![0.0f32, 1.0, 0.0],
+            vec![0.0f32, 0.0, 1.0],
+            vec![0.5f32, 0.5, 0.0],
+            vec![0.0f32, 0.5, 0.5],
+        ];
+
+        for (i, embedding) in embeddings.iter().enumerate() {
+            let props = PropertyMapBuilder::new()
+                .insert_vector("vec", embedding)
+                .build();
+
+            let node_id = NodeId::new(i as u64 + 1)?;
+            let temporal = BiTemporalInterval::current(time::now());
+
+            wal.append(WalOperation::CreateNode {
+                node_id,
+                label: "Doc".to_string(),
+                properties: props.clone(),
+                temporal,
+            })?;
+
+            let interned_label = GLOBAL_INTERNER.intern("Doc")?;
+            let version_id = VersionId::new(i as u64 + 1)?;
+            let commit_timestamp = temporal.transaction_time().start();
+            let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
+            let node = Node::with_metadata(node_id, interned_label, props, version_id, metadata);
+            current.insert_node_direct(node, commit_timestamp)?;
+        }
+
+        wal.flush()?;
+
+        // Create checkpoint at LSN 0 to ensure all node creations are replayed from WAL.
+        let checkpoint = Checkpoint::new(LSN(0), &current, &historical);
+        std::fs::create_dir_all(&checkpoint_dir)?;
+        checkpoint.save(&checkpoint_dir.join("checkpoint_000000.dat"))?;
+
+        drop(current);
+        drop(historical);
+
+        // Phase 2: Recovery
+        let config = CheckpointConfig {
+            checkpoint_dir,
+            ..Default::default()
+        };
+        let mut manager = PersistenceManager::new(config)?;
+        let (recovered_current, _recovered_historical, _lsn) = manager.recover(&wal)?;
+
+        // Phase 3: Verify index is functional
+        // Search should return results, meaning index was rebuilt
+        let query = vec![1.0f32, 0.0, 0.0];
+        let results = recovered_current.search_vectors_in("vec", &query, 3)?;
+
+        assert!(
+            !results.is_empty(),
+            "Search should return results, proving index was rebuilt"
+        );
+
+        Ok(())
+    }
+
+    /// Test that recovery fails gracefully when vector index restoration fails.
+    ///
+    /// This test verifies the error handling strategy: if vector index restoration
+    /// fails during recovery, the entire recovery operation should fail to maintain
+    /// data integrity (rather than continuing with inconsistent state).
+    #[test]
+    fn test_recovery_fails_on_invalid_vector_index_config() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let checkpoint_dir = temp_dir.path().join("checkpoints");
+
+        // Phase 1: Create a checkpoint with INVALID vector config
+        // We'll manually corrupt the checkpoint file to have dimensions=0 (invalid)
+        let wal_config = ConcurrentWalSystemConfig::new(wal_dir.clone());
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        // Create valid checkpoint first
+        let valid_config = HnswConfig::new(384, DistanceMetric::Cosine);
+        current.enable_vector_index("embedding", valid_config)?;
+
+        let checkpoint = Checkpoint::new(LSN(1), &current, &historical);
+        std::fs::create_dir_all(&checkpoint_dir)?;
+        let checkpoint_path = checkpoint_dir.join("checkpoint_000001.dat");
+        checkpoint.save(&checkpoint_path)?;
+
+        // Phase 2: Corrupt the checkpoint to have invalid dimensions (0)
+        let mut data = std::fs::read(&checkpoint_path)?;
+
+        // Find and corrupt the dimensions field in the binary format
+        // Vector config format: enabled(1) + name_len(4) + name + HnswConfig
+        // HnswConfig starts with dimensions (4 bytes)
+        // We need to find where "embedding" string ends and set next 4 bytes to 0
+
+        // Expected structure after magic/version/lsn/timestamp/counts:
+        // - Magic (4) + Version (4) = 8
+        // - LSN (8) + Timestamp (12) + NodeCount (8) + EdgeCount (8) + VersionCount (8) = 44
+        // - enabled (1) + name_len (4) = 5
+        // Total header before name = 8 + 44 + 5 = 57
+
+        let name_start = 57;
+        let name_len = u32::from_le_bytes([data[53], data[54], data[55], data[56]]) as usize;
+        let dimensions_offset = name_start + name_len;
+
+        // Corrupt dimensions to 0 (invalid)
+        data[dimensions_offset..dimensions_offset + 4].copy_from_slice(&0u32.to_le_bytes());
+
+        // Write corrupted checkpoint
+        std::fs::write(&checkpoint_path, data)?;
+
+        drop(current);
+        drop(historical);
+
+        // Phase 3: Attempt recovery - should FAIL due to invalid vector config
+        let config = CheckpointConfig {
+            checkpoint_dir,
+            ..Default::default()
+        };
+        let mut manager = PersistenceManager::new(config)?;
+        let result = manager.recover(&wal);
+
+        // Verify recovery fails (maintains data integrity)
+        match result {
+            Ok(_) => panic!("Recovery should fail when vector index config is invalid"),
+            Err(err) => {
+                // Verify the error is related to vector configuration
+                let err_str = err.to_string();
+                assert!(
+                    err_str.contains("dimension")
+                        || err_str.contains("vector")
+                        || err_str.contains("invalid"),
+                    "Error should be related to invalid vector config, got: {}",
+                    err_str
+                );
             }
         }
 
