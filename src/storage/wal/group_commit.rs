@@ -101,7 +101,7 @@ impl GroupCommitCoordinator {
     pub fn new(max_delay_ms: u64, max_batch_size: usize) -> Self {
         Self {
             state: Mutex::new(GroupCommitState {
-                current_epoch: 0,
+                current_epoch: 1, // Start at 1 so flushed_epoch=0 means "nothing flushed yet"
                 batch_count: 0,
                 flushed_epoch: 0,
                 last_flush_error: None,
@@ -181,8 +181,11 @@ impl GroupCommitCoordinator {
 
         // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
         // and this wait (rare but possible on fast systems), this loop exits immediately since
-        // flushed_epoch > epoch, and we return Ok(()) without waiting.
-        while state.flushed_epoch <= epoch {
+        // flushed_epoch >= epoch, and we return Ok(()) without waiting.
+        //
+        // EPOCH SEMANTICS: flushed_epoch = N means "epoch N has been flushed".
+        // Transaction at epoch E waits while flushed_epoch < E (i.e., E has not been flushed yet).
+        while state.flushed_epoch < epoch {
             let (new_state, timeout_result) = self
                 .flush_complete
                 .wait_timeout(state, timeout)
@@ -194,7 +197,7 @@ impl GroupCommitCoordinator {
 
             state = new_state;
 
-            if timeout_result.timed_out() && state.flushed_epoch <= epoch {
+            if timeout_result.timed_out() && state.flushed_epoch < epoch {
                 return Err(Error::Storage(StorageError::WalError {
                     reason: format!(
                         "Group commit timeout waiting for epoch {} (current flushed: {})",
@@ -242,7 +245,9 @@ impl GroupCommitCoordinator {
         // with rate limiting and filtering of uninteresting events.
 
         // Advance the flushed epoch (even on error, so waiters wake up)
-        state.flushed_epoch = state.current_epoch + 1;
+        // EPOCH SEMANTICS: flushed_epoch = N means "epoch N has been flushed".
+        // We flush the current epoch, then advance to the next epoch for new transactions.
+        state.flushed_epoch = state.current_epoch;
         state.current_epoch += 1;
         state.batch_count = 0;
 
@@ -354,7 +359,7 @@ mod tests {
         let result = coord.register_transaction();
         assert!(result.is_ok());
         let (epoch, should_flush) = result.unwrap();
-        assert_eq!(epoch, 0);
+        assert_eq!(epoch, 1); // Start at epoch 1
         assert!(!should_flush);
     }
 
@@ -400,7 +405,7 @@ mod tests {
         let coord = GroupCommitCoordinator::new(10, 200);
         let result = coord.current_epoch();
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0);
+        assert_eq!(result.unwrap(), 1); // Start at epoch 1
     }
 
     #[test]
@@ -462,7 +467,7 @@ mod tests {
     #[test]
     fn test_new_coordinator() {
         let coord = GroupCommitCoordinator::new(10, 200);
-        assert_eq!(coord.current_epoch().unwrap(), 0);
+        assert_eq!(coord.current_epoch().unwrap(), 1); // Start at 1 (flushed_epoch=0 means nothing flushed)
         assert_eq!(coord.flushed_epoch().unwrap(), 0);
         assert_eq!(coord.current_batch_size().unwrap(), 0);
     }
@@ -474,13 +479,13 @@ mod tests {
         // Register transactions
         for i in 0..4 {
             let (epoch, should_flush) = coord.register_transaction().unwrap();
-            assert_eq!(epoch, 0);
+            assert_eq!(epoch, 1); // All in epoch 1
             assert!(!should_flush, "should not flush at batch size {}", i + 1);
         }
 
         // Fifth transaction should trigger flush
         let (epoch, should_flush) = coord.register_transaction().unwrap();
-        assert_eq!(epoch, 0);
+        assert_eq!(epoch, 1); // Still in epoch 1
         assert!(should_flush, "should flush when batch is full");
     }
 
@@ -491,13 +496,13 @@ mod tests {
         coord.register_transaction().unwrap();
         coord.register_transaction().unwrap();
 
-        assert_eq!(coord.current_epoch().unwrap(), 0);
+        assert_eq!(coord.current_epoch().unwrap(), 1); // Start at epoch 1
         assert_eq!(coord.current_batch_size().unwrap(), 2);
 
         coord.mark_flushed(Ok(())).unwrap();
 
-        assert_eq!(coord.current_epoch().unwrap(), 1);
-        assert_eq!(coord.flushed_epoch().unwrap(), 1);
+        assert_eq!(coord.current_epoch().unwrap(), 2); // Advances to epoch 2
+        assert_eq!(coord.flushed_epoch().unwrap(), 1); // Epoch 1 has been flushed
         assert_eq!(coord.current_batch_size().unwrap(), 0);
     }
 
@@ -571,14 +576,14 @@ mod tests {
             epochs.push(epoch);
         }
 
-        // All should be same epoch
-        assert!(epochs.iter().all(|&e| e == 0));
+        // All should be same epoch (epoch 1)
+        assert!(epochs.iter().all(|&e| e == 1));
 
         // Spawn multiple waiting threads
         let mut handles = Vec::new();
         for _ in 0..5 {
             let coord_clone = Arc::clone(&coord);
-            handles.push(thread::spawn(move || coord_clone.wait_for_flush(0)));
+            handles.push(thread::spawn(move || coord_clone.wait_for_flush(1))); // Wait for epoch 1
         }
 
         // Let them start waiting
@@ -598,19 +603,19 @@ mod tests {
     fn test_multiple_epochs() {
         let coord = GroupCommitCoordinator::new(10, 100);
 
-        // First batch
+        // First batch at epoch 1
         coord.register_transaction().unwrap();
         coord.register_transaction().unwrap();
         coord.mark_flushed(Ok(())).unwrap();
 
-        assert_eq!(coord.current_epoch().unwrap(), 1);
+        assert_eq!(coord.current_epoch().unwrap(), 2); // Advanced to epoch 2
 
-        // Second batch
+        // Second batch at epoch 2
         let (epoch, _) = coord.register_transaction().unwrap();
-        assert_eq!(epoch, 1);
+        assert_eq!(epoch, 2);
 
         coord.mark_flushed(Ok(())).unwrap();
-        assert_eq!(coord.current_epoch().unwrap(), 2);
+        assert_eq!(coord.current_epoch().unwrap(), 3); // Advanced to epoch 3
     }
 
     #[test]
