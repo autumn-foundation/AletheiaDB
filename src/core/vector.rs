@@ -4802,8 +4802,8 @@ mod proptests {
         let sparse = SparseVec::new(vec![], vec![], 10).unwrap();
         assert_eq!(sparse.nnz(), 0);
         assert_eq!(sparse.dimension(), 10);
-        assert_eq!(sparse.indices(), &[]);
-        assert_eq!(sparse.values(), &[]);
+        assert_eq!(sparse.indices(), &[] as &[u32]);
+        assert_eq!(sparse.values(), &[] as &[f32]);
     }
 
     #[test]
