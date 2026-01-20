@@ -191,7 +191,10 @@ fn test_query_builder_temporal() {
     let (alice, _bob, _carol, _dave) = create_social_graph(&db);
 
     // Build temporal query
-    let query = QueryBuilder::new().as_of(1000.into(), 1000.into()).start(alice).build();
+    let query = QueryBuilder::new()
+        .as_of(1000.into(), 1000.into())
+        .start(alice)
+        .build();
 
     assert!(query.is_temporal());
     println!("✓ Query builder with temporal context works");
@@ -283,7 +286,10 @@ fn test_planner_temporal_lookup() {
     let db = create_test_db();
     let (alice, _bob, _carol, _dave) = create_social_graph(&db);
 
-    let query = QueryBuilder::new().as_of(1000.into(), 1000.into()).start(alice).build();
+    let query = QueryBuilder::new()
+        .as_of(1000.into(), 1000.into())
+        .start(alice)
+        .build();
 
     let planner = create_test_planner();
     let plan = planner.plan(query).expect("Planning failed");

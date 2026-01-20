@@ -44,7 +44,8 @@ fn now_timestamp() -> Timestamp {
     (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_micros() as i64).into()
+        .as_micros() as i64)
+        .into()
 }
 
 /// Format timestamp for display

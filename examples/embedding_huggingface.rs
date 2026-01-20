@@ -68,6 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(feature = "embedding-huggingface"))]
 fn main() {
     eprintln!("This example requires the 'embedding-huggingface' feature.");
-    eprintln!("Run with: cargo run --example embedding_huggingface --features embedding-huggingface");
+    eprintln!(
+        "Run with: cargo run --example embedding_huggingface --features embedding-huggingface"
+    );
     std::process::exit(1);
 }
