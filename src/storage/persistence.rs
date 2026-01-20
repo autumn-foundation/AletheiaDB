@@ -1804,7 +1804,7 @@ mod tests {
         current.enable_vector_index("vec", vector_config)?;
 
         // Create 5 nodes with embeddings
-        let embeddings = vec![
+        let embeddings = [
             vec![1.0f32, 0.0, 0.0],
             vec![0.0f32, 1.0, 0.0],
             vec![0.0f32, 0.0, 1.0],
@@ -1862,7 +1862,6 @@ mod tests {
             !results.is_empty(),
             "Search should return results, proving index was rebuilt"
         );
-        assert!(results.len() >= 1, "Should find at least 1 similar node");
 
         Ok(())
     }
