@@ -257,6 +257,14 @@ impl From<VectorDimension> for usize {
 /// - Space complexity: O(nnz) where nnz = number of non-zero elements
 /// - Dense equivalent would be: O(dimension)
 /// - Memory savings can be 10-1000x for sparse data
+///
+/// # Equality and Comparison
+///
+/// While this type implements `PartialEq` for compatibility with `PropertyValue`,
+/// direct equality comparison using `==` is **not recommended** for floating-point
+/// values. NaN != NaN (IEEE 754) and floating-point precision issues can cause
+/// semantically equal vectors to compare unequal. For robust equality checks,
+/// use [`approx_eq`](Self::approx_eq) with an appropriate epsilon value instead.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SparseVec {
     /// Indices of non-zero elements (sorted, unique, all < dimension).
@@ -512,6 +520,49 @@ impl SparseVec {
     #[inline]
     pub fn magnitude(&self) -> f32 {
         self.squared_magnitude().sqrt()
+    }
+
+    /// Checks if this sparse vector is approximately equal to another within a tolerance.
+    ///
+    /// This method provides an epsilon-based comparison that handles floating-point
+    /// precision issues. Two sparse vectors are considered approximately equal if:
+    /// - They have the same dimension
+    /// - They have the same indices
+    /// - All corresponding values differ by less than epsilon
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The sparse vector to compare with
+    /// * `epsilon` - Maximum allowed difference for each value (typically 1e-6 for f32)
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::vector::SparseVec;
+    ///
+    /// let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+    /// let b = SparseVec::new(vec![0, 2], vec![1.0000001, 2.0000001], 5).unwrap();
+    ///
+    /// // Small floating-point differences are tolerated
+    /// assert!(a.approx_eq(&b, 1e-5));
+    /// assert!(!a.approx_eq(&b, 1e-10));
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// This is the **recommended way to compare sparse vectors**. While `SparseVec`
+    /// implements `PartialEq` for compatibility with `PropertyValue`, direct equality
+    /// via `==` is not recommended due to floating-point comparison concerns.
+    /// See the "Equality and Comparison" section in the type documentation for details.
+    pub fn approx_eq(&self, other: &SparseVec, epsilon: f32) -> bool {
+        self.dimension == other.dimension
+            && self.indices == other.indices
+            && self.values.len() == other.values.len()
+            && self
+                .values
+                .iter()
+                .zip(other.values.iter())
+                .all(|(a, b)| (a - b).abs() < epsilon)
     }
 }
 
@@ -4875,9 +4926,50 @@ mod proptests {
     fn test_sparse_vec_clone() {
         let sparse1 = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
         let sparse2 = sparse1.clone();
-        assert_eq!(sparse1, sparse2);
+        // Use approx_eq instead of == due to floating-point concerns
+        assert!(
+            sparse1.approx_eq(&sparse2, 1e-10),
+            "Cloned sparse vector should be approximately equal to original"
+        );
         assert_eq!(sparse1.indices(), sparse2.indices());
         assert_eq!(sparse1.values(), sparse2.values());
+    }
+
+    #[test]
+    fn test_sparse_vec_approx_eq() {
+        let a = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 5).unwrap();
+        let b = SparseVec::new(vec![0, 2], vec![1.0000001, 2.0000001], 5).unwrap();
+
+        // Small floating-point differences should be tolerated with appropriate epsilon
+        assert!(
+            a.approx_eq(&b, 1e-5),
+            "Vectors with small floating-point differences should be approximately equal"
+        );
+        assert!(
+            !a.approx_eq(&b, 1e-10),
+            "Vectors should not be equal with very strict epsilon"
+        );
+
+        // Different dimensions
+        let c = SparseVec::new(vec![0, 2], vec![1.0, 2.0], 10).unwrap();
+        assert!(
+            !a.approx_eq(&c, 1e-5),
+            "Vectors with different dimensions should not be equal"
+        );
+
+        // Different indices
+        let d = SparseVec::new(vec![0, 3], vec![1.0, 2.0], 5).unwrap();
+        assert!(
+            !a.approx_eq(&d, 1e-5),
+            "Vectors with different indices should not be equal"
+        );
+
+        // Different values
+        let e = SparseVec::new(vec![0, 2], vec![1.0, 3.0], 5).unwrap();
+        assert!(
+            !a.approx_eq(&e, 1e-5),
+            "Vectors with significantly different values should not be equal"
+        );
     }
 
     #[test]

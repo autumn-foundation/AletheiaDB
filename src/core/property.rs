@@ -103,6 +103,13 @@ pub enum PropertyValue {
     /// - Dense: 40KB (10,000 * 4 bytes)
     /// - Sparse: ~80 bytes (10 * 8 bytes for index+value pairs)
     /// - Space savings: ~500x
+    ///
+    /// # Floating-Point Equality Note
+    /// This variant uses derived PartialEq which compares f32 values bitwise.
+    /// Be aware that NaN != NaN (IEEE 754) and floating-point precision may
+    /// cause semantically equal vectors to compare unequal. For robust equality
+    /// checks, use [`SparseVec::approx_eq`](crate::core::vector::SparseVec::approx_eq)
+    /// with an appropriate epsilon value instead of direct `==` comparison.
     SparseVector(Arc<SparseVec>),
 }
 
