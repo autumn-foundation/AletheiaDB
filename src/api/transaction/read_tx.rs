@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// ```
 pub struct ReadTransaction {
     tx_id: TxId,
-    start_timestamp: i64,
+    start_timestamp: crate::core::temporal::Timestamp,
     snapshot: TransactionSnapshot,
     current: Arc<CurrentStorage>,
     visibility_manager: Arc<TxVisibilityManager>,

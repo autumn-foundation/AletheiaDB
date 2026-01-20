@@ -2307,7 +2307,7 @@ mod tests {
             .build();
         node.properties = new_props;
 
-        storage.update_node_direct(node, 1000).unwrap();
+        storage.update_node_direct(node, 1000.into()).unwrap();
 
         // Verify update
         let updated_node = storage.get_node(node_id).unwrap();
@@ -2661,7 +2661,7 @@ mod tests {
         node1_obj.properties = PropertyMapBuilder::new()
             .insert_vector("embedding", &v1_updated)
             .build();
-        storage.update_node_direct(node1_obj, 2000).unwrap();
+        storage.update_node_direct(node1_obj, 2000.into()).unwrap();
 
         let results = storage.find_similar(node2, 1).unwrap();
         assert_eq!(results.len(), 1);
@@ -2696,7 +2696,7 @@ mod tests {
             )
             .unwrap();
 
-        storage.delete_node_direct(node2, 3000).unwrap();
+        storage.delete_node_direct(node2, 3000.into()).unwrap();
 
         let results = storage.find_similar(node1, 2).unwrap();
         assert_eq!(results.len(), 0);
@@ -3106,7 +3106,7 @@ mod tests {
             .insert_vector("title_embedding", &v1_updated)
             .insert_vector("body_embedding", &v1) // Keep body the same
             .build();
-        storage.update_node_direct(node1_obj, 2000).unwrap();
+        storage.update_node_direct(node1_obj, 2000.into()).unwrap();
 
         // Title search should now find node1 as similar to node2
         let title_results = storage
@@ -3158,7 +3158,7 @@ mod tests {
             .unwrap();
 
         // Delete node2
-        storage.delete_node_direct(node2, 3000).unwrap();
+        storage.delete_node_direct(node2, 3000.into()).unwrap();
 
         // Search from node1 should return empty in both indexes
         let title_results = storage

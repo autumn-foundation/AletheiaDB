@@ -507,10 +507,12 @@ impl QueryResults {
                 if let Some(timestamp) = row.timestamp {
                     // Safely convert timestamp (i64) to VersionId (u64)
                     // Negative timestamps are clamped to 0
-                    let ts_u64 = if timestamp < 0 {
+                    // Phase 2: Use wallclock component for version ID
+                    let wallclock = timestamp.wallclock();
+                    let ts_u64 = if wallclock < 0 {
                         0_u64
                     } else {
-                        timestamp as u64
+                        wallclock as u64
                     };
 
                     // VersionId::new validates against MAX_VALID_ID
@@ -688,9 +690,9 @@ mod tests {
     #[test]
     fn test_query_row_at_time() {
         let node = test_node(1);
-        let row = QueryRow::from_entity(EntityResult::Node(node)).at_time(12345);
+        let row = QueryRow::from_entity(EntityResult::Node(node)).at_time(12345.into());
 
-        assert_eq!(row.timestamp, Some(12345));
+        assert_eq!(row.timestamp, Some(12345.into()));
     }
 
     #[test]
@@ -1148,8 +1150,10 @@ mod tests {
     #[test]
     fn test_collect_structured_with_timestamps() {
         let rows = vec![
-            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())).at_time(100),
-            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap())).at_time(200),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()))
+                .at_time(100.into()),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap()))
+                .at_time(200.into()),
         ];
         let results = QueryResults::new(Box::new(MockIterator::new(rows)));
 
@@ -1167,7 +1171,8 @@ mod tests {
     fn test_collect_structured_hybrid() {
         let path = vec![EntityId::Node(NodeId::new(1).unwrap())];
         let rows = vec![
-            QueryRow::with_score(EntityResult::NodeId(NodeId::new(1).unwrap()), 0.95).at_time(100),
+            QueryRow::with_score(EntityResult::NodeId(NodeId::new(1).unwrap()), 0.95)
+                .at_time(100.into()),
             QueryRow::with_path(EntityResult::NodeId(NodeId::new(2).unwrap()), path.clone()),
         ];
         let results = QueryResults::new(Box::new(MockIterator::new(rows)));
@@ -1222,8 +1227,10 @@ mod tests {
     fn test_collect_structured_with_negative_timestamp() {
         // Negative timestamps should be clamped to 0
         let rows = vec![
-            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())).at_time(-100),
-            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap())).at_time(-50),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()))
+                .at_time((-100i64).into()),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap()))
+                .at_time((-50i64).into()),
         ];
         let results = QueryResults::new(Box::new(MockIterator::new(rows)));
 
@@ -1243,9 +1250,10 @@ mod tests {
         // Use values well below i64::MAX to ensure they're valid
         let large_ts = i64::MAX / 2;
         let rows = vec![
-            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())).at_time(large_ts),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()))
+                .at_time(large_ts.into()),
             QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap()))
-                .at_time(large_ts - 1000),
+                .at_time((large_ts - 1000).into()),
         ];
         let results = QueryResults::new(Box::new(MockIterator::new(rows)));
 
@@ -1276,7 +1284,7 @@ mod tests {
         // For now, let's test that very large timestamps still work
         let rows = vec![
             QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()))
-                .at_time(i64::MAX - 1000),
+                .at_time((i64::MAX - 1000).into()),
         ];
         let results = QueryResults::new(Box::new(MockIterator::new(rows)));
 
@@ -1315,9 +1323,11 @@ mod tests {
     fn test_collect_structured_mixed_timestamps() {
         // Test mixed positive, negative, and zero timestamps
         let rows = vec![
-            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap())).at_time(100),
-            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap())).at_time(-50),
-            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(3).unwrap())).at_time(0),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(1).unwrap()))
+                .at_time(100.into()),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(2).unwrap()))
+                .at_time((-50i64).into()),
+            QueryRow::from_entity(EntityResult::NodeId(NodeId::new(3).unwrap())).at_time(0.into()),
         ];
         let results = QueryResults::new(Box::new(MockIterator::new(rows)));
 

@@ -69,7 +69,7 @@ fn bench_snapshot_creation(c: &mut Criterion) {
                 for i in 0..100 {
                     let node_id = NodeId::new(i).unwrap();
                     let vector = gen_vector(384, i as usize);
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
                 }
 
                 b.iter(|| {
@@ -98,7 +98,7 @@ fn bench_point_in_time_queries(c: &mut Criterion) {
                 for i in 0..size {
                     let node_id = NodeId::new(i).unwrap();
                     let vector = gen_vector(128, i as usize);
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
 
                     if i % 100 == 0 {
                         let _ = index.on_transaction();
@@ -112,7 +112,7 @@ fn bench_point_in_time_queries(c: &mut Criterion) {
                     let _ = index.find_similar_as_of(
                         black_box(&query_vector),
                         black_box(10),
-                        black_box(query_timestamp),
+                        black_box(query_timestamp.into()),
                     );
                 });
             },
@@ -142,13 +142,14 @@ fn bench_time_range_queries(c: &mut Criterion) {
                             NodeId::new((snapshot_idx * vectors_per_snapshot + i) as u64).unwrap();
                         let vector = gen_vector(128, (snapshot_idx + i) as usize);
                         let timestamp = (snapshot_idx * 10000 + i * 100) as i64;
-                        let _ = index.add(node_id, &vector, timestamp);
+                        let _ = index.add(node_id, &vector, timestamp.into());
                     }
                     let _ = index.on_transaction();
                 }
 
                 let query_vector = gen_vector(128, 0);
-                let time_range = TimeRange::between(0, (snapshot_count * 10000) as i64).unwrap();
+                let time_range =
+                    TimeRange::between(0.into(), ((snapshot_count * 10000) as i64).into()).unwrap();
 
                 b.iter(|| {
                     let _ = index.find_similar_in_range(
@@ -192,7 +193,7 @@ fn bench_snapshot_pruning(c: &mut Criterion) {
                         // Create snapshots
                         for (i, vector) in vectors.iter().enumerate().take(snapshot_count) {
                             let node_id = NodeId::new(i as u64).unwrap();
-                            let _ = index.add(node_id, vector, i as i64 * 1000);
+                            let _ = index.add(node_id, vector, (i as i64 * 1000).into());
                             let _ = index.on_transaction();
                         }
 
@@ -242,7 +243,7 @@ fn bench_temporal_vs_current_overhead(c: &mut Criterion) {
             let _ = index.add(
                 black_box(node_id),
                 black_box(&vectors[idx]),
-                black_box(counter * 1000),
+                black_box((counter * 1000).into()),
             );
             counter += 1;
         });
@@ -272,7 +273,7 @@ fn bench_temporal_vs_current_overhead(c: &mut Criterion) {
         for i in 0..1000 {
             let node_id = NodeId::new(i).unwrap();
             let vector = gen_vector(128, i as usize);
-            let _ = index.add(node_id, &vector, i as i64 * 1000);
+            let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
         }
 
         let query_vector = gen_vector(128, 0);
@@ -306,8 +307,11 @@ fn bench_snapshot_creation_by_size(c: &mut Criterion) {
                         // Setup: create index with vectors
                         let index = create_temporal_index(128);
                         for (i, vector) in vectors.iter().enumerate().take(vector_count) {
-                            let _ =
-                                index.add(NodeId::new(i as u64).unwrap(), vector, i as i64 * 1000);
+                            let _ = index.add(
+                                NodeId::new(i as u64).unwrap(),
+                                vector,
+                                (i as i64 * 1000).into(),
+                            );
                         }
                         index
                     },
@@ -340,11 +344,12 @@ fn bench_semantic_evolution(c: &mut Criterion) {
                 let node_id = NodeId::new(42).unwrap();
                 for i in 0..snapshot_count {
                     let vector = gen_vector(384, i);
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
                     let _ = index.on_transaction();
                 }
 
-                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000).unwrap();
+                let time_range =
+                    TimeRange::between(0.into(), (snapshot_count as i64 * 1000).into()).unwrap();
 
                 b.iter(|| {
                     let _ = index.semantic_evolution(black_box(node_id), black_box(time_range));
@@ -384,7 +389,7 @@ fn bench_track_semantic_drift(c: &mut Criterion) {
                             }
                         })
                         .collect();
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
                     let _ = index.on_transaction();
                 }
 
@@ -393,7 +398,8 @@ fn bench_track_semantic_drift(c: &mut Criterion) {
                     v[0] = 1.0;
                     v
                 };
-                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000).unwrap();
+                let time_range =
+                    TimeRange::between(0.into(), (snapshot_count as i64 * 1000).into()).unwrap();
 
                 b.iter(|| {
                     let _ = index.track_semantic_drift(
@@ -436,11 +442,12 @@ fn bench_calculate_consecutive_drift(c: &mut Criterion) {
                             }
                         })
                         .collect();
-                    let _ = index.add(node_id, &vector, i as i64 * 1000);
+                    let _ = index.add(node_id, &vector, (i as i64 * 1000).into());
                     let _ = index.on_transaction();
                 }
 
-                let time_range = TimeRange::between(0, snapshot_count as i64 * 1000).unwrap();
+                let time_range =
+                    TimeRange::between(0.into(), (snapshot_count as i64 * 1000).into()).unwrap();
 
                 b.iter(|| {
                     let _ = index
@@ -481,8 +488,11 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
                             for (i, vector) in vectors.iter().enumerate() {
                                 let node_id =
                                     NodeId::new((snapshot_idx * vector_count + i) as u64).unwrap();
-                                let _ =
-                                    index.add(node_id, vector, (snapshot_idx * 1000 + i) as i64);
+                                let _ = index.add(
+                                    node_id,
+                                    vector,
+                                    ((snapshot_idx * 1000 + i) as i64).into(),
+                                );
                             }
                             let _ = index.on_transaction();
                         }
@@ -492,7 +502,7 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
                     |index| {
                         // Measure semantic evolution retrieval
                         let node_id = NodeId::new(vector_count as u64 / 2).unwrap();
-                        let time_range = TimeRange::between(0, 10000).unwrap();
+                        let time_range = TimeRange::between(0.into(), 10000.into()).unwrap();
                         let _ = index.semantic_evolution(node_id, time_range);
                     },
                     criterion::BatchSize::SmallInput,

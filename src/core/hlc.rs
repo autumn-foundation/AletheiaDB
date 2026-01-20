@@ -33,8 +33,10 @@ impl HybridTimestamp {
     #[inline]
     pub fn new(wallclock: i64, logical: u32) -> Result<Self, TemporalError> {
         if wallclock > MAX_VALID_TIMESTAMP {
+            // Phase 2: Error field expects HybridTimestamp, not i64
+            let invalid_ts = HybridTimestamp { wallclock, logical };
             return Err(TemporalError::InvalidTimestamp {
-                timestamp: wallclock,
+                timestamp: invalid_ts,
                 reason: format!(
                     "Wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
                     wallclock, MAX_VALID_TIMESTAMP
@@ -238,7 +240,8 @@ impl HybridTimestamp {
         let logical = u32::from_le_bytes(logical_bytes.try_into().unwrap());
 
         // Validate wallclock to prevent corrupted data from injecting invalid timestamps
-        if wallclock > MAX_VALID_TIMESTAMP {
+        // Allow i64::MAX as a special sentinel value for TIMESTAMP_MAX (represents infinity/"still current")
+        if wallclock > MAX_VALID_TIMESTAMP && wallclock != i64::MAX {
             return Err(StorageError::CorruptedData(format!(
                 "Deserialized wallclock {} exceeds MAX_VALID_TIMESTAMP ({})",
                 wallclock, MAX_VALID_TIMESTAMP
@@ -246,5 +249,35 @@ impl HybridTimestamp {
         }
 
         Ok((HybridTimestamp { wallclock, logical }, 12))
+    }
+}
+
+impl std::fmt::Display for HybridTimestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Display as wallclock.logical for human readability
+        write!(f, "{}.{}", self.wallclock, self.logical)
+    }
+}
+
+/// Convert an i64 wallclock timestamp to HybridTimestamp with logical counter = 0.
+///
+/// This enables seamless migration from Phase 1 (i64 timestamps) to Phase 2 (HybridTimestamp).
+/// The conversion is primarily used in:
+/// - Test code using integer literals
+/// - Legacy APIs that accept i64 timestamps
+/// - WAL/storage deserialization where logical counter is unknown
+///
+/// # Examples
+/// ```
+/// # use gallifreydb::core::hlc::HybridTimestamp;
+/// let ts: HybridTimestamp = 1000_i64.into();
+/// assert_eq!(ts.wallclock(), 1000);
+/// assert_eq!(ts.logical(), 0);
+/// ```
+impl From<i64> for HybridTimestamp {
+    fn from(wallclock: i64) -> Self {
+        // Use new_unchecked for performance - caller responsible for validation
+        // In test code and deserialization contexts, values are trusted
+        HybridTimestamp::new_unchecked(wallclock, 0)
     }
 }

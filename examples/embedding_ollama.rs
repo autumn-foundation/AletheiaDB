@@ -14,6 +14,8 @@
 //! cargo run --example embedding_ollama --features embedding-ollama
 //! ```
 
+#![cfg(feature = "embedding-ollama")]
+
 use gallifreydb::embeddings::EmbeddingService;
 use gallifreydb::embeddings::providers::ollama::*;
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
@@ -70,4 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n✨ Example complete!");
     println!("💡 Tip: Ollama runs locally - no data leaves your machine!");
     Ok(())
+}
+
+#[cfg(not(feature = "embedding-ollama"))]
+fn main() {
+    eprintln!("This example requires the 'embedding-ollama' feature.");
+    eprintln!("Run with: cargo run --example embedding_ollama --features embedding-ollama");
+    std::process::exit(1);
 }

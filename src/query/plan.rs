@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_logical_plan_with_temporal() {
         let plan = LogicalPlan::new(LogicalOp::Scan(ScanOp::NodeLookup(vec![])))
-            .with_temporal_context(TemporalContext::as_of(1000, 1000));
+            .with_temporal_context(TemporalContext::as_of(1000.into(), 1000.into()));
 
         assert!(plan.is_temporal());
     }
@@ -419,11 +419,11 @@ mod tests {
 
     #[test]
     fn test_temporal_context() {
-        let as_of = TemporalContext::as_of(1000, 2000);
+        let as_of = TemporalContext::as_of(1000.into(), 2000.into());
         assert!(as_of.as_of.is_some());
         assert!(as_of.between.is_none());
 
-        let between = TemporalContext::between(TimeRange::from(0));
+        let between = TemporalContext::between(TimeRange::from(0.into()));
         assert!(between.as_of.is_none());
         assert!(between.between.is_some());
     }

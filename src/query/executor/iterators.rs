@@ -2127,7 +2127,7 @@ mod tests {
             let node_id = NodeId::new(i).unwrap();
             let version_id = VersionId::new(i * 100).unwrap();
             let label = GLOBAL_INTERNER.intern("Person").unwrap();
-            let timestamp = (i * 1000) as i64;
+            let timestamp = ((i * 1000) as i64).into();
 
             let props = PropertyMapBuilder::new()
                 .insert("name", format!("Person{}", i).as_str())
@@ -2150,7 +2150,8 @@ mod tests {
             NodeId::new(2).unwrap(),
             NodeId::new(3).unwrap(),
         ];
-        let mut iter = BatchTemporalNodeIterator::new(node_ids, 5000, 5000, historical).unwrap();
+        let mut iter =
+            BatchTemporalNodeIterator::new(node_ids, 5000.into(), 5000.into(), historical).unwrap();
 
         // Verify all nodes retrieved
         let mut count = 0;
@@ -2167,7 +2168,8 @@ mod tests {
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
 
         let node_ids = vec![NodeId::new(999).unwrap()];
-        let mut iter = BatchTemporalNodeIterator::new(node_ids, 1000, 1000, historical).unwrap();
+        let mut iter =
+            BatchTemporalNodeIterator::new(node_ids, 1000.into(), 1000.into(), historical).unwrap();
 
         let result = iter.next().unwrap();
         assert!(result.is_err());
@@ -2179,7 +2181,8 @@ mod tests {
 
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let node_ids = vec![];
-        let mut iter = BatchTemporalNodeIterator::new(node_ids, 1000, 1000, historical).unwrap();
+        let mut iter =
+            BatchTemporalNodeIterator::new(node_ids, 1000.into(), 1000.into(), historical).unwrap();
 
         assert!(iter.next().is_none());
     }

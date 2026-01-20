@@ -213,21 +213,21 @@ impl WalEntry {
 
     /// Verify the checksum against serialized data
     pub fn verify_checksum(&self, serialized_data: &[u8]) -> bool {
-        // Extract checksum from data (stored at bytes 16-20)
-        if serialized_data.len() < 20 {
+        // Phase 2: Checksum now at bytes 20-24 (LSN=8 + HybridTimestamp=12)
+        if serialized_data.len() < 24 {
             return false;
         }
         let stored_checksum = u32::from_le_bytes([
-            serialized_data[16],
-            serialized_data[17],
-            serialized_data[18],
-            serialized_data[19],
+            serialized_data[20],
+            serialized_data[21],
+            serialized_data[22],
+            serialized_data[23],
         ]);
 
         // Compute checksum over everything except the checksum field itself
         let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&serialized_data[0..16]); // LSN + timestamp
-        hasher.update(&serialized_data[20..]); // Operation data
+        hasher.update(&serialized_data[0..20]); // LSN + timestamp
+        hasher.update(&serialized_data[24..]); // Operation data
         let computed = hasher.finalize();
 
         stored_checksum == computed
@@ -255,8 +255,8 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
     // Write LSN (8 bytes)
     buffer.extend_from_slice(&entry.lsn.0.to_le_bytes());
 
-    // Write timestamp (8 bytes)
-    buffer.extend_from_slice(&entry.timestamp.to_le_bytes());
+    // Write timestamp (12 bytes: Phase 2 HybridTimestamp)
+    entry.timestamp.serialize_into(buffer);
 
     // Reserve space for checksum (4 bytes) - will fill in later
     let checksum_offset = buffer.len();
@@ -333,7 +333,8 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
         WalOperation::Checkpoint { lsn, timestamp } => {
             buffer.push(5); // operation type
             buffer.extend_from_slice(&lsn.0.to_le_bytes());
-            buffer.extend_from_slice(&timestamp.to_le_bytes());
+            // Phase 2: Use HybridTimestamp serialization
+            timestamp.serialize_into(buffer);
         }
     }
 

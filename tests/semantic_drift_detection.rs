@@ -28,7 +28,7 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
         hnsw_config: Some(HnswConfig::new(384, DistanceMetric::Cosine)),
     };
     let index = TemporalVectorIndex::new(config)?;
-    let mut ts = 1000i64;
+    let mut ts = 1000i64.into();
 
     // Simulate 10 document nodes with varying drift patterns
 
@@ -44,9 +44,9 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
         let embedding = normalize(&embedding);
         index.add(node_id, &embedding, ts)?;
         index.on_transaction_at(ts)?;
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
 
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
 
         // Updated embedding (very similar)
         let mut updated = vec![0.0f32; 384];
@@ -56,7 +56,7 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
         index.remove(node_id, ts)?;
         index.add(node_id, &updated, ts)?;
         index.on_transaction_at(ts)?;
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
     }
 
     // Docs 4-6: Moderate drift (0.2-0.4)
@@ -70,9 +70,9 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
         let embedding = normalize(&embedding);
         index.add(node_id, &embedding, ts)?;
         index.on_transaction_at(ts)?;
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
 
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
 
         // Updated embedding (moderate change)
         let mut updated = vec![0.0f32; 384];
@@ -83,7 +83,7 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
         index.remove(node_id, ts)?;
         index.add(node_id, &updated, ts)?;
         index.on_transaction_at(ts)?;
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
     }
 
     // Docs 7-9: High drift (> 0.5)
@@ -97,9 +97,9 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
         let embedding = normalize(&embedding);
         index.add(node_id, &embedding, ts)?;
         index.on_transaction_at(ts)?;
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
 
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
 
         // Updated embedding (large change - nearly orthogonal)
         let mut updated = vec![0.0f32; 384];
@@ -109,7 +109,7 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
         index.remove(node_id, ts)?;
         index.add(node_id, &updated, ts)?;
         index.on_transaction_at(ts)?;
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
     }
 
     // Doc 10: Single version (should be excluded)
@@ -121,7 +121,7 @@ fn test_semantic_drift_detection_realistic_scenario() -> Result<()> {
     index.on_transaction_at(ts)?;
 
     // Query with threshold 0.3 - should get docs 4-9
-    let time_range = TimeRange::new(0, i64::MAX).unwrap();
+    let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
     let results = index.find_semantic_drift(0.3, time_range, DriftMetric::Cosine)?;
 
     // Verify results
@@ -204,7 +204,7 @@ fn test_semantic_drift_with_multiple_snapshots() -> Result<()> {
         hnsw_config: Some(HnswConfig::new(128, DistanceMetric::Cosine)),
     };
     let index = TemporalVectorIndex::new(config)?;
-    let mut ts = 1000i64;
+    let mut ts = 1000i64.into();
 
     let node_id = NodeId::new(1).unwrap();
 
@@ -230,12 +230,12 @@ fn test_semantic_drift_with_multiple_snapshots() -> Result<()> {
         padded[..embedding.len()].copy_from_slice(embedding);
         index.add(node_id, &padded, ts)?;
         index.on_transaction_at(ts)?;
-        ts += 1000;
-        ts += 1000;
+        ts = (ts.wallclock() + 1000).into();
+        ts = (ts.wallclock() + 1000).into();
     }
 
     // Query for drift - should find the node
-    let time_range = TimeRange::new(0, i64::MAX).unwrap();
+    let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
     let results = index.find_semantic_drift(0.05, time_range, DriftMetric::Cosine)?;
 
     assert!(
@@ -271,7 +271,7 @@ fn test_semantic_drift_different_metrics() -> Result<()> {
         hnsw_config: Some(HnswConfig::new(64, DistanceMetric::Cosine)),
     };
     let index = TemporalVectorIndex::new(config)?;
-    let mut ts = 1000i64;
+    let mut ts = 1000i64.into();
 
     let node_id = NodeId::new(1).unwrap();
 
@@ -283,9 +283,9 @@ fn test_semantic_drift_different_metrics() -> Result<()> {
     };
     index.add(node_id, &embedding1, ts)?;
     index.on_transaction_at(ts)?;
-    ts += 1000;
+    ts = (ts.wallclock() + 1000).into();
 
-    ts += 1000;
+    ts = (ts.wallclock() + 1000).into();
 
     let embedding2 = {
         let mut v = vec![0.0f32; 64];
@@ -296,7 +296,7 @@ fn test_semantic_drift_different_metrics() -> Result<()> {
     index.add(node_id, &embedding2, ts)?;
     index.on_transaction_at(ts)?;
 
-    let time_range = TimeRange::new(0, i64::MAX).unwrap();
+    let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
     // Test all three metrics
     let cosine_results = index.find_semantic_drift(0.0, time_range, DriftMetric::Cosine)?;

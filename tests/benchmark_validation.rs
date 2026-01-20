@@ -31,7 +31,7 @@ fn test_anchor_creation_matches_benchmark_assumptions() {
         .expect("create_node should succeed");
 
     // Create 10 updates and capture the commit timestamp at update 10 (anchor)
-    let mut timestamp_at_10 = 0i64;
+    let mut timestamp_at_10 = 0i64.into();
     for i in 1..=10 {
         let commit_ts = db
             .write_with_timestamp(|tx| {
@@ -97,10 +97,10 @@ fn test_delta_reconstruction_produces_correct_state() {
     // Create 15 updates with incrementing values and capture commit timestamps
     // This uses the actual commit timestamp from each transaction, ensuring
     // precise temporal semantics without relying on external timing coordination
-    let mut commit_ts_5 = 0i64; // Commit timestamp of update 5
-    let mut commit_ts_9 = 0i64; // Commit timestamp of update 9
-    let mut commit_ts_10 = 0i64; // Commit timestamp of update 10
-    let mut commit_ts_15 = 0i64; // Commit timestamp of update 15
+    let mut commit_ts_5 = 0i64.into(); // Commit timestamp of update 5
+    let mut commit_ts_9 = 0i64.into(); // Commit timestamp of update 9
+    let mut commit_ts_10 = 0i64.into(); // Commit timestamp of update 10
+    let mut commit_ts_15 = 0i64.into(); // Commit timestamp of update 15
 
     for i in 1..=15 {
         let commit_ts = db

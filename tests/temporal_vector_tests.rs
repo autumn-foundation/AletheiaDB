@@ -32,7 +32,7 @@ fn integration_test_add_vector() -> Result<()> {
     let index = create_test_index()?;
     let node1 = NodeId::new(1).unwrap();
     let vec1 = vec![1.0, 0.0, 0.0, 0.0];
-    let timestamp = 1000000;
+    let timestamp = 1000000.into();
     index.add(node1, &vec1, timestamp)?;
     assert_eq!(index.current_index().len(), 1);
     Ok(())
@@ -46,10 +46,10 @@ fn integration_test_multiple_adds() -> Result<()> {
     let node2 = NodeId::new(2).unwrap();
     let vec1 = vec![1.0, 0.0, 0.0, 0.0];
     let vec2 = vec![0.0, 1.0, 0.0, 0.0];
-    let timestamp = 1000000;
+    let timestamp = 1000000.into();
 
     index.add(node1, &vec1, timestamp)?;
-    index.add(node2, &vec2, timestamp + 100)?;
+    index.add(node2, &vec2, (timestamp.wallclock() + 100).into())?;
 
     assert_eq!(index.current_index().len(), 2);
 
@@ -70,20 +70,20 @@ fn test_find_similar_as_of() -> Result<()> {
     let vec3 = vec![0.0, 0.0, 1.0, 0.0]; // Different
 
     // Add at timestamp 1000
-    index.add(node1, &vec1, 1000)?;
-    index.on_transaction_at(1000)?;
+    index.add(node1, &vec1, 1000.into())?;
+    index.on_transaction_at(1000.into())?;
 
     // Add at timestamp 2000
-    index.add(node2, &vec2, 2000)?;
-    index.on_transaction_at(2000)?; // This should create a snapshot
+    index.add(node2, &vec2, 2000.into())?;
+    index.on_transaction_at(2000.into())?; // This should create a snapshot
 
     // Add at timestamp 3000
-    index.add(node3, &vec3, 3000)?;
-    index.on_transaction_at(3000)?;
+    index.add(node3, &vec3, 3000.into())?;
+    index.on_transaction_at(3000.into())?;
 
     // Query as of timestamp 2500 (should find node1 and node2, not node3)
     let query = vec![1.0, 0.0, 0.0, 0.0];
-    let results = index.find_similar_as_of(&query, 5, 2500)?;
+    let results = index.find_similar_as_of(&query, 5, 2500.into())?;
 
     // Should have found 2 vectors
     assert!(results.len() >= 2, "Should find at least 2 similar vectors");
@@ -106,15 +106,15 @@ fn test_find_similar_in_range() -> Result<()> {
     let vec1 = vec![1.0, 0.0, 0.0, 0.0];
     let vec2 = vec![0.9, 0.1, 0.0, 0.0];
 
-    index.add(node1, &vec1, 1000)?;
-    index.on_transaction_at(1000)?;
-    index.add(node2, &vec2, 2000)?;
-    index.on_transaction_at(2000)?;
-    index.on_transaction_at(3000)?; // Create another snapshot
+    index.add(node1, &vec1, 1000.into())?;
+    index.on_transaction_at(1000.into())?;
+    index.add(node2, &vec2, 2000.into())?;
+    index.on_transaction_at(2000.into())?;
+    index.on_transaction_at(3000.into())?; // Create another snapshot
 
     // Query range from 1500 to 2500
     let query = vec![1.0, 0.0, 0.0, 0.0];
-    let time_range = TimeRange::new(1500, 2500).unwrap();
+    let time_range = TimeRange::new(1500.into(), 2500.into()).unwrap();
     let results = index.find_similar_in_range(&query, 5, time_range)?;
 
     // Should have results for timestamps in range
@@ -129,7 +129,7 @@ fn test_create_manual_snapshot() -> Result<()> {
 
     let node1 = NodeId::new(1).unwrap();
     let vec1 = vec![1.0, 0.0, 0.0, 0.0];
-    index.add(node1, &vec1, 1000)?;
+    index.add(node1, &vec1, 1000.into())?;
 
     // Initial snapshot count
     let count_before = index.snapshot_count();
@@ -163,8 +163,8 @@ fn test_prune_snapshots() -> Result<()> {
     for i in 1..=5 {
         let node = NodeId::new(i).unwrap();
         let vec = vec![i as f32, 0.0, 0.0, 0.0];
-        index.add(node, &vec, (i * 1000) as i64)?;
-        index.on_transaction_at((i * 1000) as i64)?; // Create snapshot
+        index.add(node, &vec, ((i * 1000) as i64).into())?;
+        index.on_transaction_at(((i * 1000) as i64).into())?; // Create snapshot
     }
 
     // Prune snapshots (should keep only 2 most recent)
@@ -186,8 +186,8 @@ fn test_get_snapshot_info() -> Result<()> {
 
     let node1 = NodeId::new(1).unwrap();
     let vec1 = vec![1.0, 0.0, 0.0, 0.0];
-    index.add(node1, &vec1, 1000)?;
-    index.on_transaction_at(1000)?;
+    index.add(node1, &vec1, 1000.into())?;
+    index.on_transaction_at(1000.into())?;
 
     index.create_manual_snapshot()?;
 

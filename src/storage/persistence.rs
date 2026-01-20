@@ -245,8 +245,11 @@ impl Checkpoint {
             .write_all(&self.metadata.lsn.0.to_le_bytes())
             .map_err(|e| StorageError::IoError(format!("Failed to write LSN: {}", e)))?;
 
+        // Phase 2: Serialize HybridTimestamp (12 bytes)
+        let mut ts_buffer = Vec::with_capacity(12);
+        self.metadata.timestamp.serialize_into(&mut ts_buffer);
         writer
-            .write_all(&self.metadata.timestamp.to_le_bytes())
+            .write_all(&ts_buffer)
             .map_err(|e| StorageError::IoError(format!("Failed to write timestamp: {}", e)))?;
 
         writer
@@ -328,11 +331,15 @@ impl Checkpoint {
             .map_err(|e| StorageError::IoError(format!("Failed to read LSN: {}", e)))?;
         let lsn = LSN(u64::from_le_bytes(lsn_bytes));
 
-        let mut timestamp_bytes = [0u8; 8];
+        // Phase 2: Read HybridTimestamp (12 bytes: 8 wallclock + 4 logical)
+        let mut timestamp_bytes = [0u8; 12];
         reader
             .read_exact(&mut timestamp_bytes)
             .map_err(|e| StorageError::IoError(format!("Failed to read timestamp: {}", e)))?;
-        let timestamp = i64::from_le_bytes(timestamp_bytes);
+        let (timestamp, _) = crate::core::hlc::HybridTimestamp::deserialize(&timestamp_bytes)
+            .map_err(|e| {
+                StorageError::CorruptedData(format!("Failed to deserialize timestamp: {}", e))
+            })?;
 
         let mut node_count_bytes = [0u8; 8];
         reader
@@ -1232,10 +1239,11 @@ mod tests {
 
         // Expected size:
         // - Magic (4) + Version (4) = 8
-        // - LSN (8) + Timestamp (8) + NodeCount (8) + EdgeCount (8) + VersionCount (8) = 40
+        // - LSN (8) + Timestamp (12) + NodeCount (8) + EdgeCount (8) + VersionCount (8) = 44
+        //   (Phase 2: Timestamp is now HybridTimestamp: 8-byte wallclock + 4-byte logical = 12 bytes)
         // - Vector config: enabled (1) + name_len (4) + "test_property" (13) + HnswConfig (41) = 59
-        // Total = 107 bytes
-        assert_eq!(metadata.len(), 107);
+        // Total = 111 bytes (was 107 before Phase 2)
+        assert_eq!(metadata.len(), 111);
 
         Ok(())
     }
@@ -1326,7 +1334,7 @@ mod tests {
         buffer.extend_from_slice(&42u64.to_le_bytes());
 
         // Timestamp
-        buffer.extend_from_slice(&time::now().to_le_bytes());
+        buffer.extend_from_slice(&time::now().serialize());
 
         // Counts
         buffer.extend_from_slice(&0u64.to_le_bytes()); // node_count
@@ -1356,7 +1364,7 @@ mod tests {
         buffer.extend_from_slice(b"GFRY");
         buffer.extend_from_slice(&2u32.to_le_bytes());
         buffer.extend_from_slice(&1u64.to_le_bytes());
-        buffer.extend_from_slice(&time::now().to_le_bytes());
+        buffer.extend_from_slice(&time::now().serialize());
         buffer.extend_from_slice(&0u64.to_le_bytes());
         buffer.extend_from_slice(&0u64.to_le_bytes());
         buffer.extend_from_slice(&0u64.to_le_bytes());

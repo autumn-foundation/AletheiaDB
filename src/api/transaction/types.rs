@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn test_tx_id_creation() {
         let tx_id = TxId::new(42);
-        assert_eq!(tx_id.as_u64(), 42);
+        assert_eq!(tx_id.as_u64(), 42u64);
     }
 
     #[test]
@@ -137,10 +137,10 @@ mod tests {
         let tx2 = generator.next();
         let tx3 = generator.next();
 
-        assert_eq!(tx1.as_u64(), 1);
-        assert_eq!(tx2.as_u64(), 2);
-        assert_eq!(tx3.as_u64(), 3);
-        assert_eq!(generator.current().as_u64(), 3);
+        assert_eq!(tx1.as_u64(), 1u64);
+        assert_eq!(tx2.as_u64(), 2u64);
+        assert_eq!(tx3.as_u64(), 3u64);
+        assert_eq!(generator.current().as_u64(), 3u64);
     }
 
     #[test]
@@ -179,21 +179,21 @@ mod tests {
         assert_eq!(unique_count, 1000);
 
         // Final current should be 1000
-        assert_eq!(generator.current().as_u64(), 1000);
+        assert_eq!(generator.current().as_u64(), 1000u64);
     }
 
     #[test]
     fn test_tx_metadata() {
         let metadata = TxMetadata {
             tx_id: TxId::new(1),
-            start_timestamp: 100,
+            start_timestamp: 100.into(),
             commit_timestamp: None,
             state: TxState::Active,
             is_read_only: false,
         };
 
         assert_eq!(metadata.tx_id, TxId::new(1));
-        assert_eq!(metadata.start_timestamp, 100);
+        assert_eq!(metadata.start_timestamp, 100.into());
         assert_eq!(metadata.commit_timestamp, None);
         assert_eq!(metadata.state, TxState::Active);
         assert!(!metadata.is_read_only);

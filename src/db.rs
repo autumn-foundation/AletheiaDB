@@ -2655,7 +2655,7 @@ impl GallifreyDB {
     /// use gallifreydb::core::temporal::TimeRange;
     ///
     /// // Track how a document's embedding changed from its original version
-    /// let time_range = TimeRange::new(0, i64::MAX).unwrap();
+    /// let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
     /// let drift = db.track_drift_in(
     ///     "content_embedding",
     ///     node_id,
@@ -2709,7 +2709,7 @@ impl GallifreyDB {
     /// ```ignore
     /// use gallifreydb::core::temporal::TimeRange;
     ///
-    /// let time_range = TimeRange::new(0, i64::MAX).unwrap();
+    /// let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
     /// let evolution = db.semantic_evolution_in("content_embedding", node_id, time_range)?;
     ///
     /// for (timestamp, embedding) in evolution {
@@ -2760,7 +2760,7 @@ impl GallifreyDB {
     /// use gallifreydb::core::temporal::TimeRange;
     /// use gallifreydb::index::vector::temporal::DriftMetric;
     ///
-    /// let time_range = TimeRange::new(start_ts, end_ts).unwrap();
+    /// let time_range = TimeRange::new(start_ts.into(), end_ts.into()).unwrap();
     /// let drifted = db.find_drift_in(
     ///     "content_embedding",
     ///     0.3,  // threshold
@@ -5331,7 +5331,7 @@ mod tests {
         // Track drift over time using property-specific method
         // Even with just one snapshot, the API should work (may return empty or single result)
         let reference = vec![1.0f32, 0.0, 0.0, 0.0];
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
         let result = db.track_drift_in("content_embedding", node_id, &reference, time_range);
 
         // Should succeed (not error) - method exists and property validation passes
@@ -5368,7 +5368,7 @@ mod tests {
 
         let node_id = NodeId::new(1).unwrap();
         let reference = vec![1.0f32, 0.0, 0.0, 0.0];
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
         // Query with WRONG property name should fail
         let result = db.track_drift_in("wrong_property", node_id, &reference, time_range);
@@ -5394,7 +5394,7 @@ mod tests {
 
         let node_id = NodeId::new(1).unwrap();
         let reference = vec![1.0f32, 0.0, 0.0, 0.0];
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
         // Temporal query should fail when temporal index not enabled
         let result = db.track_drift_in("embedding", node_id, &reference, time_range);
@@ -5438,7 +5438,7 @@ mod tests {
             )
             .unwrap();
 
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
         let result = db.semantic_evolution_in("content_embedding", node_id, time_range);
 
         assert!(result.is_ok(), "semantic_evolution_in should succeed");
@@ -5469,7 +5469,7 @@ mod tests {
             .expect("Should enable temporal index");
 
         let node_id = NodeId::new(1).unwrap();
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
         let result = db.semantic_evolution_in("wrong_property", node_id, time_range);
         assert!(
@@ -5512,7 +5512,7 @@ mod tests {
             )
             .unwrap();
 
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
         let result = db.find_drift_in("content_embedding", 0.1, time_range, DriftMetric::Cosine);
 
         assert!(result.is_ok(), "find_drift_in should succeed");
@@ -5542,7 +5542,7 @@ mod tests {
             .enable()
             .expect("Should enable temporal index");
 
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
 
         let result = db.find_drift_in("wrong_property", 0.1, time_range, DriftMetric::Cosine);
         assert!(
@@ -5609,7 +5609,7 @@ mod tests {
             .unwrap();
 
         // Both temporal indexes should work independently
-        let time_range = TimeRange::new(0, i64::MAX).unwrap();
+        let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
         let query = vec![0.9f32, 0.1, 0.0, 0.0];
 
         // Query first property's temporal index

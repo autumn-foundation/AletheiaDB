@@ -28,7 +28,7 @@ fn test_temporal_lookup_directly() {
         let version_id = hist_guard.get_current_node_version(node_id).unwrap();
         let version = hist_guard.get_node_version(version_id).unwrap();
         // Use a timestamp between this version's start and the next update
-        version.temporal.valid_time().start() + 1
+        (version.temporal.valid_time().start().wallclock() + 1).into()
     };
     println!("Using query timestamp t1={} (just after first version)", t1);
 

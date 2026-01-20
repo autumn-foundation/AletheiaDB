@@ -159,7 +159,8 @@ fn test_deserialize_truncated_buffer() {
 #[test]
 fn test_deserialize_validates_wallclock() {
     // Deserialization should reject invalid wallclock values
-    let invalid_wallclock = i64::MAX;
+    // Use MAX_VALID_TIMESTAMP + 1, not i64::MAX (which is allowed as TIMESTAMP_MAX sentinel)
+    let invalid_wallclock = MAX_VALID_TIMESTAMP + 1;
     let logical = 42u32;
 
     let mut buffer = Vec::new();
@@ -169,7 +170,7 @@ fn test_deserialize_validates_wallclock() {
     let result = HybridTimestamp::deserialize(&buffer);
     assert!(
         result.is_err(),
-        "deserialize should reject wallclock > MAX_VALID_TIMESTAMP"
+        "deserialize should reject wallclock > MAX_VALID_TIMESTAMP (except i64::MAX sentinel)"
     );
 
     // Valid wallclock should succeed
@@ -182,6 +183,18 @@ fn test_deserialize_validates_wallclock() {
     assert!(
         result.is_ok(),
         "deserialize should accept wallclock <= MAX_VALID_TIMESTAMP"
+    );
+
+    // i64::MAX should be allowed as TIMESTAMP_MAX sentinel value
+    let sentinel_wallclock = i64::MAX;
+    let mut sentinel_buffer = Vec::new();
+    sentinel_buffer.extend_from_slice(&sentinel_wallclock.to_le_bytes());
+    sentinel_buffer.extend_from_slice(&logical.to_le_bytes());
+
+    let result = HybridTimestamp::deserialize(&sentinel_buffer);
+    assert!(
+        result.is_ok(),
+        "deserialize should accept i64::MAX as TIMESTAMP_MAX sentinel"
     );
 }
 

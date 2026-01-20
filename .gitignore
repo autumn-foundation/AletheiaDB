@@ -40,6 +40,7 @@ Cargo.lock
 .claude/
 settings.local.json
 nul
+$null
 
 # Git worktrees for parallel development
 agents/
@@ -55,6 +56,7 @@ __pycache__/
 # Benchmark output
 /benchmark-results/
 /benchmark-data.json
+benchmark-results-*.md
 pr-comment.md
 test-pr-comment*.md
 benchmark-summary.md
@@ -62,3 +64,7 @@ benchmark-summary.md
 # Temporary Claude working directories
 tmpclaude-*-cwd
 run-benchmarks.bat
+
+# Cleanup scripts
+final_cleanup.sh
+*_cleanup.sh

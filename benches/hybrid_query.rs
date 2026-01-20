@@ -437,7 +437,7 @@ fn bench_find_similar_as_of(c: &mut Criterion) {
                             black_box(&db),
                             black_box(&query),
                             black_box(10),
-                            black_box(query_timestamp),
+                            black_box(query_timestamp.into()),
                         )
                     });
                 },
@@ -480,7 +480,7 @@ fn bench_temporal_vs_current(c: &mut Criterion) {
                 black_box(&temporal_db),
                 black_box(&query),
                 black_box(10),
-                black_box(current_timestamp),
+                black_box(current_timestamp.into()),
             )
         });
     });
@@ -525,7 +525,7 @@ fn bench_chained_hybrid_operations(c: &mut Criterion) {
 
             // 3. For each result, query historical state
             for (_node_id, _) in filtered {
-                let _ = find_similar_as_of(&db, &query, 5, 1000);
+                let _ = find_similar_as_of(&db, &query, 5, 1000.into());
             }
         });
     });

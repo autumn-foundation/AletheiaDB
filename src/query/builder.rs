@@ -911,7 +911,7 @@ mod tests {
     #[test]
     fn test_temporal_context() {
         let query = QueryBuilder::new()
-            .as_of(1000, 2000)
+            .as_of(1000.into(), 2000.into())
             .start(test_node_id())
             .build();
 
@@ -922,7 +922,7 @@ mod tests {
     #[test]
     fn test_temporal_between() {
         let query = QueryBuilder::new()
-            .between(1000, 2000)
+            .between(1000.into(), 2000.into())
             .start(test_node_id())
             .build();
 
@@ -975,7 +975,7 @@ mod tests {
 
         // "Who did Alice know in 2023 that was similar to Bob?"
         let query = QueryBuilder::new()
-            .as_of(1000, 2000)
+            .as_of(1000.into(), 2000.into())
             .start(test_node_id())
             .traverse("KNOWS")
             .rank_by_similarity(&embedding, 10)

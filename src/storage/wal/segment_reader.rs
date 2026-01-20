@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::BiTemporalInterval;
@@ -114,8 +115,8 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     };
 
     while offset < buffer.len() {
-        // Need at least 20 bytes for LSN (8) + timestamp (8) + checksum (4)
-        if offset + 20 > buffer.len() {
+        // Phase 2: Need at least 24 bytes for LSN (8) + HybridTimestamp (12) + checksum (4)
+        if offset + 24 > buffer.len() {
             break;
         }
 
@@ -132,18 +133,11 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         ]));
         offset += 8;
 
-        // Read timestamp (8 bytes)
-        let timestamp = i64::from_le_bytes([
-            buffer[offset],
-            buffer[offset + 1],
-            buffer[offset + 2],
-            buffer[offset + 3],
-            buffer[offset + 4],
-            buffer[offset + 5],
-            buffer[offset + 6],
-            buffer[offset + 7],
-        ]);
-        offset += 8;
+        // Read timestamp (12 bytes: Phase 2 HybridTimestamp)
+        let (timestamp, _) = HybridTimestamp::deserialize(&buffer[offset..]).map_err(|e| {
+            StorageError::CorruptedData(format!("Failed to deserialize timestamp: {}", e))
+        })?;
+        offset += 12;
 
         // Read checksum (4 bytes)
         let checksum = u32::from_le_bytes([
@@ -349,8 +343,8 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                 }
             }
             5 => {
-                // Checkpoint
-                if offset + 16 > buffer.len() {
+                // Checkpoint: Phase 2: LSN (8 bytes) + HybridTimestamp (12 bytes) = 20 bytes
+                if offset + 20 > buffer.len() {
                     break;
                 }
                 let cp_lsn = LSN(u64::from_le_bytes([
@@ -365,17 +359,9 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                 ]));
                 offset += 8;
 
-                let cp_timestamp = i64::from_le_bytes([
-                    buffer[offset],
-                    buffer[offset + 1],
-                    buffer[offset + 2],
-                    buffer[offset + 3],
-                    buffer[offset + 4],
-                    buffer[offset + 5],
-                    buffer[offset + 6],
-                    buffer[offset + 7],
-                ]);
-                offset += 8;
+                // Phase 2: Deserialize HybridTimestamp (12 bytes: 8 wallclock + 4 logical)
+                let (cp_timestamp, consumed) = HybridTimestamp::deserialize(&buffer[offset..])?;
+                offset += consumed;
 
                 WalOperation::Checkpoint {
                     lsn: cp_lsn,

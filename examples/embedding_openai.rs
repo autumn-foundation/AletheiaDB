@@ -19,6 +19,8 @@
 //! cargo run --example embedding_openai --features embedding-openai
 //! ```
 
+#![cfg(feature = "embedding-openai")]
+
 use gallifreydb::embeddings::EmbeddingService;
 use gallifreydb::embeddings::providers::openai::*;
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
@@ -98,4 +100,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✨ Example complete!");
     Ok(())
+}
+
+#[cfg(not(feature = "embedding-openai"))]
+fn main() {
+    eprintln!("This example requires the 'embedding-openai' feature.");
+    eprintln!("Run with: cargo run --example embedding_openai --features embedding-openai");
+    std::process::exit(1);
 }

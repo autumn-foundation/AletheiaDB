@@ -1941,8 +1941,8 @@ fn test_temporal_version_round_trip() {
         id: VersionId::new(1000).unwrap(),
         node_id: NodeId::new(1).unwrap(),
         temporal: BiTemporalInterval::new(
-            TimeRange::new(1000, 2000).unwrap(),
-            TimeRange::from(1000),
+            TimeRange::new(1000.into(), 2000.into()).unwrap(),
+            TimeRange::from(1000.into()),
         ),
         label: person_label,
         data: VersionData::Anchor {
@@ -1960,8 +1960,8 @@ fn test_temporal_version_round_trip() {
         id: VersionId::new(1001).unwrap(),
         edge_id: EdgeId::new(100).unwrap(),
         temporal: BiTemporalInterval::new(
-            TimeRange::new(1000, 2000).unwrap(),
-            TimeRange::from(1000),
+            TimeRange::new(1000.into(), 2000.into()).unwrap(),
+            TimeRange::from(1000.into()),
         ),
         label: knows_label,
         source: NodeId::new(1).unwrap(),
@@ -2282,7 +2282,7 @@ fn test_delta_removed_properties_persistence() {
     let _anchor_version = NodeVersion {
         id: VersionId::new(1).unwrap(),
         node_id: NodeId::new(100).unwrap(),
-        temporal: BiTemporalInterval::now(1000i64, 2000i64),
+        temporal: BiTemporalInterval::now(1000i64.into(), 2000i64.into()),
         label: person_label,
         data: VersionData::Anchor {
             properties: anchor_props,
@@ -2305,7 +2305,7 @@ fn test_delta_removed_properties_persistence() {
     let delta_version = NodeVersion {
         id: VersionId::new(2).unwrap(),
         node_id: NodeId::new(100).unwrap(),
-        temporal: BiTemporalInterval::now(1000i64, 3000i64),
+        temporal: BiTemporalInterval::now(1000i64.into(), 3000i64.into()),
         label: person_label,
         data: VersionData::Delta {
             delta: delta.clone(),

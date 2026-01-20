@@ -41,17 +41,18 @@ fn format_value(value: &gallifreydb::PropertyValue) -> String {
 
 /// Get current timestamp in microseconds
 fn now_timestamp() -> Timestamp {
-    SystemTime::now()
+    (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_micros() as Timestamp
+        .as_micros() as i64)
+        .into()
 }
 
 /// Format timestamp for display
 #[allow(dead_code)]
 fn format_timestamp(ts: Timestamp) -> String {
     // Convert microseconds to a readable format
-    let secs = ts / 1_000_000;
+    let secs = ts.wallclock() / 1_000_000;
     chrono_lite_format(secs)
 }
 
