@@ -1456,7 +1456,7 @@ impl TemporalVectorIndex {
     /// # let index = TemporalVectorIndex::new(config)?;
     /// // Called by HistoricalStorage when creating an anchor
     /// let timestamp = 1234567890;
-    /// if let Some(snapshot_id) = index.create_snapshot_for_anchor(timestamp)? {
+    /// if let Some(snapshot_id) = index.create_snapshot_for_anchor(timestamp.into())? {
     ///     println!("Created snapshot {} for anchor at {}", snapshot_id, timestamp);
     /// }
     /// # Ok(())
@@ -1573,7 +1573,7 @@ impl TemporalVectorIndex {
     /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
     ///
     /// // Find what was semantically similar in 2023
-    /// let results = index.find_similar_as_of(&query, 10, timestamp_2023)?;
+    /// let results = index.find_similar_as_of(&query, 10, timestamp_2023.into())?;
     ///
     /// for (node_id, score) in results {
     ///     println!("Node {}: similarity = {:.3}", node_id, score);
