@@ -468,9 +468,10 @@ impl PersistenceManager {
         let mut historical = HistoricalStorage::new();
 
         // Restore vector index configuration BEFORE WAL replay (Issue #292)
-        // This ensures that vectors are automatically indexed during node creation
-        if let Some(ref cp) = checkpoint {
-            if let Some(ref vector_config) = cp.metadata.vector_index_config {
+        // This ensures that vectors are automatically indexed during node creation.
+        // If vector index restoration fails, recovery fails to maintain data integrity.
+        if let Some(cp) = &checkpoint {
+            if let Some(vector_config) = &cp.metadata.vector_index_config {
                 if vector_config.enabled {
                     current.enable_vector_index(
                         &vector_config.property_name,
@@ -1637,8 +1638,9 @@ mod tests {
 
         wal.flush()?;
 
-        // Create checkpoint BEFORE creating nodes (at LSN 0)
-        // This ensures WAL replay will process all node creations
+        // Create checkpoint at LSN 0 to force WAL replay of all node operations.
+        // Nodes are already in memory/WAL, but checkpoint LSN=0 ensures recovery
+        // will replay all entries starting from the beginning.
         let checkpoint = Checkpoint::new(LSN(0), &current, &historical);
         std::fs::create_dir_all(&checkpoint_dir)?;
         let checkpoint_path = checkpoint_dir.join("checkpoint_000000.dat");
@@ -1754,7 +1756,8 @@ mod tests {
 
         wal.flush()?;
 
-        // Create checkpoint BEFORE creating nodes (at LSN 0) without vector index
+        // Create checkpoint at LSN 0 (without vector index) to ensure all node
+        // creations are replayed from WAL during recovery.
         let checkpoint = Checkpoint::new(LSN(0), &current, &historical);
         std::fs::create_dir_all(&checkpoint_dir)?;
         let checkpoint_path = checkpoint_dir.join("checkpoint_000000.dat");
@@ -1837,7 +1840,7 @@ mod tests {
 
         wal.flush()?;
 
-        // Create checkpoint BEFORE creating nodes (at LSN 0)
+        // Create checkpoint at LSN 0 to ensure all node creations are replayed from WAL.
         let checkpoint = Checkpoint::new(LSN(0), &current, &historical);
         std::fs::create_dir_all(&checkpoint_dir)?;
         checkpoint.save(&checkpoint_dir.join("checkpoint_000000.dat"))?;
@@ -1863,6 +1866,91 @@ mod tests {
             "Search should return results, proving index was rebuilt"
         );
         assert!(results.len() >= 1, "Should find at least 1 similar node");
+
+        Ok(())
+    }
+
+    /// Test that recovery fails gracefully when vector index restoration fails.
+    ///
+    /// This test verifies the error handling strategy: if vector index restoration
+    /// fails during recovery, the entire recovery operation should fail to maintain
+    /// data integrity (rather than continuing with inconsistent state).
+    #[test]
+    fn test_recovery_fails_on_invalid_vector_index_config() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let checkpoint_dir = temp_dir.path().join("checkpoints");
+
+        // Phase 1: Create a checkpoint with INVALID vector config
+        // We'll manually corrupt the checkpoint file to have dimensions=0 (invalid)
+        let wal_config = ConcurrentWalSystemConfig::new(wal_dir.clone());
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        // Create valid checkpoint first
+        let valid_config = HnswConfig::new(384, DistanceMetric::Cosine);
+        current.enable_vector_index("embedding", valid_config)?;
+
+        let checkpoint = Checkpoint::new(LSN(1), &current, &historical);
+        std::fs::create_dir_all(&checkpoint_dir)?;
+        let checkpoint_path = checkpoint_dir.join("checkpoint_000001.dat");
+        checkpoint.save(&checkpoint_path)?;
+
+        // Phase 2: Corrupt the checkpoint to have invalid dimensions (0)
+        let mut data = std::fs::read(&checkpoint_path)?;
+
+        // Find and corrupt the dimensions field in the binary format
+        // Vector config format: enabled(1) + name_len(4) + name + HnswConfig
+        // HnswConfig starts with dimensions (4 bytes)
+        // We need to find where "embedding" string ends and set next 4 bytes to 0
+
+        // Expected structure after magic/version/lsn/timestamp/counts:
+        // - Magic (4) + Version (4) = 8
+        // - LSN (8) + Timestamp (12) + NodeCount (8) + EdgeCount (8) + VersionCount (8) = 44
+        // - enabled (1) + name_len (4) = 5
+        // Total header before name = 8 + 44 + 5 = 57
+
+        let name_start = 57;
+        let name_len = u32::from_le_bytes([data[53], data[54], data[55], data[56]]) as usize;
+        let dimensions_offset = name_start + name_len;
+
+        // Corrupt dimensions to 0 (invalid)
+        data[dimensions_offset..dimensions_offset + 4].copy_from_slice(&0u32.to_le_bytes());
+
+        // Write corrupted checkpoint
+        std::fs::write(&checkpoint_path, data)?;
+
+        drop(current);
+        drop(historical);
+
+        // Phase 3: Attempt recovery - should FAIL due to invalid vector config
+        let config = CheckpointConfig {
+            checkpoint_dir,
+            ..Default::default()
+        };
+        let mut manager = PersistenceManager::new(config)?;
+        let result = manager.recover(&wal);
+
+        // Verify recovery fails (maintains data integrity)
+        match result {
+            Ok(_) => panic!("Recovery should fail when vector index config is invalid"),
+            Err(err) => {
+                // Verify the error is related to vector configuration
+                let err_str = err.to_string();
+                assert!(
+                    err_str.contains("dimension")
+                        || err_str.contains("vector")
+                        || err_str.contains("invalid"),
+                    "Error should be related to invalid vector config, got: {}",
+                    err_str
+                );
+            }
+        }
 
         Ok(())
     }
