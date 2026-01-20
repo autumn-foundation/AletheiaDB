@@ -358,11 +358,12 @@ impl SparseVec {
                 }
                 // Check index bounds
                 if *idx >= dimension {
-                    return Err(VectorError::DimensionMismatch {
-                        expected: dimension as usize,
-                        actual: (*idx + 1) as usize,
-                    }
-                    .into());
+                    return Err(Error::Vector(VectorError::InvalidSparseVector {
+                        reason: format!(
+                            "Index {} is out of bounds for dimension {}",
+                            idx, dimension
+                        ),
+                    }));
                 }
                 // Check for duplicates
                 if let Some(prev) = prev_idx
@@ -2150,7 +2151,7 @@ pub fn sparse_cosine_similarity(a: &SparseVec, b: &SparseVec) -> Result<f32> {
 /// use gallifreydb::core::vector::{SparseVec, sparse_squared_euclidean_distance};
 ///
 /// let a = SparseVec::new(vec![0], vec![3.0], 5).unwrap();
-/// let b = SparseVec::new(vec![0], vec![0.0], 5).unwrap();
+/// let b = SparseVec::new(vec![], vec![], 5).unwrap(); // Zero vector
 ///
 /// // Distance from [3,0,0,0,0] to [0,0,0,0,0] = 9
 /// let dist_sq = sparse_squared_euclidean_distance(&a, &b).unwrap();
@@ -2199,7 +2200,7 @@ pub fn sparse_squared_euclidean_distance(a: &SparseVec, b: &SparseVec) -> Result
 /// use gallifreydb::core::vector::{SparseVec, sparse_euclidean_distance};
 ///
 /// let a = SparseVec::new(vec![0], vec![3.0], 5).unwrap();
-/// let b = SparseVec::new(vec![0], vec![0.0], 5).unwrap();
+/// let b = SparseVec::new(vec![], vec![], 5).unwrap(); // Zero vector
 ///
 /// // Distance from [3,0,0,0,0] to [0,0,0,0,0] = 3.0
 /// let dist = sparse_euclidean_distance(&a, &b).unwrap();
@@ -4780,7 +4781,7 @@ mod proptests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            Error::Vector(VectorError::DimensionMismatch { .. })
+            Error::Vector(VectorError::InvalidSparseVector { .. })
         ));
     }
 
