@@ -157,16 +157,17 @@ impl GroupCommitCoordinator {
     /// The timeout is a **deadlock detection mechanism**, not a performance target.
     /// It's designed to catch stuck flush threads, not to enforce timing.
     ///
-    /// Formula: `max(max_delay_ms * 10 + 2000ms, 2000ms)` with cap at 30s
-    /// - 10x multiplier: Allows for multiple flush cycles with CI thread scheduling delays
-    /// - +2000ms: Fixed overhead for fsync, thread scheduling, and CI variability
-    /// - Minimum 2000ms: Handles CI environments with high system load and thread starvation
-    /// - Maximum 30s: Prevents indefinite waiting on stuck threads
+    /// Formula: `max(max_delay_ms * 50 + 5000ms, 10000ms)` with cap at 60s
+    /// - 50x multiplier: Allows for multiple flush cycles with extreme CI thread scheduling delays
+    /// - +5000ms: Fixed overhead for fsync, thread scheduling, and CI variability
+    /// - Minimum 10000ms (10s): Handles CI environments with severe system load and thread starvation
+    /// - Maximum 60s: Prevents indefinite waiting on stuck threads
     ///
-    /// The higher timeout (vs previous 500ms) accounts for:
-    /// - CI environments with unpredictable thread scheduling
-    /// - System load causing flush thread delays
-    /// - Slow disks causing long fsync times
+    /// The generous timeout accounts for:
+    /// - CI environments with unpredictable thread scheduling (especially Windows CI)
+    /// - Shared CI runners under heavy load causing thread starvation
+    /// - Slow virtualized disks causing long fsync times
+    /// - Multiple tests running concurrently competing for I/O
     ///
     /// # Errors
     ///
@@ -177,12 +178,12 @@ impl GroupCommitCoordinator {
         let mut state = self.state.lock_or_err()?;
 
         // Deadlock detection timeout (NOT a performance SLA)
-        // Much longer than max_delay_ms to account for CI thread scheduling variability
+        // Very generous to handle worst-case CI environments with thread starvation
         let base_timeout =
-            Duration::from_millis(self.config.max_delay_ms * 10) + Duration::from_millis(2000);
+            Duration::from_millis(self.config.max_delay_ms * 50) + Duration::from_millis(5000);
         let timeout = base_timeout
-            .max(Duration::from_millis(2000))
-            .min(Duration::from_secs(30));
+            .max(Duration::from_millis(10000))
+            .min(Duration::from_secs(60));
 
         // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
         // and this wait (rare but possible on fast systems), this loop exits immediately since
