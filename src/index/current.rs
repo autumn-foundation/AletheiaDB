@@ -418,8 +418,11 @@ impl CurrentIndexes {
     ///
     /// SAFETY: Caller must hold `rebuild_lock` in write mode.
     fn rebuild_adjacency_internal(&self) {
-        let mut outgoing_edges = Vec::new();
-        let mut incoming_edges = Vec::new();
+        // Pre-allocate vectors to avoid reallocations during graph reconstruction.
+        // Each edge is added to both outgoing (source->target) and incoming (target->source) lists.
+        let edge_count = self.edges.len();
+        let mut outgoing_edges = Vec::with_capacity(edge_count);
+        let mut incoming_edges = Vec::with_capacity(edge_count);
 
         // Collect all edges (no modifications can occur while caller holds the lock)
         for entry in self.edges.iter() {
@@ -931,6 +934,78 @@ mod tests {
         // Should format successfully even with empty entries
         assert!(debug_str.contains("AdjacencyGuard"));
         assert!(debug_str.contains("entry_count"));
+    }
+
+    /// Test rebuild_adjacency correctly handles many edges.
+    ///
+    /// This test exercises the pre-allocated vector optimization in
+    /// rebuild_adjacency_internal() by creating a graph with many edges
+    /// and verifying all adjacencies are correctly computed.
+    #[test]
+    fn test_rebuild_adjacency_many_edges() {
+        let indexes = CurrentIndexes::new();
+
+        // Create a star graph: node 0 connects to nodes 1..=500
+        // and nodes 501..=1000 connect to node 0
+        // This creates 1000 total edges
+        const NUM_EDGES: u64 = 1000;
+        const HALF_EDGES: u64 = NUM_EDGES / 2;
+
+        // Add outgoing edges from node 0
+        for i in 0..HALF_EDGES {
+            indexes.insert_edge(create_test_edge(i, 0, i + 1, "OUTGOING"));
+        }
+
+        // Add incoming edges to node 0
+        for i in HALF_EDGES..NUM_EDGES {
+            indexes.insert_edge(create_test_edge(i, i + 1, 0, "INCOMING"));
+        }
+
+        // Rebuild adjacency (this exercises the pre-allocation optimization)
+        indexes.rebuild_adjacency();
+
+        // Verify edge count
+        assert_eq!(indexes.edge_count(), NUM_EDGES as usize);
+
+        // Verify outgoing from node 0
+        assert_eq!(
+            indexes.out_degree(NodeId::new(0).unwrap()),
+            HALF_EDGES as usize
+        );
+
+        // Verify incoming to node 0
+        assert_eq!(
+            indexes.in_degree(NodeId::new(0).unwrap()),
+            HALF_EDGES as usize
+        );
+
+        // Verify all outgoing edges are accessible
+        let outgoing = indexes.get_outgoing(NodeId::new(0).unwrap());
+        assert_eq!(outgoing.len(), HALF_EDGES as usize);
+
+        // Verify all targets are in expected range (1..=500)
+        for entry in outgoing.iter() {
+            let target_id = entry.target.as_u64();
+            assert!(
+                (1..=HALF_EDGES).contains(&target_id),
+                "Unexpected outgoing target: {}",
+                target_id
+            );
+        }
+
+        // Verify all incoming edges are accessible
+        let incoming = indexes.get_incoming(NodeId::new(0).unwrap());
+        assert_eq!(incoming.len(), HALF_EDGES as usize);
+
+        // Verify all sources are in expected range (501..=1000)
+        for entry in incoming.iter() {
+            let source_id = entry.target.as_u64(); // In incoming, target is the source node
+            assert!(
+                (HALF_EDGES + 1..=NUM_EDGES).contains(&source_id),
+                "Unexpected incoming source: {}",
+                source_id
+            );
+        }
     }
 }
 
