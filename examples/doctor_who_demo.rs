@@ -36,6 +36,9 @@ fn format_value(value: &gallifreydb::PropertyValue) -> String {
         PropertyValue::Bytes(b) => format!("<{} bytes>", b.len()),
         PropertyValue::Array(arr) => format!("[{} items]", arr.len()),
         PropertyValue::Vector(v) => format!("<vector dim={}>", v.len()),
+        PropertyValue::SparseVector(sv) => {
+            format!("<sparse_vector dim={}, nnz={}>", sv.dimension(), sv.nnz())
+        }
     }
 }
 

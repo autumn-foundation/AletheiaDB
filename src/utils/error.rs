@@ -726,6 +726,11 @@ pub enum VectorError {
         /// Description of why the vector is invalid
         reason: String,
     },
+    /// Sparse vector is invalid (e.g., duplicate indices, zero values).
+    InvalidSparseVector {
+        /// Description of why the sparse vector is invalid
+        reason: String,
+    },
     /// Error from underlying vector index implementation.
     IndexError(String),
 }
@@ -764,6 +769,9 @@ impl fmt::Display for VectorError {
             }
             VectorError::InvalidVector { reason } => {
                 write!(f, "Invalid vector: {}", reason)
+            }
+            VectorError::InvalidSparseVector { reason } => {
+                write!(f, "Invalid sparse vector: {}", reason)
             }
             VectorError::IndexError(msg) => {
                 write!(f, "Vector index error: {}", msg)
