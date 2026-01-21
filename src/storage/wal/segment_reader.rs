@@ -125,9 +125,30 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
                 }
                 offset += bytes_consumed;
             }
-            Err(_) => {
-                // If parsing fails (e.g., truncated data at end of file), stop reading
-                break;
+            Err(e) => {
+                // Distinguish between expected EOF truncation vs. unexpected corruption
+                if offset + 24 > buffer.len() {
+                    // Insufficient bytes for next entry header - expected at EOF
+                    // This can happen if a write was interrupted mid-entry
+                    #[cfg(feature = "observability")]
+                    tracing::debug!(
+                        "Partial entry at end of WAL segment {:?} (offset {}/{}), stopping read",
+                        path,
+                        offset,
+                        buffer.len()
+                    );
+                    break;
+                } else {
+                    // Corruption or invalid data in the middle of the file - this is serious
+                    #[cfg(feature = "observability")]
+                    tracing::error!(
+                        "Failed to parse WAL entry in segment {:?} at offset {}: {}",
+                        path,
+                        offset,
+                        e
+                    );
+                    return Err(e);
+                }
             }
         }
     }
@@ -177,16 +198,11 @@ pub(crate) fn parse_entry_at(
     }
 
     // Read LSN (8 bytes)
-    let lsn = LSN(u64::from_le_bytes([
-        buffer[current_offset],
-        buffer[current_offset + 1],
-        buffer[current_offset + 2],
-        buffer[current_offset + 3],
-        buffer[current_offset + 4],
-        buffer[current_offset + 5],
-        buffer[current_offset + 6],
-        buffer[current_offset + 7],
-    ]));
+    let lsn = LSN(u64::from_le_bytes(
+        buffer[current_offset..current_offset + 8]
+            .try_into()
+            .unwrap(), // Safe due to buffer length check above
+    ));
     current_offset += 8;
 
     // Read timestamp (12 bytes: Phase 2 HybridTimestamp)
@@ -196,12 +212,11 @@ pub(crate) fn parse_entry_at(
     current_offset += 12;
 
     // Read checksum (4 bytes)
-    let checksum = u32::from_le_bytes([
-        buffer[current_offset],
-        buffer[current_offset + 1],
-        buffer[current_offset + 2],
-        buffer[current_offset + 3],
-    ]);
+    let checksum = u32::from_le_bytes(
+        buffer[current_offset..current_offset + 4]
+            .try_into()
+            .unwrap(), // Safe due to buffer length check above
+    );
     current_offset += 4;
 
     // Read operation type
@@ -227,15 +242,15 @@ pub(crate) fn parse_entry_at(
             let node_id = deserialize_node_id(buffer, current_offset, "CreateNode")?;
             current_offset += 8;
 
-            let label_len = u32::from_le_bytes([
-                buffer[current_offset],
-                buffer[current_offset + 1],
-                buffer[current_offset + 2],
-                buffer[current_offset + 3],
-            ]) as usize;
+            let label_len = u32::from_le_bytes(
+                buffer[current_offset..current_offset + 4]
+                    .try_into()
+                    .unwrap(), // Safe due to buffer length check above
+            ) as usize;
             current_offset += 4;
 
-            if current_offset + label_len > buffer.len() {
+            // Use saturating_add to prevent overflow
+            if current_offset.saturating_add(label_len) > buffer.len() {
                 return Err(StorageError::CorruptedData(
                     "Insufficient buffer size for CreateNode label".to_string(),
                 )
@@ -281,15 +296,15 @@ pub(crate) fn parse_entry_at(
             let target = deserialize_node_id(buffer, current_offset, "CreateEdge target")?;
             current_offset += 8;
 
-            let label_len = u32::from_le_bytes([
-                buffer[current_offset],
-                buffer[current_offset + 1],
-                buffer[current_offset + 2],
-                buffer[current_offset + 3],
-            ]) as usize;
+            let label_len = u32::from_le_bytes(
+                buffer[current_offset..current_offset + 4]
+                    .try_into()
+                    .unwrap(), // Safe due to buffer length check above
+            ) as usize;
             current_offset += 4;
 
-            if current_offset + label_len > buffer.len() {
+            // Use saturating_add to prevent overflow
+            if current_offset.saturating_add(label_len) > buffer.len() {
                 return Err(StorageError::CorruptedData(
                     "Insufficient buffer size for CreateEdge label".to_string(),
                 )
@@ -437,16 +452,11 @@ pub(crate) fn parse_entry_at(
                 )
                 .into());
             }
-            let cp_lsn = LSN(u64::from_le_bytes([
-                buffer[current_offset],
-                buffer[current_offset + 1],
-                buffer[current_offset + 2],
-                buffer[current_offset + 3],
-                buffer[current_offset + 4],
-                buffer[current_offset + 5],
-                buffer[current_offset + 6],
-                buffer[current_offset + 7],
-            ]));
+            let cp_lsn = LSN(u64::from_le_bytes(
+                buffer[current_offset..current_offset + 8]
+                    .try_into()
+                    .unwrap(), // Safe due to buffer length check above
+            ));
             current_offset += 8;
 
             // Phase 2: Deserialize HybridTimestamp (12 bytes: 8 wallclock + 4 logical)
@@ -509,6 +519,22 @@ pub(crate) fn parse_entry_at(
             .into());
         }
     };
+
+    // Verify checksum to ensure data integrity (critical for WAL correctness)
+    let mut hasher = crc32fast::Hasher::new();
+    // Hash LSN (8 bytes) + timestamp (12 bytes) = bytes 0..20
+    hasher.update(&buffer[start_offset..start_offset + 20]);
+    // Hash operation data (from after checksum field to end of entry)
+    hasher.update(&buffer[start_offset + 24..current_offset]);
+    let computed_checksum = hasher.finalize();
+
+    if checksum != computed_checksum {
+        return Err(StorageError::CorruptedData(format!(
+            "WAL entry checksum mismatch for LSN {}: expected {:#x}, got {:#x}. Entry is corrupted.",
+            lsn.0, checksum, computed_checksum
+        ))
+        .into());
+    }
 
     let entry = WalEntry {
         lsn,
@@ -873,11 +899,16 @@ mod tests {
         };
         let entry2 = WalEntry::new(LSN(2), operation2);
 
-        // Serialize both
+        // Serialize both entries separately, then concatenate
+        // (serialize_entry_into computes checksum from buffer start, so we can't
+        //  append directly without getting wrong checksums)
         let mut buffer = Vec::new();
         serialize_entry_into(&entry1, &mut buffer).unwrap();
         let offset1_end = buffer.len();
-        serialize_entry_into(&entry2, &mut buffer).unwrap();
+
+        let mut buffer2 = Vec::new();
+        serialize_entry_into(&entry2, &mut buffer2).unwrap();
+        buffer.extend_from_slice(&buffer2);
 
         // Parse second entry using offset
         let (parsed_entry, bytes_consumed) =
@@ -951,5 +982,94 @@ mod tests {
         // Should return error for insufficient data
         let result = parse_entry_at(&buffer, 0, WAL_VERSION);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_entry_at_version_0_compatibility() {
+        // Test legacy version 0 parsing (without properties and temporal data)
+        // This tests the version < WAL_VERSION code path
+        let mut buffer = Vec::new();
+
+        // LSN (8 bytes)
+        buffer.extend_from_slice(&42u64.to_le_bytes());
+
+        // Timestamp (12 bytes)
+        let timestamp = time::now();
+        timestamp.serialize_into(&mut buffer);
+
+        // Placeholder checksum (4 bytes) - will be computed later
+        let checksum_offset = buffer.len();
+        buffer.extend_from_slice(&0u32.to_le_bytes());
+
+        // Operation type: CreateNode (1)
+        buffer.push(1);
+
+        // Node ID (8 bytes)
+        buffer.extend_from_slice(&123u64.to_le_bytes());
+
+        // Label
+        let label = "TestNode";
+        buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(label.as_bytes());
+
+        // Note: Version 0 format does NOT include properties or temporal data
+
+        // Compute checksum
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buffer[0..checksum_offset]); // LSN + timestamp
+        hasher.update(&buffer[checksum_offset + 4..]); // Operation data
+        let checksum = hasher.finalize();
+        buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        // Parse with version 0
+        let (parsed_entry, bytes_consumed) = parse_entry_at(&buffer, 0, 0).unwrap();
+
+        // Verify
+        assert_eq!(parsed_entry.lsn.0, 42);
+        assert_eq!(bytes_consumed, buffer.len());
+        match parsed_entry.operation {
+            WalOperation::CreateNode {
+                node_id,
+                label: parsed_label,
+                properties,
+                temporal,
+            } => {
+                assert_eq!(node_id.as_u64(), 123);
+                assert_eq!(parsed_label, "TestNode");
+                // Version 0 should have empty properties
+                assert!(properties.is_empty());
+                // Temporal should be set to current(timestamp)
+                assert_eq!(temporal.transaction_time().start(), timestamp);
+            }
+            _ => panic!("Expected CreateNode operation"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entry_at_checksum_mismatch() {
+        // Create a valid entry
+        let node_id = NodeId::new(42).unwrap();
+        let operation = WalOperation::CreateNode {
+            node_id,
+            label: "Person".to_string(),
+            properties: PropertyMap::new(),
+            temporal: BiTemporalInterval::current(time::now()),
+        };
+        let entry = WalEntry::new(LSN(1), operation);
+
+        // Serialize it
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        // Corrupt the checksum (bytes 20-24)
+        buffer[20] ^= 0xFF; // Flip all bits in first checksum byte
+
+        // Should return error for checksum mismatch
+        let result = parse_entry_at(&buffer, 0, WAL_VERSION);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            assert!(error_msg.contains("checksum mismatch"));
+        }
     }
 }
