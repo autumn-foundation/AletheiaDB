@@ -20,7 +20,7 @@
 //! - **Multiple scoring methods**: Dot product, cosine similarity, BM25
 //! - **Thread-safe**: Concurrent reads and writes via interior mutability
 //! - **Memory-efficient**: Only stores non-zero values
-//! - **Serializable**: Supports persistence to disk
+//! - **Persistence**: Save/load support (planned, not yet implemented)
 //!
 //! # Example
 //!
@@ -61,9 +61,11 @@
 //! - No approximation - exact similarity scores
 
 use crate::core::id::NodeId;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::SparseVec;
 use crate::utils::{Error, Result, error::VectorError};
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::path::Path;
@@ -159,6 +161,8 @@ struct Posting {
 }
 
 /// Entry in the score heap for top-k selection.
+///
+/// Uses `f32::total_cmp` for consistent ordering that handles NaN values correctly.
 #[derive(Debug, Clone)]
 struct ScoreEntry {
     node_id: NodeId,
@@ -167,7 +171,8 @@ struct ScoreEntry {
 
 impl PartialEq for ScoreEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.score == other.score && self.node_id == other.node_id
+        // Use total_cmp for consistent equality that handles NaN
+        self.score.total_cmp(&other.score) == Ordering::Equal && self.node_id == other.node_id
     }
 }
 
@@ -182,10 +187,8 @@ impl PartialOrd for ScoreEntry {
 impl Ord for ScoreEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Min-heap: reverse order so we can pop the smallest
-        other
-            .score
-            .partial_cmp(&self.score)
-            .unwrap_or(Ordering::Equal)
+        // Use total_cmp for consistent ordering that handles NaN
+        other.score.total_cmp(&self.score)
     }
 }
 
@@ -207,7 +210,9 @@ struct StoredVector {
 /// # Thread Safety
 ///
 /// This index is fully thread-safe for concurrent reads and writes.
-/// Multiple threads can add, remove, and search simultaneously.
+/// Multiple threads can search simultaneously. Write operations (add/remove)
+/// are serialized via an internal lock to ensure consistency between the
+/// forward index, inverted index, and statistics.
 pub struct SparseVectorIndex {
     /// Configuration
     config: SparseIndexConfig,
@@ -221,6 +226,8 @@ pub struct SparseVectorIndex {
     total_length: AtomicUsize,
     /// Document frequency: dimension -> count of documents containing it
     doc_freq: DashMap<u32, usize>,
+    /// Write lock to ensure atomicity of add/remove operations
+    write_lock: Mutex<()>,
 }
 
 impl SparseVectorIndex {
@@ -236,7 +243,8 @@ impl SparseVectorIndex {
     ///
     /// # Errors
     ///
-    /// Returns an error if dimensions is 0.
+    /// - Returns an error if dimensions is 0.
+    /// - Returns an error if dimensions exceeds `MAX_VECTOR_DIMENSIONS`.
     pub fn new(config: SparseIndexConfig) -> Result<Self> {
         if config.dimensions == 0 {
             return Err(Error::Vector(VectorError::InvalidVector {
@@ -244,13 +252,22 @@ impl SparseVectorIndex {
             }));
         }
 
+        if config.dimensions > MAX_VECTOR_DIMENSIONS {
+            return Err(Error::Vector(VectorError::DimensionTooLarge {
+                dimension: config.dimensions,
+                max_allowed: MAX_VECTOR_DIMENSIONS,
+            }));
+        }
+
+        let capacity = config.initial_capacity;
         Ok(SparseVectorIndex {
             config,
-            inverted_index: DashMap::new(),
-            vectors: DashMap::new(),
+            inverted_index: DashMap::with_capacity(capacity),
+            vectors: DashMap::with_capacity(capacity),
             count: AtomicUsize::new(0),
             total_length: AtomicUsize::new(0),
-            doc_freq: DashMap::new(),
+            doc_freq: DashMap::with_capacity(capacity),
+            write_lock: Mutex::new(()),
         })
     }
 
@@ -272,7 +289,7 @@ impl SparseVectorIndex {
     /// Returns `VectorError::DimensionMismatch` if the vector's dimension
     /// doesn't match the index's configured dimensions.
     pub fn add(&self, id: NodeId, vector: &SparseVec) -> Result<()> {
-        // Validate dimensions
+        // Validate dimensions before acquiring lock
         if vector.dimension() != self.config.dimensions {
             return Err(Error::Vector(VectorError::DimensionMismatch {
                 expected: self.config.dimensions,
@@ -280,8 +297,11 @@ impl SparseVectorIndex {
             }));
         }
 
-        // Remove existing vector if present
-        let _was_present = self.remove_internal(id);
+        // Acquire write lock to ensure atomicity of the entire add operation
+        let _guard = self.write_lock.lock();
+
+        // Remove existing vector if present (already holds lock)
+        self.remove_internal_unlocked(id);
 
         // Store the vector
         let magnitude = vector.magnitude();
@@ -305,8 +325,6 @@ impl SparseVectorIndex {
         }
 
         // Update statistics
-        // Note: If was_present, remove_internal already decremented count,
-        // so we always need to increment it for the new vector
         self.count.fetch_add(1, AtomicOrdering::Relaxed);
         self.total_length
             .fetch_add(vector.nnz(), AtomicOrdering::Relaxed);
@@ -324,12 +342,15 @@ impl SparseVectorIndex {
     ///
     /// `Ok(())` if the vector was removed or didn't exist.
     pub fn remove(&self, id: NodeId) -> Result<()> {
-        self.remove_internal(id);
+        // Acquire write lock to ensure atomicity
+        let _guard = self.write_lock.lock();
+        self.remove_internal_unlocked(id);
         Ok(())
     }
 
-    /// Internal removal that returns whether a vector was actually removed.
-    fn remove_internal(&self, id: NodeId) -> bool {
+    /// Internal removal that assumes write lock is already held.
+    /// Returns whether a vector was actually removed.
+    fn remove_internal_unlocked(&self, id: NodeId) -> bool {
         if let Some((_, stored)) = self.vectors.remove(&id) {
             let vec = &stored.vector;
 
@@ -411,7 +432,11 @@ impl SparseVectorIndex {
         }
 
         // Accumulate scores for each candidate
+        // For cosine similarity, we also track magnitudes to avoid a second lookup
+        let is_cosine = matches!(self.config.scoring, ScoringMethod::Cosine);
         let mut scores: HashMap<NodeId, f32> = HashMap::new();
+        // Magnitudes map is only used for cosine, but we always create it (cheap)
+        let mut magnitudes: HashMap<NodeId, f32> = HashMap::new();
         let query_magnitude = query.magnitude();
         let n = self.count.load(AtomicOrdering::Relaxed) as f32;
         let avgdl = if n > 0.0 {
@@ -439,6 +464,12 @@ impl SparseVectorIndex {
                         ScoringMethod::DotProduct => query_val * posting.value,
                         ScoringMethod::Cosine => {
                             // Accumulate unnormalized dot product, normalize at the end
+                            // Cache magnitude on first encounter to avoid second lookup
+                            if !magnitudes.contains_key(&posting.node_id)
+                                && let Some(stored) = self.vectors.get(&posting.node_id)
+                            {
+                                magnitudes.insert(posting.node_id, stored.magnitude);
+                            }
                             query_val * posting.value
                         }
                         ScoringMethod::BM25 { k1, b } => {
@@ -462,13 +493,13 @@ impl SparseVectorIndex {
             }
         }
 
-        // Normalize cosine scores
-        if matches!(self.config.scoring, ScoringMethod::Cosine) && query_magnitude > 0.0 {
+        // Normalize cosine scores using cached magnitudes
+        if is_cosine && query_magnitude > 0.0 {
             for (&node_id, score) in scores.iter_mut() {
-                if let Some(stored) = self.vectors.get(&node_id)
-                    && stored.magnitude > 0.0
+                if let Some(&mag) = magnitudes.get(&node_id)
+                    && mag > 0.0
                 {
-                    *score /= query_magnitude * stored.magnitude;
+                    *score /= query_magnitude * mag;
                 }
             }
         }
@@ -486,7 +517,8 @@ impl SparseVectorIndex {
         // Convert to sorted results (highest score first)
         let mut results: Vec<(NodeId, f32)> =
             heap.into_iter().map(|e| (e.node_id, e.score)).collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        // Use total_cmp for consistent ordering that handles NaN
+        results.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         Ok(results)
     }
@@ -584,9 +616,19 @@ impl SparseVectorIndex {
 
     /// Compacts the index by removing empty posting lists.
     pub fn compact(&self) {
-        // Remove empty posting lists
-        self.inverted_index
-            .retain(|_, postings| !postings.is_empty());
+        // Acquire write lock to prevent concurrent modifications
+        let _guard = self.write_lock.lock();
+
+        // Remove empty posting lists and shrink non-empty ones
+        self.inverted_index.retain(|_, postings| {
+            if postings.is_empty() {
+                false
+            } else {
+                // Shrink capacity to fit actual size
+                postings.shrink_to_fit();
+                true
+            }
+        });
         self.doc_freq.retain(|_, &mut freq| freq > 0);
     }
 
