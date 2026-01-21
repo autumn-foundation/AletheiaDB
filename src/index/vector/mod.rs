@@ -660,3 +660,12 @@ pub use temporal::{
     DriftMetric, RetentionPolicy, SnapshotInfo, SnapshotStrategy, TemporalVectorConfig,
     TemporalVectorIndex, VectorIndexObserver,
 };
+
+// Sparse vector index (Phase 5)
+pub mod sparse;
+
+// Re-export sparse types for convenience
+pub use sparse::{
+    ScoringMethod, SparseIndexConfig, SparseIndexStats, SparseVectorIndex, hybrid_fusion,
+    reciprocal_rank_fusion,
+};
