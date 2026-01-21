@@ -1063,10 +1063,17 @@ impl CheckpointManager {
 
         let final_lsn = wal.current_lsn();
 
-        // Initialize ID generators
-        current.init_node_id_generator(max_node_id + 1);
-        current.init_edge_id_generator(max_edge_id + 1);
-        current.init_version_id_generator(max_version_id + 1);
+        // Only update ID generators if we replayed entries with higher IDs
+        // This preserves the values set during load_current_storage if no WAL replay happened
+        if max_node_id > 0 {
+            current.init_node_id_generator(max_node_id + 1);
+        }
+        if max_edge_id > 0 {
+            current.init_edge_id_generator(max_edge_id + 1);
+        }
+        if max_version_id > 0 {
+            current.init_version_id_generator(max_version_id + 1);
+        }
 
         Ok((current, historical, final_lsn))
     }
@@ -1092,12 +1099,11 @@ pub struct CheckpointStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PropertyMapBuilder;
     use crate::core::id::NodeId;
-    use crate::core::property::PropertyMap;
     use crate::core::temporal::{BiTemporalInterval, time};
     use crate::storage::wal::WalOperation;
     use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
-    use crate::{PropertyMapBuilder, api::transaction::types::TxId};
     use tempfile::TempDir;
 
     // ========================================================================
@@ -1487,7 +1493,7 @@ mod tests {
             let props = PropertyMapBuilder::new()
                 .insert("string_prop", "hello")
                 .insert("int_prop", 42i64)
-                .insert("float_prop", 3.14f64)
+                .insert("float_prop", 3.15f64)
                 .insert("bool_prop", true)
                 .build();
 
@@ -1523,7 +1529,7 @@ mod tests {
             );
             assert_eq!(node.get_property("int_prop").unwrap().as_int().unwrap(), 42);
             assert!(
-                (node.get_property("float_prop").unwrap().as_float().unwrap() - 3.14).abs() < 0.001
+                (node.get_property("float_prop").unwrap().as_float().unwrap() - 3.15).abs() < 0.001
             );
             assert!(node.get_property("bool_prop").unwrap().as_bool().unwrap());
         }
