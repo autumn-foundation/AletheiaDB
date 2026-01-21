@@ -8,6 +8,15 @@
 //! 3. **Crash During WAL Write**: Handles truncated/corrupt final entries
 //! 4. **Multiple Crashes**: Sequential crash/recovery cycles
 //! 5. **Complex Workflow**: Create/update/delete with historical version verification
+//!
+//! ## Known Limitation: Checkpoint State Serialization
+//!
+//! The current checkpoint implementation only stores metadata (LSN, counts),
+//! NOT the actual database state. This means:
+//! - Pre-checkpoint WAL entries are NOT recovered if a checkpoint exists
+//! - Full checkpoint serialization via index_persistence is not yet integrated
+//!
+//! See: <https://github.com/madmax983/GallifreyDB/issues/XXX> (TODO: create issue)
 
 use gallifreydb::{
     core::{
@@ -27,7 +36,33 @@ use gallifreydb::{
     utils::error::Result,
 };
 use std::io::{Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Find all WAL segment files in the given directory, sorted by name.
+///
+/// Returns files sorted to ensure deterministic ordering across platforms,
+/// since `std::fs::read_dir` does not guarantee any particular order.
+fn find_wal_files(wal_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut wal_files: Vec<PathBuf> = std::fs::read_dir(wal_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|s| s.ends_with(".log"))
+                .unwrap_or(false)
+        })
+        .map(|e| e.path())
+        .collect();
+
+    // Sort by path to ensure deterministic ordering
+    wal_files.sort();
+    Ok(wal_files)
+}
 
 // ============================================================================
 // Scenario 1: Crash Before Checkpoint
@@ -360,22 +395,13 @@ fn test_crash_with_truncated_wal() -> Result<()> {
     }
     wal.flush()?;
 
-    // Get the current WAL size
-    let wal_files: Vec<_> = std::fs::read_dir(&wal_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|s| s.ends_with(".log"))
-                .unwrap_or(false)
-        })
-        .collect();
-
+    // Get the current WAL size - use helper for deterministic file ordering
+    let wal_files = find_wal_files(&wal_dir)?;
     assert!(!wal_files.is_empty(), "WAL files should exist");
 
-    // Find the latest WAL file
-    let wal_file_path = wal_files.last().unwrap().path();
-    let original_size = std::fs::metadata(&wal_file_path)?.len();
+    // Find the latest WAL file (last in sorted order)
+    let wal_file_path = wal_files.last().expect("WAL files should exist");
+    let original_size = std::fs::metadata(wal_file_path)?.len();
 
     // Add one more operation that we'll truncate
     wal.append(WalOperation::CreateNode {
@@ -393,7 +419,7 @@ fn test_crash_with_truncated_wal() -> Result<()> {
     // We truncate to a point in the middle of the last entry
     let file = std::fs::OpenOptions::new()
         .write(true)
-        .open(&wal_file_path)?;
+        .open(wal_file_path)?;
     let partial_size = original_size + 10; // Truncate to partial entry
     file.set_len(partial_size)?;
     drop(file);
@@ -454,24 +480,15 @@ fn test_crash_with_corrupted_wal_header() -> Result<()> {
     }
     wal.flush()?;
 
-    // Find and corrupt the WAL file header
-    let wal_files: Vec<_> = std::fs::read_dir(&wal_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|s| s.ends_with(".log"))
-                .unwrap_or(false)
-        })
-        .collect();
-
-    let wal_file_path = wal_files.last().unwrap().path();
+    // Find and corrupt the WAL file header - use helper for deterministic ordering
+    let wal_files = find_wal_files(&wal_dir)?;
+    let wal_file_path = wal_files.last().expect("WAL files should exist");
 
     // Corrupt the magic header
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .read(true)
-        .open(&wal_file_path)?;
+        .open(wal_file_path)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(b"BADD")?; // Replace "GWAL" with "BADD"
     drop(file);
