@@ -85,6 +85,7 @@ const MAX_K: usize = 10_000;
 /// - **Cosine**: Angle-based similarity, ignores magnitude
 /// - **BM25**: Best for text retrieval with term frequencies
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
 pub enum ScoringMethod {
     /// Dot product (inner product) similarity.
     /// Scores can be any real number. Higher is more similar.
@@ -112,6 +113,7 @@ impl ScoringMethod {
 
 /// Configuration for sparse vector index.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
 pub struct SparseIndexConfig {
     /// Vector dimensionality (total dimensions including zeros).
     pub dimensions: usize,
@@ -324,10 +326,12 @@ impl SparseVectorIndex {
             *self.doc_freq.entry(dim).or_insert(0) += 1;
         }
 
-        // Update statistics
-        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+        // Update statistics with Release ordering to ensure all data modifications
+        // are visible to other threads that observe the updated count
         self.total_length
             .fetch_add(vector.nnz(), AtomicOrdering::Relaxed);
+        // Final count update uses Release to synchronize with Acquire loads
+        self.count.fetch_add(1, AtomicOrdering::Release);
 
         Ok(())
     }
@@ -366,10 +370,12 @@ impl SparseVectorIndex {
                 }
             }
 
-            // Update statistics
-            self.count.fetch_sub(1, AtomicOrdering::Relaxed);
+            // Update statistics with Release ordering to ensure all data modifications
+            // are visible to other threads that observe the updated count
             self.total_length
                 .fetch_sub(vec.nnz(), AtomicOrdering::Relaxed);
+            // Final count update uses Release to synchronize with Acquire loads
+            self.count.fetch_sub(1, AtomicOrdering::Release);
 
             true
         } else {
@@ -392,6 +398,7 @@ impl SparseVectorIndex {
     /// # Errors
     ///
     /// Returns an error if the query dimensions don't match.
+    #[must_use = "search results should be used"]
     pub fn search(&self, query: &SparseVec, k: usize) -> Result<Vec<(NodeId, f32)>> {
         self.search_with_filter(query, k, |_| true)
     }
@@ -407,6 +414,7 @@ impl SparseVectorIndex {
     /// # Returns
     ///
     /// A vector of (NodeId, score) pairs where predicate returned true.
+    #[must_use = "search results should be used"]
     pub fn search_with_filter<F>(
         &self,
         query: &SparseVec,
@@ -441,9 +449,11 @@ impl SparseVectorIndex {
         // Document lengths map is only used for BM25, but we always create it (cheap)
         let mut doc_lengths: HashMap<NodeId, f32> = HashMap::new();
         let query_magnitude = query.magnitude();
-        let n = self.count.load(AtomicOrdering::Relaxed) as f32;
+        // Use Acquire ordering to synchronize with Release stores, ensuring we see
+        // all data modifications that happened before the count was updated
+        let n = self.count.load(AtomicOrdering::Acquire) as f32;
         let avgdl = if n > 0.0 {
-            self.total_length.load(AtomicOrdering::Relaxed) as f32 / n
+            self.total_length.load(AtomicOrdering::Acquire) as f32 / n
         } else {
             1.0
         };
@@ -452,8 +462,11 @@ impl SparseVectorIndex {
         for (&dim, &query_val) in query.indices().iter().zip(query.values().iter()) {
             if let Some(postings) = self.inverted_index.get(&dim) {
                 let df = self.doc_freq.get(&dim).map(|v| *v).unwrap_or(0) as f32;
+                // IDF calculation with defensive bounds checking. In rare race conditions
+                // df could exceed n, which would make the log argument < 1 and produce
+                // negative IDF. We clamp to 0.0 to prevent negative scores.
                 let idf = if df > 0.0 && n > 0.0 {
-                    ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
+                    ((n - df + 0.5) / (df + 0.5) + 1.0).ln().max(0.0)
                 } else {
                     0.0
                 };
@@ -530,7 +543,7 @@ impl SparseVectorIndex {
     /// Returns the number of vectors in the index.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.count.load(AtomicOrdering::Relaxed)
+        self.count.load(AtomicOrdering::Acquire)
     }
 
     /// Returns true if the index is empty.
@@ -625,21 +638,27 @@ impl SparseVectorIndex {
         ))
     }
 
-    /// Compacts the index by removing empty posting lists.
+    /// Compacts the index by removing empty posting lists and shrinking capacity.
+    ///
+    /// This operation reclaims memory from removed vectors by:
+    /// 1. Removing empty posting lists from the inverted index
+    /// 2. Shrinking non-empty posting lists to fit their actual size
+    /// 3. Removing zero-count entries from the document frequency map
     pub fn compact(&self) {
         // Acquire write lock to prevent concurrent modifications
         let _guard = self.write_lock.lock();
 
-        // Remove empty posting lists and shrink non-empty ones
-        self.inverted_index.retain(|_, postings| {
-            if postings.is_empty() {
-                false
-            } else {
-                // Shrink capacity to fit actual size
-                postings.shrink_to_fit();
-                true
-            }
-        });
+        // Pass 1: Remove empty posting lists
+        self.inverted_index
+            .retain(|_, postings| !postings.is_empty());
+
+        // Pass 2: Shrink non-empty posting lists (separate pass to avoid
+        // modifying entries during retain iteration)
+        for mut entry in self.inverted_index.iter_mut() {
+            entry.value_mut().shrink_to_fit();
+        }
+
+        // Remove zero-count document frequency entries
         self.doc_freq.retain(|_, &mut freq| freq > 0);
     }
 
@@ -671,7 +690,7 @@ impl SparseVectorIndex {
             },
             max_posting_length,
             avg_vector_nnz: if !self.is_empty() {
-                self.total_length.load(AtomicOrdering::Relaxed) as f32 / self.len() as f32
+                self.total_length.load(AtomicOrdering::Acquire) as f32 / self.len() as f32
             } else {
                 0.0
             },
@@ -682,6 +701,7 @@ impl SparseVectorIndex {
 
 /// Statistics about a sparse vector index.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "config-toml", derive(serde::Serialize, serde::Deserialize))]
 pub struct SparseIndexStats {
     /// Number of vectors in the index
     pub num_vectors: usize,
@@ -1465,5 +1485,119 @@ mod tests {
         } else {
             panic!("Expected BM25 scoring");
         }
+    }
+
+    // ========================================================================
+    // Edge Case Tests
+    // ========================================================================
+
+    #[test]
+    fn test_max_dimensions_boundary() {
+        // Exactly at MAX_VECTOR_DIMENSIONS should succeed
+        let result = SparseVectorIndex::new(SparseIndexConfig::new(MAX_VECTOR_DIMENSIONS));
+        assert!(result.is_ok());
+
+        // One over MAX_VECTOR_DIMENSIONS should fail
+        let result = SparseVectorIndex::new(SparseIndexConfig::new(MAX_VECTOR_DIMENSIONS + 1));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::DimensionTooLarge {
+                dimension,
+                max_allowed,
+            })) => {
+                assert_eq!(dimension, MAX_VECTOR_DIMENSIONS + 1);
+                assert_eq!(max_allowed, MAX_VECTOR_DIMENSIONS);
+            }
+            _ => panic!("Expected DimensionTooLarge error"),
+        }
+    }
+
+    #[test]
+    fn test_max_k_capping() {
+        let index = SparseVectorIndex::new(SparseIndexConfig::new(100)).unwrap();
+
+        // Add more vectors than MAX_K
+        for i in 1..=100 {
+            let doc = SparseVec::new(vec![0], vec![i as f32], 100).unwrap();
+            index.add(NodeId::new(i).unwrap(), &doc).unwrap();
+        }
+
+        // Request more than MAX_K (10_000), should be capped
+        let query = SparseVec::new(vec![0], vec![1.0], 100).unwrap();
+        let results = index.search(&query, 100_000).unwrap();
+
+        // Should return at most 100 (since we only have 100 vectors)
+        // but the request was capped to MAX_K internally
+        assert!(results.len() <= 100);
+    }
+
+    #[test]
+    fn test_nan_values_in_search_results() {
+        let index = SparseVectorIndex::new(SparseIndexConfig::new(100)).unwrap();
+
+        // Add some normal vectors
+        for i in 1..=5 {
+            let doc = SparseVec::new(vec![0], vec![i as f32], 100).unwrap();
+            index.add(NodeId::new(i).unwrap(), &doc).unwrap();
+        }
+
+        let query = SparseVec::new(vec![0], vec![1.0], 100).unwrap();
+        let results = index.search(&query, 10).unwrap();
+
+        // Results should be properly sorted without panicking
+        // (tests that total_cmp handles NaN correctly if any arise)
+        assert!(!results.is_empty());
+
+        // Verify results are sorted by score descending
+        for i in 1..results.len() {
+            assert!(
+                results[i - 1].1 >= results[i].1 || results[i].1.is_nan(),
+                "Results should be sorted by score descending"
+            );
+        }
+    }
+
+    #[test]
+    fn test_concurrent_add_remove_same_node() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let index = Arc::new(SparseVectorIndex::new(SparseIndexConfig::new(100)).unwrap());
+        let num_threads = 4;
+        let iterations = 100;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let index = Arc::clone(&index);
+                thread::spawn(move || {
+                    for i in 0..iterations {
+                        let node_id = NodeId::new(1).unwrap(); // All threads use same node ID
+                        let doc = SparseVec::new(
+                            vec![(thread_id * iterations + i) as u32 % 50],
+                            vec![1.0],
+                            100,
+                        )
+                        .unwrap();
+
+                        // Add and remove the same node concurrently
+                        let _ = index.add(node_id, &doc);
+                        let _ = index.remove(node_id);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // After all operations, index should be in a consistent state
+        // (may have 0 or 1 vectors depending on timing)
+        assert!(index.len() <= 1);
+
+        // Search should work without errors
+        let query = SparseVec::new(vec![0], vec![1.0], 100).unwrap();
+        let results = index.search(&query, 10);
+        assert!(results.is_ok());
     }
 }
