@@ -157,11 +157,16 @@ impl GroupCommitCoordinator {
     /// The timeout is a **deadlock detection mechanism**, not a performance target.
     /// It's designed to catch stuck flush threads, not to enforce timing.
     ///
-    /// Formula: `max(max_delay_ms * 2 + 500ms, 500ms)` with cap at 30s
-    /// - 2x multiplier: Allows for one full flush cycle plus margin
-    /// - +500ms: Fixed overhead for fsync and thread scheduling
-    /// - Minimum 500ms: Handles very fast configs (e.g., 1ms) in slow CI
+    /// Formula: `max(max_delay_ms * 10 + 2000ms, 2000ms)` with cap at 30s
+    /// - 10x multiplier: Allows for multiple flush cycles with CI thread scheduling delays
+    /// - +2000ms: Fixed overhead for fsync, thread scheduling, and CI variability
+    /// - Minimum 2000ms: Handles CI environments with high system load and thread starvation
     /// - Maximum 30s: Prevents indefinite waiting on stuck threads
+    ///
+    /// The higher timeout (vs previous 500ms) accounts for:
+    /// - CI environments with unpredictable thread scheduling
+    /// - System load causing flush thread delays
+    /// - Slow disks causing long fsync times
     ///
     /// # Errors
     ///
@@ -172,11 +177,11 @@ impl GroupCommitCoordinator {
         let mut state = self.state.lock_or_err()?;
 
         // Deadlock detection timeout (NOT a performance SLA)
-        // Must be longer than max_delay_ms to allow at least one flush cycle
+        // Much longer than max_delay_ms to account for CI thread scheduling variability
         let base_timeout =
-            Duration::from_millis(self.config.max_delay_ms * 2) + Duration::from_millis(500);
+            Duration::from_millis(self.config.max_delay_ms * 10) + Duration::from_millis(2000);
         let timeout = base_timeout
-            .max(Duration::from_millis(500))
+            .max(Duration::from_millis(2000))
             .min(Duration::from_secs(30));
 
         // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
