@@ -297,6 +297,27 @@ impl IdGenerator {
     pub(crate) fn reset_to(&self, value: u64) {
         self.next_id.store(value, Ordering::SeqCst);
     }
+
+    /// Ensure the generator's next value is at least the specified minimum.
+    ///
+    /// This is used during recovery when we need to account for IDs from multiple
+    /// sources (e.g., current storage and historical storage) without overwriting
+    /// a higher value that was already set.
+    ///
+    /// # Arguments
+    ///
+    /// * `min_value` - The minimum next ID to generate
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses `Ordering::SeqCst` for both load and store to ensure consistency.
+    #[inline]
+    pub(crate) fn ensure_at_least(&self, min_value: u64) {
+        let current = self.next_id.load(Ordering::SeqCst);
+        if min_value > current {
+            self.next_id.store(min_value, Ordering::SeqCst);
+        }
+    }
 }
 
 impl Default for IdGenerator {

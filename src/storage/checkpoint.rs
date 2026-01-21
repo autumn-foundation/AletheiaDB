@@ -313,7 +313,16 @@ impl CheckpointManager {
         let current = self.load_current_storage(&manifest)?;
 
         // Load temporal index
-        let historical = self.load_historical_storage(&manifest)?;
+        let (historical, historical_max_version_id) = self.load_historical_storage(&manifest)?;
+
+        // Ensure version ID generator accounts for historical versions
+        // The current storage's generator was initialized from the count of restored entities,
+        // but historical storage may have higher version IDs that we need to account for
+        if historical_max_version_id > 0 {
+            // Get current generator's next value and update if historical has higher
+            // We need to ensure no collisions with existing version IDs
+            current.ensure_version_id_generator_at_least(historical_max_version_id + 1);
+        }
 
         // Replay WAL entries after checkpoint LSN
         let start_lsn = checkpoint_lsn.next();
@@ -448,6 +457,7 @@ impl CheckpointManager {
             let entry = NodeVersionEntry {
                 version_id: version_id.as_u64(),
                 node_id: version.node_id.as_u64(),
+                label_idx: version.label.as_u32(),
                 valid_from: valid_time.start().wallclock(),
                 valid_to: if valid_time.is_current() {
                     None
@@ -502,6 +512,7 @@ impl CheckpointManager {
                 edge_id: version.edge_id.as_u64(),
                 source_id: version.source.as_u64(),
                 target_id: version.target.as_u64(),
+                label_idx: version.label.as_u32(),
                 valid_from: valid_time.start().wallclock(),
                 valid_to: if valid_time.is_current() {
                     None
@@ -585,10 +596,17 @@ impl CheckpointManager {
     }
 
     /// Load HistoricalStorage from persisted temporal index.
-    fn load_historical_storage(&self, manifest: &IndexManifest) -> Result<HistoricalStorage> {
+    ///
+    /// Returns the loaded HistoricalStorage and the maximum version ID found,
+    /// which is needed to properly initialize the version ID generator.
+    fn load_historical_storage(
+        &self,
+        manifest: &IndexManifest,
+    ) -> Result<(HistoricalStorage, u64)> {
         use crate::storage::version::PropertyDelta;
 
         let mut historical = HistoricalStorage::new();
+        let mut max_version_id: u64 = 0;
 
         if let Some(ref temporal_entry) = manifest.temporal_index {
             let temporal_path = self
@@ -605,12 +623,9 @@ impl CheckpointManager {
                 temporal_data.edge_versions.len(),
             );
 
-            // Track max version ID for generator initialization
-            let mut _max_version_id: u64 = 0;
-
             // Restore node versions
             for entry in &temporal_data.node_versions {
-                _max_version_id = _max_version_id.max(entry.version_id);
+                max_version_id = max_version_id.max(entry.version_id);
 
                 let version_id = VersionId::new(entry.version_id)?;
                 let node_id = NodeId::new(entry.node_id)?;
@@ -636,7 +651,7 @@ impl CheckpointManager {
 
                 let properties =
                     restore_property_map(&entry.properties).map_err(persistence_err)?;
-                let label = self.find_node_label_from_anchors(&temporal_data, entry.node_id)?;
+                let label = InternedString::from_raw(entry.label_idx);
 
                 let data = match &entry.version_type {
                     crate::storage::index_persistence::formats::PersistedVersionType::Anchor => {
@@ -677,7 +692,7 @@ impl CheckpointManager {
 
             // Restore edge versions
             for entry in &temporal_data.edge_versions {
-                _max_version_id = _max_version_id.max(entry.version_id);
+                max_version_id = max_version_id.max(entry.version_id);
 
                 let version_id = VersionId::new(entry.version_id)?;
                 let edge_id = EdgeId::new(entry.edge_id)?;
@@ -705,7 +720,7 @@ impl CheckpointManager {
 
                 let properties =
                     restore_property_map(&entry.properties).map_err(persistence_err)?;
-                let label = self.find_edge_label(&temporal_data, entry.edge_id)?;
+                let label = InternedString::from_raw(entry.label_idx);
 
                 let data = match &entry.version_type {
                     crate::storage::index_persistence::formats::PersistedVersionType::Anchor => {
@@ -746,37 +761,7 @@ impl CheckpointManager {
             }
         }
 
-        Ok(historical)
-    }
-
-    /// Find node label from anchors (needed for version restoration).
-    fn find_node_label_from_anchors(
-        &self,
-        _temporal_data: &TemporalIndexData,
-        _node_id: u64,
-    ) -> Result<InternedString> {
-        // TODO: Store labels in temporal data or look up from graph data
-        // For now, use a placeholder - this should be fixed in a follow-up
-        Ok(GLOBAL_INTERNER
-            .intern("unknown")
-            .map_err(|e| StorageError::WalError {
-                reason: e.to_string(),
-            })?)
-    }
-
-    /// Find edge label (needed for version restoration).
-    fn find_edge_label(
-        &self,
-        _temporal_data: &TemporalIndexData,
-        _edge_id: u64,
-    ) -> Result<InternedString> {
-        // TODO: Store labels in temporal data
-        // For now, use a placeholder - this should be fixed in a follow-up
-        Ok(GLOBAL_INTERNER
-            .intern("unknown")
-            .map_err(|e| StorageError::WalError {
-                reason: e.to_string(),
-            })?)
+        Ok((historical, max_version_id))
     }
 
     /// Recover from WAL only (no persisted state).

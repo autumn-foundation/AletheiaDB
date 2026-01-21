@@ -1226,31 +1226,14 @@ impl GallifreyDB {
                 use crate::storage::index_persistence::temporal::{
                     load_temporal_index, restore_into_historical_storage,
                 };
-                use std::collections::HashMap;
 
                 match load_temporal_index(&temporal_path) {
                     Ok(temporal_data) => {
-                        // Build label maps from current storage (nodes/edges were just loaded)
-                        let node_labels: HashMap<u64, crate::core::InternedString> = db
-                            .current
-                            .all_nodes()
-                            .map(|node| (node.id.as_u64(), node.label))
-                            .collect();
-
-                        let edge_labels: HashMap<u64, crate::core::InternedString> = db
-                            .current
-                            .all_edges()
-                            .map(|edge| (edge.id.as_u64(), edge.label))
-                            .collect();
-
                         // Restore versions into historical storage
+                        // Labels are now stored directly in the persisted entries
                         let mut historical_guard = db.historical.write();
-                        match restore_into_historical_storage(
-                            &temporal_data,
-                            &mut historical_guard,
-                            &node_labels,
-                            &edge_labels,
-                        ) {
+                        match restore_into_historical_storage(&temporal_data, &mut historical_guard)
+                        {
                             Ok(()) => {
                                 eprintln!(
                                     "Temporal index restored: {} node versions, {} edge versions",
