@@ -6,7 +6,9 @@
 //! - Version management: Version chain structures and compression
 //! - WAL: Write-ahead log for durability and crash recovery
 //! - Persistence: Memory-mapped file storage and checkpointing
+//! - Checkpoint: Full state snapshots via index persistence
 
+pub mod checkpoint;
 pub mod current;
 pub mod historical;
 pub mod index_persistence;
@@ -17,6 +19,9 @@ pub mod wal;
 pub mod wal_reader;
 
 // Re-export commonly used types
+pub use checkpoint::{
+    CheckpointConfig as UnifiedCheckpointConfig, CheckpointManager, CheckpointStats,
+};
 pub use current::{CurrentStats, CurrentStorage, DEFAULT_MAX_VECTOR_PROPERTIES, VectorIndexInfo};
 pub use historical::{CacheMetrics, HistoricalStats, HistoricalStorage};
 pub use observer::{Observer, StorageEvent, StorageObserver};

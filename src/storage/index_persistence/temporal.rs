@@ -62,6 +62,7 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
     Ok(NodeVersionEntry {
         version_id: version.id.as_u64(),
         node_id: version.node_id.as_u64(),
+        label_idx: version.label.as_u32(),
         valid_from: valid_time.start().wallclock(),
         valid_to: if valid_time.is_current() {
             None
@@ -119,6 +120,7 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
         edge_id: version.edge_id.as_u64(),
         source_id: version.source.as_u64(),
         target_id: version.target.as_u64(),
+        label_idx: version.label.as_u32(),
         valid_from: valid_time.start().wallclock(),
         valid_to: if valid_time.is_current() {
             None
@@ -136,15 +138,12 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
 /// # Arguments
 ///
 /// * `entry` - The persisted node version entry
-/// * `label` - The node label (must be provided as it's not stored in the entry)
 ///
 /// # Errors
 ///
 /// Returns an error if property restoration fails (e.g., corrupted interned strings).
-pub fn restore_node_version(
-    entry: &NodeVersionEntry,
-    label: InternedString,
-) -> Result<NodeVersion> {
+pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
+    let label = InternedString::from_raw(entry.label_idx);
     let node_id = NodeId::new(entry.node_id).map_err(|e| {
         IndexPersistenceError::Serialization(format!("Invalid node ID {}: {}", entry.node_id, e))
     })?;
@@ -223,15 +222,12 @@ pub fn restore_node_version(
 /// # Arguments
 ///
 /// * `entry` - The persisted edge version entry
-/// * `label` - The edge label (must be provided as it's not stored in the entry)
 ///
 /// # Errors
 ///
 /// Returns an error if property restoration fails (e.g., corrupted interned strings).
-pub fn restore_edge_version(
-    entry: &EdgeVersionEntry,
-    label: InternedString,
-) -> Result<EdgeVersion> {
+pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
+    let label = InternedString::from_raw(entry.label_idx);
     let edge_id = EdgeId::new(entry.edge_id).map_err(|e| {
         IndexPersistenceError::Serialization(format!("Invalid edge ID {}: {}", entry.edge_id, e))
     })?;
@@ -323,8 +319,6 @@ pub fn restore_edge_version(
 ///
 /// * `data` - The temporal index data loaded from disk
 /// * `historical` - The HistoricalStorage to populate
-/// * `node_labels` - Map of node_id -> label for restoring node versions
-/// * `edge_labels` - Map of edge_id -> label for restoring edge versions
 ///
 /// # Errors
 ///
@@ -332,22 +326,13 @@ pub fn restore_edge_version(
 pub fn restore_into_historical_storage(
     data: &TemporalIndexData,
     historical: &mut crate::storage::historical::HistoricalStorage,
-    node_labels: &std::collections::HashMap<u64, InternedString>,
-    edge_labels: &std::collections::HashMap<u64, InternedString>,
 ) -> Result<()> {
     // Pre-allocate capacity for better performance during bulk restoration
     historical.reserve_restoration_capacity(data.node_versions.len(), data.edge_versions.len());
 
     // Restore node versions
     for entry in &data.node_versions {
-        let label = node_labels.get(&entry.node_id).ok_or_else(|| {
-            IndexPersistenceError::Serialization(format!(
-                "Missing label for node ID {}",
-                entry.node_id
-            ))
-        })?;
-
-        let version = restore_node_version(entry, *label)?;
+        let version = restore_node_version(entry)?;
         historical
             .insert_restored_node_version(version)
             .map_err(|e| {
@@ -360,14 +345,7 @@ pub fn restore_into_historical_storage(
 
     // Restore edge versions
     for entry in &data.edge_versions {
-        let label = edge_labels.get(&entry.edge_id).ok_or_else(|| {
-            IndexPersistenceError::Serialization(format!(
-                "Missing label for edge ID {}",
-                entry.edge_id
-            ))
-        })?;
-
-        let version = restore_edge_version(entry, *label)?;
+        let version = restore_edge_version(entry)?;
         historical
             .insert_restored_edge_version(version)
             .map_err(|e| {
@@ -490,13 +468,16 @@ mod tests {
 
     #[test]
     fn test_temporal_index_round_trip() {
+        use crate::core::GLOBAL_INTERNER;
         let dir = tempdir().unwrap();
         let path = dir.path().join("temporal.idx");
 
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
         let mut data = new_temporal_index_data();
         data.node_versions.push(NodeVersionEntry {
             version_id: 100,
             node_id: 1,
+            label_idx: label.as_u32(),
             valid_from: 1000,
             valid_to: Some(2000),
             tx_time: 1000,
@@ -664,9 +645,11 @@ mod tests {
             .entries
             .push((age_key.as_u32(), PersistedPropertyValue::Int(30)));
 
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
         let entry = NodeVersionEntry {
             version_id: 100,
             node_id: 1,
+            label_idx: label.as_u32(),
             valid_from: 1000,
             valid_to: Some(2000),
             tx_time: 1000,
@@ -675,8 +658,7 @@ mod tests {
             vector_snapshot_id: Some(42),
         };
 
-        let label = GLOBAL_INTERNER.intern("Person").unwrap();
-        let version = restore_node_version(&entry, label).unwrap();
+        let version = restore_node_version(&entry).unwrap();
 
         assert_eq!(version.id.as_u64(), 100);
         assert_eq!(version.node_id.as_u64(), 1);
@@ -712,9 +694,11 @@ mod tests {
             .entries
             .push((age_key.as_u32(), PersistedPropertyValue::Int(31)));
 
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
         let entry = NodeVersionEntry {
             version_id: 101,
             node_id: 1,
+            label_idx: label.as_u32(),
             valid_from: 2000,
             valid_to: Some(3000),
             tx_time: 2000,
@@ -726,8 +710,7 @@ mod tests {
             vector_snapshot_id: None,
         };
 
-        let label = GLOBAL_INTERNER.intern("Person").unwrap();
-        let version = restore_node_version(&entry, label).unwrap();
+        let version = restore_node_version(&entry).unwrap();
 
         assert_eq!(version.node_id.as_u64(), 1);
         assert!(version.data.is_delta());
@@ -753,11 +736,13 @@ mod tests {
             .entries
             .push((weight_key.as_u32(), PersistedPropertyValue::Float(1.5)));
 
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
         let entry = EdgeVersionEntry {
             version_id: 200,
             edge_id: 10,
             source_id: 1,
             target_id: 2,
+            label_idx: label.as_u32(),
             valid_from: 1000,
             valid_to: Some(2000),
             tx_time: 1000,
@@ -765,8 +750,7 @@ mod tests {
             properties,
         };
 
-        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        let version = restore_edge_version(&entry, label).unwrap();
+        let version = restore_edge_version(&entry).unwrap();
 
         assert_eq!(version.id.as_u64(), 200);
         assert_eq!(version.edge_id.as_u64(), 10);
@@ -810,6 +794,7 @@ mod tests {
         let entry = NodeVersionEntry {
             version_id: 100,
             node_id: 1,
+            label_idx: person_label.as_u32(),
             valid_from: 1000,
             valid_to: Some(2000),
             tx_time: 1000,
@@ -818,25 +803,13 @@ mod tests {
             vector_snapshot_id: Some(42),
         };
 
-        // Create temporal data with node labels
+        // Create temporal data (labels are now stored in entries)
         let mut temporal_data = new_temporal_index_data();
         temporal_data.node_versions.push(entry);
 
-        // Create a map of node_id -> label
-        let mut node_labels = std::collections::HashMap::new();
-        node_labels.insert(1, person_label);
-
-        let edge_labels = std::collections::HashMap::new();
-
         // Restore into HistoricalStorage
         let mut historical = HistoricalStorage::new();
-        restore_into_historical_storage(
-            &temporal_data,
-            &mut historical,
-            &node_labels,
-            &edge_labels,
-        )
-        .unwrap();
+        restore_into_historical_storage(&temporal_data, &mut historical).unwrap();
 
         // Verify the version was restored
         let versions = historical.get_node_versions();

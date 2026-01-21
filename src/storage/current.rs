@@ -319,8 +319,23 @@ impl CurrentStorage {
     /// # Arguments
     ///
     /// * `start` - The next ID to generate (typically max_id + 1)
+    #[inline]
     pub(crate) fn init_version_id_generator(&self, start: u64) {
         self.version_id_gen.reset_to(start);
+    }
+
+    /// Ensure the version ID generator's next value is at least the specified minimum.
+    ///
+    /// This is used during recovery when we need to account for version IDs from multiple
+    /// sources (e.g., current storage and historical storage) without overwriting
+    /// a higher value that was already set.
+    ///
+    /// # Arguments
+    ///
+    /// * `min_value` - The minimum next version ID to generate
+    #[inline]
+    pub(crate) fn ensure_version_id_generator_at_least(&self, min_value: u64) {
+        self.version_id_gen.ensure_at_least(min_value);
     }
 
     /// Enable vector indexing for a specific property.

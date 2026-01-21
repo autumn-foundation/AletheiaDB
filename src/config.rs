@@ -38,7 +38,9 @@
 
 #[cfg(feature = "config-toml")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "config-toml")]
 use std::fs;
+#[cfg(feature = "config-toml")]
 use std::path::Path;
 
 use crate::storage::index_persistence::PersistenceConfig;

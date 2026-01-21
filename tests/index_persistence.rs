@@ -2016,8 +2016,8 @@ fn test_temporal_version_round_trip() {
     );
 
     // Restore versions
-    let restored_node = restore_node_version(&loaded_data.node_versions[0], person_label).unwrap();
-    let restored_edge = restore_edge_version(&loaded_data.edge_versions[0], knows_label).unwrap();
+    let restored_node = restore_node_version(&loaded_data.node_versions[0]).unwrap();
+    let restored_edge = restore_edge_version(&loaded_data.edge_versions[0]).unwrap();
 
     // ========================================================================
     // Phase 4: Verify
@@ -2338,7 +2338,7 @@ fn test_delta_removed_properties_persistence() {
 
     // Restore
     let loaded_data = load_temporal_index(&temporal_path).unwrap();
-    let restored_delta = restore_node_version(&loaded_data.node_versions[0], person_label).unwrap();
+    let restored_delta = restore_node_version(&loaded_data.node_versions[0]).unwrap();
 
     println!("✓ Restored delta version");
 
@@ -2397,7 +2397,6 @@ fn test_version_chain_reconstruction() {
     use gallifreydb::storage::index_persistence::temporal::{
         new_temporal_index_data, restore_into_historical_storage,
     };
-    use std::collections::HashMap;
 
     // Create multiple versions for the same node with different tx_times
     // Version 1: tx_time = 1000 (oldest)
@@ -2413,6 +2412,7 @@ fn test_version_chain_reconstruction() {
         NodeVersionEntry {
             version_id: 200,
             node_id,
+            label_idx: label.as_u32(),
             valid_from: 0,
             valid_to: None,
             tx_time: 2000,
@@ -2427,6 +2427,7 @@ fn test_version_chain_reconstruction() {
         NodeVersionEntry {
             version_id: 300,
             node_id,
+            label_idx: label.as_u32(),
             valid_from: 0,
             valid_to: None,
             tx_time: 3000,
@@ -2441,6 +2442,7 @@ fn test_version_chain_reconstruction() {
         NodeVersionEntry {
             version_id: 100,
             node_id,
+            label_idx: label.as_u32(),
             valid_from: 0,
             valid_to: None,
             tx_time: 1000,
@@ -2454,14 +2456,9 @@ fn test_version_chain_reconstruction() {
     let mut temporal_data = new_temporal_index_data();
     temporal_data.node_versions = node_versions;
 
-    // Create label maps
-    let mut node_labels = HashMap::new();
-    node_labels.insert(node_id, label);
-    let edge_labels: HashMap<u64, _> = HashMap::new();
-
-    // Restore into HistoricalStorage
+    // Restore into HistoricalStorage (labels are now stored in the entries)
     let mut historical = HistoricalStorage::new();
-    restore_into_historical_storage(&temporal_data, &mut historical, &node_labels, &edge_labels)
+    restore_into_historical_storage(&temporal_data, &mut historical)
         .expect("Restoration should succeed");
 
     // Now verify the version chains are correctly reconstructed using public APIs

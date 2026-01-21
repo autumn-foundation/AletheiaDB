@@ -245,6 +245,8 @@ pub struct NodeVersionEntry {
     pub version_id: u64,
     /// Node ID
     pub node_id: u64,
+    /// Label index in string interner
+    pub label_idx: u32,
     /// Valid time start (unix timestamp)
     pub valid_from: i64,
     /// Valid time end (None = still valid)
@@ -297,6 +299,8 @@ pub struct EdgeVersionEntry {
     pub source_id: u64,
     /// Target node ID
     pub target_id: u64,
+    /// Label index in string interner
+    pub label_idx: u32,
     /// Valid time start
     pub valid_from: i64,
     /// Valid time end

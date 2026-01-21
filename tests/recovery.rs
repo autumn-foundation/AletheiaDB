@@ -52,6 +52,12 @@
 //!   - Recovery time benchmarks (target: <10 seconds)
 //!   - Throughput measurements
 //!
+//! - **`checkpoint_recovery_tests`** - CheckpointManager with index persistence
+//!   - Full state persistence (graph + temporal indexes)
+//!   - Recovery from persisted state + WAL replay
+//!   - LSN consistency across checkpoint and recovery
+//!   - ID generator initialization from persisted state
+//!
 //! ## Running Tests
 //!
 //! ```bash
@@ -106,3 +112,6 @@ mod crash_scenarios;
 
 #[path = "recovery/large_dataset_recovery.rs"]
 mod large_dataset_recovery;
+
+#[path = "recovery/checkpoint_recovery_tests.rs"]
+mod checkpoint_recovery_tests;
