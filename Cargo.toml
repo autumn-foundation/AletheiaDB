@@ -40,6 +40,10 @@ libhoney-rust = { version = "0.1", optional = true }
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.17", optional = true }
 
+# MCP server support (optional)
+# Note: rmcp re-exports schemars, so we don't need a separate dependency
+rmcp = { version = "0.13", features = ["server", "transport-io"], optional = true }
+
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
@@ -98,6 +102,9 @@ embedding-all = [
     "embedding-onnx",
     "embedding-ollama"
 ]
+
+# MCP server support
+mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json"]
 
 [profile.dev]
 # Fast compilation for development
@@ -232,6 +239,12 @@ name = "hybrid_query"
 harness = false
 path = "benches/hybrid_query.rs"
 required-features = []
+
+# MCP server binary
+[[bin]]
+name = "gallifrey-mcp"
+path = "src/bin/mcp_server.rs"
+required-features = ["mcp-server"]
 
 # Patch libhoney-rust to use git version with updated dependencies
 # This overrides the crates.io version for ALL dependencies (including tracing-honeycomb)
