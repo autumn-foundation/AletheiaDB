@@ -265,6 +265,56 @@ impl PropertyValue {
         }
     }
 
+    /// Get the underlying Arc for a vector (dense embedding) without copying.
+    ///
+    /// Returns `Some(Arc<[f32]>)` if this is a `Vector` variant, `None` otherwise.
+    /// This is more efficient than `as_vector().map(|s| s.to_vec())` because it
+    /// clones the Arc (O(1) reference count increment) rather than copying the
+    /// entire vector data.
+    ///
+    /// # Use Case
+    ///
+    /// Use this method when you need an owned reference to the vector data that
+    /// can outlive the PropertyValue, without incurring the cost of copying.
+    /// This is particularly useful for:
+    /// - Passing vectors to functions that need ownership
+    /// - Storing vector references across async boundaries
+    /// - Avoiding allocations in performance-critical paths (Issue #188)
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::PropertyValue;
+    /// use std::sync::Arc;
+    ///
+    /// let embedding = vec![0.1f32, 0.2, 0.3];
+    /// let prop = PropertyValue::vector(&embedding);
+    ///
+    /// // Get an Arc to the data without copying
+    /// if let Some(arc) = prop.as_arc_vector() {
+    ///     assert_eq!(arc.len(), 3);
+    ///     // The Arc can outlive `prop` and be passed around cheaply
+    /// }
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// - O(1) operation (just increments Arc reference count)
+    /// - No memory allocation or data copying
+    /// - Safe to call multiple times (returns same underlying data)
+    ///
+    /// # See Also
+    ///
+    /// - [`as_vector`](Self::as_vector) for borrowing the vector as a slice
+    /// - [`vector`](Self::vector) for creating vector properties
+    #[inline]
+    pub fn as_arc_vector(&self) -> Option<Arc<[f32]>> {
+        match self {
+            PropertyValue::Vector(v) => Some(Arc::clone(v)),
+            _ => None,
+        }
+    }
+
     /// Create a sparse vector property value from a SparseVec.
     ///
     /// Sparse vectors store only non-zero values along with their indices,
@@ -2454,5 +2504,73 @@ mod tests {
         assert!(prop.as_str().is_none());
         assert!(prop.as_vector().is_none()); // Should not match dense vector
         assert!(prop.as_array().is_none());
+    }
+
+    // ========== Issue #188: Zero-copy vector access tests ==========
+
+    #[test]
+    fn test_as_arc_vector_returns_arc() {
+        // Test that as_arc_vector returns a cloned Arc without copying the data
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 * 0.001).collect();
+        let prop = PropertyValue::vector(&embedding);
+
+        // Get the Arc via as_arc_vector
+        let arc = prop.as_arc_vector().expect("Should return Some for Vector");
+
+        // The Arc should point to the same data
+        assert_eq!(&*arc, &embedding[..]);
+        assert_eq!(arc.len(), 384);
+    }
+
+    #[test]
+    fn test_as_arc_vector_shares_data_with_original() {
+        // Verify that as_arc_vector returns the same underlying Arc (not a copy)
+        let embedding: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let prop = PropertyValue::vector(&embedding);
+
+        // Get two Arcs - they should point to the same data
+        let arc1 = prop.as_arc_vector().unwrap();
+        let arc2 = prop.as_arc_vector().unwrap();
+
+        // Both Arcs should point to the same allocation (same pointer)
+        assert!(
+            Arc::ptr_eq(&arc1, &arc2),
+            "Multiple calls to as_arc_vector should return Arcs to the same data"
+        );
+    }
+
+    #[test]
+    fn test_as_arc_vector_returns_none_for_non_vector() {
+        // as_arc_vector should return None for non-vector types
+        assert!(PropertyValue::Null.as_arc_vector().is_none());
+        assert!(PropertyValue::Bool(true).as_arc_vector().is_none());
+        assert!(PropertyValue::Int(42).as_arc_vector().is_none());
+        assert!(PropertyValue::Float(2.5).as_arc_vector().is_none());
+        assert!(PropertyValue::string("test").as_arc_vector().is_none());
+        assert!(PropertyValue::bytes([1, 2, 3]).as_arc_vector().is_none());
+        assert!(PropertyValue::array(vec![]).as_arc_vector().is_none());
+    }
+
+    #[test]
+    fn test_as_arc_vector_does_not_copy_data() {
+        // Create a large vector to ensure we'd notice if data was copied
+        let large_embedding: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        let prop = PropertyValue::vector(&large_embedding);
+
+        // Get the internal Arc pointer before as_arc_vector
+        let internal_arc = if let PropertyValue::Vector(arc) = &prop {
+            arc.clone()
+        } else {
+            panic!("Expected Vector variant");
+        };
+
+        // Get Arc via as_arc_vector
+        let returned_arc = prop.as_arc_vector().unwrap();
+
+        // They should point to the exact same allocation
+        assert!(
+            Arc::ptr_eq(&internal_arc, &returned_arc),
+            "as_arc_vector should return the same Arc, not copy the data"
+        );
     }
 }
