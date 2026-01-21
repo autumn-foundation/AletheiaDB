@@ -432,11 +432,14 @@ impl SparseVectorIndex {
         }
 
         // Accumulate scores for each candidate
-        // For cosine similarity, we also track magnitudes to avoid a second lookup
+        // For cosine similarity, we track magnitudes to avoid second lookups
+        // For BM25, we track document lengths to avoid second lookups
         let is_cosine = matches!(self.config.scoring, ScoringMethod::Cosine);
         let mut scores: HashMap<NodeId, f32> = HashMap::new();
         // Magnitudes map is only used for cosine, but we always create it (cheap)
         let mut magnitudes: HashMap<NodeId, f32> = HashMap::new();
+        // Document lengths map is only used for BM25, but we always create it (cheap)
+        let mut doc_lengths: HashMap<NodeId, f32> = HashMap::new();
         let query_magnitude = query.magnitude();
         let n = self.count.load(AtomicOrdering::Relaxed) as f32;
         let avgdl = if n > 0.0 {
@@ -473,12 +476,13 @@ impl SparseVectorIndex {
                             query_val * posting.value
                         }
                         ScoringMethod::BM25 { k1, b } => {
-                            // Get document length
-                            let dl = self
-                                .vectors
-                                .get(&posting.node_id)
-                                .map(|v| v.vector.nnz() as f32)
-                                .unwrap_or(1.0);
+                            // Cache document length on first encounter to avoid repeated lookups
+                            let dl = *doc_lengths.entry(posting.node_id).or_insert_with(|| {
+                                self.vectors
+                                    .get(&posting.node_id)
+                                    .map(|v| v.vector.nnz() as f32)
+                                    .unwrap_or(1.0)
+                            });
 
                             // BM25 term score
                             let tf = posting.value;
@@ -566,6 +570,13 @@ impl SparseVectorIndex {
     }
 
     /// Returns approximate memory usage in bytes.
+    ///
+    /// This is an estimate based on:
+    /// - ~16 bytes per posting in the inverted index
+    /// - ~48 bytes overhead per stored vector plus 8 bytes per non-zero element
+    ///
+    /// Note: This does not account for DashMap internal overhead, Arc allocations,
+    /// or memory fragmentation. Actual memory usage may be 20-50% higher.
     #[must_use]
     pub fn memory_usage(&self) -> usize {
         // Estimate: each posting is ~16 bytes, each stored vector is ~48 bytes + nnz*8
@@ -765,7 +776,8 @@ pub fn hybrid_fusion(
 
     // Sort by combined score and take top k
     let mut results: Vec<(NodeId, f32)> = combined.into_iter().collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    // Use total_cmp for consistent ordering that handles NaN
+    results.sort_by(|a, b| b.1.total_cmp(&a.1));
     results.truncate(k);
 
     results
@@ -827,7 +839,8 @@ pub fn reciprocal_rank_fusion(
 
     // Sort by RRF score and take top k
     let mut results: Vec<(NodeId, f32)> = rrf_scores.into_iter().collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    // Use total_cmp for consistent ordering that handles NaN
+    results.sort_by(|a, b| b.1.total_cmp(&a.1));
     results.truncate(k);
 
     results
