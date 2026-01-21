@@ -156,6 +156,10 @@ fn test_checkpoint_recovery_preserves_edges() -> Result<()> {
     // Track the edge ID we create
     let edge_id: EdgeId;
 
+    // Create WAL first so we have a valid LSN for the checkpoint
+    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
     // Create checkpoint with nodes and edges
     {
         let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
@@ -182,13 +186,11 @@ fn test_checkpoint_recovery_preserves_edges() -> Result<()> {
         )?;
 
         let historical = HistoricalStorage::new();
-        manager.create_checkpoint(LSN(10), &current, &historical)?;
+        // Use LSN(0) which is valid for an empty WAL
+        manager.create_checkpoint(LSN(0), &current, &historical)?;
     }
 
-    // When: Recover
-    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
-    let wal = ConcurrentWalSystem::new(wal_config)?;
-
+    // When: Recover using the same WAL
     let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
     let mut manager = CheckpointManager::new(config)?;
     let (recovered_current, _recovered_historical, _final_lsn) = manager.recover(&wal)?;
@@ -212,6 +214,10 @@ fn test_checkpoint_recovery_id_generators_initialized() -> Result<()> {
     let wal_dir = temp_dir.path().join("wal");
     let data_dir = temp_dir.path().join("data");
 
+    // Create WAL first so we have a valid LSN for the checkpoint
+    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config)?;
+
     // Create nodes and checkpoint
     {
         let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
@@ -231,16 +237,14 @@ fn test_checkpoint_recovery_id_generators_initialized() -> Result<()> {
         assert_eq!(current.node_count(), 5);
 
         let historical = HistoricalStorage::new();
-        let stats = manager.create_checkpoint(LSN(5), &current, &historical)?;
+        // Use LSN(0) which is valid for an empty WAL
+        let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
 
         // Verify checkpoint captured the nodes
         assert_eq!(stats.node_count, 5);
     }
 
-    // When: Recover and create new node
-    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
-    let wal = ConcurrentWalSystem::new(wal_config)?;
-
+    // When: Recover and create new node using the same WAL
     let config = UnifiedCheckpointConfig::with_data_dir(&data_dir);
     let mut manager = CheckpointManager::new(config)?;
 

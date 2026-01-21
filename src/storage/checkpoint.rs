@@ -128,8 +128,21 @@ impl CheckpointManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the data directory cannot be created.
+    /// Returns an error if:
+    /// - The data directory cannot be created
+    /// - The compression level is invalid (must be 1-22 for zstd)
     pub fn new(config: CheckpointConfig) -> Result<Self> {
+        // Validate compression level (zstd supports 1-22)
+        if config.enable_compression && !(1..=22).contains(&config.compression_level) {
+            return Err(StorageError::CheckpointError {
+                reason: format!(
+                    "Invalid compression level {}: must be 1-22 for zstd",
+                    config.compression_level
+                ),
+            }
+            .into());
+        }
+
         let persistence_manager = IndexPersistenceManager::new(&config.data_dir);
         persistence_manager
             .ensure_directories()
@@ -309,6 +322,20 @@ impl CheckpointManager {
             .map_err(persistence_err)?;
         let checkpoint_lsn = LSN(manifest.lsn);
 
+        // Validate checkpoint LSN is consistent with WAL
+        // The checkpoint LSN should not exceed the WAL's current LSN
+        let wal_current_lsn = wal.current_lsn();
+        if checkpoint_lsn.0 > wal_current_lsn.0 {
+            return Err(StorageError::CheckpointError {
+                reason: format!(
+                    "Checkpoint LSN {} is ahead of WAL current LSN {}, \
+                     checkpoint may be from a different WAL or corrupted",
+                    checkpoint_lsn.0, wal_current_lsn.0
+                ),
+            }
+            .into());
+        }
+
         // Load graph index
         let current = self.load_current_storage(&manifest)?;
 
@@ -319,9 +346,20 @@ impl CheckpointManager {
         // The current storage's generator was initialized from the count of restored entities,
         // but historical storage may have higher version IDs that we need to account for
         if historical_max_version_id > 0 {
-            // Get current generator's next value and update if historical has higher
-            // We need to ensure no collisions with existing version IDs
-            current.ensure_version_id_generator_at_least(historical_max_version_id + 1);
+            use crate::core::id::MAX_VALID_ID;
+
+            // Use saturating_add to prevent overflow, then validate against MAX_VALID_ID
+            let next_version_id = historical_max_version_id.saturating_add(1);
+            if next_version_id > MAX_VALID_ID {
+                return Err(StorageError::CheckpointError {
+                    reason: format!(
+                        "Historical max version ID {} would overflow MAX_VALID_ID on recovery",
+                        historical_max_version_id
+                    ),
+                }
+                .into());
+            }
+            current.ensure_version_id_generator_at_least(next_version_id);
         }
 
         // Replay WAL entries after checkpoint LSN
@@ -1166,6 +1204,10 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let data_dir = temp_dir.path().join("data");
 
+        // Create WAL first so we have a valid LSN for the checkpoint
+        let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
         // Phase 1: Create checkpoint with data
         {
             let config = CheckpointConfig::with_data_dir(&data_dir);
@@ -1191,17 +1233,14 @@ mod tests {
             }
 
             let historical = HistoricalStorage::new();
-            manager.create_checkpoint(LSN(25), &current, &historical)?;
+            // Use LSN(0) which is valid for an empty WAL
+            manager.create_checkpoint(LSN(0), &current, &historical)?;
         }
 
-        // Phase 2: Recover from checkpoint
+        // Phase 2: Recover from checkpoint using the same WAL
         {
             let config = CheckpointConfig::with_data_dir(&data_dir);
             let mut manager = CheckpointManager::new(config)?;
-
-            // Create empty WAL (no entries after checkpoint)
-            let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
-            let wal = ConcurrentWalSystem::new(wal_config)?;
 
             let (recovered_current, _recovered_historical, lsn) = manager.recover(&wal)?;
 

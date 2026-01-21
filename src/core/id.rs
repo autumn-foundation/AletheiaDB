@@ -304,18 +304,33 @@ impl IdGenerator {
     /// sources (e.g., current storage and historical storage) without overwriting
     /// a higher value that was already set.
     ///
+    /// # Thread Safety
+    ///
+    /// This method uses compare-and-swap (CAS) in a loop to atomically ensure
+    /// the value is at least `min_value`, avoiding check-then-act race conditions
+    /// that could occur with separate load/store operations.
+    ///
     /// # Arguments
     ///
     /// * `min_value` - The minimum next ID to generate
     ///
     /// # Memory Ordering
     ///
-    /// Uses `Ordering::SeqCst` for both load and store to ensure consistency.
+    /// Uses `Ordering::SeqCst` for compare_exchange to ensure all threads observe
+    /// a globally consistent order of operations.
     #[inline]
     pub(crate) fn ensure_at_least(&self, min_value: u64) {
-        let current = self.next_id.load(Ordering::SeqCst);
-        if min_value > current {
-            self.next_id.store(min_value, Ordering::SeqCst);
+        let mut current = self.next_id.load(Ordering::SeqCst);
+        while min_value > current {
+            match self.next_id.compare_exchange(
+                current,
+                min_value,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,                  // Successfully updated
+                Err(actual) => current = actual, // Retry with actual current value
+            }
         }
     }
 }

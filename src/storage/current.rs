@@ -319,6 +319,7 @@ impl CurrentStorage {
     /// # Arguments
     ///
     /// * `start` - The next ID to generate (typically max_id + 1)
+    #[inline]
     pub(crate) fn init_version_id_generator(&self, start: u64) {
         self.version_id_gen.reset_to(start);
     }
@@ -332,6 +333,7 @@ impl CurrentStorage {
     /// # Arguments
     ///
     /// * `min_value` - The minimum next version ID to generate
+    #[inline]
     pub(crate) fn ensure_version_id_generator_at_least(&self, min_value: u64) {
         self.version_id_gen.ensure_at_least(min_value);
     }
