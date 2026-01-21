@@ -64,10 +64,14 @@ use crate::core::id::NodeId;
 use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use crate::core::vector::SparseVec;
 use crate::utils::{Error, Result, error::VectorError};
+use bitcode::{Decode, Encode};
+use crc32fast::Hasher;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -76,6 +80,12 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 ///
 /// This prevents DoS attacks via excessive memory allocation.
 const MAX_K: usize = 10_000;
+
+/// Magic bytes for sparse index files: "GSPS"
+const SPARSE_INDEX_MAGIC: [u8; 4] = [0x47, 0x53, 0x50, 0x53];
+
+/// Current format version for sparse index persistence
+const SPARSE_INDEX_VERSION: u16 = 1;
 
 /// Scoring method for sparse vector similarity.
 ///
@@ -614,28 +624,241 @@ impl SparseVectorIndex {
 
     /// Saves the index to a file.
     ///
+    /// The file format is:
+    /// - 4 bytes: Magic bytes "GSPS"
+    /// - 2 bytes: Format version (little-endian u16)
+    /// - N bytes: Bitcode-encoded index data
+    /// - 4 bytes: CRC32 checksum of all preceding bytes
+    ///
     /// # Errors
     ///
     /// Returns an error if serialization or I/O fails.
-    pub fn save(&self, _path: &Path) -> Result<()> {
-        // TODO: Implement serialization
-        Err(Error::not_implemented(
-            "SparseVectorIndex::save",
-            "Sparse index persistence not yet implemented",
-        ))
+    pub fn save(&self, path: &Path) -> Result<()> {
+        // Acquire read lock to ensure consistent snapshot
+        let _guard = self.write_lock.lock();
+
+        // Collect all vectors
+        let mut vectors = Vec::with_capacity(self.len());
+        for entry in self.vectors.iter() {
+            let node_id = entry.key();
+            let stored = entry.value();
+            vectors.push(PersistedSparseVector {
+                node_id: node_id.as_u64(),
+                indices: stored.vector.indices().to_vec(),
+                values: stored.vector.values().to_vec(),
+            });
+        }
+
+        // Collect document frequencies
+        let doc_freq: Vec<(u32, u64)> = self
+            .doc_freq
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value() as u64))
+            .collect();
+
+        // Build the data structure
+        let data = SparseIndexData {
+            dimensions: self.config.dimensions as u32,
+            scoring: self.config.scoring.into(),
+            count: self.count.load(AtomicOrdering::Acquire) as u64,
+            total_length: self.total_length.load(AtomicOrdering::Acquire) as u64,
+            vectors,
+            doc_freq,
+        };
+
+        // Encode with bitcode
+        let encoded = bitcode::encode(&data);
+
+        // Build file: magic + version + data
+        let mut file_data = Vec::with_capacity(4 + 2 + encoded.len() + 4);
+        file_data.extend_from_slice(&SPARSE_INDEX_MAGIC);
+        file_data.extend_from_slice(&SPARSE_INDEX_VERSION.to_le_bytes());
+        file_data.extend_from_slice(&encoded);
+
+        // Compute CRC32 checksum
+        let mut hasher = Hasher::new();
+        hasher.update(&file_data);
+        let crc = hasher.finalize();
+        file_data.extend_from_slice(&crc.to_le_bytes());
+
+        // Atomic write: write to temp file then rename
+        let temp_path = path.with_extension("tmp");
+        let mut file = fs::File::create(&temp_path).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to create temp file: {}",
+                e
+            )))
+        })?;
+        file.write_all(&file_data).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to write sparse index: {}",
+                e
+            )))
+        })?;
+        file.sync_all().map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to sync sparse index: {}",
+                e
+            )))
+        })?;
+        drop(file);
+
+        // Atomic rename
+        fs::rename(&temp_path, path).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to rename temp file: {}",
+                e
+            )))
+        })?;
+
+        Ok(())
     }
 
     /// Loads an index from a file.
     ///
+    /// The config parameter is used for validation - the loaded index's
+    /// dimensions must match the config's dimensions.
+    ///
     /// # Errors
     ///
-    /// Returns an error if deserialization or I/O fails.
-    pub fn load(_path: &Path, _config: SparseIndexConfig) -> Result<Self> {
-        // TODO: Implement deserialization
-        Err(Error::not_implemented(
-            "SparseVectorIndex::load",
-            "Sparse index persistence not yet implemented",
-        ))
+    /// Returns an error if:
+    /// - The file cannot be read
+    /// - The magic bytes are invalid
+    /// - The version is unsupported
+    /// - The CRC32 checksum doesn't match
+    /// - The dimensions don't match the config
+    pub fn load(path: &Path, config: SparseIndexConfig) -> Result<Self> {
+        let file_data = fs::read(path).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to read sparse index file: {}",
+                e
+            )))
+        })?;
+
+        // Minimum size: magic(4) + version(2) + crc(4) = 10 bytes
+        if file_data.len() < 10 {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Sparse index file too small to be valid".to_string(),
+            )));
+        }
+
+        // Verify magic bytes
+        let magic: [u8; 4] = file_data[0..4].try_into().map_err(|_| {
+            Error::Vector(VectorError::IndexError(
+                "Failed to read magic bytes".to_string(),
+            ))
+        })?;
+        if magic != SPARSE_INDEX_MAGIC {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Invalid magic bytes: expected {:?}, got {:?}",
+                SPARSE_INDEX_MAGIC, magic
+            ))));
+        }
+
+        // Check version
+        let version = u16::from_le_bytes(file_data[4..6].try_into().map_err(|_| {
+            Error::Vector(VectorError::IndexError(
+                "Failed to read version".to_string(),
+            ))
+        })?);
+        if version > SPARSE_INDEX_VERSION {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Unsupported sparse index version: {} (max supported: {})",
+                version, SPARSE_INDEX_VERSION
+            ))));
+        }
+
+        // Verify CRC32 checksum
+        let crc_offset = file_data.len() - 4;
+        let stored_crc = u32::from_le_bytes(file_data[crc_offset..].try_into().map_err(|_| {
+            Error::Vector(VectorError::IndexError("Failed to read CRC32".to_string()))
+        })?);
+
+        let mut hasher = Hasher::new();
+        hasher.update(&file_data[..crc_offset]);
+        let computed_crc = hasher.finalize();
+
+        if stored_crc != computed_crc {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "CRC32 mismatch: stored={:#x}, computed={:#x}",
+                stored_crc, computed_crc
+            ))));
+        }
+
+        // Decode bitcode data (between version and CRC)
+        let encoded_data = &file_data[6..crc_offset];
+        let data: SparseIndexData = bitcode::decode(encoded_data).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to decode sparse index: {}",
+                e
+            )))
+        })?;
+
+        // Validate dimensions match config
+        if data.dimensions as usize != config.dimensions {
+            return Err(Error::Vector(VectorError::DimensionMismatch {
+                expected: config.dimensions,
+                actual: data.dimensions as usize,
+            }));
+        }
+
+        // Create the index with the loaded config
+        let loaded_config = SparseIndexConfig {
+            dimensions: data.dimensions as usize,
+            scoring: data.scoring.into(),
+            initial_capacity: data.count as usize,
+        };
+
+        let index = SparseVectorIndex {
+            config: loaded_config,
+            inverted_index: DashMap::with_capacity(data.count as usize),
+            vectors: DashMap::with_capacity(data.count as usize),
+            count: AtomicUsize::new(data.count as usize),
+            total_length: AtomicUsize::new(data.total_length as usize),
+            doc_freq: DashMap::with_capacity(data.doc_freq.len()),
+            write_lock: Mutex::new(()),
+        };
+
+        // Restore document frequencies
+        for (dim, freq) in data.doc_freq {
+            index.doc_freq.insert(dim, freq as usize);
+        }
+
+        // Restore vectors and rebuild inverted index
+        for persisted in data.vectors {
+            let node_id = NodeId::new(persisted.node_id).map_err(|_| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Invalid node ID: {}",
+                    persisted.node_id
+                )))
+            })?;
+
+            let vector = SparseVec::new(persisted.indices, persisted.values, data.dimensions)?;
+
+            let magnitude = vector.magnitude();
+            let stored = StoredVector {
+                vector: Arc::new(vector),
+                magnitude,
+            };
+
+            // Add to forward index
+            index.vectors.insert(node_id, stored.clone());
+
+            // Rebuild inverted index
+            for (&dim, &val) in stored
+                .vector
+                .indices()
+                .iter()
+                .zip(stored.vector.values().iter())
+            {
+                index.inverted_index.entry(dim).or_default().push(Posting {
+                    node_id,
+                    value: val,
+                });
+            }
+        }
+
+        Ok(index)
     }
 
     /// Compacts the index by removing empty posting lists and shrinking capacity.
@@ -719,6 +942,71 @@ pub struct SparseIndexStats {
     pub avg_vector_nnz: f32,
     /// Approximate memory usage in bytes
     pub memory_usage: usize,
+}
+
+// ============================================================================
+// Persistence Data Structures
+// ============================================================================
+
+/// Persisted scoring method (bitcode-serializable version).
+#[derive(Debug, Clone, Encode, Decode)]
+enum PersistedScoringMethod {
+    DotProduct,
+    Cosine,
+    BM25 { k1: f32, b: f32 },
+}
+
+impl From<ScoringMethod> for PersistedScoringMethod {
+    fn from(method: ScoringMethod) -> Self {
+        match method {
+            ScoringMethod::DotProduct => PersistedScoringMethod::DotProduct,
+            ScoringMethod::Cosine => PersistedScoringMethod::Cosine,
+            ScoringMethod::BM25 { k1, b } => PersistedScoringMethod::BM25 { k1, b },
+        }
+    }
+}
+
+impl From<PersistedScoringMethod> for ScoringMethod {
+    fn from(method: PersistedScoringMethod) -> Self {
+        match method {
+            PersistedScoringMethod::DotProduct => ScoringMethod::DotProduct,
+            PersistedScoringMethod::Cosine => ScoringMethod::Cosine,
+            PersistedScoringMethod::BM25 { k1, b } => ScoringMethod::BM25 { k1, b },
+        }
+    }
+}
+
+/// Persisted sparse vector data.
+#[derive(Debug, Clone, Encode, Decode)]
+struct PersistedSparseVector {
+    /// Node ID as u64
+    node_id: u64,
+    /// Sparse vector indices
+    indices: Vec<u32>,
+    /// Sparse vector values
+    values: Vec<f32>,
+}
+
+/// Root data structure for sparse index persistence.
+///
+/// File format: [magic:4][version:2][bitcode_data:N][crc32:4]
+#[derive(Debug, Clone, Encode, Decode)]
+struct SparseIndexData {
+    /// Magic bytes for validation (checked separately, not in bitcode)
+    /// Format version (checked separately, not in bitcode)
+
+    /// Vector dimensionality
+    dimensions: u32,
+    /// Scoring method
+    scoring: PersistedScoringMethod,
+    /// Number of vectors
+    count: u64,
+    /// Sum of all vector lengths (for BM25 avgdl)
+    total_length: u64,
+    /// All sparse vectors
+    vectors: Vec<PersistedSparseVector>,
+    /// Document frequency per dimension
+    doc_freq: Vec<(u32, u64)>,
 }
 
 // ============================================================================
@@ -1599,5 +1887,243 @@ mod tests {
         let query = SparseVec::new(vec![0], vec![1.0], 100).unwrap();
         let results = index.search(&query, 10);
         assert!(results.is_ok());
+    }
+
+    // ========================================================================
+    // Persistence Tests
+    // ========================================================================
+
+    #[test]
+    fn test_save_and_load_basic() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sparse_index.gsp");
+
+        // Create index with some data
+        let config = SparseIndexConfig::new(100).with_scoring(ScoringMethod::DotProduct);
+        let index = SparseVectorIndex::new(config.clone()).unwrap();
+
+        let v1 = SparseVec::new(vec![0, 10, 50], vec![1.0, 2.0, 3.0], 100).unwrap();
+        let v2 = SparseVec::new(vec![10, 20, 30], vec![0.5, 1.5, 2.5], 100).unwrap();
+
+        index.add(NodeId::new(1).unwrap(), &v1).unwrap();
+        index.add(NodeId::new(2).unwrap(), &v2).unwrap();
+
+        // Save
+        index.save(&path).unwrap();
+        assert!(path.exists());
+
+        // Load
+        let loaded = SparseVectorIndex::load(&path, config).unwrap();
+
+        // Verify
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.dimensions(), 100);
+
+        // Check vectors are intact
+        let loaded_v1 = loaded.get(NodeId::new(1).unwrap()).unwrap();
+        assert_eq!(loaded_v1.indices(), v1.indices());
+        assert_eq!(loaded_v1.values(), v1.values());
+
+        let loaded_v2 = loaded.get(NodeId::new(2).unwrap()).unwrap();
+        assert_eq!(loaded_v2.indices(), v2.indices());
+        assert_eq!(loaded_v2.values(), v2.values());
+
+        // Search should work on loaded index
+        let query = SparseVec::new(vec![10], vec![1.0], 100).unwrap();
+        let results = loaded.search(&query, 10).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Clean up
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_save_and_load_bm25() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sparse_bm25.gsp");
+
+        // Create index with BM25 scoring
+        let config =
+            SparseIndexConfig::new(1000).with_scoring(ScoringMethod::BM25 { k1: 1.8, b: 0.6 });
+        let index = SparseVectorIndex::new(config.clone()).unwrap();
+
+        for i in 1..=10 {
+            let v = SparseVec::new(vec![i as u32, (i * 10) as u32], vec![1.0, 2.0], 1000).unwrap();
+            index.add(NodeId::new(i).unwrap(), &v).unwrap();
+        }
+
+        // Save and load
+        index.save(&path).unwrap();
+        let loaded = SparseVectorIndex::load(&path, config).unwrap();
+
+        // Verify BM25 parameters preserved
+        if let ScoringMethod::BM25 { k1, b } = loaded.scoring() {
+            assert!((k1 - 1.8).abs() < 1e-6);
+            assert!((b - 0.6).abs() < 1e-6);
+        } else {
+            panic!("Expected BM25 scoring method");
+        }
+
+        assert_eq!(loaded.len(), 10);
+    }
+
+    #[test]
+    fn test_save_and_load_cosine() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sparse_cosine.gsp");
+
+        let config = SparseIndexConfig::new(500).with_scoring(ScoringMethod::Cosine);
+        let index = SparseVectorIndex::new(config.clone()).unwrap();
+
+        let v = SparseVec::new(vec![0, 100, 200], vec![1.0, 1.0, 1.0], 500).unwrap();
+        index.add(NodeId::new(42).unwrap(), &v).unwrap();
+
+        index.save(&path).unwrap();
+        let loaded = SparseVectorIndex::load(&path, config).unwrap();
+
+        assert_eq!(loaded.scoring(), ScoringMethod::Cosine);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains(NodeId::new(42).unwrap()));
+    }
+
+    #[test]
+    fn test_save_and_load_empty_index() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sparse_empty.gsp");
+
+        let config = SparseIndexConfig::new(100);
+        let index = SparseVectorIndex::new(config.clone()).unwrap();
+
+        // Save empty index
+        index.save(&path).unwrap();
+
+        // Load empty index
+        let loaded = SparseVectorIndex::load(&path, config).unwrap();
+        assert_eq!(loaded.len(), 0);
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn test_load_invalid_magic() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("invalid_magic.gsp");
+
+        // Write file with invalid magic
+        fs::write(&path, b"BADM\x01\x00\x00\x00\x00\x00").unwrap();
+
+        let config = SparseIndexConfig::new(100);
+        let result = SparseVectorIndex::load(&path, config);
+        assert!(result.is_err());
+        let err = format!("{}", result.err().unwrap());
+        assert!(err.contains("Invalid magic bytes"));
+    }
+
+    #[test]
+    fn test_load_corrupted_crc() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("corrupted.gsp");
+
+        // Create valid index
+        let config = SparseIndexConfig::new(100);
+        let index = SparseVectorIndex::new(config.clone()).unwrap();
+        let v = SparseVec::new(vec![0], vec![1.0], 100).unwrap();
+        index.add(NodeId::new(1).unwrap(), &v).unwrap();
+        index.save(&path).unwrap();
+
+        // Corrupt the last byte (part of CRC)
+        let mut data = fs::read(&path).unwrap();
+        let last_idx = data.len() - 1;
+        data[last_idx] ^= 0xFF;
+        fs::write(&path, &data).unwrap();
+
+        // Load should fail
+        let result = SparseVectorIndex::load(&path, config);
+        assert!(result.is_err());
+        let err = format!("{}", result.err().unwrap());
+        assert!(err.contains("CRC32 mismatch"));
+    }
+
+    #[test]
+    fn test_load_dimension_mismatch() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dim_mismatch.gsp");
+
+        // Save with 100 dimensions
+        let config100 = SparseIndexConfig::new(100);
+        let index = SparseVectorIndex::new(config100).unwrap();
+        index.save(&path).unwrap();
+
+        // Try to load with 200 dimensions
+        let config200 = SparseIndexConfig::new(200);
+        let result = SparseVectorIndex::load(&path, config200);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_file_too_small() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("too_small.gsp");
+
+        // Write file that's too small
+        fs::write(&path, b"GSPS").unwrap();
+
+        let config = SparseIndexConfig::new(100);
+        let result = SparseVectorIndex::load(&path, config);
+        assert!(result.is_err());
+        let err = format!("{}", result.err().unwrap());
+        assert!(err.contains("too small"));
+    }
+
+    #[test]
+    fn test_save_and_load_preserves_search_results() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("search_preserve.gsp");
+
+        let config = SparseIndexConfig::new(100);
+        let index = SparseVectorIndex::new(config.clone()).unwrap();
+
+        // Add documents with varying relevance
+        for i in 1..=5 {
+            let v = SparseVec::new(vec![0, 1], vec![i as f32, (6 - i) as f32], 100).unwrap();
+            index.add(NodeId::new(i).unwrap(), &v).unwrap();
+        }
+
+        let query = SparseVec::new(vec![0], vec![1.0], 100).unwrap();
+        let results_before = index.search(&query, 5).unwrap();
+
+        // Save and load
+        index.save(&path).unwrap();
+        let loaded = SparseVectorIndex::load(&path, config).unwrap();
+
+        let results_after = loaded.search(&query, 5).unwrap();
+
+        // Results should be identical
+        assert_eq!(results_before.len(), results_after.len());
+        for (before, after) in results_before.iter().zip(results_after.iter()) {
+            assert_eq!(before.0, after.0);
+            assert!((before.1 - after.1).abs() < 1e-6);
+        }
     }
 }
