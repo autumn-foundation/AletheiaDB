@@ -96,7 +96,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
@@ -309,6 +309,53 @@ struct IndexStats {
     vectors_added: AtomicU64,
     vectors_removed: AtomicU64,
     searches_performed: AtomicU64,
+    /// Number of times search operations were retried due to transient errors
+    search_retries: AtomicU64,
+    /// Number of searches that failed even after all retry attempts
+    search_retry_failures: AtomicU64,
+}
+
+/// Maximum number of search attempts (initial attempt + retries) when encountering transient errors.
+///
+/// Under high concurrent load, usearch may fail with "No available threads to lock" when its
+/// internal thread pool is exhausted. This constant controls how many times we retry before
+/// giving up.
+///
+/// # Performance Impact
+///
+/// With exponential backoff (1ms, 2ms, 4ms), a query that exhausts all retry attempts will
+/// add up to 7ms latency. This is significant relative to the project's performance targets:
+/// - k-NN search target: <10ms
+/// - Hybrid query target: <30ms
+///
+/// Operators should monitor `search_retries` and `search_retry_failures` metrics. Frequent
+/// retries indicate thread pool exhaustion and may require tuning usearch parameters or
+/// reducing concurrency.
+const MAX_SEARCH_ATTEMPTS: u32 = 4; // 1 initial attempt + 3 retries
+
+/// Check if a usearch error is transient and should be retried.
+///
+/// # Warning: Fragile Implementation
+///
+/// This function relies on string matching against usearch error messages. If usearch changes
+/// its error messages in future versions, this detection may break silently. Callers should
+/// monitor retry metrics to detect if retries stop working.
+///
+/// # Known Retryable Errors
+///
+/// - "No available threads to lock": Thread pool exhaustion under high concurrency
+///
+/// # Arguments
+///
+/// * `error_msg` - The error message string from usearch
+///
+/// # Returns
+///
+/// `true` if the error is transient and safe to retry, `false` otherwise
+#[inline]
+fn is_retryable_usearch_error(error_msg: &str) -> bool {
+    // Thread pool exhaustion is a transient error that resolves when threads become available
+    error_msg.contains("No available threads to lock")
 }
 
 /// Builder for configuring and creating an `HnswIndex`.
@@ -645,56 +692,51 @@ impl VectorIndex for HnswIndex {
         // Cap k to prevent DoS
         let k_capped = k.min(self.max_k);
 
-        // Perform search
+        // Perform search with retry logic for transient errors
         let index = self.inner.read();
-        let matches = index
-            .search(query, k_capped)
-            .map_err(|e| Error::Vector(VectorError::IndexError(format!("Search failed: {}", e))))?;
 
-        self.stats
-            .searches_performed
-            .fetch_add(1, Ordering::Relaxed);
+        // Retry with exponential backoff to handle thread pool exhaustion
+        // Under heavy concurrent load, usearch may fail with "No available threads to lock"
+        for attempt in 0..MAX_SEARCH_ATTEMPTS {
+            match index.search(query, k_capped) {
+                Ok(matches) => {
+                    self.stats
+                        .searches_performed
+                        .fetch_add(1, Ordering::Relaxed);
 
-        // Convert results to (NodeId, similarity) format
-        let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
+                    // Convert and sort results using helper function
+                    let results = self.convert_and_sort_matches(matches);
+                    return Ok(results);
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    // Check if this is a transient thread pool exhaustion error
+                    if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
+                        // Track retry for observability
+                        self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
 
-        for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-            if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                let node_id = *node_id_ref.value();
-
-                // Convert distance to similarity based on metric.
-                // usearch returns distances where lower = more similar (except for some metrics).
-                // We convert to similarity where higher = more similar for consistent API.
-                //
-                // - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
-                //   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
-                // - Euclidean: usearch returns squared L2 distance, range [0, inf)
-                //   Converting: similarity = -distance, so closer vectors have higher similarity
-                // - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
-                //   Converting: similarity = -distance = dot_product, higher is more similar
-                // - Haversine: usearch returns great-circle distance, range [0, pi]
-                //   Converting: similarity = -distance, closer points have higher similarity
-                // - Hamming: usearch returns bit differences count, range [0, dims]
-                //   Converting: similarity = -distance, fewer differences = more similar
-                // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
-                //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
-                let similarity = match self.config.metric {
-                    DistanceMetric::Cosine => 1.0 - distance,
-                    DistanceMetric::Euclidean => -distance,
-                    DistanceMetric::DotProduct => -distance,
-                    DistanceMetric::Haversine => -distance,
-                    DistanceMetric::Hamming => -distance,
-                    DistanceMetric::Tanimoto => 1.0 - distance,
-                };
-
-                results.push((node_id, similarity));
+                        // Exponential backoff: 1ms, 2ms, 4ms
+                        let delay_ms = 1u64 << attempt;
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        continue;
+                    }
+                    // Non-retryable error or exhausted retries
+                    if attempt > 0 {
+                        // Track that we failed even after retries
+                        self.stats
+                            .search_retry_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Err(Error::Vector(VectorError::IndexError(format!(
+                        "Search failed: {}",
+                        e
+                    ))));
+                }
             }
         }
 
-        // Results should already be sorted by usearch, but ensure descending order
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        Ok(results)
+        // Unreachable: loop always returns from inside
+        unreachable!("Search retry loop should always return from within the loop body")
     }
 
     fn search_with_filter<F>(
@@ -718,7 +760,7 @@ impl VectorIndex for HnswIndex {
 
         let k_capped = k.min(self.max_k);
 
-        // Use usearch's native filtered search
+        // Use usearch's native filtered search with retry logic for thread contention
         let index = self.inner.read();
 
         // Create a filter that maps usearch keys to our predicate
@@ -731,39 +773,48 @@ impl VectorIndex for HnswIndex {
             }
         };
 
-        let matches = index
-            .filtered_search(query, k_capped, filter)
-            .map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Filtered search failed: {}",
-                    e
-                )))
-            })?;
+        // Retry with exponential backoff to handle thread pool exhaustion
+        // Under heavy concurrent load, usearch may fail with "No available threads to lock"
+        for attempt in 0..MAX_SEARCH_ATTEMPTS {
+            match index.filtered_search(query, k_capped, filter) {
+                Ok(matches) => {
+                    self.stats
+                        .searches_performed
+                        .fetch_add(1, Ordering::Relaxed);
 
-        self.stats
-            .searches_performed
-            .fetch_add(1, Ordering::Relaxed);
+                    // Convert and sort results using helper function
+                    let results = self.convert_and_sort_matches(matches);
+                    return Ok(results);
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    // Check if this is a transient thread pool exhaustion error
+                    if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
+                        // Track retry for observability
+                        self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
 
-        // Convert results (same conversion logic as search() - see comments there)
-        let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
-
-        for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-            if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                let node_id = *node_id_ref.value();
-                let similarity = match self.config.metric {
-                    DistanceMetric::Cosine => 1.0 - distance,
-                    DistanceMetric::Euclidean => -distance,
-                    DistanceMetric::DotProduct => -distance,
-                    DistanceMetric::Haversine => -distance,
-                    DistanceMetric::Hamming => -distance,
-                    DistanceMetric::Tanimoto => 1.0 - distance,
-                };
-                results.push((node_id, similarity));
+                        // Exponential backoff: 1ms, 2ms, 4ms
+                        let delay_ms = 1u64 << attempt;
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        continue;
+                    }
+                    // Non-retryable error or exhausted retries
+                    if attempt > 0 {
+                        // Track that we failed even after retries
+                        self.stats
+                            .search_retry_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Err(Error::Vector(VectorError::IndexError(format!(
+                        "Filtered search failed: {}",
+                        e
+                    ))));
+                }
             }
         }
 
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(results)
+        // Unreachable: loop always returns from inside
+        unreachable!("Filtered search retry loop should always return from within the loop body")
     }
 
     fn len(&self) -> usize {
@@ -860,6 +911,65 @@ impl VectorIndex for HnswIndex {
     fn compact(&self) -> Result<()> {
         // usearch native deletes don't require compaction
         Ok(())
+    }
+}
+
+// Private helper methods for HnswIndex
+impl HnswIndex {
+    /// Convert usearch matches to sorted vector of (NodeId, similarity) tuples.
+    ///
+    /// This helper function encapsulates the common logic of:
+    /// 1. Converting usearch keys back to NodeIds
+    /// 2. Converting distances to similarities based on the configured metric
+    /// 3. Sorting results by similarity (descending order)
+    ///
+    /// # Arguments
+    ///
+    /// * `matches` - The raw matches from usearch containing keys and distances
+    ///
+    /// # Returns
+    ///
+    /// A sorted vector of (NodeId, similarity) pairs where higher similarity means more similar.
+    fn convert_and_sort_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
+        let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
+
+        for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+            if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                let node_id = *node_id_ref.value();
+
+                // Convert distance to similarity based on metric.
+                // usearch returns distances where lower = more similar (except for some metrics).
+                // We convert to similarity where higher = more similar for consistent API.
+                //
+                // - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
+                //   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
+                // - Euclidean: usearch returns squared L2 distance, range [0, inf)
+                //   Converting: similarity = -distance, so closer vectors have higher similarity
+                // - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
+                //   Converting: similarity = -distance = dot_product, higher is more similar
+                // - Haversine: usearch returns great-circle distance, range [0, pi]
+                //   Converting: similarity = -distance, closer points have higher similarity
+                // - Hamming: usearch returns bit differences count, range [0, dims]
+                //   Converting: similarity = -distance, fewer differences = more similar
+                // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
+                //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
+                let similarity = match self.config.metric {
+                    DistanceMetric::Cosine => 1.0 - distance,
+                    DistanceMetric::Euclidean => -distance,
+                    DistanceMetric::DotProduct => -distance,
+                    DistanceMetric::Haversine => -distance,
+                    DistanceMetric::Hamming => -distance,
+                    DistanceMetric::Tanimoto => 1.0 - distance,
+                };
+
+                results.push((node_id, similarity));
+            }
+        }
+
+        // Results should already be sorted by usearch, but ensure descending order by similarity
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        results
     }
 }
 
