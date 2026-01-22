@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use base64::Engine;
+use chrono::{DateTime, Utc};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
@@ -39,6 +41,10 @@ const MAX_RESULT_LIMIT: usize = 10_000;
 
 /// Default number of results to return.
 const DEFAULT_RESULT_LIMIT: usize = 100;
+
+/// Maximum pagination offset to prevent excessive memory usage.
+/// Since we fetch limit+offset rows and then skip, this limits total rows fetched.
+const MAX_PAGINATION_OFFSET: usize = 10_000;
 
 /// Maximum k for vector similarity search.
 const MAX_VECTOR_K: usize = 1000;
@@ -80,119 +86,119 @@ impl GallifreyMcpServer {
 
     /// Get a node by its ID.
     pub fn get_node(&self, req: GetNodeRequest) -> String {
-        Self::extract_text(self.handle_get_node(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_get_node(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Create a new node.
     pub fn create_node(&self, req: CreateNodeRequest) -> String {
-        Self::extract_text(self.handle_create_node(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_create_node(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Update a node's properties.
     pub fn update_node(&self, req: UpdateNodeRequest) -> String {
-        Self::extract_text(self.handle_update_node(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_update_node(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Delete a node.
     pub fn delete_node(&self, req: DeleteNodeRequest) -> String {
-        Self::extract_text(self.handle_delete_node(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_delete_node(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// List nodes with optional filtering.
     pub fn list_nodes(&self, req: ListNodesRequest) -> String {
-        Self::extract_text(self.handle_list_nodes(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_list_nodes(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Count nodes.
     pub fn count_nodes(&self, req: CountNodesRequest) -> String {
-        Self::extract_text(self.handle_count_nodes(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_count_nodes(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Get an edge by its ID.
     pub fn get_edge(&self, req: GetEdgeRequest) -> String {
-        Self::extract_text(self.handle_get_edge(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_get_edge(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Create a new edge.
     pub fn create_edge(&self, req: CreateEdgeRequest) -> String {
-        Self::extract_text(self.handle_create_edge(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_create_edge(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Update an edge's properties.
     pub fn update_edge(&self, req: UpdateEdgeRequest) -> String {
-        Self::extract_text(self.handle_update_edge(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_update_edge(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Delete an edge.
     pub fn delete_edge(&self, req: DeleteEdgeRequest) -> String {
-        Self::extract_text(self.handle_delete_edge(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_delete_edge(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// List edges.
     pub fn list_edges(&self, req: ListEdgesRequest) -> String {
-        Self::extract_text(self.handle_list_edges(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_list_edges(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Count edges.
     pub fn count_edges(&self, req: CountEdgesRequest) -> String {
-        Self::extract_text(self.handle_count_edges(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_count_edges(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Get outgoing edges from a node.
     pub fn get_outgoing_edges(&self, req: GetOutgoingEdgesRequest) -> String {
         Self::extract_text(
-            self.handle_get_outgoing_edges(serde_json::to_value(req).unwrap_or_default()),
+            self.handle_get_outgoing_edges(serde_json::to_value(req).expect("request serialization should not fail")),
         )
     }
 
     /// Get incoming edges to a node.
     pub fn get_incoming_edges(&self, req: GetIncomingEdgesRequest) -> String {
         Self::extract_text(
-            self.handle_get_incoming_edges(serde_json::to_value(req).unwrap_or_default()),
+            self.handle_get_incoming_edges(serde_json::to_value(req).expect("request serialization should not fail")),
         )
     }
 
     /// Traverse the graph.
     pub fn traverse(&self, req: TraverseRequest) -> String {
-        Self::extract_text(self.handle_traverse(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_traverse(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Find similar nodes.
     pub fn find_similar(&self, req: FindSimilarRequest) -> String {
-        Self::extract_text(self.handle_find_similar(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_find_similar(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     /// Enable vector index.
     pub fn enable_vector_index(&self, req: EnableVectorIndexRequest) -> String {
         Self::extract_text(
-            self.handle_enable_vector_index(serde_json::to_value(req).unwrap_or_default()),
+            self.handle_enable_vector_index(serde_json::to_value(req).expect("request serialization should not fail")),
         )
     }
 
     /// List vector indexes.
     pub fn list_vector_indexes(&self, req: ListVectorIndexesRequest) -> String {
         Self::extract_text(
-            self.handle_list_vector_indexes(serde_json::to_value(req).unwrap_or_default()),
+            self.handle_list_vector_indexes(serde_json::to_value(req).expect("request serialization should not fail")),
         )
     }
 
     /// Get node at a specific time.
     pub fn get_node_at_time(&self, req: GetNodeAtTimeRequest) -> String {
         Self::extract_text(
-            self.handle_get_node_at_time(serde_json::to_value(req).unwrap_or_default()),
+            self.handle_get_node_at_time(serde_json::to_value(req).expect("request serialization should not fail")),
         )
     }
 
     /// Get edge at a specific time.
     pub fn get_edge_at_time(&self, req: GetEdgeAtTimeRequest) -> String {
         Self::extract_text(
-            self.handle_get_edge_at_time(serde_json::to_value(req).unwrap_or_default()),
+            self.handle_get_edge_at_time(serde_json::to_value(req).expect("request serialization should not fail")),
         )
     }
 
     /// Execute a hybrid query.
     pub fn hybrid_query(&self, req: HybridQueryRequest) -> String {
-        Self::extract_text(self.handle_hybrid_query(serde_json::to_value(req).unwrap_or_default()))
+        Self::extract_text(self.handle_hybrid_query(serde_json::to_value(req).expect("request serialization should not fail")))
     }
 
     // ========================================================================
@@ -240,7 +246,9 @@ impl GallifreyMcpServer {
             PropertyValue::Int(i) => json!(*i),
             PropertyValue::Float(f) => json!(*f),
             PropertyValue::String(s) => serde_json::Value::String(s.to_string()),
-            PropertyValue::Bytes(b) => serde_json::Value::String(base64_encode(b)),
+            PropertyValue::Bytes(b) => {
+                serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
+            }
             PropertyValue::Array(arr) => serde_json::Value::Array(
                 arr.iter().map(|v| self.property_value_to_json(v)).collect(),
             ),
@@ -299,11 +307,25 @@ impl GallifreyMcpServer {
     }
 
     fn parse_timestamp(&self, s: &str) -> Result<Timestamp, String> {
+        // Try parsing as ISO 8601 timestamp first
+        if let Ok(dt) = s.parse::<DateTime<Utc>>() {
+            let micros = dt.timestamp_micros();
+            return Ok(Timestamp::from(micros));
+        }
+
+        // Also try parsing ISO 8601 without timezone (assume UTC)
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+            let micros = dt.and_utc().timestamp_micros();
+            return Ok(Timestamp::from(micros));
+        }
+
+        // Fall back to microseconds since epoch
         if let Ok(micros) = s.parse::<i64>() {
             return Ok(Timestamp::from(micros));
         }
+
         Err(format!(
-            "Invalid timestamp format: {}. Expected microseconds since epoch.",
+            "Invalid timestamp format: '{}'. Expected ISO 8601 (e.g., '2024-01-15T10:00:00Z') or microseconds since epoch.",
             s
         ))
     }
@@ -312,6 +334,33 @@ impl GallifreyMcpServer {
         GLOBAL_INTERNER
             .with_str(interned, |s| s == label)
             .unwrap_or(false)
+    }
+
+    /// Get the expected dimensions for a vector index property.
+    /// Returns None if the index doesn't exist.
+    fn get_vector_index_dimensions(&self, property_name: &str) -> Option<usize> {
+        self.db
+            .list_vector_indexes()
+            .into_iter()
+            .find(|info| info.property_name == property_name)
+            .map(|info| info.dimensions)
+    }
+
+    /// Validate embedding dimensions against the expected dimensions for an index.
+    fn validate_embedding_dimensions(
+        &self,
+        embedding: &[f32],
+        property_name: &str,
+    ) -> Result<(), String> {
+        if let Some(expected_dims) = self.get_vector_index_dimensions(property_name)
+            && embedding.len() != expected_dims
+        {
+            return Err(format!(
+                "Embedding dimension mismatch: expected {} dimensions for property '{}', got {}",
+                expected_dims, property_name, embedding.len()
+            ));
+        }
+        Ok(())
     }
 
     fn success_json(&self, value: serde_json::Value) -> CallToolResult {
@@ -342,7 +391,7 @@ impl GallifreyMcpServer {
         match self.db.get_node(node_id) {
             Ok(node) => {
                 let response = self.node_to_response(&node);
-                self.success_json(serde_json::to_value(&response).unwrap_or_default())
+                self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
             }
             Err(e) => self.error_json(&e.to_string()),
         }
@@ -363,7 +412,7 @@ impl GallifreyMcpServer {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let response = self.node_to_response(&node);
-                    self.success_json(serde_json::to_value(&response).unwrap_or_default())
+                    self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
@@ -388,7 +437,7 @@ impl GallifreyMcpServer {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let response = self.node_to_response(&node);
-                    self.success_json(serde_json::to_value(&response).unwrap_or_default())
+                    self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
@@ -427,36 +476,45 @@ impl GallifreyMcpServer {
             .limit
             .unwrap_or(DEFAULT_RESULT_LIMIT)
             .min(MAX_RESULT_LIMIT);
-        let offset = req.offset.unwrap_or(0);
+        let offset = req.offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
 
         // If a label is provided, use QueryBuilder to scan by label
         if let Some(label) = &req.label {
             let builder = crate::query::QueryBuilder::new().scan_label(label);
 
+            // Note: We fetch offset+limit rows then skip offset.
+            // Offset is capped to prevent excessive memory use.
             match builder.limit(limit + offset).execute(&self.db) {
-                Ok(results) => match results.collect_all() {
-                    Ok(rows) => {
-                        let nodes: Vec<NodeResponse> = rows
-                            .into_iter()
-                            .skip(offset)
-                            .filter_map(|row| {
-                                if let EntityResult::Node(node) = row.entity {
-                                    Some(self.node_to_response(&node))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
+                Ok(results) => {
+                    // Use iterator-based approach to avoid allocating full Vec
+                    let mut nodes = Vec::with_capacity(limit);
+                    let mut skipped = 0;
 
-                        self.success_json(json!({
-                            "nodes": nodes,
-                            "count": nodes.len(),
-                            "offset": offset,
-                            "limit": limit
-                        }))
+                    for row_result in results {
+                        match row_result {
+                            Ok(row) => {
+                                if skipped < offset {
+                                    skipped += 1;
+                                    continue;
+                                }
+                                if let EntityResult::Node(node) = row.entity {
+                                    nodes.push(self.node_to_response(&node));
+                                    if nodes.len() >= limit {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => return self.error_json(&e.to_string()),
+                        }
                     }
-                    Err(e) => self.error_json(&e.to_string()),
-                },
+
+                    self.success_json(json!({
+                        "nodes": nodes,
+                        "count": nodes.len(),
+                        "offset": offset,
+                        "limit": limit
+                    }))
+                }
                 Err(e) => self.error_json(&e.to_string()),
             }
         } else {
@@ -480,13 +538,13 @@ impl GallifreyMcpServer {
         };
 
         let count = if let Some(label) = &req.label {
-            // Use QueryBuilder to count by label
+            // Use QueryBuilder to count by label efficiently without collecting all rows
             let builder = crate::query::QueryBuilder::new().scan_label(label);
             match builder.execute(&self.db) {
-                Ok(results) => match results.collect_all() {
-                    Ok(rows) => rows.len(),
-                    Err(_) => 0,
-                },
+                Ok(mut results) => {
+                    // Efficiently count without allocating a Vec
+                    results.try_fold(0usize, |acc, row| row.map(|_| acc + 1)).unwrap_or(0)
+                }
                 Err(_) => 0,
             }
         } else {
@@ -510,7 +568,7 @@ impl GallifreyMcpServer {
         match self.db.get_edge(edge_id) {
             Ok(edge) => {
                 let response = self.edge_to_response(&edge);
-                self.success_json(serde_json::to_value(&response).unwrap_or_default())
+                self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
             }
             Err(e) => self.error_json(&e.to_string()),
         }
@@ -544,7 +602,7 @@ impl GallifreyMcpServer {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
                     let response = self.edge_to_response(&edge);
-                    self.success_json(serde_json::to_value(&response).unwrap_or_default())
+                    self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
@@ -569,7 +627,7 @@ impl GallifreyMcpServer {
             Ok(()) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
                     let response = self.edge_to_response(&edge);
-                    self.success_json(serde_json::to_value(&response).unwrap_or_default())
+                    self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
@@ -817,6 +875,11 @@ impl GallifreyMcpServer {
                 "Vector index not enabled for property '{}'. Use enable_vector_index first.",
                 req.property_name
             ));
+        }
+
+        // Validate embedding dimensions
+        if let Err(e) = self.validate_embedding_dimensions(&req.embedding, &req.property_name) {
+            return self.error_json(&e);
         }
 
         match self.db.find_similar_by_embedding(&req.embedding, k) {
@@ -1104,6 +1167,11 @@ impl GallifreyMcpServer {
                 ));
             }
 
+            // Validate embedding dimensions
+            if let Err(e) = self.validate_embedding_dimensions(embedding, property_name) {
+                return self.error_json(&e);
+            }
+
             let builder = crate::query::QueryBuilder::new().find_similar(embedding, k);
 
             match builder.limit(limit).execute(&self.db) {
@@ -1143,37 +1211,11 @@ impl GallifreyMcpServer {
     }
 }
 
-// Simple base64 encoding for bytes
-fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-
-        result.push(ALPHABET[b0 >> 2] as char);
-        result.push(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
-
-        if chunk.len() > 1 {
-            result.push(ALPHABET[((b1 & 0x0f) << 2) | (b2 >> 6)] as char);
-        } else {
-            result.push('=');
-        }
-
-        if chunk.len() > 2 {
-            result.push(ALPHABET[b2 & 0x3f] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
-}
-
 fn make_input_schema<T: rmcp::schemars::JsonSchema>()
 -> Arc<serde_json::Map<String, serde_json::Value>> {
     let schema = rmcp::schemars::schema_for!(T);
-    let value = serde_json::to_value(schema).unwrap_or_default();
+    let value =
+        serde_json::to_value(schema).expect("JSON schema serialization should not fail");
     match value {
         serde_json::Value::Object(map) => Arc::new(map),
         _ => Arc::new(serde_json::Map::new()),

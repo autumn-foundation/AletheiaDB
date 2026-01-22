@@ -30,7 +30,7 @@ mod tools;
 
 pub use server::GallifreyMcpServer;
 
-// Re-export tool request/response types for testing
+// Re-export tool request/response types for testing (alphabetically sorted)
 pub use tools::{
     CountEdgesRequest,
     CountNodesRequest,
@@ -39,23 +39,17 @@ pub use tools::{
     DeleteEdgeRequest,
     DeleteNodeRequest,
     EnableVectorIndexRequest,
-    // Vector operations
     FindSimilarRequest,
     GetEdgeAtTimeRequest,
-    // Edge operations
     GetEdgeRequest,
     GetIncomingEdgesRequest,
-    // Temporal operations
     GetNodeAtTimeRequest,
-    // Node operations
     GetNodeRequest,
     GetOutgoingEdgesRequest,
-    // Hybrid query
     HybridQueryRequest,
     ListEdgesRequest,
     ListNodesRequest,
     ListVectorIndexesRequest,
-    // Graph traversal
     TraverseRequest,
     UpdateEdgeRequest,
     UpdateNodeRequest,

@@ -43,6 +43,8 @@ metrics-exporter-prometheus = { version = "0.17", optional = true }
 # MCP server support (optional)
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
 rmcp = { version = "0.13", features = ["server", "transport-io"], optional = true }
+base64 = { version = "0.22", optional = true }
+chrono = { version = "0.4", optional = true }
 
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
@@ -104,7 +106,7 @@ embedding-all = [
 ]
 
 # MCP server support
-mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json"]
+mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base64", "dep:chrono"]
 
 [profile.dev]
 # Fast compilation for development
