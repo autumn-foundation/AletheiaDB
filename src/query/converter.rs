@@ -1,13 +1,177 @@
 //! AST to IR Converter
 //!
-//! Converts parsed GQL queries (AST) into the internal Query representation
-//! that can be executed by the query planner and executor.
+//! This module converts parsed GQL (Gallifrey Query Language) queries from their
+//! Abstract Syntax Tree (AST) representation into the internal `Query` type that
+//! can be executed by the query planner and executor.
+//!
+//! # Architecture
+//!
+//! The query processing pipeline in GallifreyDB follows this flow:
+//!
+//! ```text
+//! GQL String → [Parser] → AST → [Converter] → Query → [Planner] → PhysicalPlan → [Executor] → Results
+//! ```
+//!
+//! This module handles the **Converter** step, bridging the gap between the
+//! human-readable AST and the internal query representation.
+//!
+//! # Quick Start
+//!
+//! The simplest way to execute a GQL query is using the [`parse_query`] function:
+//!
+//! ```rust
+//! use gallifreydb::query::{parse_query, QueryPlanner};
+//! use gallifreydb::query::planner::Statistics;
+//! use gallifreydb::storage::CurrentStorage;
+//! use std::sync::Arc;
+//!
+//! // Parse and convert a GQL query
+//! let query = parse_query("MATCH (n:Person) WHERE n.age > 21 RETURN n LIMIT 10")
+//!     .expect("Failed to parse query");
+//!
+//! // Create planner and execute
+//! let storage = Arc::new(CurrentStorage::new());
+//! let stats = Arc::new(Statistics::default());
+//! let planner = QueryPlanner::new(stats, storage);
+//! let plan = planner.plan(query).expect("Failed to plan query");
+//! ```
+//!
+//! # Using Parameters
+//!
+//! For queries with dynamic values, use parameterized queries to prevent injection
+//! and improve performance through query caching:
+//!
+//! ```rust
+//! use gallifreydb::query::{parse_query_with_params, ParameterValue};
+//! use gallifreydb::query::ir::PredicateValue;
+//! use std::collections::HashMap;
+//! use std::sync::Arc;
+//!
+//! // Create parameter bindings
+//! let mut params = HashMap::new();
+//! params.insert(
+//!     "min_age".to_string(),
+//!     ParameterValue::Value(PredicateValue::Int(21)),
+//! );
+//!
+//! // Parse with parameters (not yet fully supported in WHERE clause)
+//! // For vector search with embedding parameters:
+//! let mut vector_params = HashMap::new();
+//! vector_params.insert(
+//!     "embedding".to_string(),
+//!     ParameterValue::Embedding(Arc::from([0.1f32, 0.2, 0.3].as_slice())),
+//! );
+//!
+//! let query = parse_query_with_params(
+//!     "SIMILAR TO $embedding LIMIT 10",
+//!     vector_params,
+//! ).expect("Failed to parse query");
+//! ```
+//!
+//! # Supported Query Features
+//!
+//! ## Graph Pattern Matching (MATCH)
+//!
+//! ```text
+//! MATCH (n:Person)                           -- Node with label
+//! MATCH (n:Person)-[:KNOWS]->(m)             -- Outgoing relationship
+//! MATCH (n)<-[:FOLLOWS]-(m)                  -- Incoming relationship
+//! MATCH (n)-[:FRIENDS]-(m)                   -- Bidirectional
+//! MATCH (n)-[:KNOWS*1..3]->(m)               -- Variable-length path
+//! ```
+//!
+//! ## Vector Search
+//!
+//! ```text
+//! SIMILAR TO [0.1, 0.2, 0.3] LIMIT 10        -- k-NN search with literal
+//! SIMILAR TO $embedding LIMIT 10             -- k-NN with parameter
+//! FIND SIMILAR TO ($node_id) LIMIT 5         -- Find similar to existing node
+//! MATCH (n) RANK BY SIMILARITY TO [...] TOP 5 -- Rank existing results
+//! ```
+//!
+//! ## Temporal Queries
+//!
+//! ```text
+//! AS OF 1704067200000000 MATCH (n) ...       -- Point-in-time (microseconds)
+//! AS OF 1704067200000000, 1704153600000000 MATCH ... -- Valid time, tx time
+//! BETWEEN 1704067200000000 AND 1704153600000000 MATCH ... -- Time range
+//! ```
+//!
+//! ## Predicates (WHERE clause)
+//!
+//! ```text
+//! WHERE n.age > 21                           -- Comparison
+//! WHERE n.name = 'Alice'                     -- Equality
+//! WHERE n.status IN ['active', 'pending']   -- IN list
+//! WHERE n.bio CONTAINS 'engineer'            -- String contains
+//! WHERE n.name STARTS WITH 'A'               -- String prefix
+//! WHERE n.email ENDS WITH '.com'             -- String suffix
+//! WHERE EXISTS(n.email)                      -- Property exists
+//! WHERE n.deleted IS NULL                    -- NULL check
+//! WHERE n.age > 21 AND n.active = true       -- Logical AND
+//! WHERE n.role = 'admin' OR n.role = 'mod'   -- Logical OR
+//! WHERE NOT n.banned = true                  -- Logical NOT
+//! ```
+//!
+//! ## Result Modifiers
+//!
+//! ```text
+//! RETURN n                                   -- Return nodes
+//! RETURN DISTINCT n                          -- Deduplicate
+//! RETURN n.name, n.age                       -- Project properties
+//! SKIP 10 LIMIT 20                           -- Pagination
+//! ```
+//!
+//! # Manual Conversion
+//!
+//! For more control, use [`AstConverter`] directly:
+//!
+//! ```rust
+//! use gallifreydb::query::{Parser, AstConverter, ParameterValue};
+//! use gallifreydb::core::NodeId;
+//!
+//! // Parse the query
+//! let ast = Parser::parse("FIND SIMILAR TO ($node) LIMIT 5")
+//!     .expect("Parse failed");
+//!
+//! // Create converter with parameters
+//! let mut converter = AstConverter::new();
+//! converter.bind("node", ParameterValue::NodeId(NodeId::new(42).unwrap()));
+//!
+//! // Convert to Query
+//! let query = converter.convert(&ast).expect("Conversion failed");
+//! ```
+//!
+//! # Error Handling
+//!
+//! The converter returns detailed errors for:
+//!
+//! - **Missing parameters**: When a `$param` reference has no binding
+//! - **Type mismatches**: When a parameter has the wrong type (e.g., NodeId vs Embedding)
+//! - **Invalid timestamps**: When timestamp strings can't be parsed
+//! - **Syntax errors**: Propagated from the parser
+//!
+//! ```rust
+//! use gallifreydb::query::parse_query;
+//!
+//! // Missing parameter error
+//! let result = parse_query("SIMILAR TO $missing LIMIT 10");
+//! assert!(result.is_err());
+//! ```
+//!
+//! # Performance Considerations
+//!
+//! - **Reuse converters**: Create one [`AstConverter`] and reuse it for multiple
+//!   queries with the same parameters
+//! - **Parameterize queries**: Parameterized queries can be cached and reused
+//! - **Avoid large IN lists**: Large `IN [...]` clauses are converted to sequential
+//!   value checks; consider using joins for very large lists
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::core::NodeId;
-use crate::core::temporal::{TimeRange, Timestamp, time};
+use crate::core::temporal::{time, TimeRange, Timestamp};
 use crate::index::vector::DistanceMetric;
 use crate::utils::error::{Error, QueryError, Result};
 
@@ -20,50 +184,203 @@ use super::builder::Query;
 use super::ir::{Predicate, PredicateValue, QueryOp, TraversalDepth};
 use super::plan::{QueryHints, TemporalContext};
 
-/// Converts a parsed QueryAst into a Query that can be executed.
+/// Converts a parsed [`QueryAst`] into a [`Query`] that can be executed.
 ///
-/// The converter handles:
-/// - Temporal clauses (AS OF, BETWEEN)
-/// - Source clauses (MATCH patterns, vector search)
-/// - WHERE predicates
-/// - RETURN projections
-/// - ORDER BY, SKIP, LIMIT
+/// The `AstConverter` is the bridge between the parser output (AST) and the
+/// query execution engine. It transforms the tree-structured AST into a
+/// sequence of [`QueryOp`] operations that the planner can optimize.
+///
+/// # Conversion Process
+///
+/// The converter processes the AST in this order:
+///
+/// 1. **Temporal context**: `AS OF` or `BETWEEN` clauses → [`TemporalContext`]
+/// 2. **Source clause**: `MATCH` patterns or vector search → source [`QueryOp`]s
+/// 3. **WHERE clause**: Predicates → [`QueryOp::Filter`]
+/// 4. **RANK clause**: Similarity ranking → [`QueryOp::RankBySimilarity`]
+/// 5. **RETURN clause**: Projections → [`QueryOp::Project`], [`QueryOp::Distinct`]
+/// 6. **Modifiers**: `SKIP`, `LIMIT` → [`QueryOp::Skip`], [`QueryOp::Limit`]
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::query::{Parser, AstConverter};
+///
+/// let ast = Parser::parse("MATCH (n:Person) WHERE n.age > 21 RETURN n").unwrap();
+/// let converter = AstConverter::new();
+/// let query = converter.convert(&ast).unwrap();
+///
+/// // The query now contains: ScanNodes, Filter, Project operations
+/// ```
+///
+/// # Parameter Binding
+///
+/// Use [`bind`](Self::bind) to set parameter values before conversion:
+///
+/// ```rust
+/// use gallifreydb::query::{Parser, AstConverter, ParameterValue};
+/// use std::sync::Arc;
+///
+/// let ast = Parser::parse("SIMILAR TO $embedding LIMIT 10").unwrap();
+///
+/// let mut converter = AstConverter::new();
+/// converter.bind(
+///     "embedding",
+///     ParameterValue::Embedding(Arc::from([0.1f32, 0.2, 0.3].as_slice())),
+/// );
+///
+/// let query = converter.convert(&ast).unwrap();
+/// ```
 pub struct AstConverter {
-    /// Parameter bindings for the query
+    /// Parameter bindings for the query.
+    ///
+    /// Parameters are referenced in GQL using `$name` syntax and must be
+    /// bound before conversion.
     parameters: HashMap<String, ParameterValue>,
 }
 
 /// Parameter values that can be bound to a query.
+///
+/// GQL queries can reference parameters using the `$name` syntax. These
+/// parameters must be bound to actual values before the query can be
+/// converted and executed.
+///
+/// # Parameter Types
+///
+/// | Type | GQL Usage | Example |
+/// |------|-----------|---------|
+/// | `NodeId` | `FIND SIMILAR TO ($node)` | Reference to a specific node |
+/// | `Embedding` | `SIMILAR TO $embedding` | Vector for k-NN search |
+/// | `Value` | `WHERE n.age > $min_age` | Scalar comparison value |
+///
+/// # Example
+///
+/// ```rust
+/// use gallifreydb::query::ParameterValue;
+/// use gallifreydb::query::ir::PredicateValue;
+/// use gallifreydb::core::NodeId;
+/// use std::sync::Arc;
+///
+/// // Node ID parameter
+/// let node_param = ParameterValue::NodeId(NodeId::new(42).unwrap());
+///
+/// // Embedding parameter (384-dimensional vector)
+/// let embedding_param = ParameterValue::Embedding(
+///     Arc::from(vec![0.0f32; 384].as_slice())
+/// );
+///
+/// // Scalar value parameter
+/// let age_param = ParameterValue::Value(PredicateValue::Int(21));
+/// let name_param = ParameterValue::Value(PredicateValue::String("Alice".to_string()));
+/// ```
 #[derive(Debug, Clone)]
 pub enum ParameterValue {
-    /// Node ID parameter
+    /// A node ID parameter for `FIND SIMILAR TO ($node)` queries.
+    ///
+    /// Used when searching for nodes similar to an existing node.
     NodeId(NodeId),
-    /// Embedding vector parameter
+
+    /// An embedding vector parameter for `SIMILAR TO $embedding` queries.
+    ///
+    /// The vector dimensions must match the configured index dimensions.
     Embedding(Arc<[f32]>),
-    /// Scalar value parameter
+
+    /// A scalar value parameter for use in predicates.
+    ///
+    /// Supports all predicate value types: null, bool, int, float, string.
     Value(PredicateValue),
 }
 
 impl AstConverter {
-    /// Create a new converter with no parameters.
+    /// Create a new converter with no parameter bindings.
+    ///
+    /// Use this when the query has no parameters, or when you'll bind
+    /// parameters later using [`bind`](Self::bind).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::query::AstConverter;
+    ///
+    /// let converter = AstConverter::new();
+    /// ```
     pub fn new() -> Self {
         AstConverter {
             parameters: HashMap::new(),
         }
     }
 
-    /// Create a converter with parameter bindings.
+    /// Create a converter with pre-populated parameter bindings.
+    ///
+    /// This is useful when parameters are collected from an external source
+    /// (e.g., HTTP request, configuration file).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::query::{AstConverter, ParameterValue};
+    /// use gallifreydb::query::ir::PredicateValue;
+    /// use std::collections::HashMap;
+    ///
+    /// let mut params = HashMap::new();
+    /// params.insert("limit".to_string(), ParameterValue::Value(PredicateValue::Int(100)));
+    ///
+    /// let converter = AstConverter::with_parameters(params);
+    /// ```
     pub fn with_parameters(parameters: HashMap<String, ParameterValue>) -> Self {
         AstConverter { parameters }
     }
 
-    /// Bind a parameter value.
+    /// Bind a parameter value by name.
+    ///
+    /// Parameters in GQL are referenced with the `$name` syntax. This method
+    /// associates a name with a concrete value.
+    ///
+    /// Returns `&mut Self` for method chaining.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::query::{AstConverter, ParameterValue};
+    /// use gallifreydb::core::NodeId;
+    /// use std::sync::Arc;
+    ///
+    /// let mut converter = AstConverter::new();
+    /// converter
+    ///     .bind("node_id", ParameterValue::NodeId(NodeId::new(1).unwrap()))
+    ///     .bind("embedding", ParameterValue::Embedding(Arc::from([0.1f32; 384].as_slice())));
+    /// ```
     pub fn bind(&mut self, name: impl Into<String>, value: ParameterValue) -> &mut Self {
         self.parameters.insert(name.into(), value);
         self
     }
 
     /// Convert an AST to a Query.
+    ///
+    /// This is the main conversion method. It processes all parts of the AST
+    /// and produces a [`Query`] containing a sequence of [`QueryOp`] operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A referenced parameter (`$name`) is not bound
+    /// - A parameter has the wrong type for its usage
+    /// - A timestamp string cannot be parsed
+    /// - The time range in `BETWEEN` is invalid (start > end)
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::query::{Parser, AstConverter};
+    ///
+    /// let ast = Parser::parse("MATCH (n:Person) RETURN n LIMIT 10").unwrap();
+    /// let converter = AstConverter::new();
+    ///
+    /// match converter.convert(&ast) {
+    ///     Ok(query) => println!("Query converted successfully"),
+    ///     Err(e) => eprintln!("Conversion failed: {}", e),
+    /// }
+    /// ```
     pub fn convert(&self, ast: &QueryAst) -> Result<Query> {
         let mut ops = Vec::new();
         let hints = QueryHints::default();
@@ -501,14 +818,54 @@ impl Default for AstConverter {
 
 /// Parse a GQL query string and convert it to a Query.
 ///
-/// This is a convenience function that combines parsing and conversion.
+/// This is the simplest way to convert a GQL string into an executable query.
+/// It combines parsing and conversion in a single step.
+///
+/// # Arguments
+///
+/// * `gql` - A GQL query string (e.g., `"MATCH (n:Person) RETURN n"`)
+///
+/// # Returns
+///
+/// * `Ok(Query)` - The converted query ready for planning/execution
+/// * `Err(Error)` - Parse error or conversion error
 ///
 /// # Example
 ///
-/// ```ignore
-/// use gallifreydb::query::converter::parse_query;
+/// ```rust
+/// use gallifreydb::query::parse_query;
 ///
-/// let query = parse_query("MATCH (n:Person) RETURN n")?;
+/// // Simple node scan
+/// let query = parse_query("MATCH (n:Person) RETURN n").unwrap();
+///
+/// // Graph traversal with filter
+/// let query = parse_query(
+///     "MATCH (n:Person)-[:KNOWS]->(m:Person) WHERE m.age > 21 RETURN m"
+/// ).unwrap();
+///
+/// // Vector search
+/// let query = parse_query("SIMILAR TO [0.1, 0.2, 0.3] LIMIT 10").unwrap();
+///
+/// // Temporal query
+/// let query = parse_query("AS OF 1704067200000000 MATCH (n:Person) RETURN n").unwrap();
+/// ```
+///
+/// # Errors
+///
+/// Returns an error for:
+/// - Syntax errors in the GQL string
+/// - Unbound parameters (use [`parse_query_with_params`] for parameterized queries)
+///
+/// ```rust
+/// use gallifreydb::query::parse_query;
+///
+/// // Syntax error
+/// let result = parse_query("MATCH (n:Person RETURN n"); // Missing closing paren
+/// assert!(result.is_err());
+///
+/// // Unbound parameter
+/// let result = parse_query("SIMILAR TO $embedding LIMIT 10");
+/// assert!(result.is_err());
 /// ```
 pub fn parse_query(gql: &str) -> Result<Query> {
     let ast = super::parser::Parser::parse(gql).map_err(|e| {
@@ -522,17 +879,59 @@ pub fn parse_query(gql: &str) -> Result<Query> {
 
 /// Parse a GQL query string with parameters and convert it to a Query.
 ///
+/// Use this function when your query contains parameter references (`$name`).
+/// Parameters allow dynamic values without string concatenation, which:
+///
+/// - Prevents injection vulnerabilities
+/// - Enables query plan caching
+/// - Provides type safety
+///
+/// # Arguments
+///
+/// * `gql` - A GQL query string with parameter references
+/// * `params` - A map of parameter names to values
+///
+/// # Returns
+///
+/// * `Ok(Query)` - The converted query with parameters resolved
+/// * `Err(Error)` - Parse error, conversion error, or missing parameter
+///
 /// # Example
 ///
-/// ```ignore
-/// use gallifreydb::query::converter::{parse_query_with_params, ParameterValue};
+/// ```rust
+/// use gallifreydb::query::{parse_query_with_params, ParameterValue};
 /// use std::collections::HashMap;
+/// use std::sync::Arc;
 ///
+/// // Vector search with embedding parameter
 /// let mut params = HashMap::new();
-/// params.insert("name".to_string(), ParameterValue::Value(PredicateValue::String("Alice".to_string())));
+/// params.insert(
+///     "embedding".to_string(),
+///     ParameterValue::Embedding(Arc::from([0.1f32, 0.2, 0.3].as_slice())),
+/// );
 ///
-/// let query = parse_query_with_params("MATCH (n:Person {name: $name}) RETURN n", params)?;
+/// let query = parse_query_with_params(
+///     "SIMILAR TO $embedding LIMIT 10",
+///     params,
+/// ).unwrap();
 /// ```
+///
+/// # Parameter Types
+///
+/// Different query contexts require different parameter types:
+///
+/// | Context | Required Type | Example |
+/// |---------|--------------|---------|
+/// | `SIMILAR TO $param` | `Embedding` | `ParameterValue::Embedding(Arc::from(...))` |
+/// | `FIND SIMILAR TO ($param)` | `NodeId` | `ParameterValue::NodeId(NodeId::new(42)?)` |
+/// | `WHERE n.prop = $param` | `Value` | `ParameterValue::Value(PredicateValue::Int(21))` |
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The GQL string has syntax errors
+/// - A referenced parameter is not in the `params` map
+/// - A parameter has the wrong type for its context
 pub fn parse_query_with_params(
     gql: &str,
     params: HashMap<String, ParameterValue>,
