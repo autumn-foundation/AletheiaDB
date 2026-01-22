@@ -669,3 +669,12 @@ pub use sparse::{
     ScoringMethod, SparseIndexConfig, SparseIndexStats, SparseVectorIndex, hybrid_fusion,
     reciprocal_rank_fusion,
 };
+
+// Sharded vector index (VS-103)
+pub mod sharded;
+
+// Re-export sharded types for convenience
+pub use sharded::{
+    RebalanceConfig as ShardedRebalanceConfig, ShardStats, ShardedVectorConfig, ShardedVectorIndex,
+    ShardingStrategy,
+};
