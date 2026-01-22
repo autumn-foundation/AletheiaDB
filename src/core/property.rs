@@ -2541,6 +2541,8 @@ mod tests {
 
     #[test]
     fn test_as_arc_vector_returns_none_for_non_vector() {
+        use crate::core::vector::SparseVec;
+
         // as_arc_vector should return None for non-vector types
         assert!(PropertyValue::Null.as_arc_vector().is_none());
         assert!(PropertyValue::Bool(true).as_arc_vector().is_none());
@@ -2549,6 +2551,14 @@ mod tests {
         assert!(PropertyValue::string("test").as_arc_vector().is_none());
         assert!(PropertyValue::bytes([1, 2, 3]).as_arc_vector().is_none());
         assert!(PropertyValue::array(vec![]).as_arc_vector().is_none());
+
+        // SparseVector is a different type - should not match dense Vector
+        let sparse = SparseVec::new(vec![0, 1], vec![1.0, 2.0], 5).unwrap();
+        assert!(
+            PropertyValue::sparse_vector(sparse)
+                .as_arc_vector()
+                .is_none()
+        );
     }
 
     #[test]

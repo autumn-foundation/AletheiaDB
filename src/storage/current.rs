@@ -1005,6 +1005,11 @@ impl CurrentStorage {
                 )
             })?;
 
+        // Explicitly drop query_node before cloning the index Arc.
+        // While get_node() returns an owned Node (not a lock guard), this
+        // makes the lifetime scope explicit and matches the original code.
+        drop(query_node);
+
         let index = Arc::clone(&entry.value().index);
 
         Ok((index, query_vector))
