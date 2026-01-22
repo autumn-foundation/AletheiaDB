@@ -27,17 +27,25 @@
 //!     .execute()?;
 //! ```
 
+pub mod ast;
 pub mod builder;
+pub mod converter;
 pub mod executor;
 pub mod hybrid;
 pub mod ir;
+pub mod lexer;
+pub mod parser;
 pub mod plan;
 pub mod planner;
 
 // Re-export commonly used types
+pub use ast::QueryAst;
 pub use builder::{Query, QueryBuilder};
+pub use converter::{AstConverter, ParameterValue, parse_query, parse_query_with_params};
 pub use executor::{QueryExecutor, QueryResults, QueryRow};
 pub use hybrid::traverse_and_rank;
-pub use ir::{Direction, Predicate, QueryOp, TraversalDepth};
+pub use ir::{Direction, Predicate, QueryOp, SortKey, TraversalDepth};
+pub use lexer::{Lexer, LexerError, Token};
+pub use parser::{ParseError, Parser};
 pub use plan::{LogicalOp, LogicalPlan};
 pub use planner::{PhysicalPlan, QueryPlanner};

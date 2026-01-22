@@ -19,7 +19,7 @@ use crate::utils::error::{Error, QueryError, Result};
 
 use super::builder::Query;
 use super::ir::QueryOp;
-use super::plan::{LogicalOp, LogicalPlan, ScanOp, TemporalContext, UnaryOp};
+use super::plan::{LogicalOp, LogicalPlan, ScanOp, SortKey, TemporalContext, UnaryOp};
 
 pub use cost::{Cost, CostModel};
 pub use physical::{PhysicalOp, PhysicalPlan};
@@ -304,6 +304,27 @@ impl QueryPlanner {
                     })
                 })?;
                 Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input))
+            }
+
+            QueryOp::Sort { key, descending } => {
+                let input = current.ok_or_else(|| {
+                    Error::Query(QueryError::SyntaxError {
+                        message: "Sort requires a source".to_string(),
+                    })
+                })?;
+                // Convert IR SortKey to Plan SortKey
+                let plan_key = match key {
+                    crate::query::ir::SortKey::Property(prop) => SortKey::Property(prop.clone()),
+                    crate::query::ir::SortKey::Score => SortKey::Score,
+                    crate::query::ir::SortKey::Timestamp => SortKey::Timestamp,
+                };
+                Ok(LogicalOp::unary(
+                    UnaryOp::Sort {
+                        key: plan_key,
+                        descending: *descending,
+                    },
+                    input,
+                ))
             }
 
             QueryOp::GetEdges { direction: _ } => {
