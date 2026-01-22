@@ -44,7 +44,7 @@ pub use builder::{Query, QueryBuilder};
 pub use converter::{AstConverter, ParameterValue, parse_query, parse_query_with_params};
 pub use executor::{QueryExecutor, QueryResults, QueryRow};
 pub use hybrid::traverse_and_rank;
-pub use ir::{Direction, Predicate, QueryOp, TraversalDepth};
+pub use ir::{Direction, Predicate, QueryOp, SortKey, TraversalDepth};
 pub use lexer::{Lexer, LexerError, Token};
 pub use parser::{ParseError, Parser};
 pub use plan::{LogicalOp, LogicalPlan};

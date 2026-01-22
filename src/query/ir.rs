@@ -134,6 +134,14 @@ pub enum QueryOp {
     /// Skip a number of results
     Skip(usize),
 
+    /// Sort results by a key
+    Sort {
+        /// Sort key (property name or special key like "score")
+        key: SortKey,
+        /// Sort order (true = descending)
+        descending: bool,
+    },
+
     // === Aggregation Operations ===
     /// Count results
     Count,
@@ -218,6 +226,17 @@ pub enum Direction {
     Incoming,
     /// Both directions
     Both,
+}
+
+/// Key for sorting results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SortKey {
+    /// Sort by a property value
+    Property(String),
+    /// Sort by similarity score (for vector search results)
+    Score,
+    /// Sort by timestamp (for temporal queries)
+    Timestamp,
 }
 
 /// Property predicates for filtering nodes and edges.

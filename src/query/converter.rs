@@ -176,12 +176,12 @@ use crate::index::vector::DistanceMetric;
 use crate::utils::error::{Error, QueryError, Result};
 
 use super::ast::{
-    ComparisonOp, DepthSpec, EmbeddingRef, Expression, NodePattern, NodeRef, Pattern,
+    ComparisonOp, DepthSpec, EmbeddingRef, Expression, NodePattern, NodeRef, OrderClause, Pattern,
     PatternElement, PredicateExpr, PropertyValue, QueryAst, RelationshipDirection,
     RelationshipPattern, ReturnClause, SourceClause, TemporalClause, TimestampLiteral,
 };
 use super::builder::Query;
-use super::ir::{Predicate, PredicateValue, QueryOp, TraversalDepth};
+use super::ir::{Predicate, PredicateValue, QueryOp, SortKey, TraversalDepth};
 use super::plan::{QueryHints, TemporalContext};
 
 /// Converts a parsed [`QueryAst`] into a [`Query`] that can be executed.
@@ -418,7 +418,12 @@ impl AstConverter {
             }
         }
 
-        // 6. Convert SKIP and LIMIT
+        // 6. Convert ORDER BY clause
+        if let Some(ref order_clause) = ast.order {
+            self.convert_order(order_clause, &mut ops)?;
+        }
+
+        // 7. Convert SKIP and LIMIT
         if let Some(skip) = ast.skip {
             ops.push(QueryOp::Skip(skip));
         }
@@ -771,6 +776,35 @@ impl AstConverter {
             }
         }
         Ok(projections)
+    }
+
+    /// Convert ORDER BY clause to Sort operations.
+    fn convert_order(&self, order_clause: &OrderClause, ops: &mut Vec<QueryOp>) -> Result<()> {
+        for item in &order_clause.items {
+            let sort_key = match &item.expression {
+                Expression::Property(prop) => SortKey::Property(prop.property.clone()),
+                Expression::Identifier(name) => {
+                    // Special identifiers for built-in sort keys
+                    match name.as_str() {
+                        "score" => SortKey::Score,
+                        "timestamp" => SortKey::Timestamp,
+                        _ => SortKey::Property(name.clone()),
+                    }
+                }
+                _ => {
+                    return Err(Error::Query(QueryError::SyntaxError {
+                        message: "ORDER BY expression must be a property access or identifier"
+                            .to_string(),
+                    }));
+                }
+            };
+
+            ops.push(QueryOp::Sort {
+                key: sort_key,
+                descending: item.descending,
+            });
+        }
+        Ok(())
     }
 
     /// Resolve an embedding reference to an actual embedding vector.
@@ -1449,6 +1483,130 @@ mod tests {
 
         let plan = planner.plan(query).unwrap();
         // Verify the plan has a valid root operation (not empty)
+        assert!(!matches!(
+            plan.root,
+            crate::query::planner::PhysicalOp::Empty
+        ));
+    }
+
+    // ========================================================================
+    // ORDER BY conversion tests
+    // ========================================================================
+
+    #[test]
+    fn test_convert_order_by_property() {
+        // MATCH (n:Person) RETURN n ORDER BY n.age DESC
+        let ast = Parser::parse("MATCH (n:Person) RETURN n ORDER BY n.age DESC").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let sort_op = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::Sort { .. }));
+        assert!(sort_op.is_some(), "Expected Sort operation");
+        if let Some(QueryOp::Sort { key, descending }) = sort_op {
+            assert!(
+                matches!(key, SortKey::Property(p) if p == "age"),
+                "Expected property key 'age'"
+            );
+            assert!(*descending, "Expected descending order");
+        }
+    }
+
+    #[test]
+    fn test_convert_order_by_ascending() {
+        // MATCH (n:Person) RETURN n ORDER BY n.name ASC
+        let ast = Parser::parse("MATCH (n:Person) RETURN n ORDER BY n.name ASC").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let sort_op = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::Sort { .. }));
+        assert!(sort_op.is_some(), "Expected Sort operation");
+        if let Some(QueryOp::Sort { key, descending }) = sort_op {
+            assert!(
+                matches!(key, SortKey::Property(p) if p == "name"),
+                "Expected property key 'name'"
+            );
+            assert!(!*descending, "Expected ascending order");
+        }
+    }
+
+    #[test]
+    fn test_convert_order_by_score() {
+        // SIMILAR TO [0.1, 0.2, 0.3] LIMIT 10 ORDER BY score DESC
+        let ast = Parser::parse("SIMILAR TO [0.1, 0.2, 0.3] LIMIT 10 ORDER BY score DESC").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let sort_op = query
+            .ops
+            .iter()
+            .find(|op| matches!(op, QueryOp::Sort { .. }));
+        assert!(sort_op.is_some(), "Expected Sort operation");
+        if let Some(QueryOp::Sort { key, descending }) = sort_op {
+            assert!(matches!(key, SortKey::Score), "Expected Score key");
+            assert!(*descending, "Expected descending order");
+        }
+    }
+
+    #[test]
+    fn test_convert_order_by_multiple() {
+        // MATCH (n) RETURN n ORDER BY n.age DESC, n.name ASC
+        let ast = Parser::parse("MATCH (n) RETURN n ORDER BY n.age DESC, n.name ASC").unwrap();
+        let converter = AstConverter::new();
+        let query = converter.convert(&ast).unwrap();
+
+        let sort_ops: Vec<_> = query
+            .ops
+            .iter()
+            .filter(|op| matches!(op, QueryOp::Sort { .. }))
+            .collect();
+
+        assert_eq!(sort_ops.len(), 2, "Expected 2 Sort operations");
+
+        // First sort by age DESC
+        if let QueryOp::Sort { key, descending } = sort_ops[0] {
+            assert!(
+                matches!(key, SortKey::Property(p) if p == "age"),
+                "First sort should be by age"
+            );
+            assert!(*descending, "First sort should be descending");
+        }
+
+        // Second sort by name ASC
+        if let QueryOp::Sort { key, descending } = sort_ops[1] {
+            assert!(
+                matches!(key, SortKey::Property(p) if p == "name"),
+                "Second sort should be by name"
+            );
+            assert!(!*descending, "Second sort should be ascending");
+        }
+    }
+
+    #[test]
+    fn test_planner_integration_with_order_by() {
+        use crate::query::planner::{QueryPlanner, Statistics};
+        use crate::storage::CurrentStorage;
+        use std::sync::Arc;
+
+        // Parse and convert
+        let query =
+            super::parse_query("MATCH (n:Person) RETURN n ORDER BY n.age DESC LIMIT 10").unwrap();
+
+        // Create storage and planner
+        let storage = Arc::new(CurrentStorage::new());
+        let stats = Arc::new(Statistics::default());
+        let planner = QueryPlanner::new(stats, storage);
+
+        // Plan the query - should succeed
+        let result = planner.plan(query);
+        assert!(result.is_ok(), "Planning should succeed");
+
+        let plan = result.unwrap();
         assert!(!matches!(
             plan.root,
             crate::query::planner::PhysicalOp::Empty
