@@ -234,207 +234,156 @@ impl TemporalVectorIndexState {
     }
 }
 
-/// Iterator over outgoing edge IDs from a node.
+/// Macro to generate edge iterator types.
 ///
-/// This iterator provides zero-allocation traversal of outgoing edges,
-/// avoiding the `Vec` allocation overhead of [`CurrentStorage::get_outgoing_edges`].
-///
-/// # Performance
-///
-/// - **Zero allocation**: Holds an `AdjacencyGuard` (just an `Arc` clone, ~5-10ns)
-/// - **Lazy evaluation**: Only computes results as you iterate
-/// - **Cache-friendly**: Sequential access to CSR adjacency data
-///
-/// # Issue #187
-///
-/// This iterator addresses the performance issue where `get_outgoing_edges()`
-/// unnecessarily allocated a new `Vec<EdgeId>` on every call, adding 100-500ns
-/// overhead per traversal.
-pub struct OutgoingEdgesIter {
-    guard: AdjacencyGuard,
-    index: usize,
-}
-
-impl OutgoingEdgesIter {
-    /// Create a new iterator over outgoing edges.
-    #[inline]
-    fn new(guard: AdjacencyGuard) -> Self {
-        OutgoingEdgesIter { guard, index: 0 }
-    }
-}
-
-impl Iterator for OutgoingEdgesIter {
-    type Item = EdgeId;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let entries = &*self.guard;
-        if self.index < entries.len() {
-            let edge_id = entries[self.index].edge_id;
-            self.index += 1;
-            Some(edge_id)
-        } else {
-            None
+/// This eliminates code duplication between outgoing/incoming iterator variants
+/// while preserving distinct types for API clarity.
+macro_rules! impl_edge_iter {
+    (
+        $(#[$meta:meta])*
+        $name:ident,
+        $method_link:literal,
+        $direction:literal
+    ) => {
+        $(#[$meta])*
+        #[doc = concat!(
+            "\n\nThis iterator provides zero-allocation traversal of ", $direction, " edges,",
+            "\navoiding the `Vec` allocation overhead of [`", $method_link, "`](Self::", $method_link, ").",
+            "\n\n# Performance",
+            "\n\n- **Zero allocation**: Holds an `AdjacencyGuard` (just an `Arc` clone, ~5-10ns)",
+            "\n- **Lazy evaluation**: Only computes results as you iterate",
+            "\n- **Cache-friendly**: Sequential access to CSR adjacency data",
+            "\n\n# Issue #187",
+            "\n\nThis iterator addresses the performance issue where edge traversal methods",
+            "\nunnecessarily allocated a new `Vec<EdgeId>` on every call, adding 100-500ns",
+            "\noverhead per traversal."
+        )]
+        pub struct $name {
+            guard: AdjacencyGuard,
+            index: usize,
         }
-    }
 
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.guard.len() - self.index;
-        (remaining, Some(remaining))
-    }
-}
-
-impl ExactSizeIterator for OutgoingEdgesIter {}
-
-/// Iterator over incoming edge IDs to a node.
-///
-/// This iterator provides zero-allocation traversal of incoming edges,
-/// avoiding the `Vec` allocation overhead of [`CurrentStorage::get_incoming_edges`].
-///
-/// See [`OutgoingEdgesIter`] for performance details.
-pub struct IncomingEdgesIter {
-    guard: AdjacencyGuard,
-    index: usize,
-}
-
-impl IncomingEdgesIter {
-    /// Create a new iterator over incoming edges.
-    #[inline]
-    fn new(guard: AdjacencyGuard) -> Self {
-        IncomingEdgesIter { guard, index: 0 }
-    }
-}
-
-impl Iterator for IncomingEdgesIter {
-    type Item = EdgeId;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let entries = &*self.guard;
-        if self.index < entries.len() {
-            let edge_id = entries[self.index].edge_id;
-            self.index += 1;
-            Some(edge_id)
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.guard.len() - self.index;
-        (remaining, Some(remaining))
-    }
-}
-
-impl ExactSizeIterator for IncomingEdgesIter {}
-
-/// Iterator over outgoing edge IDs from a node, filtered by label.
-///
-/// This iterator provides zero-allocation traversal of outgoing edges
-/// that match a specific label.
-///
-/// # Performance
-///
-/// - **Zero allocation**: Holds an `AdjacencyGuard` and pre-resolved label ID
-/// - **Lazy evaluation**: Filters as you iterate
-/// - **Early termination**: If label doesn't exist, returns empty iterator
-pub struct OutgoingEdgesWithLabelIter {
-    guard: AdjacencyGuard,
-    index: usize,
-    label_id: Option<InternedString>,
-}
-
-impl OutgoingEdgesWithLabelIter {
-    /// Create a new iterator over outgoing edges with a specific label.
-    #[inline]
-    fn new(guard: AdjacencyGuard, label_id: Option<InternedString>) -> Self {
-        OutgoingEdgesWithLabelIter {
-            guard,
-            index: 0,
-            label_id,
-        }
-    }
-}
-
-impl Iterator for OutgoingEdgesWithLabelIter {
-    type Item = EdgeId;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        // If label doesn't exist, return None immediately
-        let label_id = self.label_id?;
-
-        let entries = &*self.guard;
-        while self.index < entries.len() {
-            let entry = &entries[self.index];
-            self.index += 1;
-            if entry.label == label_id {
-                return Some(entry.edge_id);
+        impl $name {
+            #[doc = concat!("Create a new iterator over ", $direction, " edges.")]
+            #[inline]
+            fn new(guard: AdjacencyGuard) -> Self {
+                Self { guard, index: 0 }
             }
         }
-        None
-    }
 
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        // Upper bound is remaining entries; lower bound is 0 (all could be filtered)
-        let remaining = self.guard.len().saturating_sub(self.index);
-        (0, Some(remaining))
-    }
-}
+        impl Iterator for $name {
+            type Item = EdgeId;
 
-/// Iterator over incoming edge IDs to a node, filtered by label.
-///
-/// This iterator provides zero-allocation traversal of incoming edges
-/// that match a specific label.
-///
-/// See [`OutgoingEdgesWithLabelIter`] for performance details.
-pub struct IncomingEdgesWithLabelIter {
-    guard: AdjacencyGuard,
-    index: usize,
-    label_id: Option<InternedString>,
-}
+            #[inline]
+            fn next(&mut self) -> Option<Self::Item> {
+                let entry = self.guard.get(self.index)?;
+                self.index += 1;
+                Some(entry.edge_id)
+            }
 
-impl IncomingEdgesWithLabelIter {
-    /// Create a new iterator over incoming edges with a specific label.
-    #[inline]
-    fn new(guard: AdjacencyGuard, label_id: Option<InternedString>) -> Self {
-        IncomingEdgesWithLabelIter {
-            guard,
-            index: 0,
-            label_id,
-        }
-    }
-}
-
-impl Iterator for IncomingEdgesWithLabelIter {
-    type Item = EdgeId;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        // If label doesn't exist, return None immediately
-        let label_id = self.label_id?;
-
-        let entries = &*self.guard;
-        while self.index < entries.len() {
-            let entry = &entries[self.index];
-            self.index += 1;
-            if entry.label == label_id {
-                return Some(entry.edge_id);
+            #[inline]
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                let remaining = self.guard.len().saturating_sub(self.index);
+                (remaining, Some(remaining))
             }
         }
-        None
-    }
 
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        // Upper bound is remaining entries; lower bound is 0 (all could be filtered)
-        let remaining = self.guard.len().saturating_sub(self.index);
-        (0, Some(remaining))
-    }
+        impl ExactSizeIterator for $name {}
+        impl std::iter::FusedIterator for $name {}
+    };
 }
+
+/// Macro to generate label-filtered edge iterator types.
+macro_rules! impl_edge_iter_with_label {
+    (
+        $(#[$meta:meta])*
+        $name:ident,
+        $method_link:literal,
+        $direction:literal
+    ) => {
+        $(#[$meta])*
+        #[doc = concat!(
+            "\n\nThis iterator provides zero-allocation traversal of ", $direction, " edges",
+            "\nthat match a specific label, avoiding the `Vec` allocation overhead of",
+            "\n[`", $method_link, "`](Self::", $method_link, ").",
+            "\n\n# Performance",
+            "\n\n- **Zero allocation**: Holds an `AdjacencyGuard` and pre-resolved label ID",
+            "\n- **Lazy evaluation**: Filters as you iterate",
+            "\n- **Early termination**: If label doesn't exist, returns empty iterator"
+        )]
+        pub struct $name {
+            guard: AdjacencyGuard,
+            index: usize,
+            label_id: Option<InternedString>,
+        }
+
+        impl $name {
+            #[doc = concat!("Create a new iterator over ", $direction, " edges with a specific label.")]
+            #[inline]
+            fn new(guard: AdjacencyGuard, label_id: Option<InternedString>) -> Self {
+                Self {
+                    guard,
+                    index: 0,
+                    label_id,
+                }
+            }
+        }
+
+        impl Iterator for $name {
+            type Item = EdgeId;
+
+            #[inline]
+            fn next(&mut self) -> Option<Self::Item> {
+                let label_id = self.label_id?;
+                let remaining = &self.guard[self.index..];
+
+                if let Some(pos) = remaining.iter().position(|e| e.label == label_id) {
+                    self.index += pos + 1;
+                    Some(remaining[pos].edge_id)
+                } else {
+                    self.index = self.guard.len();
+                    None
+                }
+            }
+
+            #[inline]
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                let remaining = self.guard.len().saturating_sub(self.index);
+                (0, Some(remaining))
+            }
+        }
+
+        impl std::iter::FusedIterator for $name {}
+    };
+}
+
+impl_edge_iter!(
+    /// Iterator over outgoing edge IDs from a node.
+    OutgoingEdgesIter,
+    "get_outgoing_edges",
+    "outgoing"
+);
+
+impl_edge_iter!(
+    /// Iterator over incoming edge IDs to a node.
+    IncomingEdgesIter,
+    "get_incoming_edges",
+    "incoming"
+);
+
+impl_edge_iter_with_label!(
+    /// Iterator over outgoing edge IDs from a node, filtered by label.
+    OutgoingEdgesWithLabelIter,
+    "get_outgoing_edges_with_label",
+    "outgoing"
+);
+
+impl_edge_iter_with_label!(
+    /// Iterator over incoming edge IDs to a node, filtered by label.
+    IncomingEdgesWithLabelIter,
+    "get_incoming_edges_with_label",
+    "incoming"
+);
 
 /// Current-state storage engine.
 ///
@@ -1104,7 +1053,7 @@ impl CurrentStorage {
 
     /// Get all outgoing edges from a node as an iterator.
     ///
-    /// This is a zero-allocation alternative to [`get_outgoing_edges`] that returns
+    /// This is a zero-allocation alternative to [`Self::get_outgoing_edges`] that returns
     /// an iterator instead of collecting into a `Vec`. Use this for performance-critical
     /// traversals where you don't need to store all edges.
     ///
@@ -1130,10 +1079,10 @@ impl CurrentStorage {
 
     /// Get all incoming edges to a node as an iterator.
     ///
-    /// This is a zero-allocation alternative to [`get_incoming_edges`] that returns
+    /// This is a zero-allocation alternative to [`Self::get_incoming_edges`] that returns
     /// an iterator instead of collecting into a `Vec`.
     ///
-    /// See [`get_outgoing_edges_iter`] for performance details and usage examples.
+    /// See [`Self::get_outgoing_edges_iter`] for performance details and usage examples.
     #[inline]
     pub fn get_incoming_edges_iter(&self, target: NodeId) -> IncomingEdgesIter {
         IncomingEdgesIter::new(self.indexes.get_incoming(target))
@@ -1141,7 +1090,7 @@ impl CurrentStorage {
 
     /// Get outgoing edges with a specific label as an iterator.
     ///
-    /// This is a zero-allocation alternative to [`get_outgoing_edges_with_label`].
+    /// This is a zero-allocation alternative to [`Self::get_outgoing_edges_with_label`].
     ///
     /// Returns an empty iterator if the label doesn't exist.
     #[inline]
@@ -1156,7 +1105,7 @@ impl CurrentStorage {
 
     /// Get incoming edges with a specific label as an iterator.
     ///
-    /// This is a zero-allocation alternative to [`get_incoming_edges_with_label`].
+    /// This is a zero-allocation alternative to [`Self::get_incoming_edges_with_label`].
     ///
     /// Returns an empty iterator if the label doesn't exist.
     #[inline]
@@ -3559,11 +3508,13 @@ mod tests {
             .create_edge(n0, n2, "FOLLOWS", PropertyMapBuilder::new().build())
             .unwrap();
 
-        // Test iterator returns same results as Vec version
-        let vec_result: Vec<EdgeId> = storage.get_outgoing_edges(n0);
-        let iter_result: Vec<EdgeId> = storage.get_outgoing_edges_iter(n0).collect();
+        // Test iterator returns same results as Vec version using HashSet for robust comparison
+        let vec_result: std::collections::HashSet<EdgeId> =
+            storage.get_outgoing_edges(n0).into_iter().collect();
+        let iter_result: std::collections::HashSet<EdgeId> =
+            storage.get_outgoing_edges_iter(n0).collect();
 
-        assert_eq!(vec_result.len(), iter_result.len());
+        assert_eq!(vec_result, iter_result);
         assert!(iter_result.contains(&e1));
         assert!(iter_result.contains(&e2));
     }
@@ -3604,11 +3555,13 @@ mod tests {
             .create_edge(n1, n2, "FOLLOWS", PropertyMapBuilder::new().build())
             .unwrap();
 
-        // Test iterator returns same results as Vec version
-        let vec_result: Vec<EdgeId> = storage.get_incoming_edges(n2);
-        let iter_result: Vec<EdgeId> = storage.get_incoming_edges_iter(n2).collect();
+        // Test iterator returns same results as Vec version using HashSet for robust comparison
+        let vec_result: std::collections::HashSet<EdgeId> =
+            storage.get_incoming_edges(n2).into_iter().collect();
+        let iter_result: std::collections::HashSet<EdgeId> =
+            storage.get_incoming_edges_iter(n2).collect();
 
-        assert_eq!(vec_result.len(), iter_result.len());
+        assert_eq!(vec_result, iter_result);
         assert!(iter_result.contains(&e1));
         assert!(iter_result.contains(&e2));
     }
