@@ -1737,7 +1737,8 @@ impl GallifreyDB {
 
     /// Get a node as it existed at a specific point in bi-temporal space.
     ///
-    /// This uses the slow path (historical storage + version reconstruction).
+    /// Uses the temporal index for O(log n) candidate lookup, then verifies
+    /// visibility with historical storage (handles closed intervals from deletions).
     pub fn get_node_at_time(
         &self,
         node_id: NodeId,
@@ -1746,31 +1747,48 @@ impl GallifreyDB {
     ) -> Result<Node> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("get_node_at_time").entered();
+
+        // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
+        let version_ids =
+            self.temporal_indexes
+                .find_node_version_at_point(node_id, valid_time, transaction_time);
+
+        // Early return if no candidates - avoid unnecessary lock acquisition
+        if version_ids.is_empty() {
+            return Err(StorageError::NodeNotFound(node_id).into());
+        }
+
         let historical = self.historical.read_or_err()?;
 
-        // Find the version valid at this time
-        let version_id = historical
-            .find_node_version_at_time(node_id, valid_time, transaction_time)
-            .ok_or(StorageError::NodeNotFound(node_id))?;
+        // IMPORTANT: Double-check visibility with historical storage.
+        // This is intentional and NOT redundant: the temporal index stores intervals at
+        // insertion time, but deletions close the valid_time interval in historical storage.
+        // Without this check, deleted nodes would incorrectly appear as visible.
+        for version_id in version_ids {
+            if let Some(version) = historical.get_node_version(version_id)
+                && version.temporal.is_visible_at(valid_time, transaction_time)
+            {
+                // Reconstruct properties
+                let properties = historical.reconstruct_node_properties(version_id)?;
 
-        // Get the version
-        let version = historical
-            .get_node_version(version_id)
-            .ok_or(StorageError::VersionNotFound(version_id))?;
+                // Build node from version
+                return Ok(Node::new(
+                    version.node_id,
+                    version.label,
+                    properties,
+                    version.id,
+                ));
+            }
+        }
 
-        // Reconstruct properties
-        let properties = historical.reconstruct_node_properties(version_id)?;
-
-        // Build node from version
-        Ok(Node::new(
-            version.node_id,
-            version.label,
-            properties,
-            version.id,
-        ))
+        // No visible version found
+        Err(StorageError::NodeNotFound(node_id).into())
     }
 
     /// Get an edge as it existed at a specific point in bi-temporal space.
+    ///
+    /// Uses the temporal index for O(log n) candidate lookup, then verifies
+    /// visibility with historical storage (handles closed intervals from deletions).
     pub fn get_edge_at_time(
         &self,
         edge_id: EdgeId,
@@ -1779,26 +1797,42 @@ impl GallifreyDB {
     ) -> Result<Edge> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("get_edge_at_time").entered();
+
+        // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
+        let version_ids =
+            self.temporal_indexes
+                .find_edge_version_at_point(edge_id, valid_time, transaction_time);
+
+        // Early return if no candidates - avoid unnecessary lock acquisition
+        if version_ids.is_empty() {
+            return Err(StorageError::EdgeNotFound(edge_id).into());
+        }
+
         let historical = self.historical.read_or_err()?;
 
-        let version_id = historical
-            .find_edge_version_at_time(edge_id, valid_time, transaction_time)
-            .ok_or(StorageError::EdgeNotFound(edge_id))?;
+        // IMPORTANT: Double-check visibility with historical storage.
+        // This is intentional and NOT redundant: the temporal index stores intervals at
+        // insertion time, but deletions close the valid_time interval in historical storage.
+        // Without this check, deleted edges would incorrectly appear as visible.
+        for version_id in version_ids {
+            if let Some(version) = historical.get_edge_version(version_id)
+                && version.temporal.is_visible_at(valid_time, transaction_time)
+            {
+                let properties = historical.reconstruct_edge_properties(version_id)?;
 
-        let version = historical
-            .get_edge_version(version_id)
-            .ok_or(StorageError::VersionNotFound(version_id))?;
+                return Ok(Edge::new(
+                    version.edge_id,
+                    version.label,
+                    version.source,
+                    version.target,
+                    properties,
+                    version.id,
+                ));
+            }
+        }
 
-        let properties = historical.reconstruct_edge_properties(version_id)?;
-
-        Ok(Edge::new(
-            version.edge_id,
-            version.label,
-            version.source,
-            version.target,
-            properties,
-            version.id,
-        ))
+        // No visible version found
+        Err(StorageError::EdgeNotFound(edge_id).into())
     }
 
     /// Get multiple nodes as they existed at a specific point in bi-temporal space.
@@ -1882,43 +1916,45 @@ impl GallifreyDB {
         node_ids
             .iter()
             .map(|&node_id| {
-                // Find the version valid at this time
-                let node = match historical.find_node_version_at_time(
+                // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
+                let version_ids = self.temporal_indexes.find_node_version_at_point(
                     node_id,
                     valid_time,
                     transaction_time,
-                ) {
-                    Some(version_id) => {
-                        // Get the version - this should always exist if find_node_version_at_time returned it
-                        let version = historical
-                            .get_node_version(version_id)
-                            .ok_or(StorageError::VersionNotFound(version_id))?;
+                );
 
-                        // Reconstruct properties - propagate errors as these are systemic failures
-                        #[allow(clippy::map_identity)]
-                        let properties = historical
-                            .reconstruct_node_properties(version_id)
-                            .map_err(|e| {
-                                #[cfg(feature = "observability")]
-                                tracing::error!(
-                                    version_id = %version_id,
-                                    node_id = %node_id,
-                                    error = %e,
-                                    "Property reconstruction failed in batch query"
-                                );
-                                e // Propagate the error
-                            })?;
-
-                        // Build node from version
-                        Some(Node::new(
-                            version.node_id,
-                            version.label,
-                            properties,
-                            version.id,
-                        ))
+                // Find the first version that is actually visible (handles closed intervals from deletions)
+                // Use explicit matching to ensure we check all candidates even if one is missing/corrupted
+                let node = version_ids.into_iter().find_map(|version_id| {
+                    match historical.get_node_version(version_id) {
+                        Some(version)
+                            if version.temporal.is_visible_at(valid_time, transaction_time) =>
+                        {
+                            // Reconstruct properties - return None on error to continue to next candidate
+                            // Note: Batch queries treat reconstruction errors as "not found" to allow
+                            // partial results. Errors are logged when observability is enabled.
+                            match historical.reconstruct_node_properties(version_id) {
+                                Ok(properties) => Some(Node::new(
+                                    version.node_id,
+                                    version.label,
+                                    properties,
+                                    version.id,
+                                )),
+                                Err(_e) => {
+                                    #[cfg(feature = "observability")]
+                                    tracing::error!(
+                                        version_id = %version_id,
+                                        node_id = %node_id,
+                                        error = %_e,
+                                        "Property reconstruction failed in batch query"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        _ => None, // Version missing or not visible - continue to next candidate
                     }
-                    None => None, // Node didn't exist at this time - this is expected, not an error
-                };
+                });
 
                 Ok((node_id, node))
             })
@@ -2001,45 +2037,47 @@ impl GallifreyDB {
         edge_ids
             .iter()
             .map(|&edge_id| {
-                // Find the version valid at this time
-                let edge = match historical.find_edge_version_at_time(
+                // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
+                let version_ids = self.temporal_indexes.find_edge_version_at_point(
                     edge_id,
                     valid_time,
                     transaction_time,
-                ) {
-                    Some(version_id) => {
-                        // Get the version - this should always exist if find_edge_version_at_time returned it
-                        let version = historical
-                            .get_edge_version(version_id)
-                            .ok_or(StorageError::VersionNotFound(version_id))?;
+                );
 
-                        // Reconstruct properties - propagate errors as these are systemic failures
-                        #[allow(clippy::map_identity)]
-                        let properties = historical
-                            .reconstruct_edge_properties(version_id)
-                            .map_err(|e| {
-                                #[cfg(feature = "observability")]
-                                tracing::error!(
-                                    version_id = %version_id,
-                                    edge_id = %edge_id,
-                                    error = %e,
-                                    "Property reconstruction failed in batch query"
-                                );
-                                e // Propagate the error
-                            })?;
-
-                        // Build edge from version
-                        Some(Edge::new(
-                            version.edge_id,
-                            version.label,
-                            version.source,
-                            version.target,
-                            properties,
-                            version.id,
-                        ))
+                // Find the first version that is actually visible (handles closed intervals from deletions)
+                // Use explicit matching to ensure we check all candidates even if one is missing/corrupted
+                let edge = version_ids.into_iter().find_map(|version_id| {
+                    match historical.get_edge_version(version_id) {
+                        Some(version)
+                            if version.temporal.is_visible_at(valid_time, transaction_time) =>
+                        {
+                            // Reconstruct properties - return None on error to continue to next candidate
+                            // Note: Batch queries treat reconstruction errors as "not found" to allow
+                            // partial results. Errors are logged when observability is enabled.
+                            match historical.reconstruct_edge_properties(version_id) {
+                                Ok(properties) => Some(Edge::new(
+                                    version.edge_id,
+                                    version.label,
+                                    version.source,
+                                    version.target,
+                                    properties,
+                                    version.id,
+                                )),
+                                Err(_e) => {
+                                    #[cfg(feature = "observability")]
+                                    tracing::error!(
+                                        version_id = %version_id,
+                                        edge_id = %edge_id,
+                                        error = %_e,
+                                        "Property reconstruction failed in batch query"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        _ => None, // Version missing or not visible - continue to next candidate
                     }
-                    None => None, // Edge didn't exist at this time - this is expected, not an error
-                };
+                });
 
                 Ok((edge_id, edge))
             })
@@ -3572,6 +3610,79 @@ mod tests {
         assert_eq!(
             node.get_property("name").and_then(|v| v.as_str()),
             Some("Alice")
+        );
+    }
+
+    /// Test that verifies temporal index + historical storage visibility check interaction.
+    ///
+    /// This is a critical integration test for Issue #194: the temporal index stores intervals
+    /// at insertion time, but deletions close the valid_time in historical storage. The query
+    /// path must verify visibility with historical storage to correctly reject deleted nodes.
+    #[test]
+    fn test_temporal_index_deletion_integration() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create a node
+        let props = PropertyMapBuilder::new().insert("name", "TestNode").build();
+        let node_id = db.create_node("TestLabel", props).unwrap();
+
+        // Record timestamp after creation
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        let t_after_create = crate::core::temporal::time::now();
+
+        // Verify node is queryable after creation
+        let result = db.get_node_at_time(node_id, t_after_create, t_after_create);
+        assert!(
+            result.is_ok(),
+            "Node should be queryable after creation: {:?}",
+            result
+        );
+
+        // Verify temporal index has the version
+        let version_ids =
+            db.temporal_indexes
+                .find_node_version_at_point(node_id, t_after_create, t_after_create);
+        assert!(
+            !version_ids.is_empty(),
+            "Temporal index should return candidates for existing node"
+        );
+
+        // Delete the node
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        db.write(|tx| {
+            tx.delete_node(node_id)?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Record timestamp after deletion
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        let t_after_delete = crate::core::temporal::time::now();
+
+        // CRITICAL: Temporal index may still return the version (it stores insertion-time intervals)
+        // but the query should correctly reject it via historical storage visibility check
+        let version_ids_after =
+            db.temporal_indexes
+                .find_node_version_at_point(node_id, t_after_delete, t_after_delete);
+        // Note: Temporal index might still return candidates - that's expected
+        // The visibility check in get_node_at_time should filter them out
+
+        // Query after deletion should fail
+        let result = db.get_node_at_time(node_id, t_after_delete, t_after_delete);
+        assert!(
+            result.is_err(),
+            "Query after deletion should fail. Temporal index returned {:?} candidates, \
+             but historical visibility check should reject them. Got: {:?}",
+            version_ids_after.len(),
+            result
+        );
+
+        // Query at time BEFORE deletion should still work
+        let result = db.get_node_at_time(node_id, t_after_create, t_after_create);
+        assert!(
+            result.is_ok(),
+            "Query before deletion should succeed: {:?}",
+            result
         );
     }
 
