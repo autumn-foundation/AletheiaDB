@@ -6,10 +6,10 @@
 
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
-use crate::core::interning::GLOBAL_INTERNER;
+use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
-use crate::index::current::CurrentIndexes;
+use crate::index::current::{AdjacencyGuard, CurrentIndexes};
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
@@ -233,6 +233,169 @@ impl TemporalVectorIndexState {
         self.index.is_some()
     }
 }
+
+/// Macro to generate edge iterator types.
+///
+/// This eliminates code duplication between outgoing/incoming iterator variants
+/// while preserving distinct types for API clarity.
+macro_rules! impl_edge_iter {
+    (
+        $(#[$meta:meta])*
+        $name:ident,
+        $method_link:literal,
+        $direction:literal
+    ) => {
+        $(#[$meta])*
+        #[doc = concat!(
+            "\n\nThis iterator provides zero-allocation traversal of ", $direction, " edges,",
+            "\navoiding the `Vec` allocation overhead of [`", $method_link, "`](Self::", $method_link, ").",
+            "\n\n# Performance",
+            "\n\n- **Zero allocation**: Holds an `AdjacencyGuard` (just an `Arc` clone, ~5-10ns)",
+            "\n- **Lazy evaluation**: Only computes results as you iterate",
+            "\n- **Cache-friendly**: Sequential access to CSR adjacency data",
+            "\n\n# Issue #187",
+            "\n\nThis iterator addresses the performance issue where edge traversal methods",
+            "\nunnecessarily allocated a new `Vec<EdgeId>` on every call, adding 100-500ns",
+            "\noverhead per traversal."
+        )]
+        pub struct $name {
+            guard: AdjacencyGuard,
+            index: usize,
+        }
+
+        impl $name {
+            #[doc = concat!("Create a new iterator over ", $direction, " edges.")]
+            #[inline]
+            fn new(guard: AdjacencyGuard) -> Self {
+                Self { guard, index: 0 }
+            }
+        }
+
+        impl Iterator for $name {
+            type Item = EdgeId;
+
+            #[inline]
+            fn next(&mut self) -> Option<Self::Item> {
+                let entry = self.guard.get(self.index)?;
+                self.index += 1;
+                Some(entry.edge_id)
+            }
+
+            #[inline]
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                let remaining = self.guard.len().saturating_sub(self.index);
+                (remaining, Some(remaining))
+            }
+        }
+
+        impl ExactSizeIterator for $name {
+            #[inline]
+            fn len(&self) -> usize {
+                self.guard.len().saturating_sub(self.index)
+            }
+        }
+
+        impl std::iter::FusedIterator for $name {}
+    };
+}
+
+/// Macro to generate label-filtered edge iterator types.
+macro_rules! impl_edge_iter_with_label {
+    (
+        $(#[$meta:meta])*
+        $name:ident,
+        $method_link:literal,
+        $direction:literal
+    ) => {
+        $(#[$meta])*
+        #[doc = concat!(
+            "\n\nThis iterator provides zero-allocation traversal of ", $direction, " edges",
+            "\nthat match a specific label, avoiding the `Vec` allocation overhead of",
+            "\n[`", $method_link, "`](Self::", $method_link, ").",
+            "\n\n# Performance",
+            "\n\n- **Zero allocation**: Holds an `AdjacencyGuard` and pre-resolved label ID",
+            "\n- **Lazy evaluation**: Filters as you iterate",
+            "\n- **O(n) complexity**: Single linear scan regardless of match distribution",
+            "\n- **Early termination**: If label doesn't exist, returns empty iterator"
+        )]
+        pub struct $name {
+            guard: AdjacencyGuard,
+            index: usize,
+            label_id: Option<InternedString>,
+        }
+
+        impl $name {
+            #[doc = concat!("Create a new iterator over ", $direction, " edges with a specific label.")]
+            #[inline]
+            fn new(guard: AdjacencyGuard, label_id: Option<InternedString>) -> Self {
+                Self {
+                    guard,
+                    index: 0,
+                    label_id,
+                }
+            }
+        }
+
+        impl Iterator for $name {
+            type Item = EdgeId;
+
+            #[inline]
+            fn next(&mut self) -> Option<Self::Item> {
+                // Early return if label doesn't exist in interner
+                let label_id = self.label_id?;
+
+                // Linear scan with manual indexing - O(n) total complexity
+                // Avoids the O(n²) worst-case of using .position() repeatedly
+                while self.index < self.guard.len() {
+                    let entry = &self.guard[self.index];
+                    self.index += 1;
+                    if entry.label == label_id {
+                        return Some(entry.edge_id);
+                    }
+                }
+                None
+            }
+
+            #[inline]
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                // Lower bound is 0 (all remaining could be filtered out)
+                // Upper bound is remaining entries
+                let remaining = self.guard.len().saturating_sub(self.index);
+                (0, Some(remaining))
+            }
+        }
+
+        impl std::iter::FusedIterator for $name {}
+    };
+}
+
+impl_edge_iter!(
+    /// Iterator over outgoing edge IDs from a node.
+    OutgoingEdgesIter,
+    "get_outgoing_edges",
+    "outgoing"
+);
+
+impl_edge_iter!(
+    /// Iterator over incoming edge IDs to a node.
+    IncomingEdgesIter,
+    "get_incoming_edges",
+    "incoming"
+);
+
+impl_edge_iter_with_label!(
+    /// Iterator over outgoing edge IDs from a node, filtered by label.
+    OutgoingEdgesWithLabelIter,
+    "get_outgoing_edges_with_label",
+    "outgoing"
+);
+
+impl_edge_iter_with_label!(
+    /// Iterator over incoming edge IDs to a node, filtered by label.
+    IncomingEdgesWithLabelIter,
+    "get_incoming_edges_with_label",
+    "incoming"
+);
 
 /// Current-state storage engine.
 ///
@@ -898,6 +1061,73 @@ impl CurrentStorage {
             .into_iter()
             .map(|entry| entry.edge_id)
             .collect()
+    }
+
+    /// Get all outgoing edges from a node as an iterator.
+    ///
+    /// This is a zero-allocation alternative to [`Self::get_outgoing_edges`] that returns
+    /// an iterator instead of collecting into a `Vec`. Use this for performance-critical
+    /// traversals where you don't need to store all edges.
+    ///
+    /// # Performance
+    ///
+    /// - No `Vec` allocation (saves 100-500ns per call)
+    /// - Lazy evaluation - only computes what you consume
+    /// - Can be short-circuited with `.take()`, `.find()`, etc.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get first outgoing edge without allocating a Vec
+    /// let first_edge = storage.get_outgoing_edges_iter(node).next();
+    ///
+    /// // Count edges without allocation
+    /// let count = storage.get_outgoing_edges_iter(node).count();
+    /// ```
+    #[inline]
+    pub fn get_outgoing_edges_iter(&self, source: NodeId) -> OutgoingEdgesIter {
+        OutgoingEdgesIter::new(self.indexes.get_outgoing(source))
+    }
+
+    /// Get all incoming edges to a node as an iterator.
+    ///
+    /// This is a zero-allocation alternative to [`Self::get_incoming_edges`] that returns
+    /// an iterator instead of collecting into a `Vec`.
+    ///
+    /// See [`Self::get_outgoing_edges_iter`] for performance details and usage examples.
+    #[inline]
+    pub fn get_incoming_edges_iter(&self, target: NodeId) -> IncomingEdgesIter {
+        IncomingEdgesIter::new(self.indexes.get_incoming(target))
+    }
+
+    /// Get outgoing edges with a specific label as an iterator.
+    ///
+    /// This is a zero-allocation alternative to [`Self::get_outgoing_edges_with_label`].
+    ///
+    /// Returns an empty iterator if the label doesn't exist.
+    #[inline]
+    pub fn get_outgoing_edges_with_label_iter(
+        &self,
+        source: NodeId,
+        label: &str,
+    ) -> OutgoingEdgesWithLabelIter {
+        let label_id = GLOBAL_INTERNER.get_id(label);
+        OutgoingEdgesWithLabelIter::new(self.indexes.get_outgoing(source), label_id)
+    }
+
+    /// Get incoming edges with a specific label as an iterator.
+    ///
+    /// This is a zero-allocation alternative to [`Self::get_incoming_edges_with_label`].
+    ///
+    /// Returns an empty iterator if the label doesn't exist.
+    #[inline]
+    pub fn get_incoming_edges_with_label_iter(
+        &self,
+        target: NodeId,
+        label: &str,
+    ) -> IncomingEdgesWithLabelIter {
+        let label_id = GLOBAL_INTERNER.get_id(label);
+        IncomingEdgesWithLabelIter::new(self.indexes.get_incoming(target), label_id)
     }
 
     /// Export outgoing CSR adjacency data for persistence.
@@ -3278,5 +3508,281 @@ mod tests {
         );
 
         assert!(result.is_err(), "Should fail on dimension mismatch");
+    }
+
+    // TDD tests for Issue #187 - Performance optimization for graph traversal methods
+    // These tests verify the new iterator-based API that avoids unnecessary Vec allocations
+
+    #[test]
+    fn test_get_outgoing_edges_iter_basic() {
+        let storage = CurrentStorage::new();
+
+        // Create nodes
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n1 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create edges
+        let e1 = storage
+            .create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        let e2 = storage
+            .create_edge(n0, n2, "FOLLOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Test iterator returns same results as Vec version using HashSet for robust comparison
+        let vec_result: std::collections::HashSet<EdgeId> =
+            storage.get_outgoing_edges(n0).into_iter().collect();
+        let iter_result: std::collections::HashSet<EdgeId> =
+            storage.get_outgoing_edges_iter(n0).collect();
+
+        assert_eq!(vec_result, iter_result);
+        assert!(iter_result.contains(&e1));
+        assert!(iter_result.contains(&e2));
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_iter_empty() {
+        let storage = CurrentStorage::new();
+
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Node with no outgoing edges
+        let count = storage.get_outgoing_edges_iter(n0).count();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_get_incoming_edges_iter_basic() {
+        let storage = CurrentStorage::new();
+
+        // Create nodes
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n1 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create edges pointing to n2
+        let e1 = storage
+            .create_edge(n0, n2, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        let e2 = storage
+            .create_edge(n1, n2, "FOLLOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Test iterator returns same results as Vec version using HashSet for robust comparison
+        let vec_result: std::collections::HashSet<EdgeId> =
+            storage.get_incoming_edges(n2).into_iter().collect();
+        let iter_result: std::collections::HashSet<EdgeId> =
+            storage.get_incoming_edges_iter(n2).collect();
+
+        assert_eq!(vec_result, iter_result);
+        assert!(iter_result.contains(&e1));
+        assert!(iter_result.contains(&e2));
+    }
+
+    #[test]
+    fn test_get_incoming_edges_iter_empty() {
+        let storage = CurrentStorage::new();
+
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Node with no incoming edges
+        let count = storage.get_incoming_edges_iter(n0).count();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_with_label_iter_basic() {
+        let storage = CurrentStorage::new();
+
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n1 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create edges with different labels
+        let e1 = storage
+            .create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        let _e2 = storage
+            .create_edge(n0, n2, "FOLLOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Test iterator with label filter
+        let iter_result: Vec<EdgeId> = storage
+            .get_outgoing_edges_with_label_iter(n0, "KNOWS")
+            .collect();
+        assert_eq!(iter_result.len(), 1);
+        assert!(iter_result.contains(&e1));
+
+        // Compare with Vec version
+        let vec_result = storage.get_outgoing_edges_with_label(n0, "KNOWS");
+        assert_eq!(vec_result.len(), iter_result.len());
+    }
+
+    #[test]
+    fn test_get_outgoing_edges_with_label_iter_nonexistent_label() {
+        let storage = CurrentStorage::new();
+
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n1 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        storage
+            .create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Non-existent label should return empty iterator
+        let count = storage
+            .get_outgoing_edges_with_label_iter(n0, "LOVES")
+            .count();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_get_incoming_edges_with_label_iter_basic() {
+        let storage = CurrentStorage::new();
+
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n1 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create edges with different labels pointing to n2
+        let e1 = storage
+            .create_edge(n0, n2, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        let _e2 = storage
+            .create_edge(n1, n2, "FOLLOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Test iterator with label filter
+        let iter_result: Vec<EdgeId> = storage
+            .get_incoming_edges_with_label_iter(n2, "KNOWS")
+            .collect();
+        assert_eq!(iter_result.len(), 1);
+        assert!(iter_result.contains(&e1));
+
+        // Compare with Vec version
+        let vec_result = storage.get_incoming_edges_with_label(n2, "KNOWS");
+        assert_eq!(vec_result.len(), iter_result.len());
+    }
+
+    #[test]
+    fn test_get_incoming_edges_with_label_iter_nonexistent_label() {
+        let storage = CurrentStorage::new();
+
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n1 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        storage
+            .create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Non-existent label should return empty iterator
+        let count = storage
+            .get_incoming_edges_with_label_iter(n1, "LOVES")
+            .count();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_iterator_can_be_partially_consumed() {
+        let storage = CurrentStorage::new();
+
+        let n0 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n1 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n3 = storage
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create multiple edges
+        storage
+            .create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        storage
+            .create_edge(n0, n2, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        storage
+            .create_edge(n0, n3, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Take only first 2 elements - demonstrating lazy evaluation benefit
+        let first_two: Vec<EdgeId> = storage.get_outgoing_edges_iter(n0).take(2).collect();
+        assert_eq!(first_two.len(), 2);
+    }
+
+    #[test]
+    fn test_iterator_consistency_with_vec() {
+        let storage = CurrentStorage::new();
+
+        // Create a more complex graph
+        let nodes: Vec<NodeId> = (0..5)
+            .map(|_| {
+                storage
+                    .create_node("Person", PropertyMapBuilder::new().build())
+                    .unwrap()
+            })
+            .collect();
+
+        // Create a star pattern: n0 -> n1, n2, n3, n4
+        for i in 1..5 {
+            storage
+                .create_edge(
+                    nodes[0],
+                    nodes[i],
+                    "KNOWS",
+                    PropertyMapBuilder::new().build(),
+                )
+                .unwrap();
+        }
+
+        // Verify iterator and Vec return same edges (order may differ)
+        let vec_edges: std::collections::HashSet<EdgeId> =
+            storage.get_outgoing_edges(nodes[0]).into_iter().collect();
+        let iter_edges: std::collections::HashSet<EdgeId> =
+            storage.get_outgoing_edges_iter(nodes[0]).collect();
+
+        assert_eq!(vec_edges, iter_edges);
     }
 }
