@@ -972,4 +972,190 @@ mod tests {
         let size = estimate_batch_size(&batch);
         assert!(size > 100); // At least the properties size
     }
+
+    // ==================== RoutingToken Tests ====================
+
+    #[test]
+    fn test_routing_token_generation() {
+        let router = DualWriteRouter::new();
+
+        // Token without active migration
+        let token = router.generate_routing_token("Person", make_shard_id(0));
+        assert_eq!(token.label, "Person");
+        assert_eq!(token.primary_shard, make_shard_id(0));
+        assert_eq!(token.targets, vec![make_shard_id(0)]);
+        assert_eq!(token.migration_version, 0);
+    }
+
+    #[test]
+    fn test_routing_token_with_migration() {
+        let router = DualWriteRouter::new();
+        router.register_migration(&["Person".to_string()], make_shard_id(0), make_shard_id(1));
+
+        let token = router.generate_routing_token("Person", make_shard_id(0));
+        assert_eq!(token.targets.len(), 2);
+        assert!(token.targets.contains(&make_shard_id(0)));
+        assert!(token.targets.contains(&make_shard_id(1)));
+        assert_eq!(token.migration_version, 1);
+    }
+
+    #[test]
+    fn test_routing_token_verification() {
+        let router = DualWriteRouter::new();
+
+        // Generate token without migration
+        let token = router.generate_routing_token("Person", make_shard_id(0));
+        assert!(router.verify_routing_token(&token));
+
+        // Add migration - token should still be valid if targets match
+        router.register_migration(&["Place".to_string()], make_shard_id(1), make_shard_id(2));
+        assert!(router.verify_routing_token(&token)); // Person not affected
+
+        // Add migration for Person - token should be invalid
+        router.register_migration(&["Person".to_string()], make_shard_id(0), make_shard_id(1));
+        assert!(!router.verify_routing_token(&token)); // Now invalid
+    }
+
+    #[test]
+    fn test_routing_token_debug() {
+        let token = RoutingToken {
+            label: "Person".to_string(),
+            primary_shard: make_shard_id(0),
+            targets: vec![make_shard_id(0)],
+            migration_version: 0,
+        };
+
+        let debug = format!("{:?}", token);
+        assert!(debug.contains("label"));
+        assert!(debug.contains("Person"));
+    }
+
+    // ==================== with_route_write Tests ====================
+
+    #[test]
+    fn test_with_route_write_no_migration() {
+        let router = DualWriteRouter::new();
+
+        let result = router.with_route_write("Person", make_shard_id(0), |targets| {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0], make_shard_id(0));
+            42
+        });
+
+        assert_eq!(result, Some(42));
+    }
+
+    #[test]
+    fn test_with_route_write_during_migration() {
+        let router = DualWriteRouter::new();
+        router.register_migration(&["Person".to_string()], make_shard_id(0), make_shard_id(1));
+
+        let result = router.with_route_write("Person", make_shard_id(0), |targets| {
+            assert_eq!(targets.len(), 2);
+            assert!(targets.contains(&make_shard_id(0)));
+            assert!(targets.contains(&make_shard_id(1)));
+            "success"
+        });
+
+        assert_eq!(result, Some("success"));
+    }
+
+    #[test]
+    fn test_with_route_write_different_primary() {
+        let router = DualWriteRouter::new();
+        router.register_migration(&["Person".to_string()], make_shard_id(0), make_shard_id(1));
+
+        // Primary is not the source, should route to primary only
+        let result = router.with_route_write("Person", make_shard_id(2), |targets| {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0], make_shard_id(2));
+            true
+        });
+
+        assert_eq!(result, Some(true));
+    }
+
+    // ==================== DualWriteRouter Default Tests ====================
+
+    #[test]
+    fn test_dual_write_router_default() {
+        let router = DualWriteRouter::default();
+        assert_eq!(router.active_migration_count(), 0);
+    }
+
+    // ==================== MigrationConfig Tests ====================
+
+    #[test]
+    fn test_migration_config_debug() {
+        let config = MigrationConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("batch_size"));
+        assert!(debug.contains("batch_retries"));
+    }
+
+    // ==================== ExecutorStats Tests ====================
+
+    #[test]
+    fn test_executor_stats_default() {
+        let stats = ExecutorStats {
+            batches_transferred: 0,
+            bytes_transferred: 0,
+            active_migrations: 0,
+        };
+
+        assert_eq!(stats.batches_transferred, 0);
+        assert_eq!(stats.active_migrations, 0);
+    }
+
+    // ==================== Migration Error Tests ====================
+
+    #[test]
+    fn test_migration_error_target_unavailable() {
+        let err = MigrationError::TargetUnavailable(make_shard_id(1));
+        let msg = format!("{}", err);
+        assert!(msg.contains("Target"));
+    }
+
+    #[test]
+    fn test_migration_error_verification_failed() {
+        let err = MigrationError::VerificationFailed {
+            migration_id: 42,
+            reason: "test reason".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("verification failed"));
+    }
+
+    #[test]
+    fn test_migration_error_batch_rejected() {
+        let err = MigrationError::BatchRejected {
+            batch_number: 5,
+            reason: "network error".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("Batch"));
+        assert!(msg.contains("5"));
+    }
+
+    #[test]
+    fn test_migration_error_timeout() {
+        let err = MigrationError::Timeout {
+            migration_id: 1,
+            phase: MigrationState::Copying,
+            elapsed: Duration::from_secs(30),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("timed out"));
+    }
+
+    #[test]
+    fn test_migration_error_invalid_state() {
+        let err = MigrationError::InvalidState {
+            migration_id: 1,
+            expected: MigrationState::DualWrite,
+            actual: MigrationState::Completed,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("invalid state"));
+    }
 }

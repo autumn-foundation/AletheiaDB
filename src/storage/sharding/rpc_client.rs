@@ -761,4 +761,180 @@ mod tests {
         assert!(client.get_state().is_err());
         assert!(client.health_check().is_err());
     }
+
+    // ==================== RpcConfig Tests ====================
+
+    #[test]
+    fn test_rpc_config_custom() {
+        let config = RpcConfig {
+            endpoint: "http://custom:8080".to_string(),
+            timeout: Duration::from_secs(60),
+            max_retries: 5,
+            retry_base_delay: Duration::from_millis(200),
+            retry_max_delay: Duration::from_secs(30),
+            use_tls: true,
+            pool_size: 20,
+            idle_timeout: Duration::from_secs(120),
+        };
+
+        assert_eq!(config.endpoint, "http://custom:8080");
+        assert_eq!(config.timeout, Duration::from_secs(60));
+        assert_eq!(config.max_retries, 5);
+        assert!(config.use_tls);
+        assert_eq!(config.pool_size, 20);
+    }
+
+    #[test]
+    fn test_rpc_config_debug() {
+        let config = RpcConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("endpoint"));
+        assert!(debug.contains("timeout"));
+        assert!(debug.contains("max_retries"));
+    }
+
+    #[test]
+    fn test_rpc_config_clone() {
+        let config = RpcConfig::default();
+        let cloned = config.clone();
+        assert_eq!(config.endpoint, cloned.endpoint);
+        assert_eq!(config.timeout, cloned.timeout);
+    }
+
+    // ==================== HttpShardClient Tests ====================
+
+    #[test]
+    fn test_client_shard_id() {
+        let shard_id = ShardId::new(42).unwrap();
+        let config = RpcConfig::default();
+        let client = HttpShardClient::new(shard_id, config).unwrap();
+
+        assert_eq!(client.shard_id(), shard_id);
+    }
+
+    #[test]
+    fn test_client_is_healthy() {
+        let shard_id = ShardId::new(0).unwrap();
+        let config = RpcConfig::default();
+        let client = HttpShardClient::new(shard_id, config).unwrap();
+
+        assert!(client.is_healthy());
+    }
+
+    #[test]
+    fn test_client_debug() {
+        let shard_id = ShardId::new(0).unwrap();
+        let config = RpcConfig::default();
+        let client = HttpShardClient::new(shard_id, config).unwrap();
+
+        let debug = format!("{:?}", client);
+        assert!(debug.contains("HttpShardClient"));
+        assert!(debug.contains("shard_id"));
+        assert!(debug.contains("endpoint"));
+        assert!(debug.contains("healthy"));
+    }
+
+    // ==================== ClientStats Tests ====================
+
+    #[test]
+    fn test_client_stats_success_rate() {
+        // No requests = 100% success
+        let stats = ClientStats {
+            shard_id: ShardId::new(0).unwrap(),
+            endpoint: "localhost".to_string(),
+            healthy: true,
+            request_count: 0,
+            failure_count: 0,
+            last_success: None,
+        };
+        assert_eq!(stats.success_rate(), 1.0);
+
+        // Some failures
+        let stats = ClientStats {
+            shard_id: ShardId::new(0).unwrap(),
+            endpoint: "localhost".to_string(),
+            healthy: true,
+            request_count: 10,
+            failure_count: 2,
+            last_success: Some(Instant::now()),
+        };
+        assert!((stats.success_rate() - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_client_stats_debug() {
+        let stats = ClientStats {
+            shard_id: ShardId::new(0).unwrap(),
+            endpoint: "localhost".to_string(),
+            healthy: true,
+            request_count: 5,
+            failure_count: 1,
+            last_success: None,
+        };
+
+        let debug = format!("{:?}", stats);
+        assert!(debug.contains("shard_id"));
+        assert!(debug.contains("request_count"));
+    }
+
+    // ==================== Error Retryability Tests ====================
+
+    #[test]
+    fn test_is_retryable_protocol_error() {
+        assert!(!HttpShardClient::is_retryable(
+            &NetworkError::ProtocolError("invalid response".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_is_retryable_serialization_error() {
+        assert!(!HttpShardClient::is_retryable(
+            &NetworkError::SerializationError("failed to parse".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_is_retryable_circuit_open() {
+        // CircuitOpen is not currently retryable (caller should wait)
+        assert!(!HttpShardClient::is_retryable(&NetworkError::CircuitOpen {
+            shard_id: ShardId::new(0).unwrap(),
+            remaining: Duration::from_secs(5),
+        }));
+    }
+
+    #[test]
+    fn test_is_retryable_pool_exhausted() {
+        // PoolExhausted should not be retryable
+        assert!(!HttpShardClient::is_retryable(
+            &NetworkError::PoolExhausted {
+                shard_id: ShardId::new(0).unwrap(),
+                max_connections: 10,
+            }
+        ));
+    }
+
+    // ==================== Migration Operations Tests ====================
+
+    #[test]
+    #[cfg(not(feature = "sharding-rpc"))]
+    fn test_migration_operations_without_feature() {
+        use super::super::network::MigrationBatch;
+
+        let shard_id = ShardId::new(0).unwrap();
+        let config = RpcConfig::default();
+        let client = HttpShardClient::new(shard_id, config).unwrap();
+
+        // Migration operations should fail without feature
+        let batch = MigrationBatch {
+            migration_id: 1,
+            batch_number: 0,
+            is_last: true,
+            nodes: vec![],
+            edges: vec![],
+            checksum: 0,
+        };
+
+        assert!(client.receive_migration_batch(batch).is_err());
+        assert!(client.extract_migration_batch(1, &[], 100, 0).is_err());
+    }
 }

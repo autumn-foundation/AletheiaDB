@@ -1004,4 +1004,183 @@ mod tests {
         let metrics = coordinator.get_metrics(shard_id);
         assert!(metrics.is_some());
     }
+
+    // ==================== RecoveryResult Tests ====================
+
+    #[test]
+    fn test_recovery_result_is_complete() {
+        let result = RecoveryResult {
+            recovered: vec![TxId::new(1), TxId::new(2)],
+            dead_lettered: vec![],
+        };
+        assert!(result.is_complete());
+        assert_eq!(result.dead_letter_count(), 0);
+
+        let result_with_dead = RecoveryResult {
+            recovered: vec![TxId::new(1)],
+            dead_lettered: vec![DeadLetteredTransaction {
+                tx_id: TxId::new(2),
+                reason: "Test failure".to_string(),
+                last_attempt: Instant::now(),
+                attempt_count: 3,
+            }],
+        };
+        assert!(!result_with_dead.is_complete());
+        assert_eq!(result_with_dead.dead_letter_count(), 1);
+    }
+
+    // ==================== ShardConnection Tests ====================
+
+    #[test]
+    fn test_shard_connection_health_check() {
+        let shard_id = ShardId::new(0).unwrap();
+        let mut conn = ShardConnection::new(shard_id, "localhost:9000".to_string());
+
+        assert!(conn.last_ping.is_none());
+
+        let result = conn.health_check();
+        assert!(result);
+        assert!(conn.last_ping.is_some());
+    }
+
+    #[test]
+    fn test_shard_connection_unhealthy_operations() {
+        let shard_id = ShardId::new(0).unwrap();
+        let mut conn = ShardConnection::new(shard_id, "localhost:9000".to_string());
+
+        conn.mark_unhealthy();
+
+        // All operations should fail when unhealthy
+        assert!(conn.prepare(TxId::new(1)).is_err());
+        assert!(conn.commit(TxId::new(1)).is_err());
+        assert!(conn.abort(TxId::new(1)).is_err());
+    }
+
+    // ==================== Extended Coordinator Tests ====================
+
+    #[test]
+    fn test_coordinator_with_rebalance_config() {
+        let config = test_config();
+        let rebalance_config = RebalanceConfig {
+            imbalance_threshold: 0.5,
+            batch_size: 500,
+            max_concurrent_migrations: 2,
+            ..Default::default()
+        };
+
+        let coordinator = ShardCoordinator::new(config).with_rebalance_config(rebalance_config);
+        assert_eq!(coordinator.router().config().num_shards(), 2);
+    }
+
+    #[test]
+    fn test_coordinator_route_traversal() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        let plan = coordinator.route_traversal("Person", &["Place"]);
+        assert!(!plan.involved_shards.is_empty());
+    }
+
+    #[test]
+    fn test_coordinator_active_transaction_count() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        assert_eq!(coordinator.active_transaction_count(), 0);
+
+        let shards = vec![ShardId::new(0).unwrap()];
+        coordinator.begin_distributed_transaction(shards).unwrap();
+
+        assert_eq!(coordinator.active_transaction_count(), 1);
+    }
+
+    #[test]
+    fn test_coordinator_get_nonexistent_transaction() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        let tx = coordinator.get_transaction(TxId::new(99999));
+        assert!(tx.is_none());
+    }
+
+    #[test]
+    fn test_coordinator_prepare_nonexistent_transaction() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        let result = coordinator.prepare_distributed_transaction(TxId::new(99999));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coordinator_commit_nonexistent_transaction() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        let result = coordinator.commit_distributed_transaction(TxId::new(99999));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coordinator_abort_nonexistent_transaction() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        let result = coordinator.abort_distributed_transaction(TxId::new(99999), "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coordinator_get_shard_state_nonexistent() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        let state = coordinator.get_shard_state(ShardId::new(99).unwrap());
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn test_coordinator_get_metrics_nonexistent() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        let metrics = coordinator.get_metrics(ShardId::new(99).unwrap());
+        assert!(metrics.is_none());
+    }
+
+    #[test]
+    fn test_coordinator_dead_letter_queue() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        // Initially empty
+        let dead = coordinator.get_dead_lettered_transactions();
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn test_coordinator_retry_nonexistent_dead_letter() {
+        let coordinator = ShardCoordinator::new(test_config());
+
+        let result = coordinator.retry_dead_lettered_transaction(TxId::new(99999));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dead_lettered_transaction_debug() {
+        let tx = DeadLetteredTransaction {
+            tx_id: TxId::new(1),
+            reason: "Test failure".to_string(),
+            last_attempt: Instant::now(),
+            attempt_count: 3,
+        };
+
+        let debug = format!("{:?}", tx);
+        assert!(debug.contains("tx_id"));
+        assert!(debug.contains("reason"));
+        assert!(debug.contains("attempt_count"));
+    }
+
+    #[test]
+    fn test_recovery_result_debug() {
+        let result = RecoveryResult {
+            recovered: vec![TxId::new(1)],
+            dead_lettered: vec![],
+        };
+
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("recovered"));
+        assert!(debug.contains("dead_lettered"));
+    }
 }
