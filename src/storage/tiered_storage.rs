@@ -396,14 +396,6 @@ impl TieredStorage {
         self.cold.stats()
     }
 
-    /// Clear the warm cache.
-    ///
-    /// This is useful for testing or when memory pressure is high.
-    pub fn clear_warm_cache(&self) {
-        // quick_cache doesn't have a clear method, so we create new caches
-        // This is a limitation - in production we might want a different cache impl
-    }
-
     /// Flush cold storage to disk.
     pub fn flush(&self) -> Result<()> {
         self.cold.flush()
