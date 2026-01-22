@@ -251,6 +251,12 @@ harness = false
 path = "benches/hybrid_query.rs"
 required-features = []
 
+[[bench]]
+name = "query_optimization"
+harness = false
+path = "benches/query_optimization.rs"
+required-features = []
+
 # MCP server binary
 [[bin]]
 name = "gallifrey-mcp"
