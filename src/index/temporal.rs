@@ -478,30 +478,7 @@ impl TemporalIndexes {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Vec<VersionId> {
-        let entity_id = EntityId::Node(node_id);
-
-        let Some(timelines) = self.index.get(&entity_id) else {
-            return Vec::new();
-        };
-
-        // Query both temporal dimensions with point-in-time queries
-        // Using find_at_point for correct boundary handling (start <= T < end)
-        let valid_matches = timelines.valid.find_at_point(valid_time);
-        let tx_matches = timelines.tx.find_at_point(transaction_time);
-
-        // Intersect results: version must be visible in BOTH dimensions
-        // For small result sets (typical), linear intersection is efficient
-        if valid_matches.len() <= tx_matches.len() {
-            valid_matches
-                .into_iter()
-                .filter(|v| tx_matches.contains(v))
-                .collect()
-        } else {
-            tx_matches
-                .into_iter()
-                .filter(|v| valid_matches.contains(v))
-                .collect()
-        }
+        self.find_version_at_point_impl(EntityId::Node(node_id), valid_time, transaction_time)
     }
 
     /// Find edge versions visible at a specific bi-temporal point.
@@ -533,8 +510,18 @@ impl TemporalIndexes {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Vec<VersionId> {
-        let entity_id = EntityId::Edge(edge_id);
+        self.find_version_at_point_impl(EntityId::Edge(edge_id), valid_time, transaction_time)
+    }
 
+    /// Internal implementation for bi-temporal point queries.
+    ///
+    /// Shared logic for both node and edge lookups to avoid code duplication.
+    fn find_version_at_point_impl(
+        &self,
+        entity_id: EntityId,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Vec<VersionId> {
         let Some(timelines) = self.index.get(&entity_id) else {
             return Vec::new();
         };
@@ -545,17 +532,37 @@ impl TemporalIndexes {
         let tx_matches = timelines.tx.find_at_point(transaction_time);
 
         // Intersect results: version must be visible in BOTH dimensions
-        // For small result sets (typical), linear intersection is efficient
-        if valid_matches.len() <= tx_matches.len() {
-            valid_matches
-                .into_iter()
-                .filter(|v| tx_matches.contains(v))
-                .collect()
+        Self::intersect_version_sets(valid_matches, tx_matches)
+    }
+
+    /// Efficiently intersect two sets of version IDs.
+    ///
+    /// Uses linear intersection for small sets (K < threshold) and HashSet
+    /// for larger sets to avoid O(K²) complexity when K is large.
+    ///
+    /// # Performance
+    ///
+    /// - Small K (< 16): O(K²) but with low constant factor
+    /// - Large K (>= 16): O(K) using HashSet
+    fn intersect_version_sets(a: Vec<VersionId>, b: Vec<VersionId>) -> Vec<VersionId> {
+        // Threshold for switching to HashSet-based intersection.
+        // Below this, linear scan is faster due to cache locality and no allocation.
+        const HASH_THRESHOLD: usize = 16;
+
+        let max_len = a.len().max(b.len());
+
+        if max_len < HASH_THRESHOLD {
+            // Small sets: linear intersection is efficient due to cache locality
+            if a.len() <= b.len() {
+                a.into_iter().filter(|v| b.contains(v)).collect()
+            } else {
+                b.into_iter().filter(|v| a.contains(v)).collect()
+            }
         } else {
-            tx_matches
-                .into_iter()
-                .filter(|v| valid_matches.contains(v))
-                .collect()
+            // Large sets: use HashSet for O(K) intersection instead of O(K²)
+            use std::collections::HashSet;
+            let b_set: HashSet<_> = b.into_iter().collect();
+            a.into_iter().filter(|v| b_set.contains(v)).collect()
         }
     }
 

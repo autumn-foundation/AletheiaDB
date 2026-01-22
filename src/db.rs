@@ -1755,9 +1755,10 @@ impl GallifreyDB {
 
         let historical = self.historical.read_or_err()?;
 
-        // Verify visibility with historical storage (handles closed intervals from deletions)
-        // The temporal index stores intervals at insertion time, but deletions close the
-        // valid_time interval. We must verify with the actual stored version.
+        // IMPORTANT: Double-check visibility with historical storage.
+        // This is intentional and NOT redundant: the temporal index stores intervals at
+        // insertion time, but deletions close the valid_time interval in historical storage.
+        // Without this check, deleted nodes would incorrectly appear as visible.
         for version_id in version_ids {
             if let Some(version) = historical.get_node_version(version_id)
                 && version.temporal.is_visible_at(valid_time, transaction_time)
@@ -1799,7 +1800,10 @@ impl GallifreyDB {
 
         let historical = self.historical.read_or_err()?;
 
-        // Verify visibility with historical storage (handles closed intervals from deletions)
+        // IMPORTANT: Double-check visibility with historical storage.
+        // This is intentional and NOT redundant: the temporal index stores intervals at
+        // insertion time, but deletions close the valid_time interval in historical storage.
+        // Without this check, deleted edges would incorrectly appear as visible.
         for version_id in version_ids {
             if let Some(version) = historical.get_edge_version(version_id)
                 && version.temporal.is_visible_at(valid_time, transaction_time)
