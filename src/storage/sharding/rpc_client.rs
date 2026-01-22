@@ -580,6 +580,7 @@ impl ShardClient for HttpShardClient {
         }
 
         #[derive(serde::Deserialize)]
+        #[allow(dead_code)] // Fields reserved for full implementation
         struct ExtractResponseDto {
             migration_id: u64,
             batch_number: u64,

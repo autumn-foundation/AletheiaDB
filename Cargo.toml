@@ -51,8 +51,8 @@ chrono = { version = "0.4", optional = true }
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
 async-trait = { version = "0.1", optional = true }
 
-# HTTP client for API-based providers (OpenAI, HuggingFace, Ollama)
-reqwest = { version = "0.11", features = ["json"], optional = true }
+# HTTP client for API-based providers (OpenAI, HuggingFace, Ollama) and sharding RPC
+reqwest = { version = "0.11", features = ["json", "blocking"], optional = true }
 serde_json = { version = "1.0", optional = true }
 
 # ONNX runtime for local model inference
@@ -108,7 +108,7 @@ embedding-all = [
 # MCP server support
 mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base64", "dep:chrono"]
 
-# Sharding RPC client support
+# Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 
 [profile.dev]
