@@ -718,7 +718,7 @@ impl VectorIndex for HnswIndex {
 
         let k_capped = k.min(self.max_k);
 
-        // Use usearch's native filtered search
+        // Use usearch's native filtered search with retry logic for thread contention
         let index = self.inner.read();
 
         // Create a filter that maps usearch keys to our predicate
@@ -731,39 +731,65 @@ impl VectorIndex for HnswIndex {
             }
         };
 
-        let matches = index
-            .filtered_search(query, k_capped, filter)
-            .map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Filtered search failed: {}",
-                    e
-                )))
-            })?;
+        // Retry with exponential backoff to handle thread pool exhaustion
+        // Under heavy concurrent load, usearch may fail with "No available threads to lock"
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
 
-        self.stats
-            .searches_performed
-            .fetch_add(1, Ordering::Relaxed);
+        for attempt in 0..=MAX_RETRIES {
+            match index.filtered_search(query, k_capped, filter) {
+                Ok(matches) => {
+                    self.stats
+                        .searches_performed
+                        .fetch_add(1, Ordering::Relaxed);
 
-        // Convert results (same conversion logic as search() - see comments there)
-        let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
+                    // Convert results (same conversion logic as search() - see comments there)
+                    let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
 
-        for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-            if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                let node_id = *node_id_ref.value();
-                let similarity = match self.config.metric {
-                    DistanceMetric::Cosine => 1.0 - distance,
-                    DistanceMetric::Euclidean => -distance,
-                    DistanceMetric::DotProduct => -distance,
-                    DistanceMetric::Haversine => -distance,
-                    DistanceMetric::Hamming => -distance,
-                    DistanceMetric::Tanimoto => 1.0 - distance,
-                };
-                results.push((node_id, similarity));
+                    for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+                        if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                            let node_id = *node_id_ref.value();
+                            let similarity = match self.config.metric {
+                                DistanceMetric::Cosine => 1.0 - distance,
+                                DistanceMetric::Euclidean => -distance,
+                                DistanceMetric::DotProduct => -distance,
+                                DistanceMetric::Haversine => -distance,
+                                DistanceMetric::Hamming => -distance,
+                                DistanceMetric::Tanimoto => 1.0 - distance,
+                            };
+                            results.push((node_id, similarity));
+                        }
+                    }
+
+                    results
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    return Ok(results);
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    // Check if this is a transient thread pool exhaustion error
+                    if error_msg.contains("No available threads to lock") && attempt < MAX_RETRIES {
+                        // Exponential backoff: 1ms, 2ms, 4ms
+                        let delay_ms = 1u64 << attempt;
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        last_error = Some(error_msg);
+                        continue;
+                    }
+                    // Non-retryable error or exhausted retries
+                    return Err(Error::Vector(VectorError::IndexError(format!(
+                        "Filtered search failed: {}",
+                        e
+                    ))));
+                }
             }
         }
 
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(results)
+        // This should never be reached due to the loop logic, but satisfy the compiler
+        Err(Error::Vector(VectorError::IndexError(format!(
+            "Filtered search failed after {} retries: {}",
+            MAX_RETRIES,
+            last_error.unwrap_or_else(|| "unknown error".to_string())
+        ))))
     }
 
     fn len(&self) -> usize {
