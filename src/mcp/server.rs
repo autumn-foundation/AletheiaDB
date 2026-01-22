@@ -52,6 +52,9 @@ const MAX_VECTOR_K: usize = 1000;
 /// Default k for vector similarity search.
 const DEFAULT_VECTOR_K: usize = 10;
 
+/// Default transaction time placeholder string.
+const TRANSACTION_TIME_NOW: &str = "now";
+
 /// GallifreyDB MCP Server.
 ///
 /// Exposes GallifreyDB's graph, vector, and temporal capabilities through MCP.
@@ -76,129 +79,161 @@ impl GallifreyMcpServer {
     // ========================================================================
 
     /// Extract text content from a CallToolResult.
+    ///
+    /// Returns an error JSON string if the result contains no text content.
     fn extract_text(result: CallToolResult) -> String {
         result
             .content
             .first()
             .and_then(|c| c.as_text().map(|s| s.text.clone()))
-            .unwrap_or_default()
+            .unwrap_or_else(|| r#"{"error": "No content in response"}"#.to_string())
     }
 
     /// Get a node by its ID.
     pub fn get_node(&self, req: GetNodeRequest) -> String {
-        Self::extract_text(self.handle_get_node(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_get_node(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Create a new node.
     pub fn create_node(&self, req: CreateNodeRequest) -> String {
-        Self::extract_text(self.handle_create_node(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_create_node(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Update a node's properties.
     pub fn update_node(&self, req: UpdateNodeRequest) -> String {
-        Self::extract_text(self.handle_update_node(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_update_node(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Delete a node.
     pub fn delete_node(&self, req: DeleteNodeRequest) -> String {
-        Self::extract_text(self.handle_delete_node(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_delete_node(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// List nodes with optional filtering.
     pub fn list_nodes(&self, req: ListNodesRequest) -> String {
-        Self::extract_text(self.handle_list_nodes(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_list_nodes(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Count nodes.
     pub fn count_nodes(&self, req: CountNodesRequest) -> String {
-        Self::extract_text(self.handle_count_nodes(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_count_nodes(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Get an edge by its ID.
     pub fn get_edge(&self, req: GetEdgeRequest) -> String {
-        Self::extract_text(self.handle_get_edge(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_get_edge(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Create a new edge.
     pub fn create_edge(&self, req: CreateEdgeRequest) -> String {
-        Self::extract_text(self.handle_create_edge(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_create_edge(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Update an edge's properties.
     pub fn update_edge(&self, req: UpdateEdgeRequest) -> String {
-        Self::extract_text(self.handle_update_edge(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_update_edge(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Delete an edge.
     pub fn delete_edge(&self, req: DeleteEdgeRequest) -> String {
-        Self::extract_text(self.handle_delete_edge(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_delete_edge(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// List edges.
     pub fn list_edges(&self, req: ListEdgesRequest) -> String {
-        Self::extract_text(self.handle_list_edges(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_list_edges(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Count edges.
     pub fn count_edges(&self, req: CountEdgesRequest) -> String {
-        Self::extract_text(self.handle_count_edges(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_count_edges(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Get outgoing edges from a node.
     pub fn get_outgoing_edges(&self, req: GetOutgoingEdgesRequest) -> String {
-        Self::extract_text(
-            self.handle_get_outgoing_edges(serde_json::to_value(req).expect("request serialization should not fail")),
-        )
+        Self::extract_text(self.handle_get_outgoing_edges(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Get incoming edges to a node.
     pub fn get_incoming_edges(&self, req: GetIncomingEdgesRequest) -> String {
-        Self::extract_text(
-            self.handle_get_incoming_edges(serde_json::to_value(req).expect("request serialization should not fail")),
-        )
+        Self::extract_text(self.handle_get_incoming_edges(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Traverse the graph.
     pub fn traverse(&self, req: TraverseRequest) -> String {
-        Self::extract_text(self.handle_traverse(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_traverse(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Find similar nodes.
     pub fn find_similar(&self, req: FindSimilarRequest) -> String {
-        Self::extract_text(self.handle_find_similar(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_find_similar(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Enable vector index.
     pub fn enable_vector_index(&self, req: EnableVectorIndexRequest) -> String {
-        Self::extract_text(
-            self.handle_enable_vector_index(serde_json::to_value(req).expect("request serialization should not fail")),
-        )
+        Self::extract_text(self.handle_enable_vector_index(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// List vector indexes.
     pub fn list_vector_indexes(&self, req: ListVectorIndexesRequest) -> String {
-        Self::extract_text(
-            self.handle_list_vector_indexes(serde_json::to_value(req).expect("request serialization should not fail")),
-        )
+        Self::extract_text(self.handle_list_vector_indexes(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Get node at a specific time.
     pub fn get_node_at_time(&self, req: GetNodeAtTimeRequest) -> String {
-        Self::extract_text(
-            self.handle_get_node_at_time(serde_json::to_value(req).expect("request serialization should not fail")),
-        )
+        Self::extract_text(self.handle_get_node_at_time(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Get edge at a specific time.
     pub fn get_edge_at_time(&self, req: GetEdgeAtTimeRequest) -> String {
-        Self::extract_text(
-            self.handle_get_edge_at_time(serde_json::to_value(req).expect("request serialization should not fail")),
-        )
+        Self::extract_text(self.handle_get_edge_at_time(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     /// Execute a hybrid query.
     pub fn hybrid_query(&self, req: HybridQueryRequest) -> String {
-        Self::extract_text(self.handle_hybrid_query(serde_json::to_value(req).expect("request serialization should not fail")))
+        Self::extract_text(self.handle_hybrid_query(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
     }
 
     // ========================================================================
@@ -330,6 +365,19 @@ impl GallifreyMcpServer {
         ))
     }
 
+    /// Parse an optional transaction time, returning the current time if not specified.
+    fn parse_optional_tx_time(&self, tx_time: Option<&str>) -> Result<Timestamp, String> {
+        match tx_time {
+            Some(tx) => self.parse_timestamp(tx),
+            None => Ok(time::now()),
+        }
+    }
+
+    /// Format transaction time for response, using the constant for current time.
+    fn format_tx_time_response(tx_time: Option<String>) -> String {
+        tx_time.unwrap_or_else(|| TRANSACTION_TIME_NOW.to_string())
+    }
+
     fn matches_label(&self, interned: crate::core::InternedString, label: &str) -> bool {
         GLOBAL_INTERNER
             .with_str(interned, |s| s == label)
@@ -357,7 +405,9 @@ impl GallifreyMcpServer {
         {
             return Err(format!(
                 "Embedding dimension mismatch: expected {} dimensions for property '{}', got {}",
-                expected_dims, property_name, embedding.len()
+                expected_dims,
+                property_name,
+                embedding.len()
             ));
         }
         Ok(())
@@ -391,7 +441,10 @@ impl GallifreyMcpServer {
         match self.db.get_node(node_id) {
             Ok(node) => {
                 let response = self.node_to_response(&node);
-                self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
+                self.success_json(
+                    serde_json::to_value(&response)
+                        .expect("response serialization should not fail"),
+                )
             }
             Err(e) => self.error_json(&e.to_string()),
         }
@@ -412,7 +465,10 @@ impl GallifreyMcpServer {
             Ok(node_id) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let response = self.node_to_response(&node);
-                    self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
@@ -437,7 +493,10 @@ impl GallifreyMcpServer {
             Ok(()) => match self.db.get_node(node_id) {
                 Ok(node) => {
                     let response = self.node_to_response(&node);
-                    self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
@@ -537,21 +596,28 @@ impl GallifreyMcpServer {
             Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
         };
 
-        let count = if let Some(label) = &req.label {
+        if let Some(label) = &req.label {
             // Use QueryBuilder to count by label efficiently without collecting all rows
             let builder = crate::query::QueryBuilder::new().scan_label(label);
             match builder.execute(&self.db) {
                 Ok(mut results) => {
                     // Efficiently count without allocating a Vec
-                    results.try_fold(0usize, |acc, row| row.map(|_| acc + 1)).unwrap_or(0)
+                    match results.try_fold(0usize, |acc, row| row.map(|_| acc + 1)) {
+                        Ok(count) => self.success_json(json!({"count": count, "label": label})),
+                        Err(e) => self.error_json(&format!(
+                            "Error counting nodes with label '{}': {}",
+                            label, e
+                        )),
+                    }
                 }
-                Err(_) => 0,
+                Err(e) => self.error_json(&format!(
+                    "Error executing count query for label '{}': {}",
+                    label, e
+                )),
             }
         } else {
-            self.db.node_count()
-        };
-
-        self.success_json(json!({"count": count}))
+            self.success_json(json!({"count": self.db.node_count()}))
+        }
     }
 
     fn handle_get_edge(&self, args: serde_json::Value) -> CallToolResult {
@@ -568,7 +634,10 @@ impl GallifreyMcpServer {
         match self.db.get_edge(edge_id) {
             Ok(edge) => {
                 let response = self.edge_to_response(&edge);
-                self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
+                self.success_json(
+                    serde_json::to_value(&response)
+                        .expect("response serialization should not fail"),
+                )
             }
             Err(e) => self.error_json(&e.to_string()),
         }
@@ -602,7 +671,10 @@ impl GallifreyMcpServer {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
                     let response = self.edge_to_response(&edge);
-                    self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
@@ -627,7 +699,10 @@ impl GallifreyMcpServer {
             Ok(()) => match self.db.get_edge(edge_id) {
                 Ok(edge) => {
                     let response = self.edge_to_response(&edge);
-                    self.success_json(serde_json::to_value(&response).expect("response serialization should not fail"))
+                    self.success_json(
+                        serde_json::to_value(&response)
+                            .expect("response serialization should not fail"),
+                    )
                 }
                 Err(e) => self.error_json(&e.to_string()),
             },
@@ -780,7 +855,10 @@ impl GallifreyMcpServer {
             .min(MAX_RESULT_LIMIT);
         let direction = req.direction.as_deref().unwrap_or("outgoing");
 
-        // Use simple traversal approach
+        // Use depth-first search (DFS) traversal.
+        // DFS is chosen for memory efficiency: it processes nodes immediately rather than
+        // queuing all nodes at each level. For large graphs with high branching factors,
+        // this significantly reduces peak memory usage compared to BFS.
         let mut results: Vec<TraversalResult> = Vec::new();
         let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let mut frontier: Vec<(NodeId, Vec<u64>, usize)> =
@@ -962,13 +1040,9 @@ impl GallifreyMcpServer {
             Err(e) => return self.error_json(&e),
         };
 
-        let tx_time = if let Some(ref tx) = req.transaction_time {
-            match self.parse_timestamp(tx) {
-                Ok(t) => t,
-                Err(e) => return self.error_json(&e),
-            }
-        } else {
-            time::now()
+        let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return self.error_json(&e),
         };
 
         match self.db.get_node_at_time(node_id, valid_time, tx_time) {
@@ -977,7 +1051,7 @@ impl GallifreyMcpServer {
                 self.success_json(json!({
                     "node": response,
                     "valid_time": req.valid_time,
-                    "transaction_time": req.transaction_time.unwrap_or_else(|| "now".to_string())
+                    "transaction_time": Self::format_tx_time_response(req.transaction_time)
                 }))
             }
             Err(e) => self.error_json(&e.to_string()),
@@ -1000,13 +1074,9 @@ impl GallifreyMcpServer {
             Err(e) => return self.error_json(&e),
         };
 
-        let tx_time = if let Some(ref tx) = req.transaction_time {
-            match self.parse_timestamp(tx) {
-                Ok(t) => t,
-                Err(e) => return self.error_json(&e),
-            }
-        } else {
-            time::now()
+        let tx_time = match self.parse_optional_tx_time(req.transaction_time.as_deref()) {
+            Ok(t) => t,
+            Err(e) => return self.error_json(&e),
         };
 
         match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
@@ -1015,7 +1085,7 @@ impl GallifreyMcpServer {
                 self.success_json(json!({
                     "edge": response,
                     "valid_time": req.valid_time,
-                    "transaction_time": req.transaction_time.unwrap_or_else(|| "now".to_string())
+                    "transaction_time": Self::format_tx_time_response(req.transaction_time)
                 }))
             }
             Err(e) => self.error_json(&e.to_string()),
@@ -1214,8 +1284,7 @@ impl GallifreyMcpServer {
 fn make_input_schema<T: rmcp::schemars::JsonSchema>()
 -> Arc<serde_json::Map<String, serde_json::Value>> {
     let schema = rmcp::schemars::schema_for!(T);
-    let value =
-        serde_json::to_value(schema).expect("JSON schema serialization should not fail");
+    let value = serde_json::to_value(schema).expect("JSON schema serialization should not fail");
     match value {
         serde_json::Value::Object(map) => Arc::new(map),
         _ => Arc::new(serde_json::Map::new()),
