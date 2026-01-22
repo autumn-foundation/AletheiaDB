@@ -52,10 +52,10 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --verbose --all-features --jobs 2
+        run: cargo test --verbose --all-features --jobs 1
 
       - name: Run doc tests
-        run: cargo test --doc --verbose --all-features --jobs 2
+        run: cargo test --doc --verbose --jobs 1
 
   coverage:
     name: Code Coverage
@@ -91,7 +91,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Generate coverage report
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --jobs 2
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --jobs 1
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -104,7 +104,7 @@ jobs:
           verbose: true
 
       - name: Check coverage thresholds
-        run: cargo llvm-cov --all-features --fail-under-lines 85 --fail-under-functions 88 --fail-under-regions 88 --jobs 2
+        run: cargo llvm-cov --all-features --fail-under-lines 85 --fail-under-functions 88 --fail-under-regions 88 --jobs 1
 
   lint:
     name: Linting
