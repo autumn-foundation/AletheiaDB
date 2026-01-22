@@ -361,7 +361,16 @@ impl DepthSpec {
     }
 
     /// Create a range depth.
+    ///
+    /// # Panics
+    /// Panics if `min > max`.
     pub fn range(min: usize, max: usize) -> Self {
+        assert!(
+            min <= max,
+            "DepthSpec range min ({}) must be <= max ({})",
+            min,
+            max
+        );
         DepthSpec::Range { min, max }
     }
 }
@@ -544,6 +553,8 @@ pub enum ComparisonOp {
 pub enum Expression {
     /// Property access: n.prop
     Property(PropertyAccess),
+    /// Bare identifier (variable reference): n
+    Identifier(String),
     /// Literal value
     Literal(PropertyValue),
     /// Parameter: $param
@@ -940,7 +951,7 @@ mod tests {
     fn test_property_value_from() {
         let _v: PropertyValue = true.into();
         let _v: PropertyValue = 42i64.into();
-        let _v: PropertyValue = 3.14f64.into();
+        let _v: PropertyValue = 2.71f64.into();
         let _v: PropertyValue = "hello".into();
         let _v: PropertyValue = String::from("world").into();
     }

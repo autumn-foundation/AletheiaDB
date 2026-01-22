@@ -240,7 +240,7 @@ impl Parser {
 
         let limit = if self.check(&Token::Limit) {
             self.advance();
-            self.parse_integer()? as usize
+            self.parse_usize()?
         } else {
             10 // default limit
         };
@@ -264,7 +264,7 @@ impl Parser {
 
         let limit = if self.check(&Token::Limit) {
             self.advance();
-            self.parse_integer()? as usize
+            self.parse_usize()?
         } else {
             10 // default limit
         };
@@ -282,6 +282,12 @@ impl Parser {
             Some(Token::LeftBracket) => {
                 self.advance();
                 let values = self.parse_float_list()?;
+                if values.is_empty() {
+                    return Err(self.error(
+                        "Embedding array cannot be empty".to_string(),
+                        Some("non-empty array".to_string()),
+                    ));
+                }
                 self.expect(&Token::RightBracket)?;
                 Ok(EmbeddingRef::Literal(Arc::from(values)))
             }
@@ -518,7 +524,14 @@ impl Parser {
         // Check for range or exact
         match self.current() {
             Some(Token::IntegerLiteral(n)) => {
-                let min = *n as usize;
+                let n_val = *n;
+                if n_val < 0 {
+                    return Err(self.error(
+                        format!("Depth must be non-negative, got {}", n_val),
+                        Some("non-negative integer".to_string()),
+                    ));
+                }
+                let min = n_val as usize;
                 self.advance();
 
                 if self.check(&Token::Dot) {
@@ -526,14 +539,28 @@ impl Parser {
                     self.expect(&Token::Dot)?;
 
                     if let Some(Token::IntegerLiteral(m)) = self.current() {
-                        let max = *m as usize;
+                        let m_val = *m;
+                        if m_val < 0 {
+                            return Err(self.error(
+                                format!("Depth must be non-negative, got {}", m_val),
+                                Some("non-negative integer".to_string()),
+                            ));
+                        }
+                        let max = m_val as usize;
+                        if min > max {
+                            return Err(self.error(
+                                format!("Invalid depth range: min ({}) > max ({})", min, max),
+                                Some("valid range".to_string()),
+                            ));
+                        }
                         self.advance();
                         Ok(DepthSpec::Range { min, max })
                     } else {
-                        // *n.. is max(unbounded), treat as Range { min, max: usize::MAX }
+                        // *n.. is unbounded max, use Variable with min hops
+                        // Since we can't express min with Variable, use a large max
                         Ok(DepthSpec::Range {
                             min,
-                            max: usize::MAX,
+                            max: usize::MAX / 2, // Use half max to avoid overflow issues
                         })
                     }
                 } else {
@@ -545,7 +572,14 @@ impl Parser {
                 self.expect(&Token::Dot)?;
 
                 if let Some(Token::IntegerLiteral(n)) = self.current() {
-                    let max = *n as usize;
+                    let n_val = *n;
+                    if n_val < 0 {
+                        return Err(self.error(
+                            format!("Depth must be non-negative, got {}", n_val),
+                            Some("non-negative integer".to_string()),
+                        ));
+                    }
+                    let max = n_val as usize;
                     self.advance();
                     Ok(DepthSpec::Max(max))
                 } else {
@@ -657,7 +691,7 @@ impl Parser {
 
         let top_k = if self.check(&Token::Top) {
             self.advance();
-            Some(self.parse_integer()? as usize)
+            Some(self.parse_usize()?)
         } else {
             None
         };
@@ -773,6 +807,11 @@ impl Parser {
                     property: prop,
                     substring,
                 });
+            } else {
+                return Err(self.error(
+                    "CONTAINS requires a property expression".to_string(),
+                    Some("property.name CONTAINS 'value'".to_string()),
+                ));
             }
         }
 
@@ -785,6 +824,11 @@ impl Parser {
                     property: prop,
                     prefix,
                 });
+            } else {
+                return Err(self.error(
+                    "STARTS WITH requires a property expression".to_string(),
+                    Some("property.name STARTS WITH 'value'".to_string()),
+                ));
             }
         }
 
@@ -797,6 +841,11 @@ impl Parser {
                     property: prop,
                     suffix,
                 });
+            } else {
+                return Err(self.error(
+                    "ENDS WITH requires a property expression".to_string(),
+                    Some("property.name ENDS WITH 'value'".to_string()),
+                ));
             }
         }
 
@@ -820,6 +869,11 @@ impl Parser {
                     property: prop,
                     values,
                 });
+            } else {
+                return Err(self.error(
+                    "IN requires a property expression".to_string(),
+                    Some("property.name IN [...]".to_string()),
+                ));
             }
         }
 
@@ -852,7 +906,7 @@ impl Parser {
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
         match self.current() {
             Some(Token::Identifier(_)) => {
-                // Could be property access (n.prop) or just identifier
+                // Could be property access (n.prop) or just identifier (n)
                 let ident = self.parse_identifier()?;
                 if self.check(&Token::Dot) {
                     self.advance();
@@ -862,12 +916,8 @@ impl Parser {
                         property: prop,
                     }))
                 } else {
-                    // Just an identifier - treat as property on implicit node?
-                    // For now, return as identifier wrapped in property with empty variable
-                    Ok(Expression::Property(PropertyAccess {
-                        variable: String::new(),
-                        property: ident,
-                    }))
+                    // Just an identifier - a variable reference
+                    Ok(Expression::Identifier(ident))
                 }
             }
             Some(Token::Parameter(p)) => {
@@ -1049,7 +1099,7 @@ impl Parser {
         }
 
         self.advance();
-        Ok(Some(self.parse_integer()? as usize))
+        Ok(Some(self.parse_usize()?))
     }
 
     fn parse_limit_clause(&mut self) -> Result<Option<usize>, ParseError> {
@@ -1058,7 +1108,7 @@ impl Parser {
         }
 
         self.advance();
-        Ok(Some(self.parse_integer()? as usize))
+        Ok(Some(self.parse_usize()?))
     }
 
     // =========================================================
@@ -1111,14 +1161,23 @@ impl Parser {
         }
     }
 
-    fn parse_integer(&mut self) -> Result<i64, ParseError> {
+    fn parse_usize(&mut self) -> Result<usize, ParseError> {
         match self.current() {
             Some(Token::IntegerLiteral(n)) => {
                 let n = *n;
+                if n < 0 {
+                    return Err(self.error(
+                        format!("Expected non-negative integer, got {}", n),
+                        Some("non-negative integer".to_string()),
+                    ));
+                }
                 self.advance();
-                Ok(n)
+                Ok(n as usize)
             }
-            _ => Err(self.error("Expected integer".to_string(), Some("integer".to_string()))),
+            _ => Err(self.error(
+                "Expected non-negative integer".to_string(),
+                Some("non-negative integer".to_string()),
+            )),
         }
     }
 
@@ -1180,14 +1239,14 @@ mod tests {
     fn test_parse_match_with_properties() {
         let query = Parser::parse("MATCH (n:Person {name: 'Alice'}) RETURN n").unwrap();
 
-        if let SourceClause::Match(patterns) = &query.source {
-            if let PatternElement::Node(node) = &patterns[0].elements[0] {
-                assert!(node.properties.is_some());
-                let props = node.properties.as_ref().unwrap();
-                assert_eq!(props.len(), 1);
-                assert_eq!(props[0].0, "name");
-                assert_eq!(props[0].1, PropertyValue::String("Alice".to_string()));
-            }
+        if let SourceClause::Match(patterns) = &query.source
+            && let PatternElement::Node(node) = &patterns[0].elements[0]
+        {
+            assert!(node.properties.is_some());
+            let props = node.properties.as_ref().unwrap();
+            assert_eq!(props.len(), 1);
+            assert_eq!(props[0].0, "name");
+            assert_eq!(props[0].1, PropertyValue::String("Alice".to_string()));
         }
     }
 
@@ -1212,11 +1271,11 @@ mod tests {
     fn test_parse_incoming_relationship() {
         let query = Parser::parse("MATCH (a)<-[:FOLLOWS]-(b) RETURN a, b").unwrap();
 
-        if let SourceClause::Match(patterns) = &query.source {
-            if let PatternElement::Relationship(rel) = &patterns[0].elements[1] {
-                assert_eq!(rel.direction, RelationshipDirection::Incoming);
-                assert_eq!(rel.rel_type, Some("FOLLOWS".to_string()));
-            }
+        if let SourceClause::Match(patterns) = &query.source
+            && let PatternElement::Relationship(rel) = &patterns[0].elements[1]
+        {
+            assert_eq!(rel.direction, RelationshipDirection::Incoming);
+            assert_eq!(rel.rel_type, Some("FOLLOWS".to_string()));
         }
     }
 
@@ -1224,10 +1283,10 @@ mod tests {
     fn test_parse_bidirectional_relationship() {
         let query = Parser::parse("MATCH (a)-[:RELATED]-(b) RETURN a, b").unwrap();
 
-        if let SourceClause::Match(patterns) = &query.source {
-            if let PatternElement::Relationship(rel) = &patterns[0].elements[1] {
-                assert_eq!(rel.direction, RelationshipDirection::Both);
-            }
+        if let SourceClause::Match(patterns) = &query.source
+            && let PatternElement::Relationship(rel) = &patterns[0].elements[1]
+        {
+            assert_eq!(rel.direction, RelationshipDirection::Both);
         }
     }
 
@@ -1235,10 +1294,10 @@ mod tests {
     fn test_parse_variable_length_path() {
         let query = Parser::parse("MATCH (a)-[:KNOWS*1..3]->(b) RETURN b").unwrap();
 
-        if let SourceClause::Match(patterns) = &query.source {
-            if let PatternElement::Relationship(rel) = &patterns[0].elements[1] {
-                assert_eq!(rel.depth, Some(DepthSpec::Range { min: 1, max: 3 }));
-            }
+        if let SourceClause::Match(patterns) = &query.source
+            && let PatternElement::Relationship(rel) = &patterns[0].elements[1]
+        {
+            assert_eq!(rel.depth, Some(DepthSpec::Range { min: 1, max: 3 }));
         }
     }
 
@@ -1246,10 +1305,10 @@ mod tests {
     fn test_parse_exact_depth_path() {
         let query = Parser::parse("MATCH (a)-[:KNOWS*2]->(b) RETURN b").unwrap();
 
-        if let SourceClause::Match(patterns) = &query.source {
-            if let PatternElement::Relationship(rel) = &patterns[0].elements[1] {
-                assert_eq!(rel.depth, Some(DepthSpec::Exact(2)));
-            }
+        if let SourceClause::Match(patterns) = &query.source
+            && let PatternElement::Relationship(rel) = &patterns[0].elements[1]
+        {
+            assert_eq!(rel.depth, Some(DepthSpec::Exact(2)));
         }
     }
 
@@ -1370,10 +1429,10 @@ mod tests {
     fn test_parse_where_comparison() {
         let query = Parser::parse("MATCH (n) WHERE n.age > 18 RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            if let PredicateExpr::Comparison { op, .. } = predicate {
-                assert_eq!(*op, ComparisonOp::Gt);
-            }
+        if let Some(WhereClause { predicate }) = &query.where_clause
+            && let PredicateExpr::Comparison { op, .. } = predicate
+        {
+            assert_eq!(*op, ComparisonOp::Gt);
         }
     }
 
@@ -1445,10 +1504,10 @@ mod tests {
     fn test_parse_where_in() {
         let query = Parser::parse("MATCH (n) WHERE n.age IN [20, 30, 40] RETURN n").unwrap();
 
-        if let Some(WhereClause { predicate }) = &query.where_clause {
-            if let PredicateExpr::In { values, .. } = predicate {
-                assert_eq!(values.len(), 3);
-            }
+        if let Some(WhereClause { predicate }) = &query.where_clause
+            && let PredicateExpr::In { values, .. } = predicate
+        {
+            assert_eq!(values.len(), 3);
         }
     }
 
@@ -1619,5 +1678,59 @@ mod tests {
     fn test_parse_error_missing_label() {
         let result = Parser::parse("MATCH (n:) RETURN n");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_error_negative_limit() {
+        let result = Parser::parse("MATCH (n) RETURN n LIMIT -10");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("non-negative"));
+    }
+
+    #[test]
+    fn test_parse_error_negative_skip() {
+        let result = Parser::parse("MATCH (n) RETURN n SKIP -5");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_error_empty_embedding() {
+        let result = Parser::parse("SIMILAR TO [] LIMIT 10");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_parse_error_negative_depth() {
+        let result = Parser::parse("MATCH (a)-[:KNOWS*-5]->(b) RETURN b");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("non-negative"));
+    }
+
+    #[test]
+    fn test_parse_error_invalid_depth_range() {
+        let result = Parser::parse("MATCH (a)-[:KNOWS*10..5]->(b) RETURN b");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Invalid depth range"));
+    }
+
+    #[test]
+    fn test_parse_error_contains_on_non_property() {
+        let result = Parser::parse("MATCH (n) WHERE 'hello' CONTAINS 'ell' RETURN n");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("property expression"));
+    }
+
+    #[test]
+    fn test_parse_error_in_on_non_property() {
+        let result = Parser::parse("MATCH (n) WHERE 5 IN [1, 2, 3] RETURN n");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("property expression"));
     }
 }

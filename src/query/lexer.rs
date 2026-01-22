@@ -229,7 +229,7 @@ impl<'a> Lexer<'a> {
 
     /// Get the next token from the input.
     pub fn next_token(&mut self) -> Result<Token, LexerError> {
-        self.skip_whitespace_and_comments();
+        self.skip_whitespace_and_comments()?;
 
         let Some(&(pos, ch)) = self.chars.peek() else {
             return Ok(Token::Eof);
@@ -321,7 +321,7 @@ impl<'a> Lexer<'a> {
         result
     }
 
-    fn skip_whitespace_and_comments(&mut self) {
+    fn skip_whitespace_and_comments(&mut self) -> Result<(), LexerError> {
         loop {
             // Skip whitespace
             while let Some(&(_, ch)) = self.chars.peek() {
@@ -372,17 +372,22 @@ impl<'a> Lexer<'a> {
                             // Skip to */
                             self.advance(); // /
                             self.advance(); // *
+                            let mut found_end = false;
                             loop {
                                 match self.advance() {
                                     Some((_, '*')) => {
                                         if let Some(&(_, '/')) = self.chars.peek() {
                                             self.advance();
+                                            found_end = true;
                                             break;
                                         }
                                     }
                                     None => break,
                                     _ => {}
                                 }
+                            }
+                            if !found_end {
+                                return Err(self.error("Unterminated block comment".to_string()));
                             }
                             continue;
                         }
@@ -391,6 +396,7 @@ impl<'a> Lexer<'a> {
             }
             break;
         }
+        Ok(())
     }
 
     fn read_dash_or_arrow(&mut self) -> Result<Token, LexerError> {
@@ -985,11 +991,11 @@ mod tests {
 
     #[test]
     fn test_float_literals() {
-        let tokens = Lexer::tokenize("3.14 0.5 10.0").unwrap();
+        let tokens = Lexer::tokenize("2.71 0.5 10.0").unwrap();
         assert_eq!(
             tokens,
             vec![
-                Token::FloatLiteral(3.14),
+                Token::FloatLiteral(2.71),
                 Token::FloatLiteral(0.5),
                 Token::FloatLiteral(10.0),
                 Token::Eof
@@ -999,8 +1005,8 @@ mod tests {
 
     #[test]
     fn test_negative_float() {
-        let tokens = Lexer::tokenize("-3.14").unwrap();
-        assert_eq!(tokens, vec![Token::FloatLiteral(-3.14), Token::Eof]);
+        let tokens = Lexer::tokenize("-2.71").unwrap();
+        assert_eq!(tokens, vec![Token::FloatLiteral(-2.71), Token::Eof]);
     }
 
     #[test]
@@ -1323,7 +1329,7 @@ mod tests {
             "'bar'"
         );
         assert_eq!(format!("{}", Token::IntegerLiteral(42)), "42");
-        assert_eq!(format!("{}", Token::FloatLiteral(3.14)), "3.14");
+        assert_eq!(format!("{}", Token::FloatLiteral(2.71)), "2.71");
         assert_eq!(format!("{}", Token::Parameter("p".to_string())), "$p");
     }
 }
