@@ -1,7 +1,7 @@
 # ADR-0014: Graph Sharding Strategy
 
-**Status:** Proposed
-**Date:** 2026-01-01
+**Status:** Accepted
+**Date:** 2026-01-01 (Proposed), 2026-01-22 (Accepted)
 **Deciders:** GallifreyDB Core Team
 **Categories:** storage, scalability, distributed
 
@@ -26,36 +26,58 @@ When the current-state dataset exceeds single-machine RAM (even with tiered stor
 
 ## Decision
 
-We will implement **domain-based partitioning with edge replication** as the primary sharding strategy:
+We implement **domain-based partitioning with edge replication** as the primary sharding strategy.
 
-### Sharding Architecture
+### Sharding Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Shard Coordinator                           │
-│   • Query routing         • Transaction coordination             │
-│   • Shard discovery       • Rebalancing orchestration           │
-└─────────────────────────────────────────────────────────────────┘
-              │                    │                    │
-              ▼                    ▼                    ▼
-     ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-     │   Shard 0   │      │   Shard 1   │      │   Shard 2   │
-     │   People    │◄────►│   Places    │◄────►│   Events    │
-     │             │      │             │      │             │
-     │ • Nodes     │      │ • Nodes     │      │ • Nodes     │
-     │ • Edges*    │      │ • Edges*    │      │ • Edges*    │
-     │ • History   │      │ • History   │      │ • History   │
-     └─────────────┘      └─────────────┘      └─────────────┘
-              │                    │                    │
-              └────────────────────┴────────────────────┘
-                    * Cross-shard edges replicated
+```mermaid
+flowchart TB
+    subgraph Coordinator["Shard Coordinator"]
+        QR[Query Router]
+        TC[Transaction Coordinator]
+        SD[Shard Discovery]
+        RM[Rebalance Manager]
+    end
+
+    subgraph Shard0["Shard 0 - People"]
+        N0[Nodes]
+        E0[Edges]
+        H0[History]
+        W0[WAL]
+    end
+
+    subgraph Shard1["Shard 1 - Places"]
+        N1[Nodes]
+        E1[Edges]
+        H1[History]
+        W1[WAL]
+    end
+
+    subgraph Shard2["Shard 2 - Events"]
+        N2[Nodes]
+        E2[Edges]
+        H2[History]
+        W2[WAL]
+    end
+
+    Client --> Coordinator
+    QR --> Shard0
+    QR --> Shard1
+    QR --> Shard2
+    TC --> Shard0
+    TC --> Shard1
+    TC --> Shard2
+
+    Shard0 <-.->|"Cross-shard edges"| Shard1
+    Shard1 <-.->|"Cross-shard edges"| Shard2
+    Shard0 <-.->|"Cross-shard edges"| Shard2
 ```
 
 ### Partitioning Strategy
 
 **Primary: Domain-Based Partitioning**
 
-Partition by node label/type:
+Nodes are partitioned by label/type. This provides natural data locality since queries within a domain stay local.
 
 ```rust
 pub struct ShardConfig {
@@ -91,11 +113,36 @@ let config = ShardConfig {
 };
 ```
 
-**Rationale:**
-- Queries within a domain stay local (e.g., "find all people named Alice")
-- Domain experts can size shards based on data distribution
-- Natural alignment with application data model
-- Predictable routing without hash lookups
+### Query Routing Architecture
+
+```mermaid
+flowchart TD
+    Q[Incoming Query] --> RT{Query Type?}
+
+    RT -->|Node Lookup| NL[Node Router]
+    RT -->|Traversal| TR[Traversal Router]
+    RT -->|Multi-hop| MH[Multi-shard Planner]
+
+    NL --> LM{Label Mapped?}
+    LM -->|Yes| SS[Route to Single Shard]
+    LM -->|No| DS[Route to Default Shard]
+
+    TR --> TA[Analyze Edge Labels]
+    TA --> SH{Same Shard?}
+    SH -->|Yes| LST[Local Traversal]
+    SH -->|No| RMT[Remote Traversal]
+
+    MH --> QP[Query Plan]
+    QP --> SG[Scatter Phase]
+    SG --> E1[Execute on Shard 0]
+    SG --> E2[Execute on Shard 1]
+    SG --> E3[Execute on Shard N]
+    E1 --> GA[Gather Phase]
+    E2 --> GA
+    E3 --> GA
+    GA --> AGG[Aggregate Results]
+    AGG --> RES[Return Result]
+```
 
 ### Edge Replication Strategy
 
@@ -117,136 +164,369 @@ Shard 1 stores: (person_id@shard0) --VISITED--> (place_id)
 - 2x storage for cross-shard edges
 - Must maintain consistency on edge updates
 
-### Query Routing
+### Distributed Transaction Protocol (Two-Phase Commit)
+
+For writes spanning multiple shards, we use **Two-Phase Commit (2PC)** with a persistent commit log for crash recovery.
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant CL as Commit Log
+    participant SA as Shard A
+    participant SB as Shard B
+
+    Note over C: Begin Transaction
+    C->>CL: Log PREPARING (participants: A, B)
+
+    par Phase 1: Prepare
+        C->>SA: PREPARE(tx_id, operations)
+        C->>SB: PREPARE(tx_id, operations)
+    end
+
+    SA-->>C: PREPARED
+    SB-->>C: PREPARED
+
+    Note over C: All prepared - commit decision
+    C->>CL: Log COMMITTED (tx_id)
+
+    par Phase 2: Commit
+        C->>SA: COMMIT(tx_id)
+        C->>SB: COMMIT(tx_id)
+    end
+
+    SA-->>C: COMMITTED
+    SB-->>C: COMMITTED
+
+    C->>CL: Clear entry (tx complete)
+```
+
+**Abort Flow:**
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant CL as Commit Log
+    participant SA as Shard A
+    participant SB as Shard B
+
+    Note over C: Begin Transaction
+    C->>CL: Log PREPARING
+
+    par Phase 1: Prepare
+        C->>SA: PREPARE(tx_id, operations)
+        C->>SB: PREPARE(tx_id, operations)
+    end
+
+    SA-->>C: PREPARED
+    SB-->>C: PREPARE_FAILED (e.g., constraint violation)
+
+    Note over C: Abort decision
+    C->>CL: Log ABORTED
+
+    par Rollback
+        C->>SA: ABORT(tx_id)
+        C->>SB: ABORT(tx_id)
+    end
+
+    SA-->>C: ABORTED
+    SB-->>C: ABORTED
+
+    C->>CL: Clear entry
+```
+
+**Persistent Commit Log Format:**
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Header (16 bytes)                                   │
+├─────────────────────────────────────────────────────┤
+│ Magic: "GDB2" (4 bytes)                             │
+│ Version: u32 (4 bytes)                              │
+│ Reserved (8 bytes)                                  │
+├─────────────────────────────────────────────────────┤
+│ Entry 1                                             │
+├─────────────────────────────────────────────────────┤
+│ Length: u32 (4 bytes)                               │
+│ LSN: u64 (8 bytes)                                  │
+│ Entry Type: u8 (Preparing=1, Committed=2, Aborted=3)│
+│ TxId: u64 (8 bytes)                                 │
+│ Participants: Vec<ShardId>                          │
+│ CRC32: u32 (4 bytes)                                │
+├─────────────────────────────────────────────────────┤
+│ Entry 2...                                          │
+└─────────────────────────────────────────────────────┘
+```
+
+### Circuit Breaker Pattern
+
+Network connections use circuit breakers to prevent cascade failures:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+
+    Closed --> Open: failure_count >= threshold
+    Closed --> Closed: success (reset counter)
+
+    Open --> HalfOpen: timeout elapsed
+
+    HalfOpen --> Closed: probe succeeds
+    HalfOpen --> Open: probe fails
+
+    note right of Closed
+        Normal operation
+        Requests pass through
+        Track failures
+    end note
+
+    note right of Open
+        Circuit tripped
+        Requests fail fast
+        Wait for timeout
+    end note
+
+    note right of HalfOpen
+        Testing recovery
+        Allow one probe request
+        Success closes, failure reopens
+    end note
+```
+
+**Configuration:**
 
 ```rust
-pub struct ShardRouter {
-    config: ShardConfig,
-    label_to_shard: HashMap<String, ShardId>,
-}
+pub struct CircuitBreakerConfig {
+    /// Number of failures before opening circuit
+    pub failure_threshold: u32,      // default: 5
 
-impl ShardRouter {
-    /// Route a node query to the appropriate shard
-    pub fn route_node(&self, label: &str) -> ShardId {
-        *self.label_to_shard.get(label)
-            .unwrap_or(&self.config.default_shard)
-    }
+    /// Time to wait in open state before probing
+    pub reset_timeout: Duration,     // default: 30 seconds
 
-    /// Route a traversal query
-    pub fn route_traversal(&self, start: NodeId, start_label: &str) -> TraversalPlan {
-        // Single-shard if all target labels are on same shard
-        // Multi-shard if traversal crosses domains
-    }
+    /// Number of successes in half-open to close
+    pub success_threshold: u32,      // default: 2
 }
 ```
 
-### Distributed Transaction Protocol
+### Connection Pool Architecture
 
-For writes spanning multiple shards, we use **Two-Phase Commit (2PC)**:
+```mermaid
+flowchart TB
+    subgraph Pool["Connection Pool"]
+        subgraph Connections
+            C1[Connection 1]
+            C2[Connection 2]
+            C3[Connection N]
+        end
 
+        HT[Health Tracker]
+        CB[Circuit Breaker]
+
+        HT --> C1
+        HT --> C2
+        HT --> C3
+    end
+
+    Request --> CB
+    CB -->|Closed| AC[Acquire Connection]
+    CB -->|Open| FF[Fail Fast]
+    AC --> Connections
+    Connections --> Release
+    Release --> HT
+    HT -->|Update Health| CB
 ```
-Coordinator                 Shard A                 Shard B
-     │                          │                       │
-     │───── PREPARE ───────────►│                       │
-     │───── PREPARE ────────────────────────────────────►│
-     │                          │                       │
-     │◄──── PREPARED ──────────│                       │
-     │◄──── PREPARED ───────────────────────────────────│
-     │                          │                       │
-     │───── COMMIT ────────────►│                       │
-     │───── COMMIT ─────────────────────────────────────►│
-     │                          │                       │
-     │◄──── COMMITTED ─────────│                       │
-     │◄──── COMMITTED ──────────────────────────────────│
+
+### Query Execution (Scatter-Gather)
+
+```mermaid
+flowchart LR
+    subgraph Input
+        DQ[Distributed Query]
+    end
+
+    subgraph Scatter["Scatter Phase"]
+        DQ --> P[Partition by Shard]
+        P --> Q0[Query for Shard 0]
+        P --> Q1[Query for Shard 1]
+        P --> Q2[Query for Shard N]
+    end
+
+    subgraph Execute["Parallel Execution"]
+        Q0 --> |async| E0[Execute]
+        Q1 --> |async| E1[Execute]
+        Q2 --> |async| E2[Execute]
+    end
+
+    subgraph Gather["Gather Phase"]
+        E0 --> R0[Result 0]
+        E1 --> R1[Result 1]
+        E2 --> R2[Result N]
+        R0 --> AGG[Aggregation Strategy]
+        R1 --> AGG
+        R2 --> AGG
+    end
+
+    subgraph Output
+        AGG --> FR[Final Result]
+    end
 ```
 
-**Implementation:**
+**Aggregation Strategies:**
+
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| `Concat` | Append all results | Collecting all matches |
+| `First` | Return first non-empty result | Existence check |
+| `MergeNodes` | Deduplicate by node ID | Multi-hop traversal |
+| `Sum` | Sum numeric values | Count aggregations |
+| `Count` | Count total entries | Size queries |
+| `ByShard` | Preserve shard grouping | Debugging/analysis |
+
+### Migration and Rebalancing
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: Create Migration
+
+    Pending --> Preparing: start()
+
+    Preparing --> DualWrite: Source validated
+    Preparing --> Failed: Validation error
+
+    DualWrite --> Migrating: Dual-write active
+
+    Migrating --> Verifying: All data transferred
+    Migrating --> Failed: Transfer error
+
+    Verifying --> Cutover: Verification passed
+    Verifying --> Migrating: Retry needed
+
+    Cutover --> Cleanup: Routing updated
+
+    Cleanup --> Completed: Old data removed
+    Cleanup --> Completed: Cleanup skipped (optional)
+
+    Failed --> [*]
+    Completed --> [*]
+
+    note right of DualWrite
+        Writes go to both
+        source and target
+    end note
+
+    note right of Migrating
+        Background data copy
+        in batches
+    end note
+```
+
+**Migration Lifecycle:**
+
+1. **Pending**: Migration defined but not started
+2. **Preparing**: Validating source and target shards
+3. **DualWrite**: New writes go to both old and new shards
+4. **Migrating**: Copying existing data in batches
+5. **Verifying**: Confirming data integrity
+6. **Cutover**: Atomic routing table update
+7. **Cleanup**: Remove data from old shard
+8. **Completed**: Migration finished successfully
+
+**Dual-Write Router:**
 
 ```rust
-impl ShardCoordinator {
-    pub async fn distributed_write(&self, ops: Vec<Operation>) -> Result<()> {
-        let tx_id = self.next_tx_id();
-
-        // Group operations by shard
-        let by_shard = self.group_by_shard(ops);
-        let shard_ids: Vec<_> = by_shard.keys().cloned().collect();
-
-        // Phase 1: Prepare
-        let prepare_results = futures::join_all(
-            by_shard.iter().map(|(shard, ops)| {
-                self.shards[*shard].prepare(tx_id, ops)
-            })
-        ).await;
-
-        // Check all prepared successfully
-        if prepare_results.iter().any(|r| r.is_err()) {
-            // Abort all prepared shards
-            self.abort_all(tx_id, &shard_ids).await;
-            return Err(StorageError::DistributedTransactionFailed);
-        }
-
-        // CRITICAL: Log commit decision BEFORE sending commits
-        // This enables recovery if coordinator crashes during Phase 2
-        self.log_commit_decision(tx_id, &shard_ids).await?;
-
-        // Phase 2: Commit with retry for failures
-        for shard_id in &shard_ids {
-            loop {
-                match self.shards[*shard_id].commit(tx_id).await {
-                    Ok(_) => break,
-                    Err(e) if e.is_retryable() => {
-                        // Shard temporarily unavailable, retry
-                        tokio::time::sleep(RETRY_DELAY).await;
-                        continue;
-                    }
-                    Err(e) => {
-                        // Non-retryable error - log for manual intervention
-                        // The commit decision is logged, so recovery will retry
-                        self.log_commit_failure(tx_id, *shard_id, &e).await;
-                        return Err(e.into());
-                    }
-                }
+impl DualWriteRouter {
+    pub fn route_write(&self, label: &str, primary_shard: ShardId) -> Vec<ShardId> {
+        if let Some((source, target)) = self.active_migrations.get(label) {
+            if primary_shard == *source {
+                return vec![*source, *target]; // Dual-write
             }
         }
-
-        // Clean up commit log after all shards confirmed
-        self.clear_commit_decision(tx_id).await;
-
-        Ok(())
+        vec![primary_shard] // Normal routing
     }
 }
 ```
 
-**Recovery Notes:**
+### Component Interactions
 
-On coordinator startup, scan the commit decision log:
-- For each logged `COMMIT` decision, retry sending commit to any shards that haven't acknowledged
-- For each logged `PREPARE` without a decision, send abort to all participants
-- This ensures eventual consistency even if coordinator crashes mid-transaction
+```mermaid
+flowchart TB
+    subgraph Client Layer
+        CL[Client]
+    end
 
-### Rebalancing
+    subgraph Coordinator Layer
+        SC[ShardCoordinator]
+        SR[ShardRouter]
+        QE[QueryExecutor]
+        DT[DistributedTransaction]
+        ME[MigrationExecutor]
+    end
 
-When shards become unbalanced or new shards are added:
+    subgraph Network Layer
+        CP[ConnectionPool]
+        CB[CircuitBreaker]
+        NC[ShardClient]
+    end
 
-1. **Monitor**: Track shard sizes and query patterns
-2. **Plan**: Identify nodes to migrate (minimize edge cuts)
-3. **Dual-write**: New writes go to both old and new location
-4. **Migrate**: Copy historical data in background
-5. **Cutover**: Update routing table atomically
-6. **Cleanup**: Remove data from old shard
+    subgraph Persistence Layer
+        PCL[PersistentCommitLog]
+    end
 
-```rust
-pub struct RebalanceConfig {
-    /// Trigger rebalancing when size variance exceeds this
-    pub imbalance_threshold: f64,  // default: 0.3 (30%)
+    subgraph Shard Layer
+        S0[Shard 0]
+        S1[Shard 1]
+        S2[Shard N]
+    end
 
-    /// Maximum nodes to migrate per batch
-    pub batch_size: usize,  // default: 10000
+    CL --> SC
+    SC --> SR
+    SC --> QE
+    SC --> DT
+    SC --> ME
 
-    /// Minimum time between rebalances
-    pub cooldown: Duration,  // default: 1 hour
-}
+    QE --> CP
+    DT --> CP
+    DT --> PCL
+    ME --> CP
+
+    CP --> CB
+    CB --> NC
+
+    NC --> S0
+    NC --> S1
+    NC --> S2
 ```
+
+## Implementation Details
+
+### Module Structure
+
+```
+src/storage/sharding/
+├── mod.rs               # Module exports and documentation
+├── types.rs             # ShardId, ShardState, ShardMetrics
+├── config.rs            # ShardConfig, ShardDefinition, RebalanceConfig
+├── router.rs            # ShardRouter, TraversalPlan
+├── coordinator.rs       # ShardCoordinator, ShardConnection
+├── transaction.rs       # DistributedTransaction, TwoPhaseCommitLog
+├── network.rs           # ShardClient, CircuitBreaker, ConnectionPool
+├── persistent_commit_log.rs # Durable commit decisions
+├── executor.rs          # QueryExecutor, scatter-gather execution
+├── migration.rs         # MigrationExecutor, DualWriteRouter
+├── rebalance.rs         # RebalanceManager, MigrationPlan
+└── simulation.rs        # ShardingSimulation, EdgeCutAnalysis
+```
+
+### Test Coverage
+
+The implementation includes comprehensive test coverage:
+
+| Module | Tests | Coverage Focus |
+|--------|-------|----------------|
+| `network.rs` | 24 | Circuit breaker states, connection pool health |
+| `persistent_commit_log.rs` | 14 | Durability, recovery, corruption handling |
+| `executor.rs` | 20 | Aggregation strategies, error handling |
+| `migration.rs` | 16 | State transitions, dual-write routing |
+| **Total** | **179** | Full sharding system |
 
 ## Consequences
 
@@ -256,15 +536,16 @@ pub struct RebalanceConfig {
 - **Domain locality**: Queries within domain stay fast
 - **Predictable routing**: No hash ring complexity
 - **Edge replication**: Fast single-hop traversal across shards
+- **Fault tolerance**: Circuit breakers prevent cascade failures
+- **Crash recovery**: Persistent commit log enables recovery
 
 ### Negative
 
 - **Operational complexity**: Multiple nodes to manage
 - **Network latency**: Cross-shard queries add ~1ms per hop
 - **2PC overhead**: Distributed writes slower than local
-- **Edge storage overhead**: 2x for cross-shard edges (can be higher in power-law graphs where hub nodes have many cross-shard connections)
+- **Edge storage overhead**: 2x for cross-shard edges
 - **Rebalancing disruption**: Some impact during migrations
-- **Temporal ordering complexity**: Transaction time must remain monotonic across shards (requires coordinator-assigned timestamps or hybrid logical clocks)
 
 ### Neutral
 
@@ -302,32 +583,14 @@ Shard by relationship depth from "anchor" nodes.
 - Depth from anchor changes as graph grows
 - Complex to reason about shard placement
 
-## Implementation Notes
-
-### Shard Discovery
-
-Use a configuration service (etcd, Consul) or static config:
-
-```rust
-pub enum ShardDiscovery {
-    Static(Vec<ShardEndpoint>),
-    Etcd { endpoints: Vec<String>, prefix: String },
-    Consul { address: String, service: String },
-}
-```
-
-### Failure Handling
-
-- **Shard failure**: Queries to that shard fail, others continue
-- **Coordinator failure**: New coordinator elected (Raft)
-- **Network partition**: Transactions spanning partition abort
-
-### Future Enhancements
+## Future Enhancements
 
 1. **Read replicas**: Add read-only replicas per shard
 2. **Automatic sharding**: Infer domains from label distribution
-3. **Query planning**: Optimize multi-shard query execution
+3. **Query planning optimization**: Cost-based multi-shard query planning
 4. **Shard splitting**: Subdivide large shards automatically
+5. **Raft consensus**: Replace 2PC with Raft for coordinator election
+6. **Streaming migration**: Stream-based data transfer for large migrations
 
 ## References
 
@@ -336,3 +599,4 @@ pub enum ShardDiscovery {
 - ADR-0013: Tiered Storage Architecture (prerequisite)
 - Facebook TAO: [Paper](https://www.usenix.org/system/files/conference/atc13/atc13-bronson.pdf)
 - Google Spanner: [Paper](https://research.google/pubs/pub39966/)
+- Guide: [Sharding Guide](../guides/sharding-guide.md)
