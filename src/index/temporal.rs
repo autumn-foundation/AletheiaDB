@@ -162,6 +162,36 @@ impl EntityTimeline {
 
         results
     }
+
+    /// Find all versions that contain a specific point in time.
+    ///
+    /// A version [start, end) contains timestamp T if: start <= T < end
+    ///
+    /// This is more efficient than `find_in_range(TimeRange::at(T))` because it
+    /// uses the correct semantics for point-in-time queries. The `find_in_range`
+    /// method with `TimeRange::at(T)` creates a degenerate [T, T) range which
+    /// doesn't correctly handle the inclusive-start boundary condition.
+    ///
+    /// # Performance
+    ///
+    /// - Time complexity: O(log N + K) where N = versions, K = overlapping versions
+    /// - For typical bi-temporal databases with non-overlapping intervals, K = 1
+    fn find_at_point(&self, timestamp: Timestamp) -> Vec<VersionId> {
+        // Find all entries where start <= timestamp (these could potentially contain T)
+        let cutoff = self.versions.partition_point(|e| e.start <= timestamp);
+
+        // Pre-allocate for typical case (1-2 versions at a point)
+        let mut results = Vec::with_capacity(cutoff.min(4));
+
+        // Filter to entries where end > timestamp (completing the containment check)
+        for entry in &self.versions[..cutoff] {
+            if entry.end > timestamp {
+                results.push(entry.version_id);
+            }
+        }
+
+        results
+    }
 }
 
 /// Grouped timelines for valid and transaction dimensions.
@@ -417,6 +447,116 @@ impl TemporalIndexes {
             .get(&EntityId::Edge(edge_id))
             .map(|t| t.tx.find_in_range(time_range))
             .unwrap_or_default()
+    }
+
+    /// Find node versions visible at a specific bi-temporal point.
+    ///
+    /// This is the efficient O(log n) replacement for the linear scan in
+    /// `HistoricalStorage::find_node_version_at_time`. It queries both
+    /// the valid time and transaction time indexes, returning only versions
+    /// that are visible at BOTH temporal coordinates.
+    ///
+    /// # Performance
+    ///
+    /// - Time complexity: O(log N + K) where N = versions per entity, K = overlapping versions
+    /// - For point queries, K is typically 1-2 versions
+    /// - This replaces O(N) linear scan through version chains
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The node to query
+    /// * `valid_time` - The valid time coordinate (when the fact was true in reality)
+    /// * `transaction_time` - The transaction time coordinate (when the fact was recorded)
+    ///
+    /// # Returns
+    ///
+    /// Version IDs visible at the given bi-temporal point. For typical bi-temporal
+    /// databases with non-overlapping intervals, this returns 0-1 versions.
+    pub fn find_node_version_at_point(
+        &self,
+        node_id: NodeId,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Vec<VersionId> {
+        let entity_id = EntityId::Node(node_id);
+
+        let Some(timelines) = self.index.get(&entity_id) else {
+            return Vec::new();
+        };
+
+        // Query both temporal dimensions with point-in-time queries
+        // Using find_at_point for correct boundary handling (start <= T < end)
+        let valid_matches = timelines.valid.find_at_point(valid_time);
+        let tx_matches = timelines.tx.find_at_point(transaction_time);
+
+        // Intersect results: version must be visible in BOTH dimensions
+        // For small result sets (typical), linear intersection is efficient
+        if valid_matches.len() <= tx_matches.len() {
+            valid_matches
+                .into_iter()
+                .filter(|v| tx_matches.contains(v))
+                .collect()
+        } else {
+            tx_matches
+                .into_iter()
+                .filter(|v| valid_matches.contains(v))
+                .collect()
+        }
+    }
+
+    /// Find edge versions visible at a specific bi-temporal point.
+    ///
+    /// This is the efficient O(log n) replacement for the linear scan in
+    /// `HistoricalStorage::find_edge_version_at_time`. It queries both
+    /// the valid time and transaction time indexes, returning only versions
+    /// that are visible at BOTH temporal coordinates.
+    ///
+    /// # Performance
+    ///
+    /// - Time complexity: O(log N + K) where N = versions per entity, K = overlapping versions
+    /// - For point queries, K is typically 1-2 versions
+    /// - This replaces O(N) linear scan through version chains
+    ///
+    /// # Arguments
+    ///
+    /// * `edge_id` - The edge to query
+    /// * `valid_time` - The valid time coordinate (when the fact was true in reality)
+    /// * `transaction_time` - The transaction time coordinate (when the fact was recorded)
+    ///
+    /// # Returns
+    ///
+    /// Version IDs visible at the given bi-temporal point. For typical bi-temporal
+    /// databases with non-overlapping intervals, this returns 0-1 versions.
+    pub fn find_edge_version_at_point(
+        &self,
+        edge_id: EdgeId,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+    ) -> Vec<VersionId> {
+        let entity_id = EntityId::Edge(edge_id);
+
+        let Some(timelines) = self.index.get(&entity_id) else {
+            return Vec::new();
+        };
+
+        // Query both temporal dimensions with point-in-time queries
+        // Using find_at_point for correct boundary handling (start <= T < end)
+        let valid_matches = timelines.valid.find_at_point(valid_time);
+        let tx_matches = timelines.tx.find_at_point(transaction_time);
+
+        // Intersect results: version must be visible in BOTH dimensions
+        // For small result sets (typical), linear intersection is efficient
+        if valid_matches.len() <= tx_matches.len() {
+            valid_matches
+                .into_iter()
+                .filter(|v| tx_matches.contains(v))
+                .collect()
+        } else {
+            tx_matches
+                .into_iter()
+                .filter(|v| valid_matches.contains(v))
+                .collect()
+        }
     }
 
     /// Get the total number of indexed version entries.
@@ -1415,6 +1555,190 @@ mod tests {
                 i
             );
         }
+    }
+
+    // ========================================================================
+    // Bi-temporal Point Query Tests (Issue #194 fix)
+    // ========================================================================
+
+    #[test]
+    fn test_find_node_version_at_point_basic() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
+
+        // v1: valid [0, 1000), tx [0, MAX)
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(0.into(), 1000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        // v2: valid [1000, 2000), tx [500, MAX)
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::new(500.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        // Query at valid_time=500, tx_time=600 should return v1
+        let results = indexes.find_node_version_at_point(node_id, 500.into(), 600.into());
+        assert_eq!(results.len(), 1, "Should find exactly one version");
+        assert_eq!(results[0], v1, "Should find v1");
+
+        // Query at valid_time=1500, tx_time=600 should return v2
+        let results = indexes.find_node_version_at_point(node_id, 1500.into(), 600.into());
+        assert_eq!(results.len(), 1, "Should find exactly one version");
+        assert_eq!(results[0], v2, "Should find v2");
+
+        // Query at valid_time=1500, tx_time=400 should return nothing (v2 not recorded yet)
+        let results = indexes.find_node_version_at_point(node_id, 1500.into(), 400.into());
+        assert!(
+            results.is_empty(),
+            "Should find no versions before v2 was recorded"
+        );
+    }
+
+    #[test]
+    fn test_find_node_version_at_point_empty_index() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+
+        let results = indexes.find_node_version_at_point(node_id, 500.into(), 600.into());
+        assert!(results.is_empty(), "Empty index should return no results");
+    }
+
+    #[test]
+    fn test_find_edge_version_at_point_basic() {
+        let indexes = TemporalIndexes::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+
+        indexes
+            .insert_edge_version(
+                edge_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        let results = indexes.find_edge_version_at_point(edge_id, 500.into(), 600.into());
+        assert_eq!(results.len(), 1, "Should find exactly one version");
+        assert_eq!(results[0], v1, "Should find v1");
+    }
+
+    #[test]
+    fn test_find_node_version_at_point_overlapping_intervals() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
+
+        // v1: valid [0, 2000), tx [0, MAX) - spans the full range
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(0.into(), 2000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        // v2: valid [1000, 3000), tx [0, MAX) - overlaps with v1
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 3000.into()).unwrap(),
+                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        // Query at valid_time=1500, tx_time=100 should return both v1 and v2
+        let results = indexes.find_node_version_at_point(node_id, 1500.into(), 100.into());
+        assert_eq!(results.len(), 2, "Should find both overlapping versions");
+        assert!(results.contains(&v1), "Should include v1");
+        assert!(results.contains(&v2), "Should include v2");
+
+        // Query at valid_time=500, tx_time=100 should return only v1
+        let results = indexes.find_node_version_at_point(node_id, 500.into(), 100.into());
+        assert_eq!(results.len(), 1, "Should find only v1");
+        assert_eq!(results[0], v1, "Should be v1");
+
+        // Query at valid_time=2500, tx_time=100 should return only v2
+        let results = indexes.find_node_version_at_point(node_id, 2500.into(), 100.into());
+        assert_eq!(results.len(), 1, "Should find only v2");
+        assert_eq!(results[0], v2, "Should be v2");
+    }
+
+    #[test]
+    fn test_find_node_version_at_point_boundary_conditions() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+
+        // v1: valid [1000, 2000), tx [500, 1500)
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::new(500.into(), 1500.into()).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        // Just before valid_time start - should not find
+        let results = indexes.find_node_version_at_point(node_id, 999.into(), 1000.into());
+        assert!(
+            results.is_empty(),
+            "Should not find version before valid_time start"
+        );
+
+        // At valid_time start - should find (inclusive start)
+        let results = indexes.find_node_version_at_point(node_id, 1000.into(), 1000.into());
+        assert_eq!(results.len(), 1, "Should find at valid_time start");
+
+        // Just before valid_time end - should find
+        let results = indexes.find_node_version_at_point(node_id, 1999.into(), 1000.into());
+        assert_eq!(results.len(), 1, "Should find just before valid_time end");
+
+        // At valid_time end - should not find (exclusive end)
+        let results = indexes.find_node_version_at_point(node_id, 2000.into(), 1000.into());
+        assert!(
+            results.is_empty(),
+            "Should not find at valid_time end (exclusive)"
+        );
+
+        // Just before tx_time start - should not find
+        let results = indexes.find_node_version_at_point(node_id, 1500.into(), 499.into());
+        assert!(results.is_empty(), "Should not find before tx_time start");
+
+        // At tx_time end - should not find (exclusive end)
+        let results = indexes.find_node_version_at_point(node_id, 1500.into(), 1500.into());
+        assert!(
+            results.is_empty(),
+            "Should not find at tx_time end (exclusive)"
+        );
     }
 
     // Property-based tests using proptest
