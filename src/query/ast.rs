@@ -129,9 +129,12 @@ pub enum TemporalClause {
 /// A timestamp literal (string or integer).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TimestampLiteral {
-    /// ISO 8601 string: '2024-01-15T10:00:00Z'
+    /// String timestamp - currently parsed as integer microseconds.
+    /// Example: '1704067200000000'
+    /// Note: ISO 8601 string parsing (e.g., '2024-01-15T10:00:00Z')
+    /// is not yet implemented.
     String(String),
-    /// Unix timestamp in milliseconds
+    /// Unix timestamp in microseconds (not milliseconds)
     Integer(i64),
 }
 
@@ -362,16 +365,13 @@ impl DepthSpec {
 
     /// Create a range depth.
     ///
-    /// # Panics
-    /// Panics if `min > max`.
-    pub fn range(min: usize, max: usize) -> Self {
-        assert!(
-            min <= max,
-            "DepthSpec range min ({}) must be <= max ({})",
-            min,
-            max
-        );
-        DepthSpec::Range { min, max }
+    /// # Errors
+    /// Returns an error if `min > max`.
+    pub fn range(min: usize, max: usize) -> Result<Self, &'static str> {
+        if min > max {
+            return Err("DepthSpec range min must be <= max");
+        }
+        Ok(DepthSpec::Range { min, max })
     }
 }
 
@@ -664,15 +664,6 @@ impl ReturnItem {
     }
 }
 
-/// COUNT(*) or COUNT(expr) return.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CountExpr {
-    /// COUNT(*)
-    All,
-    /// COUNT(expr)
-    Expression(Expression),
-}
-
 /// ORDER BY clause.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderClause {
@@ -841,7 +832,7 @@ mod tests {
     fn test_relationship_pattern_with_depth() {
         let rel = RelationshipPattern::outgoing()
             .with_type("KNOWS")
-            .with_depth(DepthSpec::range(1, 3));
+            .with_depth(DepthSpec::range(1, 3).unwrap());
         assert_eq!(rel.depth, Some(DepthSpec::Range { min: 1, max: 3 }));
     }
 
@@ -1013,6 +1004,10 @@ mod tests {
     fn test_depth_spec() {
         assert_eq!(DepthSpec::one(), DepthSpec::Exact(1));
         assert_eq!(DepthSpec::exact(3), DepthSpec::Exact(3));
-        assert_eq!(DepthSpec::range(1, 5), DepthSpec::Range { min: 1, max: 5 });
+        assert_eq!(
+            DepthSpec::range(1, 5).unwrap(),
+            DepthSpec::Range { min: 1, max: 5 }
+        );
+        assert!(DepthSpec::range(5, 1).is_err()); // min > max should fail
     }
 }

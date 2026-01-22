@@ -1007,17 +1007,18 @@ impl Parser {
         if self.check(&Token::Count) {
             self.advance();
             self.expect(&Token::LeftParen)?;
-            if self.check(&Token::Star) {
+            let arg = if self.check(&Token::Star) {
                 self.advance();
+                // Represent COUNT(*) with a special identifier
+                Expression::Identifier("*".to_string())
             } else {
-                self.parse_expression()?;
-            }
+                self.parse_expression()?
+            };
             self.expect(&Token::RightParen)?;
 
-            // For simplicity, we'll just return COUNT as a special item
             let items = vec![ReturnItem::new(Expression::FunctionCall {
                 name: "COUNT".to_string(),
-                args: vec![],
+                args: vec![arg],
             })];
             return Ok(Some(ReturnClause { items, distinct }));
         }
@@ -1577,9 +1578,35 @@ mod tests {
 
         if let Some(ret) = &query.return_clause {
             assert_eq!(ret.items.len(), 1);
-            if let Expression::FunctionCall { name, .. } = &ret.items[0].expression {
+            if let Expression::FunctionCall { name, args } = &ret.items[0].expression {
                 assert_eq!(name, "COUNT");
+                assert_eq!(args.len(), 1);
+                // COUNT(*) should have "*" as the argument
+                assert!(matches!(&args[0], Expression::Identifier(s) if s == "*"));
+            } else {
+                panic!("Expected FunctionCall");
             }
+        } else {
+            panic!("Expected return clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_return_count_expression() {
+        let query = Parser::parse("MATCH (n) RETURN COUNT(n)").unwrap();
+
+        if let Some(ret) = &query.return_clause {
+            assert_eq!(ret.items.len(), 1);
+            if let Expression::FunctionCall { name, args } = &ret.items[0].expression {
+                assert_eq!(name, "COUNT");
+                assert_eq!(args.len(), 1);
+                // COUNT(n) should have "n" as the argument
+                assert!(matches!(&args[0], Expression::Identifier(s) if s == "n"));
+            } else {
+                panic!("Expected FunctionCall");
+            }
+        } else {
+            panic!("Expected return clause");
         }
     }
 

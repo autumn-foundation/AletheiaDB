@@ -171,7 +171,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::core::NodeId;
-use crate::core::temporal::{time, TimeRange, Timestamp};
+use crate::core::temporal::{TimeRange, Timestamp, time};
 use crate::index::vector::DistanceMetric;
 use crate::utils::error::{Error, QueryError, Result};
 
@@ -560,7 +560,9 @@ impl AstConverter {
         // Check for inline property filters that might specify a node ID
         if let Some(ref props) = node.properties {
             for (key, value) in props {
-                if key == "id" && let PropertyValue::Int(id) = value {
+                if key == "id"
+                    && let PropertyValue::Int(id) = value
+                {
                     ops.push(QueryOp::StartNode(NodeId::new(*id as u64)?));
                     return Ok(());
                 }
@@ -685,13 +687,13 @@ impl AstConverter {
         op: ComparisonOp,
         right: &Expression,
     ) -> Result<Predicate> {
-        // Extract property key from left side
+        // Extract property key from left side - must be a property access (e.g., n.age)
         let key = match left {
             Expression::Property(prop) => prop.property.clone(),
-            Expression::Identifier(name) => name.clone(),
             _ => {
                 return Err(Error::Query(QueryError::SyntaxError {
-                    message: "Left side of comparison must be a property or identifier".to_string(),
+                    message: "Left side of comparison must be a property access (e.g., n.age)"
+                        .to_string(),
                 }));
             }
         };
@@ -759,8 +761,8 @@ impl AstConverter {
                     projections.push(prop.property.clone());
                 }
                 Expression::Identifier(name) => {
-                    // Variable reference - include all properties
-                    // For now, we just note the variable
+                    // Bare variable (e.g., RETURN n) - store the variable name.
+                    // The executor handles returning the full node for bare variables.
                     projections.push(name.clone());
                 }
                 _ => {

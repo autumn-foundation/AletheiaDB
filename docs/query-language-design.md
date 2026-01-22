@@ -299,7 +299,8 @@ Abstract Syntax Tree representing parsed queries:
 pub struct QueryAst {
     pub temporal: Option<TemporalClause>,
     pub source: SourceClause,
-    pub where_clauses: Vec<WhereClause>,
+    pub rank: Option<RankClause>,
+    pub where_clause: Option<WhereClause>,  // Single optional WHERE clause
     pub return_clause: Option<ReturnClause>,
     pub order: Option<OrderClause>,
     pub skip: Option<usize>,
@@ -308,7 +309,7 @@ pub struct QueryAst {
 
 pub enum SourceClause {
     Match(Vec<Pattern>),
-    VectorSearch { embedding: Embedding, metric: Option<DistanceMetric>, limit: usize },
+    VectorSearch { embedding: EmbeddingRef, metric: Option<DistanceMetric>, limit: usize },
     FindSimilar { node_ref: NodeRef, limit: usize },
 }
 ```
