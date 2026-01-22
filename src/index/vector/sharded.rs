@@ -318,19 +318,37 @@ impl ShardedVectorIndex {
         stats.imbalance_ratio > self.config.rebalance_config.imbalance_threshold
     }
 
-    /// Rebalance vectors across shards.
+    /// Estimate the number of vectors that would need to move to rebalance shards.
     ///
-    /// This operation moves vectors from overloaded shards to underloaded ones
-    /// to achieve better balance.
+    /// # Current Limitation
+    ///
+    /// This method currently only **estimates** how many vectors would need to move
+    /// to achieve balance. It does **not** actually move any vectors because the
+    /// underlying HNSW index doesn't support efficient iteration over stored vectors.
+    ///
+    /// A full rebalancing implementation would require:
+    /// - Maintaining a separate vector storage (id -> vector mapping)
+    /// - Using the index persistence format to extract vectors
+    /// - Or implementing an iterator API in the HNSW index
     ///
     /// # Returns
     ///
-    /// The number of vectors moved during rebalancing.
+    /// The estimated number of vectors that would need to move (capped by batch_size).
+    /// Returns 0 if the index is already balanced below the threshold.
     ///
-    /// # Note
+    /// # Example
     ///
-    /// Rebalancing is a potentially expensive operation that should be
-    /// performed during low-traffic periods.
+    /// ```rust,no_run
+    /// # use gallifreydb::index::vector::sharded::ShardedVectorIndex;
+    /// # use gallifreydb::index::vector::DistanceMetric;
+    /// # fn example() -> gallifreydb::utils::Result<()> {
+    /// let index = ShardedVectorIndex::with_defaults(128, DistanceMetric::Cosine, 4)?;
+    /// // ... add vectors ...
+    /// let vectors_to_move = index.rebalance()?;
+    /// println!("Would need to move {} vectors to rebalance", vectors_to_move);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn rebalance(&self) -> Result<usize> {
         // Acquire exclusive lock for rebalancing
         let _lock = self.rebalance_lock.write();
@@ -342,31 +360,19 @@ impl ShardedVectorIndex {
 
         // Calculate target size for each shard
         let target_size = stats.total_vectors / self.shards.len();
-        let mut vectors_moved = 0;
+        let mut vectors_to_move = 0;
 
-        // In a real implementation, we would:
-        // 1. Identify vectors in overloaded shards
-        // 2. Remove them from the source shard
-        // 3. Add them to underloaded shards
-        //
-        // However, HNSW doesn't support efficient iteration over all vectors.
-        // For now, we return a count of how many vectors *would* need to move.
-        //
-        // A production implementation would need:
-        // - Maintain a separate vector storage (id -> vector mapping)
-        // - Or use the index persistence format to extract vectors
-        // - Or implement a cursor/iterator API in the HNSW index
-
+        // Count how many vectors would need to move from overloaded shards
         for size in &stats.shard_sizes {
             if *size > target_size {
-                vectors_moved += size - target_size;
+                vectors_to_move += size - target_size;
             }
         }
 
         // Cap at batch size
-        vectors_moved = vectors_moved.min(self.config.rebalance_config.batch_size);
+        vectors_to_move = vectors_to_move.min(self.config.rebalance_config.batch_size);
 
-        Ok(vectors_moved)
+        Ok(vectors_to_move)
     }
 
     /// Add a shard to the index.
@@ -383,6 +389,38 @@ impl ShardedVectorIndex {
     /// Returns the total memory usage across all shards.
     pub fn total_memory_usage(&self) -> usize {
         self.shards.iter().map(|s| s.memory_usage()).sum()
+    }
+
+    /// Load a sharded index from disk.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Base path used when saving (shards are at path.shard_N)
+    /// * `config` - Configuration matching the saved index
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Any shard file cannot be loaded
+    /// - The configuration doesn't match the saved index
+    pub fn load(path: &Path, config: ShardedVectorConfig) -> Result<Self> {
+        let mut shards = Vec::with_capacity(config.num_shards);
+
+        for i in 0..config.num_shards {
+            let shard_path = path.with_file_name(format!(
+                "{}.shard_{}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("index"),
+                i
+            ));
+            let shard = HnswIndex::load(&shard_path, config.hnsw_config.clone())?;
+            shards.push(Arc::new(shard));
+        }
+
+        Ok(Self {
+            config,
+            shards,
+            rebalance_lock: RwLock::new(()),
+        })
     }
 }
 
@@ -535,8 +573,13 @@ impl VectorIndex for ShardedVectorIndex {
 
     fn save(&self, path: &Path) -> Result<()> {
         // Save each shard to a separate file
+        // Uses naming pattern: base_path.shard_N (e.g., /data/index.shard_0, /data/index.shard_1)
         for (i, shard) in self.shards.iter().enumerate() {
-            let shard_path = path.with_extension(format!("shard_{}.usearch", i));
+            let shard_path = path.with_file_name(format!(
+                "{}.shard_{}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("index"),
+                i
+            ));
             shard.save(&shard_path)?;
         }
         Ok(())
@@ -558,14 +601,10 @@ impl VectorIndex for ShardedVectorIndex {
     }
 }
 
-// SAFETY: ShardedVectorIndex is safe to send across threads.
-//
-// All fields are thread-safe:
-// - `config`: Immutable after construction (Clone + Send + Sync via Debug)
-// - `shards`: Vec<Arc<HnswIndex>> - Arc provides shared ownership, HnswIndex is Send+Sync
-// - `rebalance_lock`: parking_lot::RwLock is Send + Sync
-unsafe impl Send for ShardedVectorIndex {}
-unsafe impl Sync for ShardedVectorIndex {}
+// Note: ShardedVectorIndex automatically implements Send + Sync because:
+// - `config`: ShardedVectorConfig is Send + Sync (contains only Send + Sync types)
+// - `shards`: Vec<Arc<HnswIndex>> - HnswIndex manually implements Send + Sync
+// - `rebalance_lock`: parking_lot::RwLock<()> is Send + Sync
 
 #[cfg(test)]
 mod tests {
@@ -1200,6 +1239,44 @@ mod tests {
         let results = index.search(&query, 10)?;
 
         assert_eq!(results.len(), 4);
+
+        Ok(())
+    }
+
+    // ============================================================
+    // Save/Load Tests
+    // ============================================================
+
+    #[test]
+    fn test_save_and_load() -> Result<()> {
+        use tempfile::tempdir;
+
+        let dir = tempdir().map_err(|e| Error::Io(e))?;
+        let path = dir.path().join("test_index");
+
+        let config = ShardedVectorConfig::new(2)
+            .with_hnsw_config(HnswConfig::new(4, DistanceMetric::Cosine));
+
+        // Create and populate index
+        let index = ShardedVectorIndex::new(config.clone())?;
+        for i in 1..=10 {
+            let node = NodeId::new(i).unwrap();
+            index.add(node, &[i as f32, 0.0, 0.0, 0.0])?;
+        }
+        assert_eq!(index.len(), 10);
+
+        // Save
+        index.save(&path)?;
+
+        // Load into new index
+        let loaded = ShardedVectorIndex::load(&path, config)?;
+        assert_eq!(loaded.len(), 10);
+        assert_eq!(loaded.num_shards(), 2);
+
+        // Verify search still works
+        let query = vec![5.0, 0.0, 0.0, 0.0];
+        let results = loaded.search(&query, 5)?;
+        assert!(!results.is_empty());
 
         Ok(())
     }
