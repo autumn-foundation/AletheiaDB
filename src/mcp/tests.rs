@@ -1176,7 +1176,7 @@ mod conversion_tests {
         let mut props = HashMap::new();
         props.insert("string_val".to_string(), serde_json::json!("hello"));
         props.insert("int_val".to_string(), serde_json::json!(42));
-        props.insert("float_val".to_string(), serde_json::json!(3.14));
+        props.insert("float_val".to_string(), serde_json::json!(1.5));
         props.insert("bool_val".to_string(), serde_json::json!(true));
         props.insert("null_val".to_string(), serde_json::Value::Null);
         props.insert("array_val".to_string(), serde_json::json!([1, 2, 3]));
@@ -1223,5 +1223,276 @@ mod conversion_tests {
         // Vector should be preserved
         let embedding = node.properties.get("embedding").unwrap();
         assert!(embedding.is_array());
+    }
+}
+
+// ============================================================================
+// Additional Coverage Tests
+// ============================================================================
+
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn test_vector_dimension_validation() {
+        let server = create_test_server();
+
+        // Enable vector index with 4 dimensions
+        let response = server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+        assert!(
+            !response.contains("error"),
+            "Failed to enable index: {}",
+            response
+        );
+
+        // Try to search with wrong dimensions (3 instead of 4)
+        let response = server.find_similar(FindSimilarRequest {
+            property_name: "embedding".to_string(),
+            embedding: vec![0.1, 0.2, 0.3], // Wrong: 3 dimensions instead of 4
+            k: Some(5),
+        });
+
+        // Should get dimension mismatch error
+        assert!(response.contains("error"), "Expected error response");
+        assert!(
+            response.contains("dimension mismatch") || response.contains("Embedding dimension"),
+            "Expected dimension mismatch error, got: {}",
+            response
+        );
+    }
+
+    #[test]
+    fn test_hybrid_query_dimension_validation() {
+        let server = create_test_server();
+
+        // Enable vector index with 4 dimensions
+        let response = server.enable_vector_index(EnableVectorIndexRequest {
+            property_name: "embedding".to_string(),
+            dimensions: 4,
+            distance_metric: Some("cosine".to_string()),
+        });
+        assert!(
+            !response.contains("error"),
+            "Failed to enable index: {}",
+            response
+        );
+
+        // Try hybrid query with wrong embedding dimensions
+        let response = server.hybrid_query(HybridQueryRequest {
+            start_node_id: None,
+            traverse_edge: None,
+            traverse_depth: None,
+            query_embedding: Some(vec![0.1, 0.2, 0.3]), // Wrong: 3 dimensions
+            vector_property: Some("embedding".to_string()),
+            top_k: Some(5),
+            filter_label: None,
+            limit: None,
+            valid_time: None,
+            transaction_time: None,
+        });
+
+        // Should get dimension mismatch error
+        assert!(response.contains("error"), "Expected error response");
+        assert!(
+            response.contains("dimension mismatch") || response.contains("Embedding dimension"),
+            "Expected dimension mismatch error, got: {}",
+            response
+        );
+    }
+
+    #[test]
+    fn test_iso8601_timestamp_parsing() {
+        let server = create_test_server();
+
+        // Create a node first
+        let response = server.create_node(CreateNodeRequest {
+            label: "Event".to_string(),
+            properties: None,
+        });
+        let node: NodeResponse = parse_response(&response).expect("Failed to create node");
+
+        // Test with ISO 8601 timestamp format (with Z timezone)
+        let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: "2024-01-15T10:30:00Z".to_string(),
+            transaction_time: None,
+        });
+
+        // Should not contain a parsing error
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        // Either we get the node back or a "not found" type error (since we're querying at a past time)
+        // but we should NOT get a timestamp parsing error
+        if let Some(error) = value.get("error") {
+            let err_str = error.as_str().unwrap_or("");
+            assert!(
+                !err_str.contains("Invalid timestamp format"),
+                "ISO 8601 timestamp should be parsed correctly, got error: {}",
+                err_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_iso8601_timestamp_without_timezone() {
+        let server = create_test_server();
+
+        // Create a node first
+        let response = server.create_node(CreateNodeRequest {
+            label: "Event".to_string(),
+            properties: None,
+        });
+        let node: NodeResponse = parse_response(&response).expect("Failed to create node");
+
+        // Test with ISO 8601 timestamp without timezone (should assume UTC)
+        let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: "2024-01-15T10:30:00".to_string(),
+            transaction_time: None,
+        });
+
+        // Should not contain a parsing error
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        if let Some(error) = value.get("error") {
+            let err_str = error.as_str().unwrap_or("");
+            assert!(
+                !err_str.contains("Invalid timestamp format"),
+                "ISO 8601 timestamp without TZ should be parsed correctly, got error: {}",
+                err_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_transaction_time_now_response() {
+        let server = create_test_server();
+
+        // Create a node first
+        let response = server.create_node(CreateNodeRequest {
+            label: "Event".to_string(),
+            properties: None,
+        });
+        let node: NodeResponse = parse_response(&response).expect("Failed to create node");
+
+        // Get node at time without specifying transaction_time
+        let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: node.id,
+            valid_time: "0".to_string(), // Use 0 for simplicity
+            transaction_time: None,
+        });
+
+        // Response should contain "now" for transaction_time when not specified
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        if value.get("error").is_none() {
+            let tx_time = value.get("transaction_time");
+            assert_eq!(
+                tx_time,
+                Some(&serde_json::json!("now")),
+                "Expected 'now' for unspecified transaction_time"
+            );
+        }
+    }
+
+    #[test]
+    fn test_count_nodes_with_nonexistent_label() {
+        let server = create_test_server();
+
+        // Count nodes with a label that doesn't exist
+        let response = server.count_nodes(CountNodesRequest {
+            label: Some("NonexistentLabel".to_string()),
+        });
+
+        // Should return count: 0 (not an error)
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "Should not error for nonexistent label"
+        );
+        assert_eq!(
+            value.get("count"),
+            Some(&serde_json::json!(0)),
+            "Count should be 0 for nonexistent label"
+        );
+    }
+
+    #[test]
+    fn test_list_nodes_offset_cap() {
+        let server = create_test_server();
+
+        // Create a few nodes
+        for i in 0..5 {
+            server.create_node(CreateNodeRequest {
+                label: "OffsetTest".to_string(),
+                properties: Some({
+                    let mut props = HashMap::new();
+                    props.insert("index".to_string(), serde_json::json!(i));
+                    props
+                }),
+            });
+        }
+
+        // Request with a very large offset (should be capped)
+        let response = server.list_nodes(ListNodesRequest {
+            label: Some("OffsetTest".to_string()),
+            limit: Some(10),
+            offset: Some(100_000), // Very large offset, should be capped to MAX_PAGINATION_OFFSET
+        });
+
+        // Should not error, just return empty results due to offset being beyond data
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "Large offset should not cause error: {}",
+            response
+        );
+    }
+
+    #[test]
+    fn test_traversal_depth_limit() {
+        let server = create_test_server();
+
+        // Create a chain of nodes
+        let mut prev_id: Option<u64> = None;
+        for i in 0..5 {
+            let response = server.create_node(CreateNodeRequest {
+                label: "ChainNode".to_string(),
+                properties: Some({
+                    let mut props = HashMap::new();
+                    props.insert("level".to_string(), serde_json::json!(i));
+                    props
+                }),
+            });
+            let node: NodeResponse = parse_response(&response).unwrap();
+
+            if let Some(source_id) = prev_id {
+                server.create_edge(CreateEdgeRequest {
+                    source_id,
+                    target_id: node.id,
+                    label: "NEXT".to_string(),
+                    properties: None,
+                });
+            }
+            prev_id = Some(node.id);
+        }
+
+        // Try to traverse with a very large depth (should be capped to MAX_TRAVERSAL_DEPTH)
+        let response = server.traverse(TraverseRequest {
+            start_node_id: 0,
+            edge_label: "NEXT".to_string(),
+            depth: Some(100), // Very large depth, should be capped
+            direction: Some("outgoing".to_string()),
+            limit: Some(50),
+        });
+
+        // Should not error
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            value.get("error").is_none(),
+            "Large depth should be capped, not error: {}",
+            response
+        );
     }
 }
