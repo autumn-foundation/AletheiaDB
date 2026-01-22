@@ -96,7 +96,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+use usearch::{ffi::Matches, Index, IndexOptions, MetricKind, ScalarKind};
 
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
@@ -704,46 +704,8 @@ impl VectorIndex for HnswIndex {
                         .searches_performed
                         .fetch_add(1, Ordering::Relaxed);
 
-                    // Convert results to (NodeId, similarity) format
-                    let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
-
-                    for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-                        if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                            let node_id = *node_id_ref.value();
-
-                            // Convert distance to similarity based on metric.
-                            // usearch returns distances where lower = more similar (except for some metrics).
-                            // We convert to similarity where higher = more similar for consistent API.
-                            //
-                            // - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
-                            //   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
-                            // - Euclidean: usearch returns squared L2 distance, range [0, inf)
-                            //   Converting: similarity = -distance, so closer vectors have higher similarity
-                            // - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
-                            //   Converting: similarity = -distance = dot_product, higher is more similar
-                            // - Haversine: usearch returns great-circle distance, range [0, pi]
-                            //   Converting: similarity = -distance, closer points have higher similarity
-                            // - Hamming: usearch returns bit differences count, range [0, dims]
-                            //   Converting: similarity = -distance, fewer differences = more similar
-                            // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
-                            //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
-                            let similarity = match self.config.metric {
-                                DistanceMetric::Cosine => 1.0 - distance,
-                                DistanceMetric::Euclidean => -distance,
-                                DistanceMetric::DotProduct => -distance,
-                                DistanceMetric::Haversine => -distance,
-                                DistanceMetric::Hamming => -distance,
-                                DistanceMetric::Tanimoto => 1.0 - distance,
-                            };
-
-                            results.push((node_id, similarity));
-                        }
-                    }
-
-                    // Results should already be sorted by usearch, but ensure descending order
-                    results
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
+                    // Convert and sort results using helper function
+                    let results = self.convert_and_sort_matches(matches);
                     return Ok(results);
                 }
                 Err(e) => {
@@ -820,26 +782,8 @@ impl VectorIndex for HnswIndex {
                         .searches_performed
                         .fetch_add(1, Ordering::Relaxed);
 
-                    // Convert results (same conversion logic as search() - see comments there)
-                    let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
-
-                    for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
-                        if let Some(node_id_ref) = self.reverse_mapping.get(key) {
-                            let node_id = *node_id_ref.value();
-                            let similarity = match self.config.metric {
-                                DistanceMetric::Cosine => 1.0 - distance,
-                                DistanceMetric::Euclidean => -distance,
-                                DistanceMetric::DotProduct => -distance,
-                                DistanceMetric::Haversine => -distance,
-                                DistanceMetric::Hamming => -distance,
-                                DistanceMetric::Tanimoto => 1.0 - distance,
-                            };
-                            results.push((node_id, similarity));
-                        }
-                    }
-
-                    results
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    // Convert and sort results using helper function
+                    let results = self.convert_and_sort_matches(matches);
                     return Ok(results);
                 }
                 Err(e) => {
@@ -967,6 +911,65 @@ impl VectorIndex for HnswIndex {
     fn compact(&self) -> Result<()> {
         // usearch native deletes don't require compaction
         Ok(())
+    }
+}
+
+// Private helper methods for HnswIndex
+impl HnswIndex {
+    /// Convert usearch matches to sorted vector of (NodeId, similarity) tuples.
+    ///
+    /// This helper function encapsulates the common logic of:
+    /// 1. Converting usearch keys back to NodeIds
+    /// 2. Converting distances to similarities based on the configured metric
+    /// 3. Sorting results by similarity (descending order)
+    ///
+    /// # Arguments
+    ///
+    /// * `matches` - The raw matches from usearch containing keys and distances
+    ///
+    /// # Returns
+    ///
+    /// A sorted vector of (NodeId, similarity) pairs where higher similarity means more similar.
+    fn convert_and_sort_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
+        let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
+
+        for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+            if let Some(node_id_ref) = self.reverse_mapping.get(key) {
+                let node_id = *node_id_ref.value();
+
+                // Convert distance to similarity based on metric.
+                // usearch returns distances where lower = more similar (except for some metrics).
+                // We convert to similarity where higher = more similar for consistent API.
+                //
+                // - Cosine: usearch returns cosine distance (1 - cosine_similarity), range [0, 2]
+                //   Converting: similarity = 1 - distance, gives cosine similarity in [-1, 1]
+                // - Euclidean: usearch returns squared L2 distance, range [0, inf)
+                //   Converting: similarity = -distance, so closer vectors have higher similarity
+                // - DotProduct: usearch returns -dot_product (negated for min-heap), range (-inf, inf)
+                //   Converting: similarity = -distance = dot_product, higher is more similar
+                // - Haversine: usearch returns great-circle distance, range [0, pi]
+                //   Converting: similarity = -distance, closer points have higher similarity
+                // - Hamming: usearch returns bit differences count, range [0, dims]
+                //   Converting: similarity = -distance, fewer differences = more similar
+                // - Tanimoto: usearch returns Tanimoto distance (1 - coefficient), range [0, 1]
+                //   Converting: similarity = 1 - distance = Tanimoto coefficient in [0, 1]
+                let similarity = match self.config.metric {
+                    DistanceMetric::Cosine => 1.0 - distance,
+                    DistanceMetric::Euclidean => -distance,
+                    DistanceMetric::DotProduct => -distance,
+                    DistanceMetric::Haversine => -distance,
+                    DistanceMetric::Hamming => -distance,
+                    DistanceMetric::Tanimoto => 1.0 - distance,
+                };
+
+                results.push((node_id, similarity));
+            }
+        }
+
+        // Results should already be sorted by usearch, but ensure descending order by similarity
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        results
     }
 }
 
