@@ -16,8 +16,11 @@ pub mod cold_storage;
 pub mod current;
 pub mod historical;
 pub mod index_persistence;
+pub mod migration;
 pub mod observer;
 pub mod persistence;
+#[cfg(feature = "tiered-storage")]
+pub mod rocksdb_cold_storage;
 pub mod sharding;
 pub mod tiered_storage;
 pub mod version;
@@ -30,13 +33,19 @@ pub use checkpoint::{
 };
 pub use cold_storage::{
     AtomicColdStorageStats, ColdStorage, ColdStorageConfig, ColdStorageStats, CompressionAlgorithm,
-    FileColdStorage, InMemoryColdStorage,
+    FileColdStorage, InMemoryColdStorage, decode_edge_version, decode_node_version,
+    encode_edge_version, encode_node_version,
 };
 pub use current::{CurrentStats, CurrentStorage, DEFAULT_MAX_VECTOR_PROPERTIES, VectorIndexInfo};
 pub use historical::{CacheMetrics, HistoricalStats, HistoricalStorage};
+pub use migration::{MigrationCandidate, MigrationPolicy, MigrationService, MigrationStats};
 pub use observer::{Observer, StorageEvent, StorageObserver};
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
-pub use tiered_storage::{TieredStorage, TieredStorageConfig, TieredStorageMetrics};
+#[cfg(feature = "tiered-storage")]
+pub use rocksdb_cold_storage::{RocksDBColdStorage, RocksDBConfig};
+pub use tiered_storage::{
+    LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
+};
 pub use version::{
     AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData, VersionMetadata,
 };

@@ -939,7 +939,10 @@ enum SerializablePropertyValue {
     },
 }
 
-fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
+/// Encode a NodeVersion to bytes for storage.
+///
+/// This function is public for use by other cold storage implementations (e.g., RocksDB).
+pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
     use crate::core::interning::GLOBAL_INTERNER;
 
     let serializable = SerializableNodeVersion {
@@ -961,7 +964,10 @@ fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
     bitcode::encode(&serializable)
 }
 
-fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
+/// Decode a NodeVersion from bytes.
+///
+/// This function is public for use by other cold storage implementations (e.g., RocksDB).
+pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
     use crate::core::hlc::HybridTimestamp;
     use crate::core::id::NodeId;
     use crate::core::interning::GLOBAL_INTERNER;
@@ -1004,7 +1010,10 @@ fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
     })
 }
 
-fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
+/// Encode an EdgeVersion to bytes for storage.
+///
+/// This function is public for use by other cold storage implementations (e.g., RocksDB).
+pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
     use crate::core::interning::GLOBAL_INTERNER;
 
     let serializable = SerializableEdgeVersion {
@@ -1028,7 +1037,10 @@ fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
     bitcode::encode(&serializable)
 }
 
-fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
+/// Decode an EdgeVersion from bytes.
+///
+/// This function is public for use by other cold storage implementations (e.g., RocksDB).
+pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
     use crate::core::hlc::HybridTimestamp;
     use crate::core::id::{EdgeId, NodeId};
     use crate::core::interning::GLOBAL_INTERNER;

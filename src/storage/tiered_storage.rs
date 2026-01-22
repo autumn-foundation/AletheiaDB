@@ -47,12 +47,17 @@ use crate::core::id::VersionId;
 use crate::storage::cold_storage::{ColdStorage, ColdStorageStats};
 use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::utils::error::Result;
+use parking_lot::Mutex;
 use quick_cache::sync::Cache;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "config-toml")]
 use serde::{Deserialize, Serialize};
+
+/// Number of latency samples to keep for percentile calculation.
+const LATENCY_SAMPLE_SIZE: usize = 1000;
 
 /// Configuration for tiered storage.
 #[derive(Debug, Clone)]
@@ -94,6 +99,34 @@ pub struct TieredStorageMetrics {
     pub misses: u64,
     /// Number of prefetch operations.
     pub prefetches: u64,
+    /// Cold read latency percentiles (p50, p95, p99).
+    pub cold_latency: LatencyPercentiles,
+}
+
+/// Latency percentiles for cold storage reads.
+#[derive(Debug, Clone, Default)]
+pub struct LatencyPercentiles {
+    /// 50th percentile (median) latency in microseconds.
+    pub p50_us: u64,
+    /// 95th percentile latency in microseconds.
+    pub p95_us: u64,
+    /// 99th percentile latency in microseconds.
+    pub p99_us: u64,
+    /// Minimum latency observed in microseconds.
+    pub min_us: u64,
+    /// Maximum latency observed in microseconds.
+    pub max_us: u64,
+    /// Average latency in microseconds.
+    pub avg_us: u64,
+    /// Number of samples used for calculation.
+    pub sample_count: usize,
+}
+
+impl LatencyPercentiles {
+    /// Check if latency meets the target (p50 < 1ms).
+    pub fn meets_target(&self) -> bool {
+        self.p50_us < 1000 // Less than 1ms
+    }
 }
 
 impl TieredStorageMetrics {
@@ -128,14 +161,94 @@ impl TieredStorageMetrics {
     }
 }
 
+/// Latency tracker for cold storage operations.
+///
+/// Uses a circular buffer to track recent latencies and compute percentiles.
+#[derive(Debug)]
+struct LatencyTracker {
+    /// Circular buffer of latency samples (in microseconds).
+    samples: Mutex<Vec<u64>>,
+    /// Maximum number of samples to keep.
+    max_samples: usize,
+}
+
+impl Default for LatencyTracker {
+    fn default() -> Self {
+        Self::new(LATENCY_SAMPLE_SIZE)
+    }
+}
+
+impl LatencyTracker {
+    /// Create a new latency tracker with the given sample size.
+    fn new(max_samples: usize) -> Self {
+        Self {
+            samples: Mutex::new(Vec::with_capacity(max_samples)),
+            max_samples,
+        }
+    }
+
+    /// Record a latency sample.
+    fn record(&self, duration: Duration) {
+        let us = duration.as_micros() as u64;
+        let mut samples = self.samples.lock();
+        if samples.len() >= self.max_samples {
+            samples.remove(0);
+        }
+        samples.push(us);
+    }
+
+    /// Calculate latency percentiles from the current samples.
+    fn percentiles(&self) -> LatencyPercentiles {
+        let samples = self.samples.lock();
+        if samples.is_empty() {
+            return LatencyPercentiles::default();
+        }
+
+        let mut sorted: Vec<u64> = samples.clone();
+        sorted.sort_unstable();
+
+        let len = sorted.len();
+        let p50_idx = (len as f64 * 0.50) as usize;
+        let p95_idx = (len as f64 * 0.95) as usize;
+        let p99_idx = (len as f64 * 0.99) as usize;
+
+        let sum: u64 = sorted.iter().sum();
+        let avg = sum / len as u64;
+
+        LatencyPercentiles {
+            p50_us: sorted.get(p50_idx).copied().unwrap_or(0),
+            p95_us: sorted.get(p95_idx.min(len - 1)).copied().unwrap_or(0),
+            p99_us: sorted.get(p99_idx.min(len - 1)).copied().unwrap_or(0),
+            min_us: sorted.first().copied().unwrap_or(0),
+            max_us: sorted.last().copied().unwrap_or(0),
+            avg_us: avg,
+            sample_count: len,
+        }
+    }
+}
+
 /// Atomic metrics tracker for tiered storage.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AtomicTieredMetrics {
     hot_hits: AtomicU64,
     warm_hits: AtomicU64,
     cold_hits: AtomicU64,
     misses: AtomicU64,
     prefetches: AtomicU64,
+    cold_latency: LatencyTracker,
+}
+
+impl Default for AtomicTieredMetrics {
+    fn default() -> Self {
+        Self {
+            hot_hits: AtomicU64::new(0),
+            warm_hits: AtomicU64::new(0),
+            cold_hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            prefetches: AtomicU64::new(0),
+            cold_latency: LatencyTracker::default(),
+        }
+    }
 }
 
 impl AtomicTieredMetrics {
@@ -150,6 +263,7 @@ impl AtomicTieredMetrics {
             cold_hits: self.cold_hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             prefetches: self.prefetches.load(Ordering::Relaxed),
+            cold_latency: self.cold_latency.percentiles(),
         }
     }
 }
@@ -225,10 +339,15 @@ impl TieredStorage {
             return Ok(Some(cached));
         }
 
-        // Fetch from cold storage
-        match self.cold.get_node_version(id)? {
+        // Fetch from cold storage with latency tracking
+        let start = Instant::now();
+        let result = self.cold.get_node_version(id)?;
+        let elapsed = start.elapsed();
+
+        match result {
             Some(version) => {
                 self.metrics.cold_hits.fetch_add(1, Ordering::Relaxed);
+                self.metrics.cold_latency.record(elapsed);
 
                 let version_arc = Arc::new(version);
 
@@ -260,10 +379,15 @@ impl TieredStorage {
             return Ok(Some(cached));
         }
 
-        // Fetch from cold storage
-        match self.cold.get_edge_version(id)? {
+        // Fetch from cold storage with latency tracking
+        let start = Instant::now();
+        let result = self.cold.get_edge_version(id)?;
+        let elapsed = start.elapsed();
+
+        match result {
             Some(version) => {
                 self.metrics.cold_hits.fetch_add(1, Ordering::Relaxed);
+                self.metrics.cold_latency.record(elapsed);
 
                 let version_arc = Arc::new(version);
 
@@ -588,6 +712,7 @@ mod tests {
             cold_hits: 10,
             misses: 0,
             prefetches: 5,
+            cold_latency: LatencyPercentiles::default(),
         };
 
         assert!((metrics.hot_ratio() - 0.7).abs() < 0.001);
@@ -616,5 +741,120 @@ mod tests {
         assert_eq!(config.warm_cache_size, 10_000);
         assert!(config.enable_prefetch);
         assert_eq!(config.prefetch_depth, 5);
+    }
+
+    // ========================================================================
+    // Latency tracking tests
+    // ========================================================================
+
+    #[test]
+    fn test_latency_tracker_empty() {
+        let tracker = LatencyTracker::new(100);
+        let percentiles = tracker.percentiles();
+
+        assert_eq!(percentiles.sample_count, 0);
+        assert_eq!(percentiles.p50_us, 0);
+        assert_eq!(percentiles.p95_us, 0);
+        assert_eq!(percentiles.p99_us, 0);
+    }
+
+    #[test]
+    fn test_latency_tracker_single_sample() {
+        let tracker = LatencyTracker::new(100);
+        tracker.record(Duration::from_micros(500));
+
+        let percentiles = tracker.percentiles();
+        assert_eq!(percentiles.sample_count, 1);
+        assert_eq!(percentiles.p50_us, 500);
+        assert_eq!(percentiles.min_us, 500);
+        assert_eq!(percentiles.max_us, 500);
+    }
+
+    #[test]
+    fn test_latency_tracker_percentiles() {
+        let tracker = LatencyTracker::new(100);
+
+        // Add 100 samples with values 1-100 microseconds
+        for i in 1..=100 {
+            tracker.record(Duration::from_micros(i));
+        }
+
+        let percentiles = tracker.percentiles();
+        assert_eq!(percentiles.sample_count, 100);
+        assert_eq!(percentiles.min_us, 1);
+        assert_eq!(percentiles.max_us, 100);
+        // p50 at index 50 (0-indexed) = value 51
+        assert_eq!(percentiles.p50_us, 51);
+        // p95 at index 95 = value 96
+        assert_eq!(percentiles.p95_us, 96);
+        // p99 at index 99 = value 100
+        assert_eq!(percentiles.p99_us, 100);
+        // avg = sum(1..=100)/100 = 5050/100 = 50
+        assert_eq!(percentiles.avg_us, 50);
+    }
+
+    #[test]
+    fn test_latency_tracker_circular_buffer() {
+        let tracker = LatencyTracker::new(10);
+
+        // Add 20 samples, only last 10 should be kept
+        for i in 1..=20 {
+            tracker.record(Duration::from_micros(i));
+        }
+
+        let percentiles = tracker.percentiles();
+        assert_eq!(percentiles.sample_count, 10);
+        assert_eq!(percentiles.min_us, 11); // Oldest kept is 11
+        assert_eq!(percentiles.max_us, 20);
+    }
+
+    #[test]
+    fn test_latency_percentiles_meets_target() {
+        let good = LatencyPercentiles {
+            p50_us: 500,
+            p95_us: 900,
+            p99_us: 950,
+            min_us: 100,
+            max_us: 1000,
+            avg_us: 500,
+            sample_count: 100,
+        };
+        assert!(good.meets_target());
+
+        let bad = LatencyPercentiles {
+            p50_us: 1500, // Exceeds 1ms target
+            p95_us: 2000,
+            p99_us: 3000,
+            min_us: 500,
+            max_us: 5000,
+            avg_us: 1500,
+            sample_count: 100,
+        };
+        assert!(!bad.meets_target());
+    }
+
+    #[test]
+    fn test_cold_latency_tracking() {
+        let cold = InMemoryColdStorage::default_config();
+        let tiered = TieredStorage::with_default_config(Box::new(cold));
+
+        // Store some versions
+        for i in 1..=10 {
+            let version = create_test_node_version(i);
+            tiered.store_node_version(&version).unwrap();
+        }
+
+        // Access them from cold storage (first access bypasses warm cache)
+        for i in 1..=10 {
+            let _ = tiered
+                .get_node_version_cold(VersionId::new(i).unwrap())
+                .unwrap();
+        }
+
+        let metrics = tiered.metrics();
+        assert_eq!(metrics.cold_hits, 10);
+        assert!(metrics.cold_latency.sample_count > 0);
+        // InMemory storage should be very fast
+        assert!(metrics.cold_latency.p99_us < 100_000); // Less than 100ms
     }
 }

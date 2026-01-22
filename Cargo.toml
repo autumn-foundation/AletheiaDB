@@ -60,6 +60,9 @@ ort = { version = "2.0.0-rc.0", optional = true }
 tokenizers = { version = "0.15", optional = true }
 num_cpus = { version = "1.16", optional = true }
 
+# RocksDB for tiered cold storage (optional)
+rocksdb = { version = "0.22", optional = true }
+
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1.4"
@@ -110,6 +113,9 @@ mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base6
 
 # Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+
+# Tiered storage with RocksDB cold storage backend
+tiered-storage = ["dep:rocksdb"]
 
 [profile.dev]
 # Fast compilation for development
