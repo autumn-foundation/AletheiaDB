@@ -626,6 +626,55 @@ impl PropertyValue {
             .into()),
         }
     }
+
+    /// Estimate the heap memory usage of this property value in bytes.
+    ///
+    /// This provides a rough estimate of heap allocations, useful for memory
+    /// accounting in tiered storage migration decisions. The estimate includes:
+    ///
+    /// - String/Bytes: actual data size (shared via Arc)
+    /// - Array: element sizes plus Vec overhead
+    /// - Vector: f32 count * 4 bytes
+    /// - SparseVector: indices + values + dimension overhead
+    ///
+    /// Note: This is an estimate. Due to Arc sharing, actual memory usage may
+    /// be lower if values are shared across versions.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::PropertyValue;
+    ///
+    /// let small = PropertyValue::Int(42);
+    /// assert_eq!(small.estimated_heap_size(), 0); // No heap allocation
+    ///
+    /// let string = PropertyValue::string("hello world");
+    /// assert_eq!(string.estimated_heap_size(), 11); // String length
+    /// ```
+    pub fn estimated_heap_size(&self) -> usize {
+        match self {
+            PropertyValue::Null
+            | PropertyValue::Bool(_)
+            | PropertyValue::Int(_)
+            | PropertyValue::Float(_) => 0,
+            PropertyValue::String(s) => s.len(),
+            PropertyValue::Bytes(b) => b.len(),
+            PropertyValue::Array(arr) => {
+                // Vec capacity overhead + recursive element sizes
+                let mut size = arr.capacity() * std::mem::size_of::<PropertyValue>();
+                for item in arr.iter() {
+                    size += item.estimated_heap_size();
+                }
+                size
+            }
+            PropertyValue::Vector(v) => v.len() * std::mem::size_of::<f32>(),
+            PropertyValue::SparseVector(sv) => {
+                // Indices + values + SparseVec struct overhead
+                sv.nnz() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
+                    + std::mem::size_of::<usize>() // dimension field
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -1229,6 +1278,30 @@ impl PropertyMap {
             },
             offset,
         ))
+    }
+
+    /// Estimate the heap memory usage of this property map in bytes.
+    ///
+    /// This provides a rough estimate of heap allocations, useful for memory
+    /// accounting in tiered storage migration decisions. The estimate includes:
+    ///
+    /// - HashMap internal storage overhead
+    /// - PropertyKey storage (interned, so minimal)
+    /// - PropertyValue heap allocations (strings, vectors, etc.)
+    ///
+    /// Note: Due to Arc sharing, actual memory usage may be lower if this
+    /// PropertyMap shares its underlying data with other instances.
+    pub fn estimated_heap_size(&self) -> usize {
+        // HashMap overhead: capacity * (key_size + value_size + ~8 bytes overhead per entry)
+        let mut size = self.inner.capacity()
+            * (std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8);
+
+        // Add heap sizes of individual values
+        for value in self.inner.values() {
+            size += value.estimated_heap_size();
+        }
+
+        size
     }
 }
 
@@ -2581,6 +2654,141 @@ mod tests {
         assert!(
             Arc::ptr_eq(&internal_arc, &returned_arc),
             "as_arc_vector should return the same Arc, not copy the data"
+        );
+    }
+
+    // ========================================================================
+    // Heap Size Estimation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_estimated_heap_size_primitives() {
+        // Primitives should have zero heap size
+        assert_eq!(PropertyValue::Null.estimated_heap_size(), 0);
+        assert_eq!(PropertyValue::Bool(true).estimated_heap_size(), 0);
+        assert_eq!(PropertyValue::Bool(false).estimated_heap_size(), 0);
+        assert_eq!(PropertyValue::Int(42).estimated_heap_size(), 0);
+        assert_eq!(PropertyValue::Int(i64::MAX).estimated_heap_size(), 0);
+        assert_eq!(PropertyValue::Float(1.5).estimated_heap_size(), 0);
+        assert_eq!(PropertyValue::Float(f64::MAX).estimated_heap_size(), 0);
+    }
+
+    #[test]
+    fn test_estimated_heap_size_string() {
+        // String heap size should equal string length
+        let empty_string = PropertyValue::string("");
+        assert_eq!(empty_string.estimated_heap_size(), 0);
+
+        let hello = PropertyValue::string("hello");
+        assert_eq!(hello.estimated_heap_size(), 5);
+
+        let long_string = PropertyValue::string("hello world, this is a longer string");
+        // 36 characters
+        assert_eq!(long_string.estimated_heap_size(), 36);
+    }
+
+    #[test]
+    fn test_estimated_heap_size_bytes() {
+        // Bytes heap size should equal byte array length
+        let empty_bytes = PropertyValue::bytes([]);
+        assert_eq!(empty_bytes.estimated_heap_size(), 0);
+
+        let some_bytes = PropertyValue::bytes([1, 2, 3, 4, 5]);
+        assert_eq!(some_bytes.estimated_heap_size(), 5);
+
+        let large_bytes: Vec<u8> = vec![0; 1000];
+        let large = PropertyValue::bytes(large_bytes);
+        assert_eq!(large.estimated_heap_size(), 1000);
+    }
+
+    #[test]
+    fn test_estimated_heap_size_vector() {
+        // Vector heap size should be len * sizeof(f32)
+        let empty_vec = PropertyValue::vector::<[f32; 0]>([]);
+        assert_eq!(empty_vec.estimated_heap_size(), 0);
+
+        let small_vec = PropertyValue::vector([1.0f32, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            small_vec.estimated_heap_size(),
+            4 * std::mem::size_of::<f32>()
+        );
+
+        let embedding = PropertyValue::vector((0..384).map(|i| i as f32).collect::<Vec<_>>());
+        assert_eq!(
+            embedding.estimated_heap_size(),
+            384 * std::mem::size_of::<f32>()
+        );
+    }
+
+    #[test]
+    fn test_estimated_heap_size_sparse_vector() {
+        use crate::core::vector::SparseVec;
+
+        // Sparse vector heap size: nnz * (sizeof(u32) + sizeof(f32)) + sizeof(usize)
+        let sparse = SparseVec::new(vec![0, 10, 100], vec![1.0, 2.0, 3.0], 1000).unwrap();
+        let prop = PropertyValue::sparse_vector(sparse);
+
+        let expected = 3 * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
+            + std::mem::size_of::<usize>();
+        assert_eq!(prop.estimated_heap_size(), expected);
+    }
+
+    #[test]
+    fn test_estimated_heap_size_array() {
+        // Empty array - should be 0 since no elements
+        let empty_array = PropertyValue::array(vec![]);
+        assert_eq!(empty_array.estimated_heap_size(), 0);
+
+        // Array with primitives - includes Vec overhead but values have no heap size
+        let primitive_array = PropertyValue::array(vec![
+            PropertyValue::Int(1),
+            PropertyValue::Int(2),
+            PropertyValue::Int(3),
+        ]);
+        assert!(primitive_array.estimated_heap_size() > 0);
+
+        // Array with strings - should include string lengths
+        let string_array = PropertyValue::array(vec![
+            PropertyValue::string("hello"),
+            PropertyValue::string("world"),
+        ]);
+        // Should include at least the string lengths (5 + 5)
+        assert!(string_array.estimated_heap_size() >= 10);
+    }
+
+    #[test]
+    fn test_property_map_estimated_heap_size_empty() {
+        let map = PropertyMap::new();
+        // Empty map should have zero heap overhead
+        let size = map.estimated_heap_size();
+        assert_eq!(size, 0, "Empty map heap size should be zero");
+    }
+
+    #[test]
+    fn test_property_map_estimated_heap_size_with_values() {
+        let map = PropertyMapBuilder::new()
+            .insert("name", "Alice") // string with 5 chars
+            .insert("age", 30i64) // primitive, no heap
+            .insert("active", true) // primitive, no heap
+            .build();
+
+        let size = map.estimated_heap_size();
+        // Should include at least the string length plus HashMap overhead
+        assert!(size >= 5, "Map with string should include string heap size");
+    }
+
+    #[test]
+    fn test_property_map_estimated_heap_size_with_vector() {
+        let embedding = vec![0.1f32; 384];
+        let map = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&embedding))
+            .build();
+
+        let size = map.estimated_heap_size();
+        // Should include vector heap size: 384 * 4 = 1536 bytes
+        assert!(
+            size >= 384 * std::mem::size_of::<f32>(),
+            "Map with vector should include vector heap size"
         );
     }
 }

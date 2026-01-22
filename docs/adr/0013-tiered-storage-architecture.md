@@ -1,7 +1,7 @@
 # ADR-0013: Tiered Storage Architecture
 
-**Status:** Proposed
-**Date:** 2026-01-01
+**Status:** Accepted
+**Date:** 2026-01-22
 **Deciders:** GallifreyDB Core Team
 **Categories:** storage, scalability, performance
 
@@ -26,32 +26,78 @@ The bi-temporal nature of GallifreyDB creates a natural hot/cold split:
 
 ## Decision
 
-We will implement a tiered storage architecture that keeps current state in RAM while storing historical versions on disk:
+We will implement a tiered storage architecture that keeps current state in RAM while storing historical versions on disk.
 
 ### Architecture Overview
 
+```mermaid
+flowchart TB
+    subgraph QueryEngine["Query Engine"]
+        CQ["Current Queries"]
+        TQ["Time-Travel Queries"]
+    end
+
+    subgraph Tiers["Storage Tiers"]
+        subgraph Hot["HOT TIER<br/>(Always RAM)"]
+            HN["Current nodes"]
+            HE["Current edges"]
+            HI["CSR indexes"]
+            HL["22ns lookup"]
+        end
+
+        subgraph Warm["WARM TIER<br/>(RAM Cache)"]
+            WH["Recent history"]
+            WC["LRU cache"]
+            WL["<1μs lookup"]
+        end
+
+        subgraph Cold["COLD TIER<br/>(Disk)"]
+            CV["Old versions"]
+            CC["Compressed"]
+            CR["RocksDB"]
+            CL["<1ms lookup"]
+        end
+    end
+
+    CQ --> Hot
+    TQ --> Warm
+    TQ --> Cold
+
+    Hot -.->|"Migration Service<br/>(Background)"| Cold
+    Cold -->|"Cache Miss"| Warm
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Query Engine                            │
-│   Current queries → Hot Tier    Time-travel → Cold Tier     │
-└─────────────────────────────────────────────────────────────┘
-                              │
-          ┌───────────────────┼───────────────────┐
-          │                   │                   │
-          ▼                   ▼                   ▼
-┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│    HOT TIER     │  │   WARM TIER     │  │   COLD TIER     │
-│   (Always RAM)  │  │  (RAM Cache)    │  │    (Disk)       │
-│                 │  │                 │  │                 │
-│ • Current nodes │  │ • Recent history│  │ • Old versions  │
-│ • Current edges │  │ • LRU cache     │  │ • Compressed    │
-│ • CSR indexes   │  │ • Configurable  │  │ • RocksDB/LMDB  │
-│ • 22ns lookup   │  │ • <1µs lookup   │  │ • <1ms lookup   │
-└─────────────────┘  └─────────────────┘  └─────────────────┘
-         │                                        ▲
-         │         Migration Service              │
-         └────────────────────────────────────────┘
-                 (Background, continuous)
+
+### Data Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant HistoricalStorage
+    participant HotTier as Hot Tier (RAM)
+    participant WarmCache as Warm Cache (LRU)
+    participant ColdTier as Cold Tier (RocksDB)
+
+    Client->>HistoricalStorage: get_version(id)
+    HistoricalStorage->>HotTier: lookup(id)
+
+    alt Found in Hot
+        HotTier-->>HistoricalStorage: version
+        HistoricalStorage-->>Client: Ok(version)
+    else Not in Hot
+        HotTier-->>HistoricalStorage: None
+        HistoricalStorage->>WarmCache: get(id)
+
+        alt Found in Warm
+            WarmCache-->>HistoricalStorage: cached_version
+            HistoricalStorage-->>Client: Ok(version)
+        else Not in Warm
+            WarmCache-->>HistoricalStorage: None
+            HistoricalStorage->>ColdTier: get(id)
+            ColdTier-->>HistoricalStorage: version
+            HistoricalStorage->>WarmCache: insert(id, version)
+            HistoricalStorage-->>Client: Ok(version)
+        end
+    end
 ```
 
 ### Storage Tiers
@@ -63,6 +109,29 @@ We will implement a tiered storage architecture that keeps current state in RAM 
 | **Cold** | Disk (RocksDB) | 100µs-1ms | Compressed historical versions |
 
 ### Migration Strategy
+
+```mermaid
+flowchart LR
+    subgraph Policy["Migration Policy"]
+        Age["age_threshold<br/>default: 7 days"]
+        Mem["memory_threshold<br/>default: 80%"]
+        Min["min_hot_versions<br/>default: 1"]
+    end
+
+    subgraph Flow["Migration Flow"]
+        Monitor["1. Monitor hot tier"]
+        Identify["2. Identify candidates"]
+        Serialize["3. Serialize + compress"]
+        Write["4. Write to cold tier"]
+        Remove["5. Remove from hot"]
+    end
+
+    Policy --> Monitor
+    Monitor --> Identify
+    Identify --> Serialize
+    Serialize --> Write
+    Write --> Remove
+```
 
 Versions migrate from hot to cold based on configurable policies:
 
@@ -76,46 +145,62 @@ pub struct MigrationPolicy {
 
     /// Minimum versions to keep in hot tier
     pub min_hot_versions: usize,  // default: 1 (current only)
+
+    /// Maximum batch size for migration
+    pub batch_size: usize,  // default: 1000
+
+    /// Interval between migration runs
+    pub run_interval: Duration,  // default: 60 seconds
 }
 ```
-
-**Migration Flow:**
-1. Background thread monitors hot tier size and version ages
-2. When thresholds exceeded, identify candidate versions
-3. Serialize and compress versions to cold tier
-4. Remove from hot tier after cold tier confirms write
-5. Update version chain pointers
 
 ### Query Routing
 
 ```rust
 impl HistoricalStorage {
-    pub fn get_version(&self, id: VersionId) -> Result<NodeVersion> {
+    pub fn get_node_version_tiered(&self, id: VersionId) -> Result<Option<Arc<NodeVersion>>> {
         // 1. Check hot tier (fast path)
-        if let Some(v) = self.hot.get(&id) {
-            return Ok(v.clone());
+        if let Some(v) = self.node_versions.get(&id) {
+            self.tiered_storage.record_hot_hit();
+            return Ok(Some(Arc::new(v.clone())));
         }
 
-        // 2. Check warm cache
-        if let Some(v) = self.cache.get(&id) {
-            return Ok(v.clone());
+        // 2. Check warm cache, then cold tier
+        if let Some(ref tiered) = self.tiered_storage {
+            return tiered.get_node_version_cold(id);
         }
 
-        // 3. Fetch from cold tier, handling not found case
-        let v = self.cold.get(id)?
-            .ok_or_else(|| StorageError::VersionNotFound(id))?;
-
-        // 4. Populate cache for future access
-        self.cache.insert(id, v.clone());
-
-        Ok(v)
+        Ok(None)
     }
 }
 ```
 
 ### Cold Tier Implementation
 
-We will use **RocksDB** as the cold storage engine:
+We use **RocksDB** as the cold storage engine:
+
+```mermaid
+flowchart TB
+    subgraph RocksDB["RocksDB Cold Storage"]
+        subgraph CFs["Column Families"]
+            NodeCF["node_versions"]
+            EdgeCF["edge_versions"]
+        end
+
+        subgraph Features["Features"]
+            Compression["Zstd/LZ4 Compression"]
+            Bloom["Bloom Filters"]
+            Batch["Batch Writes"]
+        end
+    end
+
+    subgraph Encoding["Version Encoding"]
+        Bitcode["bitcode serialization"]
+        CRC["CRC32 checksums"]
+    end
+
+    Encoding --> RocksDB
+```
 
 **Rationale:**
 - LSM-tree optimized for write-heavy workloads (version ingestion)
@@ -131,28 +216,57 @@ We will use **RocksDB** as the cold storage engine:
 RocksDB chosen because historical versions are write-once (immutable) and compression is critical for storage efficiency.
 
 ```rust
-pub struct ColdStorage {
-    db: rocksdb::DB,
-    compression: CompressionType,  // Zstd for ratio, LZ4 for speed
+pub struct RocksDBColdStorage {
+    db: DBWithThreadMode<MultiThreaded>,
+    path: PathBuf,
+    stats: AtomicColdStorageStats,
 }
 
-impl ColdStorage {
-    pub fn store_version(&self, id: VersionId, version: &NodeVersion) -> Result<()> {
-        let key = id.to_bytes();
-        let value = bincode::serialize(version)?;
-        self.db.put(&key, &value)?;
-        Ok(())
-    }
-
-    pub fn get_version(&self, id: VersionId) -> Result<Option<NodeVersion>> {
-        let key = id.to_bytes();
-        match self.db.get(&key)? {
-            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
-            None => Ok(None),
-        }
-    }
+impl ColdStorage for RocksDBColdStorage {
+    fn store_node_version(&self, version: &NodeVersion) -> Result<()>;
+    fn get_node_version(&self, id: VersionId) -> Result<Option<NodeVersion>>;
+    fn store_node_versions_batch(&self, versions: &[NodeVersion]) -> Result<()>;
+    // ... edge version methods
 }
 ```
+
+### Metrics and Monitoring
+
+```mermaid
+flowchart LR
+    subgraph Metrics["TieredStorageMetrics"]
+        HotHits["hot_hits"]
+        WarmHits["warm_hits"]
+        ColdHits["cold_hits"]
+        Misses["misses"]
+        Prefetches["prefetches"]
+    end
+
+    subgraph Latency["LatencyPercentiles"]
+        P50["p50_us"]
+        P95["p95_us"]
+        P99["p99_us"]
+        Min["min_us"]
+        Max["max_us"]
+        Avg["avg_us"]
+    end
+
+    subgraph Ratios["Computed Ratios"]
+        HotRatio["hot_ratio()"]
+        WarmRatio["warm_ratio()"]
+        CacheHit["cache_hit_ratio()"]
+    end
+
+    Metrics --> Ratios
+    Latency --> Ratios
+```
+
+Key metrics exposed:
+- Hot tier size (bytes, version count)
+- Cold tier size (bytes, version count)
+- Cache hit ratio (hot_hits + warm_hits) / total
+- Migration throughput (versions/sec)
+- Cold query latency (p50, p95, p99)
 
 ## Consequences
 
@@ -223,23 +337,28 @@ Target: 3-5x compression ratio with Zstd level 3.
 The warm cache should be sized based on working set:
 
 ```rust
-pub struct CacheConfig {
-    /// Maximum cache size in bytes
-    pub max_size: usize,  // default: 1GB
+pub struct TieredStorageConfig {
+    /// Size of warm cache (number of entries)
+    pub warm_cache_size: usize,  // default: 10,000
 
-    /// Eviction policy
-    pub policy: EvictionPolicy,  // LRU, LFU, or ARC
+    /// Enable prefetching of version chains
+    pub enable_prefetch: bool,  // default: true
+
+    /// Maximum prefetch depth
+    pub prefetch_depth: usize,  // default: 5
 }
 ```
 
-### Monitoring
+### Feature Flag
 
-Key metrics to expose:
-- Hot tier size (bytes, version count)
-- Cold tier size (bytes, version count)
-- Cache hit ratio
-- Migration throughput (versions/sec)
-- Cold query latency (p50, p95, p99)
+The RocksDB cold storage backend is behind an optional feature flag:
+
+```toml
+[features]
+tiered-storage = ["dep:rocksdb"]
+```
+
+This allows users to opt-in to the additional dependency.
 
 ## References
 
@@ -248,3 +367,4 @@ Key metrics to expose:
 - RocksDB: [Documentation](https://rocksdb.org/docs/)
 - ADR-0001: Hybrid Storage Architecture (foundation for this design)
 - ADR-0004: Anchor+Delta Compression (compression strategy)
+- User Guide: [Tiered Storage Guide](../guides/tiered-storage-guide.md)

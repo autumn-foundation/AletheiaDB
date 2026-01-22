@@ -188,6 +188,47 @@ let results = db.query()
 
 **See [docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md) for complete guide.**
 
+### Tiered Storage
+
+Three-tier storage architecture for unlimited historical depth while preserving current-state query performance.
+
+**Architecture:**
+- **Hot Tier (RAM)**: Current state, 22-70ns lookup
+- **Warm Tier (LRU Cache)**: Recently accessed history, <1µs lookup
+- **Cold Tier (Disk/RocksDB)**: Compressed historical versions, <1ms lookup
+
+**Quick Start:**
+```rust
+use gallifreydb::storage::{
+    TieredStorage, TieredStorageConfig,
+    FileColdStorage, ColdStorageConfig,
+};
+
+// Create cold storage backend
+let cold = FileColdStorage::new("data/cold", ColdStorageConfig::default())?;
+
+// Create tiered storage
+let tiered = TieredStorage::new(TieredStorageConfig::default(), Box::new(cold));
+
+// Configure historical storage to use tiered access
+historical.set_tiered_storage(Arc::new(tiered));
+```
+
+**RocksDB Backend (Production):**
+```toml
+[dependencies]
+gallifreydb = { version = "0.1", features = ["tiered-storage"] }
+```
+
+**Key Features:**
+- Unlimited historical depth on disk
+- Current-state performance unchanged (22-70ns)
+- Configurable migration policies (age, memory thresholds)
+- Zstd/LZ4 compression (3-5x compression ratio)
+- Latency metrics with percentiles (p50, p95, p99)
+
+**See [docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md) for complete guide.**
+
 ### Embedding Generation (Optional)
 
 Optional embedding providers via feature flags (OpenAI, HuggingFace, Ollama, ONNX).
@@ -400,6 +441,7 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id)
 - **[docs/guides/vector-search-performance.md](docs/guides/vector-search-performance.md)** - Performance tuning
 - **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** - Hybrid query API reference
 - **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** - Index persistence details
+- **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** - Tiered storage configuration and usage
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.
