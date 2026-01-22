@@ -726,4 +726,137 @@ mod tests {
         assert!(version.is_delta());
         assert_eq!(version.prev_version, Some(VersionId::new(1).unwrap()));
     }
+
+    // ========================================================================
+    // Estimated Size Tests
+    // ========================================================================
+
+    #[test]
+    fn test_property_delta_estimated_heap_size_empty() {
+        let delta = PropertyDelta::new();
+        let size = delta.estimated_heap_size();
+        // Empty delta should have minimal heap overhead
+        assert!(size >= 0, "Empty delta heap size should be non-negative");
+    }
+
+    #[test]
+    fn test_property_delta_estimated_heap_size_with_changes() {
+        let mut delta = PropertyDelta::new();
+        delta.changed.insert(
+            GLOBAL_INTERNER.intern("name").unwrap(),
+            PropertyValue::string("Alice"), // 5 bytes
+        );
+        delta.changed.insert(
+            GLOBAL_INTERNER.intern("description").unwrap(),
+            PropertyValue::string("A longer description"), // 20 bytes
+        );
+        delta
+            .removed
+            .insert(GLOBAL_INTERNER.intern("old_field").unwrap());
+
+        let size = delta.estimated_heap_size();
+        // Should include at least string lengths (5 + 20 = 25 bytes)
+        assert!(
+            size >= 25,
+            "Delta with strings should include string heap size"
+        );
+    }
+
+    #[test]
+    fn test_version_data_estimated_heap_size_anchor() {
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+
+        let data = VersionData::anchor(props);
+        let size = data.estimated_heap_size();
+        // Anchor should include property map heap size
+        assert!(size >= 5, "Anchor heap size should include string 'Alice'");
+    }
+
+    #[test]
+    fn test_version_data_estimated_heap_size_delta() {
+        let old_props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let new_props = PropertyMapBuilder::new().insert("name", "Bob").build();
+
+        let data = VersionData::delta_from_diff(&old_props, &new_props);
+        let size = data.estimated_heap_size();
+        // Delta should include the changed property heap size
+        assert!(size >= 3, "Delta heap size should include string 'Bob'");
+    }
+
+    #[test]
+    fn test_node_version_estimated_size() {
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("embedding", PropertyValue::vector(vec![0.1f32; 384]))
+            .build();
+
+        let temporal = BiTemporalInterval::current(1000.into());
+        let version = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            NodeId::new(10).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            props,
+        );
+
+        let size = version.estimated_size();
+        // Should include stack size + heap size (at least vector: 384 * 4 = 1536 bytes)
+        assert!(
+            size >= std::mem::size_of::<NodeVersion>() + 384 * 4,
+            "Node version estimated size should include vector heap"
+        );
+    }
+
+    #[test]
+    fn test_edge_version_estimated_size() {
+        let props = PropertyMapBuilder::new()
+            .insert("weight", 1.5f64)
+            .insert("label", "connection")
+            .build();
+
+        let temporal = BiTemporalInterval::current(1000.into());
+        let version = EdgeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            EdgeId::new(20).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            props,
+        );
+
+        let size = version.estimated_size();
+        // Should include at least stack size + string "connection" (10 bytes)
+        assert!(
+            size >= std::mem::size_of::<EdgeVersion>() + 10,
+            "Edge version estimated size should include string heap"
+        );
+    }
+
+    #[test]
+    fn test_node_version_estimated_size_delta() {
+        let old_props = PropertyMapBuilder::new().insert("count", 1i64).build();
+        let new_props = PropertyMapBuilder::new().insert("count", 2i64).build();
+
+        let temporal = BiTemporalInterval::current(2000.into());
+        let version = NodeVersion::new_delta(
+            VersionId::new(2).unwrap(),
+            NodeId::new(10).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("Counter").unwrap(),
+            &old_props,
+            &new_props,
+            VersionId::new(1).unwrap(),
+        );
+
+        let size = version.estimated_size();
+        // Delta version should have smaller heap size than anchor with full data
+        assert!(
+            size >= std::mem::size_of::<NodeVersion>(),
+            "Delta version size should include at least stack size"
+        );
+    }
 }

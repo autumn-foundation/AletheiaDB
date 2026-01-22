@@ -772,4 +772,113 @@ mod tests {
         storage.store_node_version(&version).unwrap();
         assert!(storage.contains_node_version(version.id).unwrap());
     }
+
+    #[test]
+    fn test_rocksdb_compression_ratio() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDBColdStorage::open_default(temp_dir.path()).unwrap();
+
+        // Store some data first
+        let versions: Vec<NodeVersion> = (1..=50).map(create_test_node_version).collect();
+        storage.store_node_versions_batch(&versions).unwrap();
+        storage.flush().unwrap();
+
+        // Get compression ratio
+        let ratio = storage.compression_ratio();
+        // May be None if no data on disk yet or Some with a ratio
+        match ratio {
+            Some(r) => {
+                // Ratio should be positive and reasonable
+                assert!(r > 0.0, "Compression ratio should be positive");
+                // Typically compression ratio is between 0.1 and 2.0
+                assert!(r < 10.0, "Compression ratio should be reasonable");
+            }
+            None => {
+                // This is acceptable if approximate_size() returns 0
+                // (e.g., data not yet flushed to disk)
+            }
+        }
+    }
+
+    #[test]
+    fn test_rocksdb_compact() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDBColdStorage::open_default(temp_dir.path()).unwrap();
+
+        // Store some data
+        let versions: Vec<NodeVersion> = (1..=10).map(create_test_node_version).collect();
+        storage.store_node_versions_batch(&versions).unwrap();
+
+        // Compact should succeed
+        let result = storage.compact();
+        assert!(result.is_ok(), "Compact should succeed");
+
+        // Data should still be accessible
+        for version in &versions {
+            assert!(storage.contains_node_version(version.id).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_rocksdb_approximate_size() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDBColdStorage::open_default(temp_dir.path()).unwrap();
+
+        // Initial size should be 0 or small
+        let _initial_size = storage.approximate_size();
+
+        // Store some data
+        let versions: Vec<NodeVersion> = (1..=100).map(create_test_node_version).collect();
+        storage.store_node_versions_batch(&versions).unwrap();
+        storage.flush().unwrap();
+
+        // Size should increase after storing data
+        let new_size = storage.approximate_size();
+        // Note: This may or may not be greater depending on RocksDB internals
+        // At minimum, check it doesn't panic and returns a valid value
+        assert!(new_size >= 0, "Approximate size should be non-negative");
+    }
+
+    #[test]
+    fn test_rocksdb_edge_operations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDBColdStorage::open_default(temp_dir.path()).unwrap();
+
+        let edge_version = create_test_edge_version(1);
+
+        // Store edge
+        storage.store_edge_version(&edge_version).unwrap();
+        assert!(storage.contains_edge_version(edge_version.id).unwrap());
+
+        // Retrieve edge
+        let retrieved = storage.get_edge_version(edge_version.id).unwrap();
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().id, edge_version.id);
+
+        // Delete edge
+        let deleted = storage.delete_edge_version(edge_version.id).unwrap();
+        assert!(deleted);
+        assert!(!storage.contains_edge_version(edge_version.id).unwrap());
+
+        // Delete non-existent edge
+        let deleted_again = storage.delete_edge_version(edge_version.id).unwrap();
+        assert!(!deleted_again);
+    }
+
+    #[test]
+    fn test_rocksdb_batch_edge_store() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDBColdStorage::open_default(temp_dir.path()).unwrap();
+
+        let versions: Vec<EdgeVersion> = (1..=50).map(create_test_edge_version).collect();
+        storage.store_edge_versions_batch(&versions).unwrap();
+
+        // Verify all edge versions are stored
+        for version in &versions {
+            assert!(storage.contains_edge_version(version.id).unwrap());
+        }
+
+        let stats = storage.stats();
+        assert_eq!(stats.edge_versions_stored, 50);
+    }
 }

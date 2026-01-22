@@ -1687,4 +1687,63 @@ mod tests {
         assert!(config.enable_checksums);
         assert_eq!(config.batch_size, 1000);
     }
+
+    // ========================================================================
+    // ColdStorageStats tests
+    // ========================================================================
+
+    #[test]
+    fn test_cold_storage_stats_default() {
+        let stats = ColdStorageStats::default();
+        assert_eq!(stats.node_versions_stored, 0);
+        assert_eq!(stats.edge_versions_stored, 0);
+        assert_eq!(stats.node_version_reads, 0);
+        assert_eq!(stats.edge_version_reads, 0);
+        assert_eq!(stats.bytes_written_raw, 0);
+        assert_eq!(stats.bytes_written_compressed, 0);
+        assert_eq!(stats.bytes_read_compressed, 0);
+        assert_eq!(stats.bytes_read_decompressed, 0);
+        assert_eq!(stats.read_errors, 0);
+        assert_eq!(stats.write_errors, 0);
+    }
+
+    #[test]
+    fn test_cold_storage_stats_compression_ratio_no_data() {
+        let stats = ColdStorageStats::default();
+        // With no data written, compression ratio should be 1.0
+        assert_eq!(stats.compression_ratio(), 1.0);
+    }
+
+    #[test]
+    fn test_cold_storage_stats_compression_ratio_with_data() {
+        let stats = ColdStorageStats {
+            bytes_written_raw: 1000,
+            bytes_written_compressed: 500,
+            ..Default::default()
+        };
+        // Ratio = raw / compressed = 1000 / 500 = 2.0
+        assert_eq!(stats.compression_ratio(), 2.0);
+    }
+
+    #[test]
+    fn test_cold_storage_stats_compression_ratio_no_compression() {
+        let stats = ColdStorageStats {
+            bytes_written_raw: 1000,
+            bytes_written_compressed: 1000,
+            ..Default::default()
+        };
+        // When raw == compressed, ratio is 1.0 (no compression benefit)
+        assert_eq!(stats.compression_ratio(), 1.0);
+    }
+
+    #[test]
+    fn test_cold_storage_stats_compression_ratio_good_compression() {
+        let stats = ColdStorageStats {
+            bytes_written_raw: 10000,
+            bytes_written_compressed: 2000,
+            ..Default::default()
+        };
+        // Ratio = 10000 / 2000 = 5.0 (5x compression)
+        assert_eq!(stats.compression_ratio(), 5.0);
+    }
 }
