@@ -470,7 +470,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_string(&mut self) -> Result<Token, LexerError> {
-        let quote = self.advance().map(|(_, c)| c).unwrap();
+        let quote = self
+            .advance()
+            .map(|(_, c)| c)
+            .ok_or_else(|| self.error("Unexpected EOF while reading string".to_string()))?;
         let mut value = String::new();
 
         loop {

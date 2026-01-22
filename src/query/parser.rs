@@ -1173,7 +1173,10 @@ impl Parser {
                     ));
                 }
                 self.advance();
-                Ok(n as usize)
+                // Safe conversion: on 32-bit systems, values > usize::MAX are clamped.
+                // This is acceptable for SKIP/LIMIT as such large values are impractical.
+                let result = usize::try_from(n).unwrap_or(usize::MAX);
+                Ok(result)
             }
             _ => Err(self.error(
                 "Expected non-negative integer".to_string(),
