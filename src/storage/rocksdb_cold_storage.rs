@@ -836,7 +836,7 @@ mod tests {
         let new_size = storage.approximate_size();
         // Note: This may or may not be greater depending on RocksDB internals
         // At minimum, check it doesn't panic and returns a valid value
-        assert!(new_size >= 0, "Approximate size should be non-negative");
+        let _ = new_size; // Verify the call succeeds
     }
 
     #[test]

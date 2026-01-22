@@ -735,8 +735,8 @@ mod tests {
     fn test_property_delta_estimated_heap_size_empty() {
         let delta = PropertyDelta::new();
         let size = delta.estimated_heap_size();
-        // Empty delta should have minimal heap overhead
-        assert!(size >= 0, "Empty delta heap size should be non-negative");
+        // Empty delta should have zero heap overhead
+        assert_eq!(size, 0, "Empty delta heap size should be zero");
     }
 
     #[test]

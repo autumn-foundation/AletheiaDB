@@ -2669,7 +2669,7 @@ mod tests {
         assert_eq!(PropertyValue::Bool(false).estimated_heap_size(), 0);
         assert_eq!(PropertyValue::Int(42).estimated_heap_size(), 0);
         assert_eq!(PropertyValue::Int(i64::MAX).estimated_heap_size(), 0);
-        assert_eq!(PropertyValue::Float(3.14).estimated_heap_size(), 0);
+        assert_eq!(PropertyValue::Float(1.5).estimated_heap_size(), 0);
         assert_eq!(PropertyValue::Float(f64::MAX).estimated_heap_size(), 0);
     }
 
@@ -2735,9 +2735,9 @@ mod tests {
 
     #[test]
     fn test_estimated_heap_size_array() {
-        // Empty array
+        // Empty array - should be 0 since no elements
         let empty_array = PropertyValue::array(vec![]);
-        assert!(empty_array.estimated_heap_size() >= 0);
+        assert_eq!(empty_array.estimated_heap_size(), 0);
 
         // Array with primitives - includes Vec overhead but values have no heap size
         let primitive_array = PropertyValue::array(vec![
@@ -2759,9 +2759,9 @@ mod tests {
     #[test]
     fn test_property_map_estimated_heap_size_empty() {
         let map = PropertyMap::new();
-        // Empty map should have minimal overhead
+        // Empty map should have zero heap overhead
         let size = map.estimated_heap_size();
-        assert!(size >= 0, "Empty map heap size should be non-negative");
+        assert_eq!(size, 0, "Empty map heap size should be zero");
     }
 
     #[test]
