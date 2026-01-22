@@ -96,7 +96,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use usearch::{ffi::Matches, Index, IndexOptions, MetricKind, ScalarKind};
+use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
