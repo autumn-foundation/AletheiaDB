@@ -288,7 +288,13 @@ macro_rules! impl_edge_iter {
             }
         }
 
-        impl ExactSizeIterator for $name {}
+        impl ExactSizeIterator for $name {
+            #[inline]
+            fn len(&self) -> usize {
+                self.guard.len().saturating_sub(self.index)
+            }
+        }
+
         impl std::iter::FusedIterator for $name {}
     };
 }
@@ -309,6 +315,7 @@ macro_rules! impl_edge_iter_with_label {
             "\n\n# Performance",
             "\n\n- **Zero allocation**: Holds an `AdjacencyGuard` and pre-resolved label ID",
             "\n- **Lazy evaluation**: Filters as you iterate",
+            "\n- **O(n) complexity**: Single linear scan regardless of match distribution",
             "\n- **Early termination**: If label doesn't exist, returns empty iterator"
         )]
         pub struct $name {
@@ -334,20 +341,25 @@ macro_rules! impl_edge_iter_with_label {
 
             #[inline]
             fn next(&mut self) -> Option<Self::Item> {
+                // Early return if label doesn't exist in interner
                 let label_id = self.label_id?;
-                let remaining = &self.guard[self.index..];
 
-                if let Some(pos) = remaining.iter().position(|e| e.label == label_id) {
-                    self.index += pos + 1;
-                    Some(remaining[pos].edge_id)
-                } else {
-                    self.index = self.guard.len();
-                    None
+                // Linear scan with manual indexing - O(n) total complexity
+                // Avoids the O(n²) worst-case of using .position() repeatedly
+                while self.index < self.guard.len() {
+                    let entry = &self.guard[self.index];
+                    self.index += 1;
+                    if entry.label == label_id {
+                        return Some(entry.edge_id);
+                    }
                 }
+                None
             }
 
             #[inline]
             fn size_hint(&self) -> (usize, Option<usize>) {
+                // Lower bound is 0 (all remaining could be filtered out)
+                // Upper bound is remaining entries
                 let remaining = self.guard.len().saturating_sub(self.index);
                 (0, Some(remaining))
             }
