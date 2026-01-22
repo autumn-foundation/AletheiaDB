@@ -1,7 +1,7 @@
 # ADR-0013: Tiered Storage Architecture
 
-**Status:** Proposed
-**Date:** 2026-01-01
+**Status:** Accepted
+**Date:** 2026-01-22
 **Deciders:** GallifreyDB Core Team
 **Categories:** storage, scalability, performance
 

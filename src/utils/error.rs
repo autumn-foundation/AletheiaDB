@@ -231,6 +231,23 @@ pub enum StorageError {
     },
 }
 
+impl StorageError {
+    /// Create an I/O error with a message.
+    pub fn io_error<S: Into<String>>(msg: S) -> Self {
+        StorageError::IoError(msg.into())
+    }
+
+    /// Create a corruption error with a message.
+    pub fn corruption<S: Into<String>>(msg: S) -> Self {
+        StorageError::CorruptedData(msg.into())
+    }
+
+    /// Create a persistence error with a message.
+    pub fn persistence<S: Into<String>>(msg: S) -> Self {
+        StorageError::PersistenceError(msg.into())
+    }
+}
+
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
