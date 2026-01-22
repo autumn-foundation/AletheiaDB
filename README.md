@@ -12,6 +12,7 @@ GallifreyDB tracks both **valid time** (when facts were true in reality) and **t
 
 - **Bi-Temporal Model**: Track both valid time and transaction time for full temporal reasoning
 - **Hybrid Storage**: Separate current state (fast path) from historical data (temporal path)
+- **Tiered Storage**: Hot/warm/cold architecture for unlimited historical depth with disk-backed cold storage
 - **Anchor+Delta Compression**: 5-6X storage reduction while maintaining query performance
 - **ACID Transactions**: Full snapshot isolation with write conflict detection
 - **Write-Ahead Log (WAL)**: Striped lock-free ring buffer architecture, ~100K+ writes/sec (GroupCommit)
@@ -19,6 +20,9 @@ GallifreyDB tracks both **valid time** (when facts were true in reality) and **t
 - **Vector Search**: HNSW indexing for k-NN semantic search with full temporal versioning
 - **Multi-Property Vector Indexes**: Multiple independent vector properties per database
 - **Hybrid Query API**: Combine graph traversal + vector similarity + bi-temporal queries
+- **Query Language**: Cypher-like GQL with temporal and vector extensions
+- **MCP Server**: Model Context Protocol server for LLM integration (Claude, etc.)
+- **Graph Sharding**: Domain-based horizontal scaling with 2PC distributed transactions
 - **Semantic Drift Tracking**: Detect how embeddings evolve over time for knowledge evolution analysis
 - **Production Observability**: Distributed tracing, metrics, and profiling (optional)
 - **High Performance**: Sub-microsecond traversals (~22ns node lookup, ~23ns edge traversal)
@@ -130,6 +134,27 @@ gallifreydb = { version = "0.1", features = ["embedding-openai"] }
 
 **Note**: Embedding features are **completely optional** and add zero overhead when disabled. The database core has no embedding dependencies.
 
+### MCP Server Features
+```toml
+[dependencies]
+gallifreydb = { version = "0.1", features = ["mcp-server"] }
+```
+
+| Feature | Description | Dependencies |
+|---------|-------------|--------------|
+| `mcp-server` | Model Context Protocol server for LLM integration | `rmcp`, `tokio`, `serde` |
+
+### Sharding & Storage Features
+```toml
+[dependencies]
+gallifreydb = { version = "0.1", features = ["tiered-storage"] }
+```
+
+| Feature | Description | Dependencies |
+|---------|-------------|--------------|
+| `sharding-rpc` | RPC client for sharding coordination | `reqwest`, `serde` |
+| `tiered-storage` | RocksDB cold storage backend | `rocksdb` |
+
 ## Performance & Benchmarks
 
 GallifreyDB is designed for high performance with minimal temporal overhead. View live benchmark results:
@@ -211,13 +236,43 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 - [x] Critical error detection (lock poisons, timestamp violations, WAL checksum failures)
 - [x] Error categorization metrics
 
+### MCP Server (Complete ✅)
+- [x] Model Context Protocol server binary (`gallifrey-mcp`)
+- [x] Node operations (get, create, update, delete, list, count)
+- [x] Edge operations (get, create, update, delete, list, count)
+- [x] Graph traversal (outgoing, incoming, multi-hop)
+- [x] Vector search (find similar, enable/list indexes)
+- [x] Temporal queries (get at time)
+- [x] Hybrid queries (graph + vector + temporal)
+
+### Query Language (Complete ✅)
+- [x] Cypher-like parser (MATCH, WHERE, RETURN, ORDER BY, LIMIT)
+- [x] Vector search syntax (SIMILAR TO, RANK BY SIMILARITY)
+- [x] Bi-temporal syntax (AS OF, BETWEEN)
+- [x] AST-to-IR converter with planner integration
+- [x] Comprehensive query documentation
+
+### Graph Sharding (Complete ✅)
+- [x] Domain-based node partitioning by label
+- [x] Edge replication for cross-shard traversal
+- [x] Two-Phase Commit (2PC) distributed transactions
+- [x] Circuit breakers for fault tolerance
+- [x] Online migration with dual-write support
+- [x] Connection pooling and query executor
+
+### Tiered Storage (Complete ✅)
+- [x] Three-tier architecture (hot/warm/cold)
+- [x] File-based cold storage backend
+- [x] RocksDB cold storage backend (optional feature)
+- [x] Configurable migration policies
+- [x] Latency metrics with percentiles
+
 ### In Progress / Planned
 - [ ] Vector Search Phase 5: Streaming and incremental updates
 - [ ] Custom Honeycomb client wrapper ([#271](https://github.com/madmax983/GallifreyDB/issues/271))
 - [ ] Comprehensive Prometheus metrics suite ([#272](https://github.com/madmax983/GallifreyDB/issues/272))
-- [ ] MCP Server for Claude integration
 - [ ] GraphQL/REST API layer
-- [ ] Distributed deployment (sharding, replication)
+- [ ] Distributed replication
 
 **Test Coverage**: 671+ tests passing, 86%+ line coverage (enforced: 85% minimum)
 
@@ -426,6 +481,106 @@ let config = GallifreyDBConfig::builder()
 
 See **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for all configuration options and presets.
 
+### MCP Server (Claude Integration)
+
+Run the MCP server for LLM integration:
+
+```bash
+# Start the MCP server (communicates over stdio)
+cargo run --bin gallifrey-mcp --features mcp-server
+```
+
+Available MCP tools for LLMs:
+- **Node Operations**: `get_node`, `create_node`, `update_node`, `delete_node`, `list_nodes`, `count_nodes`
+- **Edge Operations**: `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `get_outgoing_edges`, `get_incoming_edges`
+- **Traversal**: `traverse` (multi-hop graph traversal)
+- **Vector Search**: `find_similar`, `enable_vector_index`, `list_vector_indexes`
+- **Temporal**: `get_node_at_time`, `get_edge_at_time`
+- **Hybrid**: `hybrid_query` (combined graph + vector + temporal)
+
+### Query Language (GQL)
+
+GallifreyDB supports a Cypher-like query language with temporal and vector extensions:
+
+```cypher
+-- Basic graph query
+MATCH (n:Person {name: "Alice"})-[:KNOWS]->(friend:Person)
+RETURN friend
+
+-- Vector similarity search
+SIMILAR TO $embedding LIMIT 10
+
+-- Hybrid graph + vector query
+MATCH (a:Person {name: "Alice"})-[:KNOWS]->(friend)
+RANK BY SIMILARITY TO $bob_embedding TOP 10
+RETURN friend
+
+-- Bi-temporal query (point-in-time)
+AS OF '2024-01-15T10:00:00Z'
+MATCH (n:Person {name: "Alice"})
+RETURN n
+
+-- Full hybrid: temporal + graph + vector
+AS OF '2024-06-01T00:00:00Z'
+MATCH (user:User {id: $user_id})-[:VIEWED]->(item:Product)
+RANK BY SIMILARITY TO $recommendation_embedding TOP 20
+WHERE item.price < 100
+RETURN item
+ORDER BY score DESC
+LIMIT 10
+```
+
+See **[docs/query-language-design.md](docs/query-language-design.md)** for complete grammar and examples.
+
+### Graph Sharding
+
+For horizontal scaling with datasets exceeding single-machine capacity:
+
+```rust
+use gallifreydb::storage::sharding::{
+    ShardConfig, ShardDefinition, ShardCoordinator,
+};
+
+// Define shard topology
+let config = ShardConfig::new(vec![
+    ShardDefinition::new(0, "shard0:9000", vec!["Person", "User"]),
+    ShardDefinition::new(1, "shard1:9000", vec!["Place", "Location"]),
+    ShardDefinition::new(2, "shard2:9000", vec!["Event", "Activity"]),
+]);
+
+// Create coordinator
+let coordinator = ShardCoordinator::new(config);
+
+// Route queries to appropriate shards
+let shard = coordinator.router().route_node("Person");
+```
+
+See **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** for complete guide.
+
+### Tiered Storage
+
+For unlimited historical depth with disk-backed cold storage:
+
+```rust
+use gallifreydb::storage::{
+    HistoricalStorage, TieredStorage, TieredStorageConfig,
+    FileColdStorage, ColdStorageConfig,
+};
+use std::sync::Arc;
+
+// Create cold storage backend
+let cold = FileColdStorage::new("data/cold", ColdStorageConfig::default())?;
+
+// Create tiered storage
+let tiered = TieredStorage::new(TieredStorageConfig::default(), Box::new(cold));
+
+// Configure historical storage
+let mut historical = HistoricalStorage::new();
+historical.set_tiered_storage(Arc::new(tiered));
+```
+
+See **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** for complete guide.
+
 ### Transactions
 
 ```rust
@@ -567,20 +722,27 @@ cargo run --example observability_demo --all-features
 - **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture (Phases 1-5)
 - **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide (optional providers)
 - **[docs/WAL.md](docs/WAL.md)** - Write-Ahead Log format and architecture
+- **[docs/query-language-design.md](docs/query-language-design.md)** - Query language grammar and semantics
 
 ### User Guides
 - **[docs/guides/vector-search-integration.md](docs/guides/vector-search-integration.md)** - Complete vector search API
 - **[docs/guides/vector-search-performance.md](docs/guides/vector-search-performance.md)** - Performance tuning
 - **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** - Hybrid query API reference
 - **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** - Index persistence details
+- **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** - Graph sharding and distributed deployment
+- **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** - Tiered storage configuration
+- **[docs/guides/query-pipeline-guide.md](docs/guides/query-pipeline-guide.md)** - Query execution pipeline
 
 ### Architecture Decision Records (ADRs)
+- **[docs/adr/0013-tiered-storage-architecture.md](docs/adr/0013-tiered-storage-architecture.md)** - Tiered storage architecture
+- **[docs/adr/0014-graph-sharding-strategy.md](docs/adr/0014-graph-sharding-strategy.md)** - Graph sharding strategy
 - **[docs/adr/0016-embedding-providers.md](docs/adr/0016-embedding-providers.md)** - Embedding provider architecture
 - **[docs/adr/0018-temporal-vector-historical-integration.md](docs/adr/0018-temporal-vector-historical-integration.md)** - Temporal vector integration
 - **[docs/adr/0019-hybrid-query-planner.md](docs/adr/0019-hybrid-query-planner.md)** - Hybrid query architecture
 - **[docs/adr/0020-concurrent-wal-architecture.md](docs/adr/0020-concurrent-wal-architecture.md)** - Concurrent WAL design
 - **[docs/adr/0022-multi-property-vector-index.md](docs/adr/0022-multi-property-vector-index.md)** - Multi-property vector indexes
 - **[docs/adr/0023-index-persistence-layer.md](docs/adr/0023-index-persistence-layer.md)** - Index persistence architecture
+- **[docs/adr/0024-hybrid-logical-clock-timestamps.md](docs/adr/0024-hybrid-logical-clock-timestamps.md)** - HLC timestamp design
 
 See `docs/adr/` for all architectural decisions.
 

@@ -229,6 +229,102 @@ gallifreydb = { version = "0.1", features = ["tiered-storage"] }
 
 **See [docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md) for complete guide.**
 
+### MCP Server (Claude Integration)
+
+Model Context Protocol server enabling LLMs to interact with GallifreyDB.
+
+**Quick Start:**
+```bash
+# Run the MCP server (communicates over stdio)
+cargo run --bin gallifrey-mcp --features mcp-server
+```
+
+**Available Tools:**
+| Category | Tools |
+|----------|-------|
+| **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `list_nodes`, `count_nodes` |
+| **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `get_outgoing_edges`, `get_incoming_edges` |
+| **Traversal** | `traverse` (multi-hop graph traversal) |
+| **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |
+| **Temporal** | `get_node_at_time`, `get_edge_at_time` |
+| **Hybrid** | `hybrid_query` (combined graph + vector + temporal) |
+
+**Programmatic Usage:**
+```rust
+use gallifreydb::mcp::GallifreyMcpServer;
+use gallifreydb::GallifreyDB;
+use std::sync::Arc;
+
+let db = Arc::new(GallifreyDB::new()?);
+let server = GallifreyMcpServer::new(db);
+server.serve_stdio().await?;
+```
+
+### Query Language (GQL)
+
+Cypher-like query language with temporal and vector extensions.
+
+**Grammar Support:**
+- Graph patterns: `MATCH (n:Label)-[:REL]->(m)`
+- Variable-depth traversal: `-[:KNOWS*1..3]->`
+- Vector search: `SIMILAR TO $embedding LIMIT 10`
+- Hybrid queries: `RANK BY SIMILARITY TO $embedding TOP 10`
+- Bi-temporal: `AS OF '2024-01-15T10:00:00Z'`, `BETWEEN ... AND ...`
+- Filtering: `WHERE`, `ORDER BY`, `LIMIT`, `SKIP`
+
+**Example Queries:**
+```cypher
+-- Basic graph query
+MATCH (n:Person {name: "Alice"})-[:KNOWS]->(friend:Person)
+RETURN friend
+
+-- Hybrid: temporal + graph + vector
+AS OF '2024-06-01T00:00:00Z'
+MATCH (user:User {id: $user_id})-[:VIEWED]->(item:Product)
+RANK BY SIMILARITY TO $recommendation_embedding TOP 20
+WHERE item.price < 100
+RETURN item
+ORDER BY score DESC
+LIMIT 10
+```
+
+**See [docs/query-language-design.md](docs/query-language-design.md) for complete grammar and semantics.**
+
+### Graph Sharding
+
+Domain-based horizontal scaling for datasets exceeding single-machine capacity.
+
+**Key Features:**
+- Domain-based partitioning (nodes partitioned by label)
+- Edge replication for cross-shard traversal
+- Two-Phase Commit (2PC) distributed transactions
+- Circuit breakers for fault tolerance
+- Online migration with dual-write support
+
+**Quick Start:**
+```rust
+use gallifreydb::storage::sharding::{
+    ShardConfig, ShardDefinition, ShardCoordinator,
+};
+
+// Define shard topology
+let config = ShardConfig::new(vec![
+    ShardDefinition::new(0, "shard0:9000", vec!["Person", "User"]),
+    ShardDefinition::new(1, "shard1:9000", vec!["Place", "Location"]),
+    ShardDefinition::new(2, "shard2:9000", vec!["Event", "Activity"]),
+]);
+
+let coordinator = ShardCoordinator::new(config);
+let shard = coordinator.router().route_node("Person");
+```
+
+**When to Use:**
+- Dataset exceeds single-machine RAM (~256GB → ~1.2B nodes)
+- Need geographic distribution
+- Require isolation between domains
+
+**See [docs/guides/sharding-guide.md](docs/guides/sharding-guide.md) for complete guide.**
+
 ### Embedding Generation (Optional)
 
 Optional embedding providers via feature flags (OpenAI, HuggingFace, Ollama, ONNX).
@@ -405,15 +501,15 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id)
 
 ### Scalability
 
-- Sharding for horizontal scale
-- Distributed transaction coordination
-- Replication for high availability
+- ✅ Sharding for horizontal scale (implemented)
+- ✅ Distributed transaction coordination with 2PC (implemented)
+- Replication for high availability (planned)
 
 ### Query Language
 
-- Cypher-like temporal extensions
-- SQL:2011 temporal syntax
-- Time-aware pattern matching
+- ✅ Cypher-like temporal extensions (implemented)
+- SQL:2011 temporal syntax (planned)
+- ✅ Time-aware pattern matching (implemented)
 
 ### Advanced Features
 
@@ -435,6 +531,7 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id)
 - **[docs/WAL.md](docs/WAL.md)** - Write-ahead log internals
 - **[docs/VECTOR_SEARCH_DESIGN.md](docs/VECTOR_SEARCH_DESIGN.md)** - Vector search architecture and roadmap
 - **[docs/EMBEDDINGS.md](docs/EMBEDDINGS.md)** - Embedding generation guide
+- **[docs/query-language-design.md](docs/query-language-design.md)** - Query language grammar and semantics
 
 ### User Guides
 - **[docs/guides/vector-search-integration.md](docs/guides/vector-search-integration.md)** - Complete vector search API
@@ -442,6 +539,8 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id)
 - **[docs/guides/hybrid-query-guide.md](docs/guides/hybrid-query-guide.md)** - Hybrid query API reference
 - **[docs/guides/index-persistence-guide.md](docs/guides/index-persistence-guide.md)** - Index persistence details
 - **[docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md)** - Tiered storage configuration and usage
+- **[docs/guides/sharding-guide.md](docs/guides/sharding-guide.md)** - Graph sharding and distributed deployment
+- **[docs/guides/query-pipeline-guide.md](docs/guides/query-pipeline-guide.md)** - Query execution pipeline
 
 ### Architecture Decision Records (ADRs)
 See `docs/adr/` for all architectural decisions.
