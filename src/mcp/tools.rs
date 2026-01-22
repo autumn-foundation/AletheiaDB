@@ -38,8 +38,8 @@ pub struct UpdateNodeRequest {
     #[schemars(description = "The unique identifier of the node to update")]
     pub node_id: u64,
 
-    /// New properties to set (will be merged with existing).
-    #[schemars(description = "New properties to set (will be merged with existing)")]
+    /// New properties to set (replaces all existing properties).
+    #[schemars(description = "New properties to set (replaces all existing properties)")]
     pub properties: HashMap<String, serde_json::Value>,
 }
 
@@ -114,8 +114,8 @@ pub struct UpdateEdgeRequest {
     #[schemars(description = "The unique identifier of the edge to update")]
     pub edge_id: u64,
 
-    /// New properties to set (will be merged with existing).
-    #[schemars(description = "New properties to set (will be merged with existing)")]
+    /// New properties to set (replaces all existing properties).
+    #[schemars(description = "New properties to set (replaces all existing properties)")]
     pub properties: HashMap<String, serde_json::Value>,
 }
 

@@ -27,6 +27,25 @@ use crate::query::executor::{EntityId as ResultEntityId, EntityResult};
 
 use super::tools::*;
 
+// ============================================================================
+// Resource Limits (to prevent DoS attacks)
+// ============================================================================
+
+/// Maximum traversal depth to prevent stack overflow and excessive computation.
+const MAX_TRAVERSAL_DEPTH: usize = 10;
+
+/// Maximum number of results to return in a single query.
+const MAX_RESULT_LIMIT: usize = 10_000;
+
+/// Default number of results to return.
+const DEFAULT_RESULT_LIMIT: usize = 100;
+
+/// Maximum k for vector similarity search.
+const MAX_VECTOR_K: usize = 1000;
+
+/// Default k for vector similarity search.
+const DEFAULT_VECTOR_K: usize = 10;
+
 /// GallifreyDB MCP Server.
 ///
 /// Exposes GallifreyDB's graph, vector, and temporal capabilities through MCP.
@@ -403,7 +422,11 @@ impl GallifreyMcpServer {
             Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
         };
 
-        let limit = req.limit.unwrap_or(100);
+        // Apply resource limits
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .min(MAX_RESULT_LIMIT);
         let offset = req.offset.unwrap_or(0);
 
         // If a label is provided, use QueryBuilder to scan by label
@@ -580,7 +603,11 @@ impl GallifreyMcpServer {
             Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
         };
 
-        let limit = req.limit.unwrap_or(100);
+        // Apply resource limits
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .min(MAX_RESULT_LIMIT);
         let offset = req.offset.unwrap_or(0);
 
         // Edges cannot be efficiently listed without knowing source/target nodes.
@@ -687,8 +714,12 @@ impl GallifreyMcpServer {
             Err(e) => return self.error_json(&e.to_string()),
         };
 
-        let depth = req.depth.unwrap_or(1);
-        let limit = req.limit.unwrap_or(100);
+        // Apply resource limits to prevent DoS
+        let depth = req.depth.unwrap_or(1).min(MAX_TRAVERSAL_DEPTH);
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .min(MAX_RESULT_LIMIT);
         let direction = req.direction.as_deref().unwrap_or("outgoing");
 
         // Use simple traversal approach
@@ -778,7 +809,8 @@ impl GallifreyMcpServer {
             Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
         };
 
-        let k = req.k.unwrap_or(10);
+        // Apply resource limits
+        let k = req.k.unwrap_or(DEFAULT_VECTOR_K).min(MAX_VECTOR_K);
 
         if !self.db.is_vector_index_enabled_for(&req.property_name) {
             return self.error_json(&format!(
@@ -933,7 +965,58 @@ impl GallifreyMcpServer {
             Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
         };
 
-        let limit = req.limit.unwrap_or(100);
+        // Apply resource limits
+        let limit = req
+            .limit
+            .unwrap_or(DEFAULT_RESULT_LIMIT)
+            .min(MAX_RESULT_LIMIT);
+        let depth = req.traverse_depth.unwrap_or(1).min(MAX_TRAVERSAL_DEPTH);
+        let k = req.top_k.unwrap_or(DEFAULT_VECTOR_K).min(MAX_VECTOR_K);
+
+        // Parse temporal parameters if provided
+        let valid_time = if let Some(ref vt) = req.valid_time {
+            match self.parse_timestamp(vt) {
+                Ok(t) => Some(t),
+                Err(e) => return self.error_json(&format!("Invalid valid_time: {}", e)),
+            }
+        } else {
+            None
+        };
+
+        let tx_time = if let Some(ref tt) = req.transaction_time {
+            match self.parse_timestamp(tt) {
+                Ok(t) => Some(t),
+                Err(e) => return self.error_json(&format!("Invalid transaction_time: {}", e)),
+            }
+        } else {
+            None
+        };
+
+        // Helper to convert rows to hybrid results with temporal info
+        let rows_to_results =
+            |rows: Vec<crate::query::executor::QueryRow>| -> Vec<HybridQueryResult> {
+                rows.into_iter()
+                    .filter_map(|row| {
+                        if let EntityResult::Node(node) = row.entity {
+                            Some(HybridQueryResult {
+                                node: self.node_to_response(&node),
+                                similarity_score: row.score,
+                                traversal_path: row.path.map(|p| {
+                                    p.iter()
+                                        .map(|e| match e {
+                                            ResultEntityId::Node(id) => id.as_u64(),
+                                            ResultEntityId::Edge(id) => id.as_u64(),
+                                        })
+                                        .collect()
+                                }),
+                                timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
 
         // Use QueryBuilder for hybrid queries
         if let Some(start_id) = req.start_node_id {
@@ -942,11 +1025,34 @@ impl GallifreyMcpServer {
                 Err(e) => return self.error_json(&e.to_string()),
             };
 
+            // If temporal filtering requested, use temporal query
+            if let (Some(vt), Some(tt)) = (valid_time, tx_time) {
+                // Temporal query for a single node
+                return match self.db.get_node_at_time(node_id, vt, tt) {
+                    Ok(node) => {
+                        let response = self.node_to_response(&node);
+                        self.success_json(json!({
+                            "results": [HybridQueryResult {
+                                node: response,
+                                similarity_score: None,
+                                traversal_path: Some(vec![node_id.as_u64()]),
+                                timestamp: Some(vt.wallclock().to_string()),
+                            }],
+                            "count": 1,
+                            "temporal_query": {
+                                "valid_time": req.valid_time,
+                                "transaction_time": req.transaction_time
+                            }
+                        }))
+                    }
+                    Err(e) => self.error_json(&e.to_string()),
+                };
+            }
+
             // Graph-first query with optional vector ranking
             let builder = crate::query::QueryBuilder::new().start(node_id);
 
             let builder = if let Some(ref edge_label) = req.traverse_edge {
-                let depth = req.traverse_depth.unwrap_or(1);
                 if depth > 1 {
                     builder.traverse_n(edge_label, depth)
                 } else {
@@ -975,29 +1081,7 @@ impl GallifreyMcpServer {
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results: Vec<HybridQueryResult> = rows
-                            .into_iter()
-                            .filter_map(|row| {
-                                if let EntityResult::Node(node) = row.entity {
-                                    Some(HybridQueryResult {
-                                        node: self.node_to_response(&node),
-                                        similarity_score: row.score,
-                                        traversal_path: row.path.map(|p| {
-                                            p.iter()
-                                                .map(|e| match e {
-                                                    ResultEntityId::Node(id) => id.as_u64(),
-                                                    ResultEntityId::Edge(id) => id.as_u64(),
-                                                })
-                                                .collect()
-                                        }),
-                                        timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
-                                    })
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
+                        let hybrid_results = rows_to_results(rows);
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
@@ -1009,31 +1093,27 @@ impl GallifreyMcpServer {
             }
         } else if let Some(ref embedding) = req.query_embedding {
             // Vector-first query
-            let k = req.top_k.unwrap_or(10);
+            // Use vector_property if specified
+            let property_name = req.vector_property.as_deref().unwrap_or("embedding");
+
+            // Check if vector index is enabled for the property
+            if !self.db.is_vector_index_enabled_for(property_name) {
+                return self.error_json(&format!(
+                    "Vector index not enabled for property '{}'. Use enable_vector_index first.",
+                    property_name
+                ));
+            }
+
             let builder = crate::query::QueryBuilder::new().find_similar(embedding, k);
 
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results: Vec<HybridQueryResult> = rows
-                            .into_iter()
-                            .filter_map(|row| {
-                                if let EntityResult::Node(node) = row.entity {
-                                    Some(HybridQueryResult {
-                                        node: self.node_to_response(&node),
-                                        similarity_score: row.score,
-                                        traversal_path: None,
-                                        timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
-                                    })
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
+                        let hybrid_results = rows_to_results(rows);
                         self.success_json(json!({
                             "results": hybrid_results,
-                            "count": hybrid_results.len()
+                            "count": hybrid_results.len(),
+                            "vector_property": property_name
                         }))
                     }
                     Err(e) => self.error_json(&e.to_string()),
@@ -1047,22 +1127,7 @@ impl GallifreyMcpServer {
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let hybrid_results: Vec<HybridQueryResult> = rows
-                            .into_iter()
-                            .filter_map(|row| {
-                                if let EntityResult::Node(node) = row.entity {
-                                    Some(HybridQueryResult {
-                                        node: self.node_to_response(&node),
-                                        similarity_score: None,
-                                        traversal_path: None,
-                                        timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
-                                    })
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
+                        let hybrid_results = rows_to_results(rows);
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()

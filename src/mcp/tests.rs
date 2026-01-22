@@ -77,7 +77,6 @@ fn test_server_with_existing_db() {
 
 mod node_tests {
     use super::*;
-    use rmcp::ServerHandler;
 
     #[test]
     fn test_create_node_basic() {
@@ -394,7 +393,6 @@ mod node_tests {
 
 mod edge_tests {
     use super::*;
-    use rmcp::ServerHandler;
 
     fn create_two_nodes(server: &GallifreyMcpServer) -> (u64, u64) {
         let node1 = server.create_node(CreateNodeRequest {
@@ -692,7 +690,6 @@ mod edge_tests {
 
 mod traversal_tests {
     use super::*;
-    use rmcp::ServerHandler;
 
     fn create_graph(server: &GallifreyMcpServer) -> Vec<u64> {
         // Create a simple graph: A -> B -> C -> D
@@ -806,7 +803,6 @@ mod traversal_tests {
 
 mod vector_tests {
     use super::*;
-    use rmcp::ServerHandler;
 
     #[test]
     fn test_enable_vector_index() {
@@ -910,7 +906,6 @@ mod vector_tests {
 
 mod temporal_tests {
     use super::*;
-    use rmcp::ServerHandler;
 
     #[test]
     fn test_get_node_at_time_invalid_timestamp() {
@@ -1013,7 +1008,6 @@ mod temporal_tests {
 
 mod hybrid_tests {
     use super::*;
-    use rmcp::ServerHandler;
 
     #[test]
     fn test_hybrid_query_with_start_node() {
