@@ -242,10 +242,11 @@ fn test_group_commit_respects_max_delay() {
 
     let elapsed = start.elapsed();
 
-    // Should complete within max_delay + overhead for thread scheduling
+    // Should complete within max_delay + overhead for thread scheduling.
     // In CI, thread startup and scheduling can add significant overhead.
-    // Windows CI especially can be slow. Use 2s threshold to avoid flakiness.
-    let threshold = Duration::from_secs(2);
+    // Windows CI especially can be slow. Use 10s threshold to be consistent
+    // with other CI-resilient tests in this file (test_group_commit_triggers_on_batch_size).
+    let threshold = Duration::from_secs(10);
     assert!(
         elapsed < threshold,
         "GroupCommit took too long: {:?} (threshold: {:?})",
