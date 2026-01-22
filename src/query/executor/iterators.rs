@@ -449,75 +449,111 @@ impl TraversalIterator {
 
         match self.direction {
             Direction::Outgoing => {
-                let edges = if let Some(ref label) = self.label {
-                    self.current.get_outgoing_edges_with_label(node_id, label)
+                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
+                if let Some(ref label) = self.label {
+                    self.current
+                        .get_outgoing_edges_with_label_iter(node_id, label)
+                        .filter_map(|edge_id| {
+                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                                return None;
+                            }
+                            self.current
+                                .get_edge(edge_id)
+                                .ok()
+                                .map(|e| (e.target, edge_id))
+                        })
+                        .collect()
                 } else {
-                    self.current.get_outgoing_edges(node_id)
-                };
-
-                edges
-                    .into_iter()
-                    .filter_map(|edge_id| {
-                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                            return None;
-                        }
-                        self.current
-                            .get_edge(edge_id)
-                            .ok()
-                            .map(|e| (e.target, edge_id))
-                    })
-                    .collect()
+                    self.current
+                        .get_outgoing_edges_iter(node_id)
+                        .filter_map(|edge_id| {
+                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                                return None;
+                            }
+                            self.current
+                                .get_edge(edge_id)
+                                .ok()
+                                .map(|e| (e.target, edge_id))
+                        })
+                        .collect()
+                }
             }
             Direction::Incoming => {
-                let edges = if let Some(ref label) = self.label {
-                    self.current.get_incoming_edges_with_label(node_id, label)
+                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
+                if let Some(ref label) = self.label {
+                    self.current
+                        .get_incoming_edges_with_label_iter(node_id, label)
+                        .filter_map(|edge_id| {
+                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                                return None;
+                            }
+                            self.current
+                                .get_edge(edge_id)
+                                .ok()
+                                .map(|e| (e.source, edge_id))
+                        })
+                        .collect()
                 } else {
-                    self.current.get_incoming_edges(node_id)
-                };
-
-                edges
-                    .into_iter()
-                    .filter_map(|edge_id| {
-                        if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                            return None;
-                        }
-                        self.current
-                            .get_edge(edge_id)
-                            .ok()
-                            .map(|e| (e.source, edge_id))
-                    })
-                    .collect()
+                    self.current
+                        .get_incoming_edges_iter(node_id)
+                        .filter_map(|edge_id| {
+                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
+                                return None;
+                            }
+                            self.current
+                                .get_edge(edge_id)
+                                .ok()
+                                .map(|e| (e.source, edge_id))
+                        })
+                        .collect()
+                }
             }
             Direction::Both => {
                 let mut neighbors = Vec::new();
 
-                let out_edges = if let Some(ref label) = self.label {
-                    self.current.get_outgoing_edges_with_label(node_id, label)
-                } else {
-                    self.current.get_outgoing_edges(node_id)
-                };
-
-                for edge_id in out_edges {
+                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
+                // Helper closure to process edges and add to neighbors
+                let mut process_outgoing = |edge_id| {
                     if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                        continue;
+                        return;
                     }
                     if let Ok(e) = self.current.get_edge(edge_id) {
                         neighbors.push((e.target, edge_id));
                     }
-                }
-
-                let in_edges = if let Some(ref label) = self.label {
-                    self.current.get_incoming_edges_with_label(node_id, label)
-                } else {
-                    self.current.get_incoming_edges(node_id)
                 };
 
-                for edge_id in in_edges {
+                if let Some(ref label) = self.label {
+                    for edge_id in self
+                        .current
+                        .get_outgoing_edges_with_label_iter(node_id, label)
+                    {
+                        process_outgoing(edge_id);
+                    }
+                } else {
+                    for edge_id in self.current.get_outgoing_edges_iter(node_id) {
+                        process_outgoing(edge_id);
+                    }
+                }
+
+                let mut process_incoming = |edge_id| {
                     if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                        continue;
+                        return;
                     }
                     if let Ok(e) = self.current.get_edge(edge_id) {
                         neighbors.push((e.source, edge_id));
+                    }
+                };
+
+                if let Some(ref label) = self.label {
+                    for edge_id in self
+                        .current
+                        .get_incoming_edges_with_label_iter(node_id, label)
+                    {
+                        process_incoming(edge_id);
+                    }
+                } else {
+                    for edge_id in self.current.get_incoming_edges_iter(node_id) {
+                        process_incoming(edge_id);
                     }
                 }
 
