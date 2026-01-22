@@ -60,6 +60,7 @@ const ENTRY_TYPE_COMPLETE: u8 = 3;
 
 /// Error types for commit log operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub enum CommitLogError {
     /// I/O error.
     IoError(String),
@@ -314,7 +315,13 @@ impl CommitLogEntry {
                 ));
             }
             let shard_id_val = u16::from_le_bytes([entry_data[offset], entry_data[offset + 1]]);
-            participants.push(ShardId::new_unchecked(shard_id_val));
+            let shard_id = ShardId::new(shard_id_val).map_err(|_| {
+                CommitLogError::InvalidEntry(format!(
+                    "Invalid shard ID {} exceeds maximum allowed value",
+                    shard_id_val
+                ))
+            })?;
+            participants.push(shard_id);
             offset += 2;
         }
 
@@ -582,17 +589,17 @@ impl PersistentCommitLog {
 
     /// Sync the log to disk.
     pub fn sync(&self) -> CommitLogResult<()> {
-        if let Ok(mut writer_guard) = self.writer.write() {
-            if let Some(ref mut writer) = *writer_guard {
-                writer
-                    .flush()
-                    .map_err(|e| CommitLogError::IoError(format!("Flush failed: {}", e)))?;
+        if let Ok(mut writer_guard) = self.writer.write()
+            && let Some(ref mut writer) = *writer_guard
+        {
+            writer
+                .flush()
+                .map_err(|e| CommitLogError::IoError(format!("Flush failed: {}", e)))?;
 
-                writer
-                    .get_ref()
-                    .sync_all()
-                    .map_err(|e| CommitLogError::IoError(format!("Sync failed: {}", e)))?;
-            }
+            writer
+                .get_ref()
+                .sync_all()
+                .map_err(|e| CommitLogError::IoError(format!("Sync failed: {}", e)))?;
         }
         Ok(())
     }

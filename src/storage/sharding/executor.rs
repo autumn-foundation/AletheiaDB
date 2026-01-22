@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 
 /// Error types for query execution.
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub enum ExecutorError {
     /// All target shards failed.
     AllShardsFailed {

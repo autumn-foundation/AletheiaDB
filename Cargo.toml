@@ -108,6 +108,9 @@ embedding-all = [
 # MCP server support
 mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base64", "dep:chrono"]
 
+# Sharding RPC client support
+sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+
 [profile.dev]
 # Fast compilation for development
 opt-level = 0

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 /// Error types for network operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub enum NetworkError {
     /// Connection failed.
     ConnectionFailed { shard_id: ShardId, reason: String },
@@ -289,21 +290,37 @@ impl CircuitBreaker {
     }
 
     /// Get the current state.
+    ///
+    /// If the lock is poisoned, returns Closed (fail-open) to prevent
+    /// cascading failures.
     pub fn state(&self) -> CircuitState {
         self.maybe_transition();
-        *self.state.read().unwrap()
+        self.state
+            .read()
+            .map(|s| *s)
+            .unwrap_or(CircuitState::Closed)
     }
 
     /// Check if requests should be allowed.
+    ///
+    /// If the lock is poisoned, returns true (fail-open) to prevent
+    /// cascading failures.
     pub fn should_allow(&self) -> bool {
         self.maybe_transition();
-        let state = *self.state.read().unwrap();
+        let state = self
+            .state
+            .read()
+            .map(|s| *s)
+            .unwrap_or(CircuitState::Closed);
         matches!(state, CircuitState::Closed | CircuitState::HalfOpen)
     }
 
     /// Record a successful request.
     pub fn record_success(&self) {
-        let state = *self.state.read().unwrap();
+        let state = match self.state.read() {
+            Ok(s) => *s,
+            Err(_) => return, // Lock poisoned, silently skip
+        };
 
         match state {
             CircuitState::Closed => {
@@ -329,7 +346,10 @@ impl CircuitBreaker {
 
     /// Record a failed request.
     pub fn record_failure(&self) {
-        let state = *self.state.read().unwrap();
+        let state = match self.state.read() {
+            Ok(s) => *s,
+            Err(_) => return, // Lock poisoned, silently skip
+        };
 
         match state {
             CircuitState::Closed => {
@@ -379,7 +399,10 @@ impl CircuitBreaker {
 
     /// Check and perform state transitions based on time.
     fn maybe_transition(&self) {
-        let state = *self.state.read().unwrap();
+        let state = match self.state.read() {
+            Ok(s) => *s,
+            Err(_) => return, // Lock poisoned, skip transition
+        };
 
         if state == CircuitState::Open {
             if let Ok(opened) = self.opened_at.read() {
@@ -398,7 +421,8 @@ impl CircuitBreaker {
 
     /// Get remaining time before circuit can close.
     pub fn remaining_open_time(&self) -> Option<Duration> {
-        if *self.state.read().unwrap() != CircuitState::Open {
+        let state = self.state.read().ok()?;
+        if *state != CircuitState::Open {
             return None;
         }
 

@@ -35,8 +35,25 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+/// A token that captures routing state at a point in time.
+///
+/// Used to verify that migration state hasn't changed between
+/// routing decision and write commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingToken {
+    /// The label this token is for.
+    pub label: String,
+    /// The primary shard.
+    pub primary_shard: ShardId,
+    /// Target shards at token creation time.
+    pub targets: Vec<ShardId>,
+    /// Migration version at token creation (for staleness detection).
+    pub migration_version: u64,
+}
+
 /// Error types for migration operations.
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub enum MigrationError {
     /// Network error during migration.
     NetworkError(NetworkError),
@@ -254,6 +271,10 @@ impl DualWriteRouter {
     }
 
     /// Get the target shards for a write (returns both if migrating).
+    ///
+    /// WARNING: This method has a race condition - the migration state can change
+    /// between calling this method and performing the write. For atomic guarantees,
+    /// use `with_route_write` instead.
     pub fn route_write(&self, label: &str, primary_shard: ShardId) -> Vec<ShardId> {
         if let Ok(migrations) = self.active_migrations.read()
             && let Some((source, target)) = migrations.get(label)
@@ -262,6 +283,100 @@ impl DualWriteRouter {
             return vec![*source, *target];
         }
         vec![primary_shard]
+    }
+
+    /// Execute a write operation with atomic routing guarantees.
+    ///
+    /// This method holds the migration lock during the entire write operation,
+    /// ensuring the routing decision remains valid throughout. Use this instead
+    /// of `route_write` when writes must be atomic with respect to migration state.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - The node label being written
+    /// * `primary_shard` - The primary shard for this label
+    /// * `write_fn` - A function that performs the write to the given shards
+    ///
+    /// # Returns
+    ///
+    /// The result of the write function, or an error if the lock is poisoned.
+    pub fn with_route_write<T, F>(
+        &self,
+        label: &str,
+        primary_shard: ShardId,
+        write_fn: F,
+    ) -> Option<T>
+    where
+        F: FnOnce(&[ShardId]) -> T,
+    {
+        let migrations = self.active_migrations.read().ok()?;
+
+        let targets = if let Some((source, target)) = migrations.get(label) {
+            if primary_shard == *source {
+                vec![*source, *target]
+            } else {
+                vec![primary_shard]
+            }
+        } else {
+            vec![primary_shard]
+        };
+
+        // Lock is held while write_fn executes
+        Some(write_fn(&targets))
+    }
+
+    /// Generate a routing token that can be verified at write time.
+    ///
+    /// Use this for cases where `with_route_write` is not suitable (e.g., async operations).
+    /// The token captures the current migration state and can be verified before committing.
+    pub fn generate_routing_token(&self, label: &str, primary_shard: ShardId) -> RoutingToken {
+        let (targets, migration_version) = self
+            .active_migrations
+            .read()
+            .map(|migrations| {
+                let version = migrations.len() as u64; // Simple version based on migration count
+                let targets = if let Some((source, target)) = migrations.get(label) {
+                    if primary_shard == *source {
+                        vec![*source, *target]
+                    } else {
+                        vec![primary_shard]
+                    }
+                } else {
+                    vec![primary_shard]
+                };
+                (targets, version)
+            })
+            .unwrap_or_else(|_| (vec![primary_shard], 0));
+
+        RoutingToken {
+            label: label.to_string(),
+            primary_shard,
+            targets,
+            migration_version,
+        }
+    }
+
+    /// Verify a routing token is still valid.
+    ///
+    /// Returns true if the migration state hasn't changed in a way that would
+    /// affect this routing decision.
+    pub fn verify_routing_token(&self, token: &RoutingToken) -> bool {
+        self.active_migrations
+            .read()
+            .map(|migrations| {
+                let current_targets = if let Some((source, target)) = migrations.get(&token.label) {
+                    if token.primary_shard == *source {
+                        vec![*source, *target]
+                    } else {
+                        vec![token.primary_shard]
+                    }
+                } else {
+                    vec![token.primary_shard]
+                };
+                // Token is valid if targets haven't changed
+                current_targets == token.targets
+            })
+            .unwrap_or(false)
     }
 
     /// Get the number of active migrations.

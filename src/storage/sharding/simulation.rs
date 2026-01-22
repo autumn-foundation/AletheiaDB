@@ -654,7 +654,7 @@ mod tests {
         analysis.add_shard_pair_cut(ShardId::new_unchecked(0), ShardId::new_unchecked(1), 100);
         analysis.add_shard_pair_cut(ShardId::new_unchecked(1), ShardId::new_unchecked(0), 50); // Same pair
 
-        let (pair, count) = analysis.most_connected_pair().unwrap();
+        let (_pair, count) = analysis.most_connected_pair().unwrap();
         assert_eq!(count, 150);
     }
 
@@ -790,9 +790,11 @@ mod tests {
 
     #[test]
     fn test_simulation_empty_graph() {
-        let mut config = SimulationConfig::default();
-        config.num_nodes = 0;
-        config.num_edges = 0;
+        let config = SimulationConfig {
+            num_nodes: 0,
+            num_edges: 0,
+            ..Default::default()
+        };
 
         let sim = ShardingSimulation::new(config);
         let result = sim.run(ShardingStrategy::DomainBased);

@@ -10,6 +10,40 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+/// Result of recovery operation.
+#[derive(Debug, Clone)]
+pub struct RecoveryResult {
+    /// Transactions that were successfully recovered.
+    pub recovered: Vec<TxId>,
+    /// Transactions that failed recovery and were dead-lettered.
+    pub dead_lettered: Vec<DeadLetteredTransaction>,
+}
+
+impl RecoveryResult {
+    /// Check if recovery was fully successful (no dead letters).
+    pub fn is_complete(&self) -> bool {
+        self.dead_lettered.is_empty()
+    }
+
+    /// Get the number of transactions that required manual intervention.
+    pub fn dead_letter_count(&self) -> usize {
+        self.dead_lettered.len()
+    }
+}
+
+/// A transaction that failed recovery and requires manual intervention.
+#[derive(Debug, Clone)]
+pub struct DeadLetteredTransaction {
+    /// The transaction ID.
+    pub tx_id: TxId,
+    /// Reason for dead-lettering.
+    pub reason: String,
+    /// Time of last recovery attempt.
+    pub last_attempt: Instant,
+    /// Number of recovery attempts made.
+    pub attempt_count: u32,
+}
+
 /// Connection to a shard (placeholder for actual network implementation).
 #[derive(Debug)]
 pub struct ShardConnection {
@@ -106,6 +140,8 @@ pub struct ShardCoordinator {
     rebalance_config: RebalanceConfig,
     /// Timeout for transaction operations.
     transaction_timeout: Duration,
+    /// Dead letter queue for transactions that failed recovery.
+    dead_letter_queue: RwLock<HashMap<TxId, DeadLetteredTransaction>>,
 }
 
 impl ShardCoordinator {
@@ -137,6 +173,7 @@ impl ShardCoordinator {
             metrics: RwLock::new(metrics),
             rebalance_config: RebalanceConfig::default(),
             transaction_timeout,
+            dead_letter_queue: RwLock::new(HashMap::new()),
         }
     }
 
@@ -340,22 +377,25 @@ impl ShardCoordinator {
 
         for shard_id in transaction.participant_shards() {
             if let Some(conn) = connections.get(&shard_id) {
-                // Retry logic for commit (commit is idempotent)
-                let mut retries = 3;
+                // Retry logic for commit with exponential backoff
+                let max_retries = 3;
+                let mut retry_count = 0;
+
                 loop {
                     match conn.commit(tx_id) {
                         Ok(()) => {
                             transaction.record_commit_success(shard_id);
                             break;
                         }
-                        Err(_) if retries > 0 => {
-                            retries -= 1;
-                            // In real implementation, would sleep with backoff
+                        Err(_) if retry_count < max_retries => {
+                            // Exponential backoff: 100ms, 200ms, 400ms
+                            let backoff_ms = 100 * (1 << retry_count);
+                            std::thread::sleep(Duration::from_millis(backoff_ms));
+                            retry_count += 1;
                             continue;
                         }
                         Err(_) => {
-                            // Non-retryable or exhausted retries
-                            // The commit decision is logged, recovery will retry
+                            // Exhausted retries - commit decision is logged, recovery will retry
                             break;
                         }
                     }
@@ -489,7 +529,11 @@ impl ShardCoordinator {
     ///
     /// This should be called on coordinator startup to handle
     /// transactions that were in-flight when the coordinator crashed.
-    pub fn recover_pending_transactions(&self) -> Result<Vec<TxId>, DistributedTxError> {
+    ///
+    /// Returns a tuple of (successfully recovered, dead-lettered transactions).
+    /// Dead-lettered transactions are those that exceeded max recovery attempts
+    /// and require manual intervention.
+    pub fn recover_pending_transactions(&self) -> Result<RecoveryResult, DistributedTxError> {
         let decisions = {
             let log = self
                 .commit_log
@@ -504,6 +548,8 @@ impl ShardCoordinator {
         };
 
         let mut recovered = Vec::new();
+        let mut dead_lettered = Vec::new();
+        let max_recovery_attempts = 5;
 
         for (tx_id, participants) in decisions {
             // Create a transaction in committing state for recovery
@@ -521,16 +567,143 @@ impl ShardCoordinator {
                 txns.insert(tx_id, tx);
             }
 
-            // Try to complete the commit
-            match self.commit_distributed_transaction(tx_id) {
-                Ok(()) => recovered.push(tx_id),
-                Err(_) => {
-                    // Leave in active transactions for manual intervention
+            // Try to complete the commit with exponential backoff
+            let mut attempts = 0;
+            let mut success = false;
+
+            while attempts < max_recovery_attempts && !success {
+                match self.commit_distributed_transaction(tx_id) {
+                    Ok(()) => {
+                        recovered.push(tx_id);
+                        success = true;
+                    }
+                    Err(e) => {
+                        attempts += 1;
+                        if attempts < max_recovery_attempts {
+                            // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                            let backoff_secs = 1 << attempts;
+                            #[cfg(feature = "observability")]
+                            tracing::warn!(
+                                tx_id = %tx_id,
+                                attempt = attempts,
+                                backoff_secs = backoff_secs,
+                                error = %e,
+                                "Recovery attempt failed, retrying"
+                            );
+                            std::thread::sleep(Duration::from_secs(backoff_secs));
+                        } else {
+                            // Max attempts exceeded - dead letter this transaction
+                            #[cfg(feature = "observability")]
+                            tracing::error!(
+                                tx_id = %tx_id,
+                                max_attempts = max_recovery_attempts,
+                                "Transaction exceeded max recovery attempts, moving to dead letter queue"
+                            );
+                            dead_lettered.push(DeadLetteredTransaction {
+                                tx_id,
+                                reason: format!("Exceeded max recovery attempts: {}", e),
+                                last_attempt: Instant::now(),
+                                attempt_count: attempts,
+                            });
+
+                            // Remove from active transactions to prevent unbounded growth
+                            if let Ok(mut txns) = self.active_transactions.write() {
+                                txns.remove(&tx_id);
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        Ok(recovered)
+        // Store dead-lettered transactions
+        if let Ok(mut dlq) = self.dead_letter_queue.write() {
+            for tx in &dead_lettered {
+                dlq.insert(tx.tx_id, tx.clone());
+            }
+        }
+
+        Ok(RecoveryResult {
+            recovered,
+            dead_lettered,
+        })
+    }
+
+    /// Get transactions in the dead letter queue.
+    ///
+    /// These are transactions that failed recovery and require manual intervention.
+    pub fn get_dead_lettered_transactions(&self) -> Vec<DeadLetteredTransaction> {
+        self.dead_letter_queue
+            .read()
+            .map(|dlq| dlq.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Manually retry a dead-lettered transaction.
+    ///
+    /// This removes the transaction from the dead letter queue and attempts
+    /// recovery again.
+    pub fn retry_dead_lettered_transaction(&self, tx_id: TxId) -> Result<(), DistributedTxError> {
+        // Remove from dead letter queue
+        let dlq_entry = {
+            let mut dlq =
+                self.dead_letter_queue
+                    .write()
+                    .map_err(|_| DistributedTxError::Aborted {
+                        reason: "Lock poisoned".to_string(),
+                    })?;
+            dlq.remove(&tx_id)
+        };
+
+        if dlq_entry.is_none() {
+            return Err(DistributedTxError::Aborted {
+                reason: format!("Transaction {} not found in dead letter queue", tx_id),
+            });
+        }
+
+        // Re-attempt recovery using single-transaction recovery
+        let decisions = {
+            let log = self
+                .commit_log
+                .read()
+                .map_err(|_| DistributedTxError::Aborted {
+                    reason: "Lock poisoned".to_string(),
+                })?;
+            log.decisions_to_replay()
+                .into_iter()
+                .filter(|d| d.tx_id == tx_id)
+                .map(|d| (d.tx_id, d.participants.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        if let Some((found_tx_id, participants)) = decisions.into_iter().next() {
+            let mut tx =
+                DistributedTransaction::new(found_tx_id, participants, self.transaction_timeout);
+            tx.begin_prepare().ok();
+            for shard_id in tx.participant_shards() {
+                tx.record_prepare_success(shard_id);
+            }
+            tx.mark_prepared().ok();
+            tx.begin_commit().ok();
+            tx.commit_decision_logged = true;
+
+            if let Ok(mut txns) = self.active_transactions.write() {
+                txns.insert(found_tx_id, tx);
+            }
+
+            self.commit_distributed_transaction(found_tx_id)
+        } else {
+            Err(DistributedTxError::Aborted {
+                reason: format!("No commit decision found for transaction {}", tx_id),
+            })
+        }
+    }
+
+    /// Clear all dead-lettered transactions (after manual resolution).
+    pub fn clear_dead_letter_queue(&self) {
+        if let Ok(mut dlq) = self.dead_letter_queue.write() {
+            dlq.clear();
+        }
     }
 
     /// Perform health checks on all shards.

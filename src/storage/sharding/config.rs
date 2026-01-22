@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(label_map.get("User").unwrap().as_u16(), 0);
         assert_eq!(label_map.get("Place").unwrap().as_u16(), 1);
         assert_eq!(label_map.get("Location").unwrap().as_u16(), 1);
-        assert!(label_map.get("Unknown").is_none());
+        assert!(!label_map.contains_key("Unknown"));
     }
 
     #[test]
