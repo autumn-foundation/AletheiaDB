@@ -957,7 +957,17 @@ impl CurrentStorage {
     ///
     /// This uses the "default" property (first enabled) for backward compatibility.
     /// For multi-property searches, use `find_similar_in` instead.
-    fn prepare_vector_search(&self, query_node_id: NodeId) -> Result<(Arc<HnswIndex>, Vec<f32>)> {
+    ///
+    /// # Performance (Issue #188)
+    ///
+    /// This method returns `Arc<[f32]>` instead of `Vec<f32>` to avoid unnecessary
+    /// memory allocation. The query vector is stored internally as `Arc<[f32]>`,
+    /// so returning an Arc clone (O(1) refcount increment) is much cheaper than
+    /// copying the entire vector (O(n) allocation + copy).
+    ///
+    /// For 384-dim embeddings, this saves ~1.5KB allocation per search.
+    /// For 1536-dim embeddings, this saves ~6KB allocation per search.
+    fn prepare_vector_search(&self, query_node_id: NodeId) -> Result<(Arc<HnswIndex>, Arc<[f32]>)> {
         // Get the default property name from legacy state
         let state = self.vector_index_state.read();
         let prop_name = state.property_name.as_ref().ok_or_else(|| {
@@ -979,11 +989,14 @@ impl CurrentStorage {
             .indexes
             .get_node(query_node_id)
             .ok_or(StorageError::NodeNotFound(query_node_id))?;
-        let query_vec_ref = query_node
+
+        // Use as_arc_vector() to get an Arc clone (O(1)) instead of to_vec() (O(n))
+        // This avoids unnecessary memory allocation - Issue #188
+        let query_vector = query_node
             .properties
             .get(&prop_name)
             .ok_or_else(|| StorageError::PropertyNotFound(prop_name.clone()))?
-            .as_vector()
+            .as_arc_vector()
             .ok_or_else(|| {
                 crate::utils::error::Error::Vector(
                     crate::utils::error::VectorError::InvalidVector {
@@ -992,9 +1005,12 @@ impl CurrentStorage {
                 )
             })?;
 
-        let query_vector: Vec<f32> = query_vec_ref.to_vec();
-        let index = Arc::clone(&entry.value().index);
+        // Explicitly drop query_node before cloning the index Arc.
+        // While get_node() returns an owned Node (not a lock guard), this
+        // makes the lifetime scope explicit and matches the original code.
         drop(query_node);
+
+        let index = Arc::clone(&entry.value().index);
 
         Ok((index, query_vector))
     }
