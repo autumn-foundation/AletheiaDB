@@ -63,6 +63,9 @@ pub mod embeddings;
 // Optional observability infrastructure
 #[cfg(feature = "observability")]
 pub mod observability;
+// Optional MCP server module
+#[cfg(feature = "mcp-server")]
+pub mod mcp;
 
 // Re-export commonly used types at the crate root
 pub use config::{
