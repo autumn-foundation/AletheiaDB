@@ -44,6 +44,10 @@
 
 pub mod config;
 pub mod coordinator;
+pub mod executor;
+pub mod migration;
+pub mod network;
+pub mod persistent_commit_log;
 pub mod rebalance;
 pub mod router;
 pub mod simulation;
@@ -53,6 +57,23 @@ pub mod types;
 // Re-export commonly used types
 pub use config::{RebalanceConfig, ShardConfig, ShardDefinition, ShardDiscovery};
 pub use coordinator::{ShardConnection, ShardCoordinator};
+pub use executor::{
+    AggregationStrategy, DistributedQuery, ExecutorConfig, ExecutorError, ExecutorResult,
+    ExecutorStats, QueryExecutor, QueryResult, ShardResult,
+};
+pub use migration::{
+    DualWriteRouter, MigrationConfig, MigrationError, MigrationExecutor, MigrationResult,
+    MigrationStats,
+};
+pub use network::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitState, ConnectionPool, MigrationBatch,
+    MigrationResponse, MockShardClient, NetworkError, NetworkResult, PoolConfig, PoolStats,
+    ShardClient,
+};
+pub use persistent_commit_log::{
+    CommitLogConfig, CommitLogEntry, CommitLogError, CommitLogResult, CommitLogStats, EntryType,
+    PersistentCommitLog,
+};
 pub use rebalance::{MigrationPlan, MigrationProgress, MigrationState, RebalanceManager};
 pub use router::{ShardRouter, TraversalPlan, TraversalStep};
 pub use simulation::{EdgeCutAnalysis, ShardingSimulation, SimulationResult};
