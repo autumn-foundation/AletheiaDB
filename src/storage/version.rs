@@ -174,6 +174,31 @@ impl PropertyDelta {
     pub fn is_empty(&self) -> bool {
         self.changed.is_empty() && self.removed.is_empty()
     }
+
+    /// Estimate the heap memory usage of this delta in bytes.
+    ///
+    /// This provides a rough estimate including:
+    /// - HashMap/HashSet internal storage
+    /// - PropertyKey interned strings (counted as pointer size since shared)
+    /// - PropertyValue heap allocations (strings, vectors, etc.)
+    pub fn estimated_heap_size(&self) -> usize {
+        let mut size = 0;
+
+        // HashMap overhead: capacity * (key_size + value_size + ~8 bytes overhead)
+        // Use a conservative estimate
+        size += self.changed.capacity()
+            * (std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8);
+
+        // Estimate PropertyValue heap sizes (conservative estimate per value)
+        for value in self.changed.values() {
+            size += value.estimated_heap_size();
+        }
+
+        // HashSet overhead
+        size += self.removed.capacity() * (std::mem::size_of::<PropertyKey>() + 8);
+
+        size
+    }
 }
 
 impl Default for PropertyDelta {
@@ -261,6 +286,16 @@ impl VersionData {
             _ => None,
         }
     }
+
+    /// Estimate the heap memory usage of this version data in bytes.
+    ///
+    /// This provides a rough estimate of heap allocations for memory accounting.
+    pub fn estimated_heap_size(&self) -> usize {
+        match self {
+            VersionData::Anchor { properties, .. } => properties.estimated_heap_size(),
+            VersionData::Delta { delta } => delta.estimated_heap_size(),
+        }
+    }
 }
 
 /// A version of a node at a specific point in time.
@@ -333,6 +368,14 @@ impl NodeVersion {
     #[inline]
     pub fn is_delta(&self) -> bool {
         self.data.is_delta()
+    }
+
+    /// Estimate the total memory usage of this version in bytes.
+    ///
+    /// This includes both stack size and estimated heap allocations, useful
+    /// for memory accounting in tiered storage migration decisions.
+    pub fn estimated_size(&self) -> usize {
+        std::mem::size_of::<Self>() + self.data.estimated_heap_size()
     }
 }
 
@@ -429,6 +472,14 @@ impl EdgeVersion {
     #[inline]
     pub fn is_delta(&self) -> bool {
         self.data.is_delta()
+    }
+
+    /// Estimate the total memory usage of this version in bytes.
+    ///
+    /// This includes both stack size and estimated heap allocations, useful
+    /// for memory accounting in tiered storage migration decisions.
+    pub fn estimated_size(&self) -> usize {
+        std::mem::size_of::<Self>() + self.data.estimated_heap_size()
     }
 }
 

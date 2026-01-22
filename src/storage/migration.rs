@@ -43,7 +43,7 @@ use crate::utils::error::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "config-toml")]
 use serde::{Deserialize, Serialize};
@@ -359,8 +359,8 @@ impl MigrationService {
                 continue;
             }
 
+            total_bytes += version.estimated_size();
             batch.push(version.clone());
-            total_bytes += std::mem::size_of::<NodeVersion>();
 
             if batch.len() >= self.policy.batch_size {
                 self.cold_storage.store_node_versions_batch(&batch)?;
@@ -402,8 +402,8 @@ impl MigrationService {
                 continue;
             }
 
+            total_bytes += version.estimated_size();
             batch.push(version.clone());
-            total_bytes += std::mem::size_of::<EdgeVersion>();
 
             if batch.len() >= self.policy.batch_size {
                 self.cold_storage.store_edge_versions_batch(&batch)?;
@@ -434,16 +434,29 @@ impl MigrationService {
     /// This method examines the hot tier and returns versions that meet
     /// the migration policy criteria. It ensures that at least `min_hot_versions`
     /// versions remain in hot storage for each node.
+    ///
+    /// # Arguments
+    ///
+    /// * `versions` - All versions currently in hot storage
+    /// * `head_versions` - Map of node IDs to their current head version
+    /// * `version_counts` - Count of versions per node
+    /// * `_current_time` - Unused, kept for API compatibility (wallclock time is used internally)
     pub fn identify_node_candidates(
         &self,
         versions: &HashMap<VersionId, NodeVersion>,
         head_versions: &HashMap<NodeId, VersionId>,
         version_counts: &HashMap<NodeId, usize>,
-        current_time: Instant,
+        _current_time: Instant,
     ) -> Vec<MigrationCandidate> {
         // Track how many candidates we've selected per node
         let mut candidates_per_node: HashMap<NodeId, usize> = HashMap::new();
         let mut all_candidates = Vec::new();
+
+        // Get current wallclock time in milliseconds since UNIX epoch
+        let current_wallclock_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
 
         // First, collect all potential candidates with their ages
         for (version_id, version) in versions {
@@ -454,19 +467,18 @@ impl MigrationService {
                 continue;
             }
 
-            // Calculate age from transaction time
+            // Calculate age from transaction time (wallclock comparison)
             let tx_start_ms = version.temporal.transaction_time().start().wallclock();
-            let age_estimate = Duration::from_millis(
-                current_time.elapsed().as_millis() as u64 + tx_start_ms.unsigned_abs(),
-            );
+            let age_ms = (current_wallclock_ms - tx_start_ms).max(0) as u64;
+            let age = Duration::from_millis(age_ms);
 
             // Check if version meets age threshold
-            if age_estimate >= self.policy.age_threshold {
+            if age >= self.policy.age_threshold {
                 all_candidates.push(MigrationCandidate {
                     version_id: *version_id,
                     is_node: true,
-                    age: age_estimate,
-                    estimated_size: std::mem::size_of::<NodeVersion>(),
+                    age,
+                    estimated_size: version.estimated_size(),
                 });
             }
         }
@@ -500,16 +512,29 @@ impl MigrationService {
     ///
     /// This method ensures that at least `min_hot_versions` versions remain
     /// in hot storage for each edge.
+    ///
+    /// # Arguments
+    ///
+    /// * `versions` - All versions currently in hot storage
+    /// * `head_versions` - Map of edge IDs to their current head version
+    /// * `version_counts` - Count of versions per edge
+    /// * `_current_time` - Unused, kept for API compatibility (wallclock time is used internally)
     pub fn identify_edge_candidates(
         &self,
         versions: &HashMap<VersionId, EdgeVersion>,
         head_versions: &HashMap<EdgeId, VersionId>,
         version_counts: &HashMap<EdgeId, usize>,
-        current_time: Instant,
+        _current_time: Instant,
     ) -> Vec<MigrationCandidate> {
         // Track how many candidates we've selected per edge
         let mut candidates_per_edge: HashMap<EdgeId, usize> = HashMap::new();
         let mut all_candidates = Vec::new();
+
+        // Get current wallclock time in milliseconds since UNIX epoch
+        let current_wallclock_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
 
         // First, collect all potential candidates with their ages
         for (version_id, version) in versions {
@@ -520,17 +545,17 @@ impl MigrationService {
                 continue;
             }
 
+            // Calculate age from transaction time (wallclock comparison)
             let tx_start_ms = version.temporal.transaction_time().start().wallclock();
-            let age_estimate = Duration::from_millis(
-                current_time.elapsed().as_millis() as u64 + tx_start_ms.unsigned_abs(),
-            );
+            let age_ms = (current_wallclock_ms - tx_start_ms).max(0) as u64;
+            let age = Duration::from_millis(age_ms);
 
-            if age_estimate >= self.policy.age_threshold {
+            if age >= self.policy.age_threshold {
                 all_candidates.push(MigrationCandidate {
                     version_id: *version_id,
                     is_node: false,
-                    age: age_estimate,
-                    estimated_size: std::mem::size_of::<EdgeVersion>(),
+                    age,
+                    estimated_size: version.estimated_size(),
                 });
             }
         }

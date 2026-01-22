@@ -28,9 +28,7 @@ use crate::storage::cold_storage::{
 };
 use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::utils::error::{Result, StorageError};
-use rocksdb::{
-    ColumnFamily, ColumnFamilyDescriptor, DB, DBWithThreadMode, MultiThreaded, Options, WriteBatch,
-};
+use rocksdb::{ColumnFamilyDescriptor, DB, Options, WriteBatch};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
@@ -136,7 +134,7 @@ impl RocksDBConfig {
 /// - Column families for node/edge separation
 /// - Bloom filters for fast negative lookups
 pub struct RocksDBColdStorage {
-    db: DBWithThreadMode<MultiThreaded>,
+    db: DB,
     #[allow(dead_code)]
     path: PathBuf,
     stats: AtomicColdStorageStats,
@@ -204,17 +202,33 @@ impl RocksDBColdStorage {
     }
 
     /// Get the column family handle for node versions.
-    fn cf_nodes(&self) -> &ColumnFamily {
-        self.db
-            .cf_handle(CF_NODE_VERSIONS)
-            .expect("node_versions column family should exist")
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the column family is missing, which indicates
+    /// RocksDB is in an inconsistent state.
+    fn cf_nodes(&self) -> Result<&rocksdb::ColumnFamily> {
+        self.db.cf_handle(CF_NODE_VERSIONS).ok_or_else(|| {
+            StorageError::persistence(
+                "node_versions column family missing - database may be corrupted",
+            )
+            .into()
+        })
     }
 
     /// Get the column family handle for edge versions.
-    fn cf_edges(&self) -> &ColumnFamily {
-        self.db
-            .cf_handle(CF_EDGE_VERSIONS)
-            .expect("edge_versions column family should exist")
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the column family is missing, which indicates
+    /// RocksDB is in an inconsistent state.
+    fn cf_edges(&self) -> Result<&rocksdb::ColumnFamily> {
+        self.db.cf_handle(CF_EDGE_VERSIONS).ok_or_else(|| {
+            StorageError::persistence(
+                "edge_versions column family missing - database may be corrupted",
+            )
+            .into()
+        })
     }
 
     /// Convert a VersionId to a RocksDB key.
@@ -227,19 +241,19 @@ impl RocksDBColdStorage {
     /// This is more efficient than individual stores and provides atomicity.
     pub fn store_node_versions_atomic(&self, versions: &[NodeVersion]) -> Result<()> {
         let mut batch = WriteBatch::default();
-        let cf = self.cf_nodes();
+        let cf = self.cf_nodes()?;
 
         let mut total_raw = 0u64;
-        let mut total_compressed = 0u64;
 
         for version in versions {
             let key = Self::version_key(version.id);
             let encoded = super::cold_storage::encode_node_version(version);
             total_raw += encoded.len() as u64;
 
-            // RocksDB handles compression internally based on config
+            // Note: RocksDB handles compression internally at the block level.
+            // We track raw (uncompressed) bytes here. Actual on-disk size after
+            // compression can be queried via approximate_size() or RocksDB properties.
             batch.put_cf(cf, key, &encoded);
-            total_compressed += encoded.len() as u64;
         }
 
         self.db.write(batch).map_err(|e| {
@@ -253,9 +267,11 @@ impl RocksDBColdStorage {
         self.stats
             .bytes_written_raw
             .fetch_add(total_raw, Ordering::Relaxed);
+        // Note: bytes_written_compressed equals raw because RocksDB compresses
+        // internally at the block level. Use approximate_size() for actual disk usage.
         self.stats
             .bytes_written_compressed
-            .fetch_add(total_compressed, Ordering::Relaxed);
+            .fetch_add(total_raw, Ordering::Relaxed);
 
         Ok(())
     }
@@ -263,18 +279,17 @@ impl RocksDBColdStorage {
     /// Store multiple edge versions atomically using a write batch.
     pub fn store_edge_versions_atomic(&self, versions: &[EdgeVersion]) -> Result<()> {
         let mut batch = WriteBatch::default();
-        let cf = self.cf_edges();
+        let cf = self.cf_edges()?;
 
         let mut total_raw = 0u64;
-        let mut total_compressed = 0u64;
 
         for version in versions {
             let key = Self::version_key(version.id);
             let encoded = super::cold_storage::encode_edge_version(version);
             total_raw += encoded.len() as u64;
 
+            // Note: RocksDB handles compression internally at the block level.
             batch.put_cf(cf, key, &encoded);
-            total_compressed += encoded.len() as u64;
         }
 
         self.db.write(batch).map_err(|e| {
@@ -288,9 +303,11 @@ impl RocksDBColdStorage {
         self.stats
             .bytes_written_raw
             .fetch_add(total_raw, Ordering::Relaxed);
+        // Note: bytes_written_compressed equals raw because RocksDB compresses
+        // internally at the block level. Use approximate_size() for actual disk usage.
         self.stats
             .bytes_written_compressed
-            .fetch_add(total_compressed, Ordering::Relaxed);
+            .fetch_add(total_raw, Ordering::Relaxed);
 
         Ok(())
     }
@@ -298,28 +315,62 @@ impl RocksDBColdStorage {
     /// Compact the database to reclaim space and improve read performance.
     ///
     /// This is a blocking operation and should be called during maintenance windows.
-    pub fn compact(&self) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if column families are missing (database corruption).
+    pub fn compact(&self) -> Result<()> {
+        let cf_nodes = self.cf_nodes()?;
+        let cf_edges = self.cf_edges()?;
         self.db
-            .compact_range_cf(self.cf_nodes(), None::<&[u8]>, None::<&[u8]>);
+            .compact_range_cf(cf_nodes, None::<&[u8]>, None::<&[u8]>);
         self.db
-            .compact_range_cf(self.cf_edges(), None::<&[u8]>, None::<&[u8]>);
+            .compact_range_cf(cf_edges, None::<&[u8]>, None::<&[u8]>);
+        Ok(())
+    }
+
+    /// Get the actual compression ratio based on RocksDB statistics.
+    ///
+    /// Returns the ratio of compressed size to raw size, or None if unavailable.
+    /// A ratio of 0.3 means data is compressed to 30% of original size.
+    ///
+    /// Note: This reflects the overall database compression, not individual writes.
+    pub fn compression_ratio(&self) -> Option<f64> {
+        let stats = self.stats();
+        let on_disk = self.approximate_size();
+
+        if stats.bytes_written_raw > 0 && on_disk > 0 {
+            Some(on_disk as f64 / stats.bytes_written_raw as f64)
+        } else {
+            None
+        }
     }
 
     /// Get the approximate size of the database on disk in bytes.
+    ///
+    /// Returns 0 if column families are unavailable.
     pub fn approximate_size(&self) -> u64 {
         // Get sizes for both column families
         let node_size = self
-            .db
-            .property_int_value_cf(self.cf_nodes(), "rocksdb.estimate-live-data-size")
+            .cf_nodes()
             .ok()
-            .flatten()
+            .and_then(|cf| {
+                self.db
+                    .property_int_value_cf(cf, "rocksdb.estimate-live-data-size")
+                    .ok()
+                    .flatten()
+            })
             .unwrap_or(0);
 
         let edge_size = self
-            .db
-            .property_int_value_cf(self.cf_edges(), "rocksdb.estimate-live-data-size")
+            .cf_edges()
             .ok()
-            .flatten()
+            .and_then(|cf| {
+                self.db
+                    .property_int_value_cf(cf, "rocksdb.estimate-live-data-size")
+                    .ok()
+                    .flatten()
+            })
             .unwrap_or(0);
 
         node_size + edge_size
@@ -331,13 +382,12 @@ impl ColdStorage for RocksDBColdStorage {
         let key = Self::version_key(version.id);
         let encoded = super::cold_storage::encode_node_version(version);
         let raw_size = encoded.len();
+        let cf = self.cf_nodes()?;
 
-        self.db
-            .put_cf(self.cf_nodes(), key, &encoded)
-            .map_err(|e| {
-                self.stats.write_errors.fetch_add(1, Ordering::Relaxed);
-                StorageError::persistence(format!("Failed to store node version: {}", e))
-            })?;
+        self.db.put_cf(cf, key, &encoded).map_err(|e| {
+            self.stats.write_errors.fetch_add(1, Ordering::Relaxed);
+            StorageError::persistence(format!("Failed to store node version: {}", e))
+        })?;
 
         self.stats
             .node_versions_stored
@@ -362,7 +412,8 @@ impl ColdStorage for RocksDBColdStorage {
             .fetch_add(1, Ordering::Relaxed);
 
         let key = Self::version_key(id);
-        match self.db.get_cf(self.cf_nodes(), key) {
+        let cf = self.cf_nodes()?;
+        match self.db.get_cf(cf, key) {
             Ok(Some(data)) => {
                 self.stats
                     .bytes_read_compressed
@@ -386,13 +437,12 @@ impl ColdStorage for RocksDBColdStorage {
         let key = Self::version_key(version.id);
         let encoded = super::cold_storage::encode_edge_version(version);
         let raw_size = encoded.len();
+        let cf = self.cf_edges()?;
 
-        self.db
-            .put_cf(self.cf_edges(), key, &encoded)
-            .map_err(|e| {
-                self.stats.write_errors.fetch_add(1, Ordering::Relaxed);
-                StorageError::persistence(format!("Failed to store edge version: {}", e))
-            })?;
+        self.db.put_cf(cf, key, &encoded).map_err(|e| {
+            self.stats.write_errors.fetch_add(1, Ordering::Relaxed);
+            StorageError::persistence(format!("Failed to store edge version: {}", e))
+        })?;
 
         self.stats
             .edge_versions_stored
@@ -417,7 +467,8 @@ impl ColdStorage for RocksDBColdStorage {
             .fetch_add(1, Ordering::Relaxed);
 
         let key = Self::version_key(id);
-        match self.db.get_cf(self.cf_edges(), key) {
+        let cf = self.cf_edges()?;
+        match self.db.get_cf(cf, key) {
             Ok(Some(data)) => {
                 self.stats
                     .bytes_read_compressed
@@ -439,42 +490,45 @@ impl ColdStorage for RocksDBColdStorage {
 
     fn contains_node_version(&self, id: VersionId) -> Result<bool> {
         let key = Self::version_key(id);
+        let cf = self.cf_nodes()?;
         // Use key_may_exist for faster negative lookups (bloom filter)
-        if !self.db.key_may_exist_cf(self.cf_nodes(), &key) {
+        if !self.db.key_may_exist_cf(cf, key) {
             return Ok(false);
         }
         // Confirm with actual get if bloom filter says maybe
         Ok(self
             .db
-            .get_cf(self.cf_nodes(), key)
+            .get_cf(cf, key)
             .map_err(|e| StorageError::persistence(format!("Failed to check node version: {}", e)))?
             .is_some())
     }
 
     fn contains_edge_version(&self, id: VersionId) -> Result<bool> {
         let key = Self::version_key(id);
-        if !self.db.key_may_exist_cf(self.cf_edges(), &key) {
+        let cf = self.cf_edges()?;
+        if !self.db.key_may_exist_cf(cf, key) {
             return Ok(false);
         }
         Ok(self
             .db
-            .get_cf(self.cf_edges(), key)
+            .get_cf(cf, key)
             .map_err(|e| StorageError::persistence(format!("Failed to check edge version: {}", e)))?
             .is_some())
     }
 
     fn delete_node_version(&self, id: VersionId) -> Result<bool> {
         let key = Self::version_key(id);
+        let cf = self.cf_nodes()?;
 
         // Check if exists first
         let exists = self
             .db
-            .get_cf(self.cf_nodes(), &key)
+            .get_cf(cf, key)
             .map_err(|e| StorageError::persistence(format!("Failed to check node version: {}", e)))?
             .is_some();
 
         if exists {
-            self.db.delete_cf(self.cf_nodes(), key).map_err(|e| {
+            self.db.delete_cf(cf, key).map_err(|e| {
                 StorageError::persistence(format!("Failed to delete node version: {}", e))
             })?;
         }
@@ -484,15 +538,16 @@ impl ColdStorage for RocksDBColdStorage {
 
     fn delete_edge_version(&self, id: VersionId) -> Result<bool> {
         let key = Self::version_key(id);
+        let cf = self.cf_edges()?;
 
         let exists = self
             .db
-            .get_cf(self.cf_edges(), &key)
+            .get_cf(cf, key)
             .map_err(|e| StorageError::persistence(format!("Failed to check edge version: {}", e)))?
             .is_some();
 
         if exists {
-            self.db.delete_cf(self.cf_edges(), key).map_err(|e| {
+            self.db.delete_cf(cf, key).map_err(|e| {
                 StorageError::persistence(format!("Failed to delete edge version: {}", e))
             })?;
         }
@@ -511,11 +566,6 @@ impl ColdStorage for RocksDBColdStorage {
         Ok(())
     }
 }
-
-// Make encode/decode functions accessible to this module
-use super::cold_storage::{
-    decode_edge_version, decode_node_version, encode_edge_version, encode_node_version,
-};
 
 #[cfg(test)]
 mod tests {

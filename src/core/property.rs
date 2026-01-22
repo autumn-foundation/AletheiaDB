@@ -626,6 +626,55 @@ impl PropertyValue {
             .into()),
         }
     }
+
+    /// Estimate the heap memory usage of this property value in bytes.
+    ///
+    /// This provides a rough estimate of heap allocations, useful for memory
+    /// accounting in tiered storage migration decisions. The estimate includes:
+    ///
+    /// - String/Bytes: actual data size (shared via Arc)
+    /// - Array: element sizes plus Vec overhead
+    /// - Vector: f32 count * 4 bytes
+    /// - SparseVector: indices + values + dimension overhead
+    ///
+    /// Note: This is an estimate. Due to Arc sharing, actual memory usage may
+    /// be lower if values are shared across versions.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use gallifreydb::core::PropertyValue;
+    ///
+    /// let small = PropertyValue::Int(42);
+    /// assert_eq!(small.estimated_heap_size(), 0); // No heap allocation
+    ///
+    /// let string = PropertyValue::string("hello world");
+    /// assert_eq!(string.estimated_heap_size(), 11); // String length
+    /// ```
+    pub fn estimated_heap_size(&self) -> usize {
+        match self {
+            PropertyValue::Null
+            | PropertyValue::Bool(_)
+            | PropertyValue::Int(_)
+            | PropertyValue::Float(_) => 0,
+            PropertyValue::String(s) => s.len(),
+            PropertyValue::Bytes(b) => b.len(),
+            PropertyValue::Array(arr) => {
+                // Vec capacity overhead + recursive element sizes
+                let mut size = arr.capacity() * std::mem::size_of::<PropertyValue>();
+                for item in arr.iter() {
+                    size += item.estimated_heap_size();
+                }
+                size
+            }
+            PropertyValue::Vector(v) => v.len() * std::mem::size_of::<f32>(),
+            PropertyValue::SparseVector(sv) => {
+                // Indices + values + SparseVec struct overhead
+                sv.nnz() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
+                    + std::mem::size_of::<usize>() // dimension field
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -1229,6 +1278,30 @@ impl PropertyMap {
             },
             offset,
         ))
+    }
+
+    /// Estimate the heap memory usage of this property map in bytes.
+    ///
+    /// This provides a rough estimate of heap allocations, useful for memory
+    /// accounting in tiered storage migration decisions. The estimate includes:
+    ///
+    /// - HashMap internal storage overhead
+    /// - PropertyKey storage (interned, so minimal)
+    /// - PropertyValue heap allocations (strings, vectors, etc.)
+    ///
+    /// Note: Due to Arc sharing, actual memory usage may be lower if this
+    /// PropertyMap shares its underlying data with other instances.
+    pub fn estimated_heap_size(&self) -> usize {
+        // HashMap overhead: capacity * (key_size + value_size + ~8 bytes overhead per entry)
+        let mut size = self.inner.capacity()
+            * (std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8);
+
+        // Add heap sizes of individual values
+        for value in self.inner.values() {
+            size += value.estimated_heap_size();
+        }
+
+        size
     }
 }
 

@@ -104,6 +104,13 @@ impl Default for ColdStorageConfig {
 }
 
 /// Statistics for cold storage operations.
+///
+/// # Compression Stats Note
+///
+/// For backends like RocksDB that handle compression internally at the block level,
+/// `bytes_written_compressed` may equal `bytes_written_raw` because the actual
+/// compression happens asynchronously during compaction. To get the true on-disk
+/// size, use the backend's `approximate_size()` method instead.
 #[derive(Debug, Clone, Default)]
 pub struct ColdStorageStats {
     /// Total number of node versions stored.
@@ -117,8 +124,15 @@ pub struct ColdStorageStats {
     /// Total bytes written (before compression).
     pub bytes_written_raw: u64,
     /// Total bytes written (after compression).
+    ///
+    /// Note: For backends like RocksDB that handle compression internally,
+    /// this may equal `bytes_written_raw`. Use `approximate_size()` or
+    /// `compression_ratio()` on the backend for actual compression metrics.
     pub bytes_written_compressed: u64,
-    /// Total bytes read (compressed).
+    /// Total bytes read (compressed size from storage).
+    ///
+    /// Note: For backends with transparent decompression, this may equal
+    /// `bytes_read_decompressed`.
     pub bytes_read_compressed: u64,
     /// Total bytes read (after decompression).
     pub bytes_read_decompressed: u64,
@@ -130,7 +144,12 @@ pub struct ColdStorageStats {
 
 impl ColdStorageStats {
     /// Calculate the compression ratio (raw/compressed).
+    ///
     /// Returns 1.0 if no data has been written.
+    ///
+    /// Note: For backends like RocksDB, this ratio may be 1.0 because compression
+    /// happens at the block level during compaction. Use the backend's own
+    /// `compression_ratio()` method for actual on-disk compression metrics.
     pub fn compression_ratio(&self) -> f64 {
         if self.bytes_written_compressed == 0 {
             1.0
