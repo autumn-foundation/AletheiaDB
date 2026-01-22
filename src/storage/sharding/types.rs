@@ -54,9 +54,11 @@ impl fmt::Display for ShardId {
     }
 }
 
-impl From<u16> for ShardId {
-    fn from(id: u16) -> Self {
-        ShardId::new_unchecked(id)
+impl TryFrom<u16> for ShardId {
+    type Error = StorageError;
+
+    fn try_from(id: u16) -> Result<Self, Self::Error> {
+        ShardId::new(id)
     }
 }
 
@@ -318,9 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn test_shard_id_from_u16() {
-        let id: ShardId = 42u16.into();
+    fn test_shard_id_try_from_u16() {
+        let id: ShardId = 42u16.try_into().unwrap();
         assert_eq!(id.as_u16(), 42);
+
+        // Invalid ID should fail
+        let result: Result<ShardId, _> = (MAX_SHARD_ID + 1).try_into();
+        assert!(result.is_err());
     }
 
     #[test]

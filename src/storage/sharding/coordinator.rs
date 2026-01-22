@@ -348,7 +348,7 @@ impl ShardCoordinator {
                             transaction.record_commit_success(shard_id);
                             break;
                         }
-                        Err(e) if retries > 0 => {
+                        Err(_) if retries > 0 => {
                             retries -= 1;
                             // In real implementation, would sleep with backoff
                             continue;
