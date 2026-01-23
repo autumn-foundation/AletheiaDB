@@ -109,6 +109,13 @@ impl Options {
                 "Sample rate must be greater than 0".to_string(),
             ));
         }
+        // Prevent DoS via extremely large sample rates that could cause overflow
+        const MAX_SAMPLE_RATE: usize = 1_000_000;
+        if self.sample_rate > MAX_SAMPLE_RATE {
+            return Err(super::error::Error::Config(format!(
+                "Sample rate must not exceed {MAX_SAMPLE_RATE}"
+            )));
+        }
         Ok(())
     }
 
@@ -353,6 +360,18 @@ mod tests {
             err.to_string()
                 .contains("Sample rate must be greater than 0")
         );
+    }
+
+    #[test]
+    fn test_options_validate_excessive_sample_rate() {
+        // Sample rate exceeding MAX_SAMPLE_RATE (1,000,000) should be rejected
+        let opts = Options::new("key", "dataset").with_sample_rate(1_000_001);
+        let err = opts.validate().unwrap_err();
+        assert!(err.to_string().contains("must not exceed"));
+
+        // Just at the limit should be fine
+        let opts_at_limit = Options::new("key", "dataset").with_sample_rate(1_000_000);
+        assert!(opts_at_limit.validate().is_ok());
     }
 
     #[test]

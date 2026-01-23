@@ -126,11 +126,18 @@ impl BatchBuffer {
     /// Returns `Ok(Some(batch))` if the buffer is now full and should be flushed,
     /// `Ok(None)` if the event was added but the buffer is not yet full,
     /// or `Err` if the buffer is at capacity.
+    ///
+    /// # Mutex Poisoning
+    ///
+    /// If a previous thread panicked while holding the mutex, this method recovers
+    /// the data rather than propagating the error. This ensures observability data
+    /// is preserved even during crash scenarios.
     pub fn add(&self, event: Event) -> Result<Option<Vec<Event>>, super::error::Error> {
-        let mut events = self
-            .events
-            .lock()
-            .map_err(|e| super::error::Error::Buffer(format!("Failed to acquire lock: {e}")))?;
+        // Recover from poisoned mutex - observability should work even after panics
+        let mut events = self.events.lock().unwrap_or_else(|poisoned| {
+            eprintln!("Warning: BatchBuffer events mutex was poisoned, recovering data");
+            poisoned.into_inner()
+        });
 
         // Check capacity
         if events.len() >= self.options.pending_work_capacity {
@@ -141,10 +148,11 @@ impl BatchBuffer {
         }
 
         // Set batch start time if this is the first event
-        let mut batch_start = self
-            .batch_start
-            .lock()
-            .map_err(|e| super::error::Error::Buffer(format!("Failed to acquire lock: {e}")))?;
+        // Recover from poisoned mutex
+        let mut batch_start = self.batch_start.lock().unwrap_or_else(|poisoned| {
+            eprintln!("Warning: BatchBuffer batch_start mutex was poisoned, recovering data");
+            poisoned.into_inner()
+        });
         if batch_start.is_none() {
             *batch_start = Some(Instant::now());
         }
@@ -183,16 +191,21 @@ impl BatchBuffer {
     /// Flush the buffer, returning all pending events.
     ///
     /// Returns an empty vector if the buffer is empty.
+    ///
+    /// # Mutex Poisoning
+    ///
+    /// Recovers from poisoned mutexes to ensure observability data is not lost.
     pub fn flush(&self) -> Result<Vec<Event>, super::error::Error> {
-        let mut events = self
-            .events
-            .lock()
-            .map_err(|e| super::error::Error::Buffer(format!("Failed to acquire lock: {e}")))?;
+        // Recover from poisoned mutex - observability should work even after panics
+        let mut events = self.events.lock().unwrap_or_else(|poisoned| {
+            eprintln!("Warning: BatchBuffer events mutex was poisoned during flush, recovering data");
+            poisoned.into_inner()
+        });
 
-        let mut batch_start = self
-            .batch_start
-            .lock()
-            .map_err(|e| super::error::Error::Buffer(format!("Failed to acquire lock: {e}")))?;
+        let mut batch_start = self.batch_start.lock().unwrap_or_else(|poisoned| {
+            eprintln!("Warning: BatchBuffer batch_start mutex was poisoned during flush, recovering data");
+            poisoned.into_inner()
+        });
 
         let batch = std::mem::replace(
             &mut *events,
