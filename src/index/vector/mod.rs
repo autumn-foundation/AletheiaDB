@@ -678,3 +678,14 @@ pub use sharded::{
     RebalanceConfig as ShardedRebalanceConfig, ShardStats, ShardedVectorConfig, ShardedVectorIndex,
     ShardingStrategy,
 };
+
+// Distributed vector index (VS-107)
+pub mod distributed;
+
+// Re-export distributed types for convenience
+pub use distributed::{
+    CircuitBreakerConfig as DistributedCircuitBreakerConfig, CircuitState, DistributedError,
+    DistributedIndexStats, DistributedVectorConfig, DistributedVectorIndex, MockVectorNodeClient,
+    NodeCircuitBreaker, NodeConnection, NodeConnectionStats, RoutingStrategy, VectorNodeClient,
+    VectorNodeConfig,
+};
