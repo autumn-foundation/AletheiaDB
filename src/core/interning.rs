@@ -817,7 +817,7 @@ mod tests {
         interner.warm_common_strings();
 
         // After warming, common strings should be interned
-        assert!(interner.len() > 0);
+        assert!(!interner.is_empty());
 
         // Verify all common strings are present
         for s in COMMON_STRINGS {
