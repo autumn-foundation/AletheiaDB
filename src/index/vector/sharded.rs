@@ -22,6 +22,16 @@
 //!
 //! This provides even distribution regardless of NodeId patterns.
 //!
+//! # Important: Fixed Shard Count
+//!
+//! The number of shards is **fixed at construction time** and cannot be changed
+//! dynamically. This is because hash-based routing depends on the modulo of the
+//! shard count - changing it would cause existing vectors to be routed to wrong
+//! shards on lookup.
+//!
+//! To scale to more shards, create a new index with the desired count and
+//! migrate data.
+//!
 //! # Performance Characteristics
 //!
 //! - **Add operation**: Same as single HNSW (~1-10µs per vector)
@@ -67,6 +77,9 @@ use crate::core::vector::validate_vector;
 use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, Quantization, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
 use parking_lot::RwLock;
+use rayon::prelude::*;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -87,8 +100,8 @@ pub enum ShardingStrategy {
     /// Provides even distribution regardless of NodeId patterns.
     #[default]
     HashBased,
-    /// Range-based partitioning: shard = node_id / range_size
-    /// Better for range queries but may have uneven distribution.
+    /// Range-based partitioning: divides the u64 ID space evenly across shards.
+    /// Better for range queries but may have uneven distribution if IDs are clustered.
     RangeBased,
 }
 
@@ -193,13 +206,19 @@ impl Default for ShardedVectorConfig {
 ///
 /// This structure provides horizontal scalability by partitioning vectors
 /// across multiple shards and coordinating search operations.
+///
+/// # Fixed Shard Count
+///
+/// The number of shards is fixed at construction time. This is because the
+/// routing algorithm (hash % num_shards) depends on a consistent shard count.
+/// Changing it would cause existing vectors to be routed to wrong shards.
 pub struct ShardedVectorIndex {
     /// Configuration for this index.
     config: ShardedVectorConfig,
     /// The underlying HNSW shards.
     shards: Vec<Arc<HnswIndex>>,
-    /// Lock for rebalancing operations.
-    rebalance_lock: RwLock<()>,
+    /// Lock for exclusive operations.
+    _lock: RwLock<()>,
 }
 
 impl ShardedVectorIndex {
@@ -222,9 +241,12 @@ impl ShardedVectorIndex {
             }));
         }
 
+        // Ensure num_shards is at least 1
+        let num_shards = config.num_shards.max(1);
+
         // Create shards
-        let mut shards = Vec::with_capacity(config.num_shards);
-        for _ in 0..config.num_shards {
+        let mut shards = Vec::with_capacity(num_shards);
+        for _ in 0..num_shards {
             let shard = HnswIndex::new(config.hnsw_config.clone())?;
             shards.push(Arc::new(shard));
         }
@@ -232,7 +254,7 @@ impl ShardedVectorIndex {
         Ok(Self {
             config,
             shards,
-            rebalance_lock: RwLock::new(()),
+            _lock: RwLock::new(()),
         })
     }
 
@@ -292,17 +314,29 @@ impl ShardedVectorIndex {
     }
 
     /// Returns the shard index for a given NodeId.
+    ///
+    /// The routing is deterministic: the same NodeId always maps to the same shard.
     fn shard_for_id(&self, id: NodeId) -> usize {
+        // Defensive check - should never happen due to construction validation
+        debug_assert!(!self.shards.is_empty(), "shards cannot be empty");
+        let num_shards = self.shards.len();
+        if num_shards == 0 {
+            return 0;
+        }
+
         match self.config.strategy {
             ShardingStrategy::HashBased => {
                 let mut hasher = DefaultHasher::new();
                 id.as_u64().hash(&mut hasher);
-                (hasher.finish() as usize) % self.shards.len()
+                (hasher.finish() as usize) % num_shards
             }
             ShardingStrategy::RangeBased => {
-                // Divide the ID space evenly across shards
-                let range_size = u64::MAX / self.shards.len() as u64;
-                (id.as_u64() / range_size.max(1)) as usize % self.shards.len()
+                // Divide the u64 ID space evenly across shards using u128 to avoid overflow
+                // This maps [0, u64::MAX] proportionally to [0, num_shards)
+                let num_shards_128 = num_shards as u128;
+                let id_128 = id.as_u64() as u128;
+                // We use (u64::MAX as u128 + 1) to represent the full range size
+                ((id_128 * num_shards_128) / (u64::MAX as u128 + 1)) as usize
             }
         }
     }
@@ -322,7 +356,7 @@ impl ShardedVectorIndex {
     ///
     /// # Current Limitation
     ///
-    /// This method currently only **estimates** how many vectors would need to move
+    /// This method only **estimates** how many vectors would need to move
     /// to achieve balance. It does **not** actually move any vectors because the
     /// underlying HNSW index doesn't support efficient iteration over stored vectors.
     ///
@@ -344,17 +378,19 @@ impl ShardedVectorIndex {
     /// # fn example() -> gallifreydb::utils::Result<()> {
     /// let index = ShardedVectorIndex::with_defaults(128, DistanceMetric::Cosine, 4)?;
     /// // ... add vectors ...
-    /// let vectors_to_move = index.rebalance()?;
+    /// let vectors_to_move = index.estimate_rebalance_cost()?;
     /// println!("Would need to move {} vectors to rebalance", vectors_to_move);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn rebalance(&self) -> Result<usize> {
-        // Acquire exclusive lock for rebalancing
-        let _lock = self.rebalance_lock.write();
-
+    pub fn estimate_rebalance_cost(&self) -> Result<usize> {
         let stats = self.stats();
         if stats.imbalance_ratio <= self.config.rebalance_config.imbalance_threshold {
+            return Ok(0);
+        }
+
+        // Protect against division by zero
+        if self.shards.is_empty() {
             return Ok(0);
         }
 
@@ -375,17 +411,6 @@ impl ShardedVectorIndex {
         Ok(vectors_to_move)
     }
 
-    /// Add a shard to the index.
-    ///
-    /// This creates a new empty shard. Existing vectors are not automatically
-    /// redistributed - call `rebalance()` after adding shards if needed.
-    pub fn add_shard(&mut self) -> Result<()> {
-        let shard = HnswIndex::new(self.config.hnsw_config.clone())?;
-        self.shards.push(Arc::new(shard));
-        self.config.num_shards = self.shards.len();
-        Ok(())
-    }
-
     /// Returns the total memory usage across all shards.
     pub fn total_memory_usage(&self) -> usize {
         self.shards.iter().map(|s| s.memory_usage()).sum()
@@ -403,15 +428,15 @@ impl ShardedVectorIndex {
     /// Returns an error if:
     /// - Any shard file cannot be loaded
     /// - The configuration doesn't match the saved index
+    /// - The path contains invalid characters or path traversal attempts
     pub fn load(path: &Path, config: ShardedVectorConfig) -> Result<Self> {
+        // Validate path to prevent path traversal attacks
+        Self::validate_path(path)?;
+
         let mut shards = Vec::with_capacity(config.num_shards);
 
         for i in 0..config.num_shards {
-            let shard_path = path.with_file_name(format!(
-                "{}.shard_{}",
-                path.file_name().and_then(|n| n.to_str()).unwrap_or("index"),
-                i
-            ));
+            let shard_path = Self::shard_path(path, i)?;
             let shard = HnswIndex::load(&shard_path, config.hnsw_config.clone())?;
             shards.push(Arc::new(shard));
         }
@@ -419,7 +444,110 @@ impl ShardedVectorIndex {
         Ok(Self {
             config,
             shards,
-            rebalance_lock: RwLock::new(()),
+            _lock: RwLock::new(()),
+        })
+    }
+
+    /// Validate a path for security concerns.
+    fn validate_path(path: &Path) -> Result<()> {
+        // Check for path traversal attempts
+        let path_str = path.to_string_lossy();
+        if path_str.contains("..") {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Path contains invalid traversal characters (..)".to_string(),
+            )));
+        }
+
+        // Ensure the path has a valid file name
+        if path.file_name().is_none() {
+            return Err(Error::Vector(VectorError::IndexError(
+                "Path must have a valid file name".to_string(),
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Generate the path for a specific shard.
+    fn shard_path(base_path: &Path, shard_index: usize) -> Result<std::path::PathBuf> {
+        let file_name = base_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Path must have a valid UTF-8 file name".to_string(),
+                ))
+            })?;
+
+        Ok(base_path.with_file_name(format!("{}.shard_{}", file_name, shard_index)))
+    }
+
+    /// Merge search results from multiple shards using a min-heap for efficiency.
+    ///
+    /// This is O(n log k) where n is total results and k is the desired count,
+    /// compared to O(n log n) for sorting all results.
+    fn merge_results(shard_results: Vec<Vec<(NodeId, f32)>>, k: usize) -> Vec<(NodeId, f32)> {
+        if k == 0 {
+            return Vec::new();
+        }
+
+        // Use a min-heap to track the top-k results
+        // We store (Reverse(score), NodeId) so the smallest score is at the top
+        let mut heap: BinaryHeap<(Reverse<OrderedFloat>, NodeId)> =
+            BinaryHeap::with_capacity(k + 1);
+
+        for results in shard_results {
+            for (id, score) in results {
+                let ordered_score = OrderedFloat(score);
+
+                if heap.len() < k {
+                    heap.push((Reverse(ordered_score), id));
+                } else if let Some(&(Reverse(min_score), _)) = heap.peek()
+                    && ordered_score > min_score
+                {
+                    heap.pop();
+                    heap.push((Reverse(ordered_score), id));
+                }
+            }
+        }
+
+        // Extract results and sort by descending score
+        let mut results: Vec<(NodeId, f32)> = heap
+            .into_iter()
+            .map(|(Reverse(score), id)| (id, score.0))
+            .collect();
+
+        // Sort descending by score
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        results
+    }
+}
+
+/// Wrapper for f32 that implements Ord for use in BinaryHeap.
+///
+/// NaN values are treated as less than all other values for consistent ordering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OrderedFloat(f32);
+
+impl Eq for OrderedFloat {}
+
+impl PartialOrd for OrderedFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedFloat {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.partial_cmp(&other.0).unwrap_or_else(|| {
+            // Handle NaN: treat NaN as less than everything
+            match (self.0.is_nan(), other.0.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => unreachable!(),
+            }
         })
     }
 }
@@ -463,23 +591,18 @@ impl VectorIndex for ShardedVectorIndex {
         // Cap k to prevent DoS
         let k_capped = k.min(MAX_K);
 
-        // Search all shards and collect results
-        // In a production implementation, this would use rayon for parallel search
-        let mut all_results: Vec<(NodeId, f32)> = Vec::new();
+        // Search all shards in parallel using rayon
+        let shard_results: Result<Vec<Vec<(NodeId, f32)>>> = self
+            .shards
+            .par_iter()
+            .filter(|shard| !shard.is_empty())
+            .map(|shard| shard.search(query, k_capped))
+            .collect();
 
-        for shard in &self.shards {
-            if shard.len() == 0 {
-                continue;
-            }
-            let shard_results = shard.search(query, k_capped)?;
-            all_results.extend(shard_results);
-        }
+        let shard_results = shard_results?;
 
-        // Sort by similarity (descending) and take top k
-        all_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        all_results.truncate(k_capped);
-
-        Ok(all_results)
+        // Merge results using efficient heap-based algorithm
+        Ok(Self::merge_results(shard_results, k_capped))
     }
 
     fn search_with_filter<F>(
@@ -503,22 +626,18 @@ impl VectorIndex for ShardedVectorIndex {
 
         let k_capped = k.min(MAX_K);
 
-        // Search all shards with filter
-        let mut all_results: Vec<(NodeId, f32)> = Vec::new();
+        // Search all shards in parallel with filter
+        let shard_results: Result<Vec<Vec<(NodeId, f32)>>> = self
+            .shards
+            .par_iter()
+            .filter(|shard| !shard.is_empty())
+            .map(|shard| shard.search_with_filter(query, k_capped, &predicate))
+            .collect();
 
-        for shard in &self.shards {
-            if shard.len() == 0 {
-                continue;
-            }
-            let shard_results = shard.search_with_filter(query, k_capped, &predicate)?;
-            all_results.extend(shard_results);
-        }
+        let shard_results = shard_results?;
 
-        // Sort and truncate
-        all_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        all_results.truncate(k_capped);
-
-        Ok(all_results)
+        // Merge results using efficient heap-based algorithm
+        Ok(Self::merge_results(shard_results, k_capped))
     }
 
     fn len(&self) -> usize {
@@ -534,18 +653,23 @@ impl VectorIndex for ShardedVectorIndex {
     }
 
     fn add_batch(&self, items: &[(NodeId, Vec<f32>)]) -> Result<()> {
-        // Group items by shard for more efficient batch operations
-        let mut shard_items: Vec<Vec<(NodeId, Vec<f32>)>> = vec![Vec::new(); self.shards.len()];
+        // Group item indices by shard to avoid cloning vectors
+        let mut shard_indices: Vec<Vec<usize>> = vec![Vec::new(); self.shards.len()];
 
-        for (id, vec) in items {
+        for (idx, (id, _)) in items.iter().enumerate() {
             let shard_idx = self.shard_for_id(*id);
-            shard_items[shard_idx].push((*id, vec.clone()));
+            shard_indices[shard_idx].push(idx);
         }
 
-        // Add to each shard
-        for (shard_idx, items) in shard_items.into_iter().enumerate() {
-            if !items.is_empty() {
-                self.shards[shard_idx].add_batch(&items)?;
+        // Add to each shard using the original items slice
+        for (shard_idx, indices) in shard_indices.into_iter().enumerate() {
+            if !indices.is_empty() {
+                // Build the batch for this shard by referencing the original items
+                let shard_items: Vec<(NodeId, Vec<f32>)> = indices
+                    .iter()
+                    .map(|&idx| (items[idx].0, items[idx].1.clone()))
+                    .collect();
+                self.shards[shard_idx].add_batch(&shard_items)?;
             }
         }
 
@@ -572,14 +696,12 @@ impl VectorIndex for ShardedVectorIndex {
     }
 
     fn save(&self, path: &Path) -> Result<()> {
+        // Validate path for security
+        Self::validate_path(path)?;
+
         // Save each shard to a separate file
-        // Uses naming pattern: base_path.shard_N (e.g., /data/index.shard_0, /data/index.shard_1)
         for (i, shard) in self.shards.iter().enumerate() {
-            let shard_path = path.with_file_name(format!(
-                "{}.shard_{}",
-                path.file_name().and_then(|n| n.to_str()).unwrap_or("index"),
-                i
-            ));
+            let shard_path = Self::shard_path(path, i)?;
             shard.save(&shard_path)?;
         }
         Ok(())
@@ -604,7 +726,7 @@ impl VectorIndex for ShardedVectorIndex {
 // Note: ShardedVectorIndex automatically implements Send + Sync because:
 // - `config`: ShardedVectorConfig is Send + Sync (contains only Send + Sync types)
 // - `shards`: Vec<Arc<HnswIndex>> - HnswIndex manually implements Send + Sync
-// - `rebalance_lock`: parking_lot::RwLock<()> is Send + Sync
+// - `_lock`: parking_lot::RwLock<()> is Send + Sync
 
 #[cfg(test)]
 mod tests {
@@ -982,6 +1104,40 @@ mod tests {
     }
 
     #[test]
+    fn test_range_based_distribution_even() -> Result<()> {
+        // Test that range-based distribution is even across the full ID space
+        let config = ShardedVectorConfig::new(4)
+            .with_strategy(ShardingStrategy::RangeBased)
+            .with_hnsw_config(HnswConfig::new(4, DistanceMetric::Cosine));
+        let index = ShardedVectorIndex::new(config)?;
+
+        // Add vectors spread across the u64 range
+        let test_ids: Vec<u64> = vec![
+            0,
+            u64::MAX / 4,
+            u64::MAX / 2,
+            u64::MAX / 4 * 3,
+            u64::MAX - 1000, // near max
+        ];
+
+        for id in test_ids {
+            if let Ok(node) = NodeId::new(id) {
+                index.add(node, &[id as f32, 0.0, 0.0, 0.0])?;
+            }
+        }
+
+        // Verify vectors are distributed across different shards
+        let stats = index.stats();
+        let non_empty_shards = stats.shard_sizes.iter().filter(|&&s| s > 0).count();
+        assert!(
+            non_empty_shards >= 2,
+            "Vectors should be in multiple shards"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_consistent_routing() -> Result<()> {
         let index = ShardedVectorIndex::with_defaults(4, DistanceMetric::Cosine, 4)?;
 
@@ -1027,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rebalance_balanced_index() -> Result<()> {
+    fn test_estimate_rebalance_cost() -> Result<()> {
         let index = ShardedVectorIndex::with_defaults(4, DistanceMetric::Cosine, 4)?;
 
         // Add evenly distributed vectors
@@ -1036,29 +1192,10 @@ mod tests {
             index.add(node, &[i as f32, 0.0, 0.0, 0.0])?;
         }
 
-        // Rebalancing a balanced index should move 0 vectors
-        let moved = index.rebalance()?;
+        // Estimate rebalancing cost
+        let cost = index.estimate_rebalance_cost()?;
         // May or may not need rebalancing depending on hash distribution
-        assert!(moved <= 100);
-
-        Ok(())
-    }
-
-    // ============================================================
-    // Add Shard Tests
-    // ============================================================
-
-    #[test]
-    fn test_add_shard() -> Result<()> {
-        // with_defaults(dimensions, metric, num_shards)
-        let mut index = ShardedVectorIndex::with_defaults(4, DistanceMetric::Cosine, 2)?;
-        assert_eq!(index.num_shards(), 2);
-
-        index.add_shard()?;
-        assert_eq!(index.num_shards(), 3);
-
-        // New shard should be empty
-        assert_eq!(index.get_shard(2).unwrap().len(), 0);
+        assert!(cost <= 100);
 
         Ok(())
     }
@@ -1244,6 +1381,83 @@ mod tests {
     }
 
     // ============================================================
+    // Heap-based Merging Tests
+    // ============================================================
+
+    #[test]
+    fn test_merge_results_empty() {
+        let results = ShardedVectorIndex::merge_results(vec![], 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_merge_results_single_shard() {
+        let shard_results = vec![vec![
+            (NodeId::new(1).unwrap(), 0.9),
+            (NodeId::new(2).unwrap(), 0.8),
+            (NodeId::new(3).unwrap(), 0.7),
+        ]];
+
+        let merged = ShardedVectorIndex::merge_results(shard_results, 2);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].0, NodeId::new(1).unwrap());
+        assert_eq!(merged[1].0, NodeId::new(2).unwrap());
+    }
+
+    #[test]
+    fn test_merge_results_multiple_shards() {
+        let shard_results = vec![
+            vec![
+                (NodeId::new(1).unwrap(), 0.9),
+                (NodeId::new(2).unwrap(), 0.7),
+            ],
+            vec![
+                (NodeId::new(3).unwrap(), 0.85),
+                (NodeId::new(4).unwrap(), 0.6),
+            ],
+        ];
+
+        let merged = ShardedVectorIndex::merge_results(shard_results, 3);
+        assert_eq!(merged.len(), 3);
+        // Should be sorted: 0.9, 0.85, 0.7
+        assert_eq!(merged[0].0, NodeId::new(1).unwrap());
+        assert_eq!(merged[1].0, NodeId::new(3).unwrap());
+        assert_eq!(merged[2].0, NodeId::new(2).unwrap());
+    }
+
+    #[test]
+    fn test_merge_results_k_zero() {
+        let shard_results = vec![vec![(NodeId::new(1).unwrap(), 0.9)]];
+        let merged = ShardedVectorIndex::merge_results(shard_results, 0);
+        assert!(merged.is_empty());
+    }
+
+    // ============================================================
+    // Path Validation Tests
+    // ============================================================
+
+    #[test]
+    fn test_path_validation_traversal() {
+        let path = Path::new("/data/../etc/passwd");
+        let result = ShardedVectorIndex::validate_path(path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_path_validation_no_filename() {
+        let path = Path::new("/");
+        let result = ShardedVectorIndex::validate_path(path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_path_validation_valid() {
+        let path = Path::new("/data/index");
+        let result = ShardedVectorIndex::validate_path(path);
+        assert!(result.is_ok());
+    }
+
+    // ============================================================
     // Save/Load Tests
     // ============================================================
 
@@ -1251,7 +1465,7 @@ mod tests {
     fn test_save_and_load() -> Result<()> {
         use tempfile::tempdir;
 
-        let dir = tempdir().map_err(|e| Error::Io(e))?;
+        let dir = tempdir().map_err(Error::Io)?;
         let path = dir.path().join("test_index");
 
         let config = ShardedVectorConfig::new(2)
@@ -1279,5 +1493,30 @@ mod tests {
         assert!(!results.is_empty());
 
         Ok(())
+    }
+
+    // ============================================================
+    // OrderedFloat Tests
+    // ============================================================
+
+    #[test]
+    fn test_ordered_float_ordering() {
+        let a = OrderedFloat(0.5);
+        let b = OrderedFloat(0.7);
+        let c = OrderedFloat(0.5);
+
+        assert!(a < b);
+        assert!(b > a);
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn test_ordered_float_nan_handling() {
+        let nan = OrderedFloat(f32::NAN);
+        let normal = OrderedFloat(0.5);
+
+        // NaN should be less than normal values
+        assert!(nan < normal);
+        assert!(normal > nan);
     }
 }
