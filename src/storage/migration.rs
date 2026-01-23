@@ -50,6 +50,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "config-toml")]
 use serde::{Deserialize, Serialize};
 
+/// Interval for checking shutdown signal in the background worker.
+/// Short enough for responsive shutdown, long enough to avoid busy-waiting.
+const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Policy for determining when to migrate versions from hot to cold tier.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "config-toml", derive(Serialize, Deserialize))]
@@ -472,7 +476,9 @@ impl MigrationService {
         // Mark as not shutdown complete
         {
             let (lock, _) = &*self.shutdown_complete;
-            let mut complete = lock.lock().unwrap();
+            let mut complete = lock
+                .lock()
+                .expect("MigrationService shutdown lock poisoned in start()");
             *complete = false;
         }
 
@@ -487,7 +493,10 @@ impl MigrationService {
         });
 
         // Store the handle
-        let mut handle_guard = self.worker_handle.lock().unwrap();
+        let mut handle_guard = self
+            .worker_handle
+            .lock()
+            .expect("MigrationService worker_handle lock poisoned in start()");
         *handle_guard = Some(handle);
     }
 
@@ -498,13 +507,11 @@ impl MigrationService {
         shutdown_complete: Arc<(Mutex<bool>, Condvar)>,
     ) {
         while running.load(Ordering::SeqCst) {
-            // Sleep for the configured interval
-            // Use shorter sleep intervals to check for shutdown more frequently
-            let check_interval = Duration::from_millis(50);
+            // Sleep for the configured interval, checking for shutdown periodically
             let mut remaining = policy.run_interval;
 
             while remaining > Duration::ZERO && running.load(Ordering::SeqCst) {
-                let sleep_time = remaining.min(check_interval);
+                let sleep_time = remaining.min(SHUTDOWN_CHECK_INTERVAL);
                 thread::sleep(sleep_time);
                 remaining = remaining.saturating_sub(sleep_time);
             }
@@ -520,7 +527,9 @@ impl MigrationService {
 
         // Signal that shutdown is complete
         let (lock, cvar) = &*shutdown_complete;
-        let mut complete = lock.lock().unwrap();
+        let mut complete = lock
+            .lock()
+            .expect("MigrationService shutdown lock poisoned in worker_loop");
         *complete = true;
         cvar.notify_all();
     }
@@ -541,13 +550,20 @@ impl MigrationService {
 
         // Wait for the worker to complete
         let (lock, cvar) = &*self.shutdown_complete;
-        let mut complete = lock.lock().unwrap();
+        let mut complete = lock
+            .lock()
+            .expect("MigrationService shutdown lock poisoned in stop()");
         while !*complete {
-            complete = cvar.wait(complete).unwrap();
+            complete = cvar
+                .wait(complete)
+                .expect("MigrationService shutdown condvar wait failed");
         }
 
         // Join the thread if we have a handle
-        let mut handle_guard = self.worker_handle.lock().unwrap();
+        let mut handle_guard = self
+            .worker_handle
+            .lock()
+            .expect("MigrationService worker_handle lock poisoned in stop()");
         if let Some(handle) = handle_guard.take() {
             let _ = handle.join();
         }
@@ -590,7 +606,10 @@ impl MigrationService {
     /// This method should be called whenever a version is accessed
     /// to track access patterns for LRU-based migration.
     pub fn record_access(&self, version_id: VersionId) {
-        let mut access_times = self.access_times.write().unwrap();
+        let mut access_times = self
+            .access_times
+            .write()
+            .expect("MigrationService access_times lock poisoned in record_access()");
         access_times.insert(version_id, Instant::now());
     }
 
@@ -598,15 +617,51 @@ impl MigrationService {
     ///
     /// Returns `None` if the version has never been accessed.
     pub fn get_last_access(&self, version_id: VersionId) -> Option<Instant> {
-        let access_times = self.access_times.read().unwrap();
+        let access_times = self
+            .access_times
+            .read()
+            .expect("MigrationService access_times lock poisoned in get_last_access()");
         access_times.get(&version_id).copied()
     }
 
     /// Clear access tracking for versions that have been migrated.
     pub fn clear_access(&self, version_ids: &[VersionId]) {
-        let mut access_times = self.access_times.write().unwrap();
+        let mut access_times = self
+            .access_times
+            .write()
+            .expect("MigrationService access_times lock poisoned in clear_access()");
         for id in version_ids {
             access_times.remove(id);
+        }
+    }
+
+    /// Sort migration candidates based on policy.
+    ///
+    /// In LRU mode, candidates are sorted by last access time (least recently used first).
+    /// In age mode, candidates are sorted by age (oldest first).
+    fn sort_candidates_by_policy(&self, candidates: &mut [MigrationCandidate]) {
+        if self.policy.enable_lru {
+            // LRU mode: sort by last access time (least recently used first)
+            let access_times = self.access_times.read().expect(
+                "MigrationService access_times lock poisoned in sort_candidates_by_policy()",
+            );
+            candidates.sort_by(|a, b| {
+                let a_access = access_times.get(&a.version_id);
+                let b_access = access_times.get(&b.version_id);
+
+                match (a_access, b_access) {
+                    // Both have access times: sort by oldest access first
+                    (Some(a_time), Some(b_time)) => a_time.cmp(b_time),
+                    // No access time means never accessed, prioritize for migration
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    // Both never accessed: fall back to age-based ordering
+                    (None, None) => b.age.cmp(&a.age),
+                }
+            });
+        } else {
+            // Age mode: sort by age (oldest first) to prioritize older versions
+            candidates.sort_by(|a, b| b.age.cmp(&a.age));
         }
     }
 
@@ -829,28 +884,8 @@ impl MigrationService {
             }
         }
 
-        // Sort candidates based on policy
-        if self.policy.enable_lru {
-            // LRU mode: sort by last access time (least recently used first)
-            let access_times = self.access_times.read().unwrap();
-            all_candidates.sort_by(|a, b| {
-                let a_access = access_times.get(&a.version_id);
-                let b_access = access_times.get(&b.version_id);
-
-                match (a_access, b_access) {
-                    // Both have access times: sort by oldest access first
-                    (Some(a_time), Some(b_time)) => a_time.cmp(b_time),
-                    // No access time means never accessed, prioritize for migration
-                    (None, Some(_)) => std::cmp::Ordering::Less,
-                    (Some(_), None) => std::cmp::Ordering::Greater,
-                    // Both never accessed: fall back to age-based ordering
-                    (None, None) => b.age.cmp(&a.age),
-                }
-            });
-        } else {
-            // Age mode: sort by age (oldest first) to prioritize older versions
-            all_candidates.sort_by(|a, b| b.age.cmp(&a.age));
-        }
+        // Sort candidates based on policy (LRU or age-based)
+        self.sort_candidates_by_policy(&mut all_candidates);
 
         // Filter candidates to ensure min_hot_versions remain
         let mut final_candidates = Vec::new();
@@ -926,28 +961,8 @@ impl MigrationService {
             }
         }
 
-        // Sort candidates based on policy
-        if self.policy.enable_lru {
-            // LRU mode: sort by last access time (least recently used first)
-            let access_times = self.access_times.read().unwrap();
-            all_candidates.sort_by(|a, b| {
-                let a_access = access_times.get(&a.version_id);
-                let b_access = access_times.get(&b.version_id);
-
-                match (a_access, b_access) {
-                    // Both have access times: sort by oldest access first
-                    (Some(a_time), Some(b_time)) => a_time.cmp(b_time),
-                    // No access time means never accessed, prioritize for migration
-                    (None, Some(_)) => std::cmp::Ordering::Less,
-                    (Some(_), None) => std::cmp::Ordering::Greater,
-                    // Both never accessed: fall back to age-based ordering
-                    (None, None) => b.age.cmp(&a.age),
-                }
-            });
-        } else {
-            // Age mode: sort by age (oldest first) to prioritize older versions
-            all_candidates.sort_by(|a, b| b.age.cmp(&a.age));
-        }
+        // Sort candidates based on policy (LRU or age-based)
+        self.sort_candidates_by_policy(&mut all_candidates);
 
         // Filter candidates to ensure min_hot_versions remain
         let mut final_candidates = Vec::new();
