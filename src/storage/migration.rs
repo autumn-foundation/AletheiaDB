@@ -41,6 +41,7 @@ use crate::storage::cold_storage::ColdStorage;
 use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::utils::error::Result;
 use std::collections::HashMap;
+use std::panic;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, RwLock};
@@ -53,6 +54,11 @@ use serde::{Deserialize, Serialize};
 /// Interval for checking shutdown signal in the background worker.
 /// Short enough for responsive shutdown, long enough to avoid busy-waiting.
 const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Maximum number of entries in the access_times tracking map.
+/// Prevents unbounded memory growth from access tracking (DoS protection).
+/// When exceeded, oldest entries are evicted.
+const MAX_ACCESS_ENTRIES: usize = 1_000_000;
 
 /// Policy for determining when to migrate versions from hot to cold tier.
 #[derive(Debug, Clone)]
@@ -399,6 +405,9 @@ impl MigrationCallback for DefaultMigrationCallback {}
 /// 1. Signals the background worker to stop
 /// 2. Waits for any in-flight batch to complete
 /// 3. Returns only when fully stopped
+///
+/// The service also implements `Drop` to ensure the worker thread is stopped
+/// when the service is dropped.
 pub struct MigrationService {
     cold_storage: Arc<dyn ColdStorage>,
     policy: MigrationPolicy,
@@ -407,13 +416,20 @@ pub struct MigrationService {
     callback: Arc<dyn MigrationCallback>,
 
     /// Access time tracking for LRU migration (version_id -> last access time)
+    /// Bounded to MAX_ACCESS_ENTRIES to prevent unbounded memory growth.
     access_times: Arc<RwLock<HashMap<VersionId, Instant>>>,
 
     /// Handle to the background worker thread
     worker_handle: Mutex<Option<JoinHandle<()>>>,
 
-    /// Condvar for signaling worker shutdown completion
-    shutdown_complete: Arc<(Mutex<bool>, Condvar)>,
+    /// Condvar for signaling worker shutdown completion.
+    /// Tuple contains (shutdown_complete flag, generation counter).
+    /// Generation counter prevents race conditions during rapid start/stop cycles.
+    shutdown_complete: Arc<(Mutex<(bool, u64)>, Condvar)>,
+
+    /// Current generation of the worker. Incremented on each start().
+    /// Used to detect stale shutdown signals from previous workers.
+    generation: Arc<AtomicU64>,
 }
 
 impl MigrationService {
@@ -427,7 +443,8 @@ impl MigrationService {
             callback: Arc::new(DefaultMigrationCallback),
             access_times: Arc::new(RwLock::new(HashMap::new())),
             worker_handle: Mutex::new(None),
-            shutdown_complete: Arc::new((Mutex::new(true), Condvar::new())),
+            shutdown_complete: Arc::new((Mutex::new((true, 0)), Condvar::new())),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -445,7 +462,8 @@ impl MigrationService {
             callback,
             access_times: Arc::new(RwLock::new(HashMap::new())),
             worker_handle: Mutex::new(None),
-            shutdown_complete: Arc::new((Mutex::new(true), Condvar::new())),
+            shutdown_complete: Arc::new((Mutex::new((true, 0)), Condvar::new())),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -473,13 +491,14 @@ impl MigrationService {
             return;
         }
 
-        // Mark as not shutdown complete
+        // Increment generation and mark as not shutdown complete
+        let current_gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         {
             let (lock, _) = &*self.shutdown_complete;
-            let mut complete = lock
+            let mut state = lock
                 .lock()
                 .expect("MigrationService shutdown lock poisoned in start()");
-            *complete = false;
+            *state = (false, current_gen);
         }
 
         // Clone what we need for the worker thread
@@ -487,9 +506,9 @@ impl MigrationService {
         let policy = self.policy.clone();
         let shutdown_complete = self.shutdown_complete.clone();
 
-        // Spawn the background worker
+        // Spawn the background worker with panic safety
         let handle = thread::spawn(move || {
-            Self::worker_loop(running, policy, shutdown_complete);
+            Self::worker_loop(running, policy, shutdown_complete, current_gen);
         });
 
         // Store the handle
@@ -500,12 +519,43 @@ impl MigrationService {
         *handle_guard = Some(handle);
     }
 
-    /// Background worker loop.
+    /// Background worker loop with panic safety.
+    ///
+    /// The loop is wrapped in catch_unwind to ensure shutdown_complete is signaled
+    /// even if the worker panics, preventing stop() from hanging indefinitely.
     fn worker_loop(
         running: Arc<AtomicBool>,
         policy: MigrationPolicy,
-        shutdown_complete: Arc<(Mutex<bool>, Condvar)>,
+        shutdown_complete: Arc<(Mutex<(bool, u64)>, Condvar)>,
+        generation: u64,
     ) {
+        // Wrap the entire loop in catch_unwind for panic safety
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            Self::worker_loop_inner(&running, &policy);
+        }));
+
+        // Always signal shutdown complete, even on panic
+        let (lock, cvar) = &*shutdown_complete;
+        let mut state = lock
+            .lock()
+            .expect("MigrationService shutdown lock poisoned in worker_loop");
+
+        // Only signal if this is the current generation (prevents stale signals)
+        if state.1 == generation {
+            state.0 = true;
+            cvar.notify_all();
+        }
+
+        // Re-panic after signaling if there was a panic
+        if let Err(panic_payload) = result {
+            // Mark as not running so stop() doesn't try to join again
+            running.store(false, Ordering::SeqCst);
+            panic::resume_unwind(panic_payload);
+        }
+    }
+
+    /// Inner worker loop logic.
+    fn worker_loop_inner(running: &AtomicBool, policy: &MigrationPolicy) {
         while running.load(Ordering::SeqCst) {
             // Sleep for the configured interval, checking for shutdown periodically
             let mut remaining = policy.run_interval;
@@ -524,14 +574,7 @@ impl MigrationService {
             // Migration logic would go here when integrated with HistoricalStorage
             // For now, this is a placeholder that the integration tests can verify
         }
-
-        // Signal that shutdown is complete
-        let (lock, cvar) = &*shutdown_complete;
-        let mut complete = lock
-            .lock()
-            .expect("MigrationService shutdown lock poisoned in worker_loop");
-        *complete = true;
-        cvar.notify_all();
+        // Shutdown signaling is handled by worker_loop() wrapper
     }
 
     /// Stop the background migration worker.
@@ -548,14 +591,21 @@ impl MigrationService {
             return;
         }
 
-        // Wait for the worker to complete
+        // Get current generation to wait for
+        let current_gen = self.generation.load(Ordering::SeqCst);
+
+        // Wait for the worker to complete (check generation to avoid stale signals)
         let (lock, cvar) = &*self.shutdown_complete;
-        let mut complete = lock
+        let mut state = lock
             .lock()
             .expect("MigrationService shutdown lock poisoned in stop()");
-        while !*complete {
-            complete = cvar
-                .wait(complete)
+        while !state.0 || state.1 != current_gen {
+            // If generation changed, a new worker started - don't wait for old one
+            if state.1 > current_gen {
+                break;
+            }
+            state = cvar
+                .wait(state)
                 .expect("MigrationService shutdown condvar wait failed");
         }
 
@@ -605,11 +655,27 @@ impl MigrationService {
     ///
     /// This method should be called whenever a version is accessed
     /// to track access patterns for LRU-based migration.
+    ///
+    /// The access tracking map is bounded to `MAX_ACCESS_ENTRIES` to prevent
+    /// unbounded memory growth. When at capacity, oldest entries are evicted.
     pub fn record_access(&self, version_id: VersionId) {
         let mut access_times = self
             .access_times
             .write()
             .expect("MigrationService access_times lock poisoned in record_access()");
+
+        // If already at max capacity and this is a new entry, evict oldest
+        if access_times.len() >= MAX_ACCESS_ENTRIES && !access_times.contains_key(&version_id) {
+            // Find and remove the oldest entry
+            if let Some(oldest_id) = access_times
+                .iter()
+                .min_by_key(|(_, time)| *time)
+                .map(|(id, _)| *id)
+            {
+                access_times.remove(&oldest_id);
+            }
+        }
+
         access_times.insert(version_id, Instant::now());
     }
 
@@ -639,19 +705,29 @@ impl MigrationService {
     ///
     /// In LRU mode, candidates are sorted by last access time (least recently used first).
     /// In age mode, candidates are sorted by age (oldest first).
+    ///
+    /// For LRU mode, access times are pre-fetched to minimize lock contention during sort.
     fn sort_candidates_by_policy(&self, candidates: &mut [MigrationCandidate]) {
         if self.policy.enable_lru {
+            // Pre-fetch access times to minimize lock hold time during sort
+            let candidate_access_times: HashMap<VersionId, Option<Instant>> = {
+                let access_times = self.access_times.read().expect(
+                    "MigrationService access_times lock poisoned in sort_candidates_by_policy()",
+                );
+                candidates
+                    .iter()
+                    .map(|c| (c.version_id, access_times.get(&c.version_id).copied()))
+                    .collect()
+            };
+
             // LRU mode: sort by last access time (least recently used first)
-            let access_times = self.access_times.read().expect(
-                "MigrationService access_times lock poisoned in sort_candidates_by_policy()",
-            );
             candidates.sort_by(|a, b| {
-                let a_access = access_times.get(&a.version_id);
-                let b_access = access_times.get(&b.version_id);
+                let a_access = candidate_access_times.get(&a.version_id).and_then(|&t| t);
+                let b_access = candidate_access_times.get(&b.version_id).and_then(|&t| t);
 
                 match (a_access, b_access) {
                     // Both have access times: sort by oldest access first
-                    (Some(a_time), Some(b_time)) => a_time.cmp(b_time),
+                    (Some(a_time), Some(b_time)) => a_time.cmp(&b_time),
                     // No access time means never accessed, prioritize for migration
                     (None, Some(_)) => std::cmp::Ordering::Less,
                     (Some(_), None) => std::cmp::Ordering::Greater,
@@ -982,6 +1058,19 @@ impl MigrationService {
         }
 
         final_candidates
+    }
+}
+
+impl Drop for MigrationService {
+    /// Ensure the background worker is stopped when the service is dropped.
+    ///
+    /// This prevents orphaned worker threads that would continue running
+    /// after the service is no longer accessible.
+    fn drop(&mut self) {
+        // Only stop if running - stop() handles the is_running check internally
+        if self.running.load(Ordering::Relaxed) {
+            self.stop();
+        }
     }
 }
 
