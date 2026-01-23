@@ -612,15 +612,18 @@ mod tests {
         // Verify correctness
         assert_eq!(index.edge_count(), edge_count);
 
-        // Each node should have roughly edge_count/node_count edges
-        let first_node = NodeId::new(0).unwrap();
-        let degree = index.degree(first_node);
-        assert!(degree > 0, "First node should have outgoing edges");
-
-        // Verify we can retrieve adjacency for all nodes
+        // Verify that each node has the correct number of outgoing edges.
+        // In this test setup, each node is a source for `edge_count / node_count` edges.
+        let expected_degree = edge_count / node_count;
         for i in 0..node_count {
             let node = NodeId::new(i as u64).unwrap();
             let adj = index.get_adjacency(node);
+            assert_eq!(
+                adj.len(),
+                expected_degree,
+                "Node {} has an unexpected degree",
+                i
+            );
             // All adjacency entries should be valid
             for entry in adj {
                 assert!(entry.edge_id.as_u64() < edge_count as u64);
