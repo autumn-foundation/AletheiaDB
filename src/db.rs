@@ -597,6 +597,7 @@ fn persist_graph_index(
         graph_data.nodes.push(PersistedNode {
             id: node.id.as_u64(),
             label_idx: node.label.as_u32(),
+            version_id: node.current_version.as_u64(),
             properties,
         });
     }
@@ -613,6 +614,7 @@ fn persist_graph_index(
             source_id: edge.source.as_u64(),
             target_id: edge.target.as_u64(),
             label_idx: edge.label.as_u32(),
+            version_id: edge.current_version.as_u64(),
             properties,
         });
     }
@@ -3117,6 +3119,7 @@ impl GallifreyDB {
             graph_data.nodes.push(PersistedNode {
                 id: node.id.as_u64(),
                 label_idx,
+                version_id: node.current_version.as_u64(),
                 properties,
             });
         }
@@ -3134,6 +3137,7 @@ impl GallifreyDB {
                 source_id: edge.source.as_u64(),
                 target_id: edge.target.as_u64(),
                 label_idx,
+                version_id: edge.current_version.as_u64(),
                 properties,
             });
         }

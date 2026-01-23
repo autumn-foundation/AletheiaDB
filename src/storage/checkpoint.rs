@@ -406,6 +406,7 @@ impl CheckpointManager {
             let persisted = PersistedNode {
                 id: node.id.as_u64(),
                 label_idx: node.label.as_u32(),
+                version_id: node.current_version.as_u64(),
                 properties: persist_property_map(&node.properties).map_err(persistence_err)?,
             };
             nodes.push(persisted);
@@ -418,6 +419,7 @@ impl CheckpointManager {
                 source_id: edge.source.as_u64(),
                 target_id: edge.target.as_u64(),
                 label_idx: edge.label.as_u32(),
+                version_id: edge.current_version.as_u64(),
                 properties: persist_property_map(&edge.properties).map_err(persistence_err)?,
             };
             edges.push(persisted);
@@ -587,8 +589,8 @@ impl CheckpointManager {
                 crate::storage::index_persistence::graph::load_graph_index(&graph_path)
                     .map_err(persistence_err)?;
 
-            // Track next version ID for restored entities
-            let mut next_version_id: u64 = 1;
+            // Track maximum version ID to initialize generator
+            let mut max_version_id: u64 = 0;
 
             // Restore nodes
             for persisted_node in &graph_data.nodes {
@@ -596,8 +598,8 @@ impl CheckpointManager {
                 let label = InternedString::from_raw(persisted_node.label_idx);
                 let properties =
                     restore_property_map(&persisted_node.properties).map_err(persistence_err)?;
-                let version_id = VersionId::new(next_version_id)?;
-                next_version_id += 1;
+                let version_id = VersionId::new(persisted_node.version_id)?;
+                max_version_id = max_version_id.max(persisted_node.version_id);
 
                 let node = Node::new(node_id, label, properties, version_id);
                 current.insert_node_direct(node, crate::core::temporal::time::now())?;
@@ -611,15 +613,15 @@ impl CheckpointManager {
                 let label = InternedString::from_raw(persisted_edge.label_idx);
                 let properties =
                     restore_property_map(&persisted_edge.properties).map_err(persistence_err)?;
-                let version_id = VersionId::new(next_version_id)?;
-                next_version_id += 1;
+                let version_id = VersionId::new(persisted_edge.version_id)?;
+                max_version_id = max_version_id.max(persisted_edge.version_id);
 
                 let edge = Edge::new(edge_id, label, source, target, properties, version_id);
                 current.insert_edge_direct(edge)?;
             }
 
-            // Initialize version ID generator
-            current.init_version_id_generator(next_version_id);
+            // Initialize version ID generator to continue from max version ID
+            current.init_version_id_generator(max_version_id + 1);
 
             // Initialize ID generators to continue from max IDs
             if let Some(max_node_id) = graph_data.nodes.iter().map(|n| n.id).max() {

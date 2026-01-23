@@ -82,6 +82,7 @@ fn test_full_persistence_cycle() {
     graph_data.nodes.push(PersistedNode {
         id: 1,
         label_idx: GLOBAL_INTERNER.intern("Person").unwrap().as_u32(),
+        version_id: 1,
         properties: persisted_props.clone(),
     });
 
@@ -92,6 +93,7 @@ fn test_full_persistence_cycle() {
     graph_data.nodes.push(PersistedNode {
         id: 2,
         label_idx: GLOBAL_INTERNER.intern("Document").unwrap().as_u32(),
+        version_id: 2,
         properties: persist_property_map(&doc_props).unwrap(),
     });
 
@@ -101,6 +103,7 @@ fn test_full_persistence_cycle() {
         source_id: 1,
         target_id: 2,
         label_idx: GLOBAL_INTERNER.intern("AUTHORED").unwrap().as_u32(),
+        version_id: 3,
         properties: PersistedPropertyMap { entries: vec![] },
     });
 
@@ -769,6 +772,7 @@ fn test_compression_reduces_file_size() {
         graph_data.nodes.push(PersistedNode {
             id: i,
             label_idx: 1, // Same label for all - compresses well
+            version_id: i,
             properties: persisted_props,
         });
     }
@@ -851,6 +855,7 @@ fn test_parallel_loading_is_faster() {
         graph_data.nodes.push(PersistedNode {
             id: i,
             label_idx: 1,
+            version_id: i,
             properties: persisted_props,
         });
     }
@@ -949,6 +954,7 @@ fn test_memory_mapped_loading() {
         graph_data.nodes.push(PersistedNode {
             id: i,
             label_idx: 1,
+            version_id: i,
             properties: persisted_props,
         });
     }
@@ -1016,6 +1022,7 @@ fn test_delta_encoding_reduces_incremental_save_size() {
         base_data.nodes.push(PersistedNode {
             id: i,
             label_idx: 1,
+            version_id: i,
             properties: persisted_props,
         });
     }
@@ -1032,7 +1039,8 @@ fn test_delta_encoding_reduces_incremental_save_size() {
             id: i,
             source_id: i,
             target_id: target,
-            label_idx: 2, // Different label for edges
+            label_idx: 2,         // Different label for edges
+            version_id: i + 1000, // Offset to avoid collision with nodes
             properties: persisted_props,
         });
     }
@@ -1066,6 +1074,7 @@ fn test_delta_encoding_reduces_incremental_save_size() {
         modified_data.nodes.push(PersistedNode {
             id: i,
             label_idx: 1,
+            version_id: i,
             properties: persisted_props,
         });
     }
@@ -1105,6 +1114,7 @@ fn test_delta_encoding_reduces_incremental_save_size() {
             source_id: i,
             target_id: target,
             label_idx: 2,
+            version_id: i + 1000, // Offset to avoid collision with nodes
             properties: persisted_props,
         });
     }
@@ -1366,6 +1376,7 @@ fn test_truncated_file_detection() {
     graph_data.nodes.push(PersistedNode {
         id: 1,
         label_idx: 1,
+        version_id: 1,
         properties: persisted_props,
     });
     graph_data.node_count = 1;
@@ -1440,6 +1451,7 @@ fn test_invalid_id_detection() {
     graph_data.nodes.push(PersistedNode {
         id: u64::MAX - 500, // Very large ID
         label_idx: 1,
+        version_id: u64::MAX - 500,
         properties: graph_data.nodes[0].properties.clone(),
     });
 
@@ -1555,6 +1567,7 @@ fn test_corrupted_property_data() {
     graph_data.nodes.push(PersistedNode {
         id: 1,
         label_idx: 1,
+        version_id: 1,
         properties: persisted_props,
     });
 
@@ -1562,6 +1575,7 @@ fn test_corrupted_property_data() {
     graph_data.nodes.push(PersistedNode {
         id: 2,
         label_idx: 1,
+        version_id: 2,
         properties: PersistedPropertyMap {
             entries: vec![], // Empty properties - edge case
         },
@@ -1637,6 +1651,7 @@ fn test_multiple_restoration_errors() {
     graph_data.nodes.push(PersistedNode {
         id: 100,
         label_idx: 99999, // Non-existent string index
+        version_id: 100,
         properties: graph_data.nodes[0].properties.clone(),
     });
 
@@ -1644,6 +1659,7 @@ fn test_multiple_restoration_errors() {
     graph_data.nodes.push(PersistedNode {
         id: u64::MAX - 100,
         label_idx: 1,
+        version_id: u64::MAX - 100,
         properties: graph_data.nodes[0].properties.clone(),
     });
 
