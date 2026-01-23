@@ -337,7 +337,7 @@ impl CurrentIndexes {
     /// - **Partial clone**: Only clones the PropertyValue (cheap for Arc types)
     /// - **No Node clone**: Does not clone the entire Node structure
     /// - **Interning cost**: The key is interned on each call; for hot paths
-    ///   with repeated lookups, consider using `with_node` with a pre-interned key
+    ///   with repeated lookups, use [`get_node_property_by_key`](Self::get_node_property_by_key)
     ///
     /// # Example
     ///
@@ -368,7 +368,7 @@ impl CurrentIndexes {
     /// - **Partial clone**: Only clones the PropertyValue (cheap for Arc types)
     /// - **No Edge clone**: Does not clone the entire Edge structure
     /// - **Interning cost**: The key is interned on each call; for hot paths
-    ///   with repeated lookups, consider using `with_edge` with a pre-interned key
+    ///   with repeated lookups, use [`get_edge_property_by_key`](Self::get_edge_property_by_key)
     ///
     /// # Example
     ///
@@ -386,6 +386,80 @@ impl CurrentIndexes {
         self.edges
             .get(&id)
             .and_then(|entry| entry.value().properties.get(key).cloned())
+    }
+
+    /// Get a property value from a node using a pre-interned key.
+    ///
+    /// This is the high-performance version of [`get_node_property`](Self::get_node_property)
+    /// for hot paths where the same property key is accessed repeatedly.
+    ///
+    /// # Performance
+    ///
+    /// - **No interning**: Avoids HashMap lookup in the global interner
+    /// - **Partial clone**: Only clones the PropertyValue (cheap for Arc types)
+    /// - **Ideal for loops**: Pre-intern key once, use this method in the loop
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// // Pre-intern the key once outside the loop
+    /// let name_key = GLOBAL_INTERNER.intern("name").unwrap();
+    ///
+    /// // Use the interned key in the hot loop
+    /// for node_id in node_ids {
+    ///     if let Some(name) = indexes.get_node_property_by_key(node_id, &name_key) {
+    ///         // Process name
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_node_property_by_key(
+        &self,
+        id: NodeId,
+        key: &crate::core::property::PropertyKey,
+    ) -> Option<crate::core::property::PropertyValue> {
+        self.nodes
+            .get(&id)
+            .and_then(|entry| entry.value().properties.get_by_interned_key(key).cloned())
+    }
+
+    /// Get a property value from an edge using a pre-interned key.
+    ///
+    /// This is the high-performance version of [`get_edge_property`](Self::get_edge_property)
+    /// for hot paths where the same property key is accessed repeatedly.
+    ///
+    /// # Performance
+    ///
+    /// - **No interning**: Avoids HashMap lookup in the global interner
+    /// - **Partial clone**: Only clones the PropertyValue (cheap for Arc types)
+    /// - **Ideal for loops**: Pre-intern key once, use this method in the loop
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// // Pre-intern the key once outside the loop
+    /// let weight_key = GLOBAL_INTERNER.intern("weight").unwrap();
+    ///
+    /// // Use the interned key in the hot loop
+    /// for edge_id in edge_ids {
+    ///     if let Some(weight) = indexes.get_edge_property_by_key(edge_id, &weight_key) {
+    ///         // Process weight
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_edge_property_by_key(
+        &self,
+        id: EdgeId,
+        key: &crate::core::property::PropertyKey,
+    ) -> Option<crate::core::property::PropertyValue> {
+        self.edges
+            .get(&id)
+            .and_then(|entry| entry.value().properties.get_by_interned_key(key).cloned())
     }
 
     /// Remove a node from the indexes.
@@ -2015,6 +2089,89 @@ mod zero_copy_access_tests {
         let indexes = CurrentIndexes::new();
 
         let prop = indexes.get_edge_property(EdgeId::new(999).unwrap(), "weight");
+        assert!(prop.is_none());
+    }
+
+    // ========================================================================
+    // Tests for interned-key property accessors (hot path optimization)
+    // ========================================================================
+
+    /// Test that get_node_property_by_key works with pre-interned keys.
+    #[test]
+    fn test_get_node_property_by_key() {
+        let indexes = CurrentIndexes::new();
+
+        // Create a node with properties
+        use crate::core::id::VersionId;
+        use crate::core::property::PropertyMapBuilder;
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+            VersionId::new(1).unwrap(),
+        );
+        indexes.insert_node(node);
+
+        // Pre-intern the key
+        let name_key = GLOBAL_INTERNER.intern("name").unwrap();
+
+        // Get property using interned key
+        let name = indexes.get_node_property_by_key(NodeId::new(1).unwrap(), &name_key);
+        assert!(name.is_some());
+        assert_eq!(name.unwrap().as_str(), Some("Alice"));
+    }
+
+    /// Test that get_node_property_by_key returns None for missing key.
+    #[test]
+    fn test_get_node_property_by_key_missing() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(1, "Person");
+        indexes.insert_node(node);
+
+        let nonexistent_key = GLOBAL_INTERNER.intern("nonexistent_key_test").unwrap();
+        let prop = indexes.get_node_property_by_key(NodeId::new(1).unwrap(), &nonexistent_key);
+        assert!(prop.is_none());
+    }
+
+    /// Test that get_edge_property_by_key works with pre-interned keys.
+    #[test]
+    fn test_get_edge_property_by_key() {
+        let indexes = CurrentIndexes::new();
+
+        // Create an edge with properties
+        use crate::core::id::VersionId;
+        use crate::core::property::PropertyMapBuilder;
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(10).unwrap(),
+            NodeId::new(20).unwrap(),
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+            VersionId::new(1).unwrap(),
+        );
+        indexes.insert_edge(edge);
+
+        // Pre-intern the key
+        let since_key = GLOBAL_INTERNER.intern("since").unwrap();
+
+        // Get property using interned key
+        let since = indexes.get_edge_property_by_key(EdgeId::new(1).unwrap(), &since_key);
+        assert!(since.is_some());
+        assert_eq!(since.unwrap().as_int(), Some(2020));
+    }
+
+    /// Test that get_edge_property_by_key returns None for missing key.
+    #[test]
+    fn test_get_edge_property_by_key_missing() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(1, 10, 20, "KNOWS");
+        indexes.insert_edge(edge);
+
+        let nonexistent_key = GLOBAL_INTERNER.intern("nonexistent_edge_key_test").unwrap();
+        let prop = indexes.get_edge_property_by_key(EdgeId::new(1).unwrap(), &nonexistent_key);
         assert!(prop.is_none());
     }
 
