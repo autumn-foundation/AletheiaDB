@@ -1108,11 +1108,12 @@ impl Drop for MigrationService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::id::NodeId;
+    use crate::core::id::{EdgeId, NodeId};
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::BiTemporalInterval;
     use crate::storage::cold_storage::InMemoryColdStorage;
+    use crate::storage::version::EdgeVersion;
     use std::sync::atomic::AtomicUsize;
     use std::thread;
 
@@ -1754,5 +1755,639 @@ mod tests {
 
         let stats = service.stats();
         assert_eq!(stats.node_versions_migrated, 0);
+    }
+
+    // ========================================================================
+    // Edge Version Tests (Additional Coverage)
+    // ========================================================================
+
+    fn create_test_edge_version(id: u64, edge_id: u64) -> EdgeVersion {
+        let properties = PropertyMapBuilder::new().insert("weight", 1.5f64).build();
+
+        EdgeVersion::new_anchor(
+            VersionId::new(id).unwrap(),
+            EdgeId::new(edge_id).unwrap(),
+            BiTemporalInterval::current(1000.into()),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            properties,
+        )
+    }
+
+    fn create_test_edge_version_with_timestamp(id: u64, edge_id: u64, ts_ms: i64) -> EdgeVersion {
+        use crate::core::temporal::TimeRange;
+        let properties = PropertyMapBuilder::new().insert("weight", 1.5f64).build();
+
+        let range = TimeRange::from(ts_ms.into());
+        let temporal = BiTemporalInterval::new(range, range);
+
+        EdgeVersion::new_anchor(
+            VersionId::new(id).unwrap(),
+            EdgeId::new(edge_id).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            properties,
+        )
+    }
+
+    #[test]
+    fn test_migrate_edge_versions() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::default();
+        let service = MigrationService::new(cold.clone(), policy);
+
+        let versions: Vec<EdgeVersion> =
+            (1..=10).map(|i| create_test_edge_version(i, 200)).collect();
+
+        let migrated = service.migrate_edge_versions(&versions).unwrap();
+        assert_eq!(migrated, 10);
+
+        let stats = service.stats();
+        assert_eq!(stats.edge_versions_migrated, 10);
+
+        // Verify versions are in cold storage
+        for version in &versions {
+            assert!(cold.contains_edge_version(version.id).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_migrate_edge_versions_disabled() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::disabled();
+        let service = MigrationService::new(cold.clone(), policy);
+
+        let versions: Vec<EdgeVersion> =
+            (1..=10).map(|i| create_test_edge_version(i, 200)).collect();
+
+        let migrated = service.migrate_edge_versions(&versions).unwrap();
+        assert_eq!(migrated, 0);
+
+        // Verify versions are NOT in cold storage
+        for version in &versions {
+            assert!(!cold.contains_edge_version(version.id).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_migrate_edge_versions_batching() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::builder().batch_size(3).build();
+        let service = MigrationService::new(cold.clone(), policy);
+
+        let versions: Vec<EdgeVersion> =
+            (1..=10).map(|i| create_test_edge_version(i, 200)).collect();
+
+        let migrated = service.migrate_edge_versions(&versions).unwrap();
+        assert_eq!(migrated, 10);
+
+        // All should be migrated despite small batch size
+        for version in &versions {
+            assert!(cold.contains_edge_version(version.id).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_identify_edge_candidates_respects_min_hot_versions() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::builder()
+            .min_hot_versions(2)
+            .age_threshold(Duration::ZERO) // All versions are "old enough"
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
+
+        // Create 3 versions for edge 200
+        let edge_id = EdgeId::new(200).unwrap();
+        for i in 1..=3 {
+            let v = create_test_edge_version(i, 200);
+            versions.insert(v.id, v);
+        }
+        heads.insert(edge_id, VersionId::new(3).unwrap()); // v3 is head
+        counts.insert(edge_id, 3);
+
+        let candidates =
+            service.identify_edge_candidates(&versions, &heads, &counts, Instant::now());
+
+        // With min_hot_versions=2 and 3 versions, only 1 should be candidate
+        // (v3 is head and skipped, v2 must stay hot, v1 can migrate)
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn test_identify_edge_candidates_skips_head() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::builder()
+            .min_hot_versions(1)
+            .age_threshold(Duration::ZERO)
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
+
+        let edge_id = EdgeId::new(200).unwrap();
+        for i in 1..=3 {
+            let v = create_test_edge_version(i, 200);
+            versions.insert(v.id, v);
+        }
+        heads.insert(edge_id, VersionId::new(3).unwrap());
+        counts.insert(edge_id, 3);
+
+        let candidates =
+            service.identify_edge_candidates(&versions, &heads, &counts, Instant::now());
+
+        // Head (v3) should not be a candidate
+        assert!(!candidates.iter().any(|c| c.version_id.as_u64() == 3));
+    }
+
+    #[test]
+    fn test_identify_edge_candidates_respects_age_threshold() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        // Set age threshold to 1 hour
+        let policy = MigrationPolicy::builder()
+            .min_hot_versions(1)
+            .age_threshold(Duration::from_secs(3600))
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
+
+        let edge_id = EdgeId::new(200).unwrap();
+
+        // Get current time in ms
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        // Create an old version (2 hours ago)
+        let old_ts = now_ms - (2 * 60 * 60 * 1000);
+        let v1 = create_test_edge_version_with_timestamp(1, 200, old_ts);
+        versions.insert(v1.id, v1);
+
+        // Create a recent version (30 minutes ago)
+        let recent_ts = now_ms - (30 * 60 * 1000);
+        let v2 = create_test_edge_version_with_timestamp(2, 200, recent_ts);
+        versions.insert(v2.id, v2);
+
+        // Create head version (now)
+        let v3 = create_test_edge_version_with_timestamp(3, 200, now_ms);
+        versions.insert(v3.id, v3);
+
+        heads.insert(edge_id, VersionId::new(3).unwrap());
+        counts.insert(edge_id, 3);
+
+        let candidates =
+            service.identify_edge_candidates(&versions, &heads, &counts, Instant::now());
+
+        // Only v1 (2 hours old) should be a candidate, v2 (30 min) is too young
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].version_id.as_u64(), 1);
+    }
+
+    // ========================================================================
+    // Edge Callback Tests
+    // ========================================================================
+
+    struct EdgeFilteringCallback {
+        skip_version_ids: Vec<u64>,
+        batch_counts: std::sync::Mutex<Vec<(usize, usize)>>,
+    }
+
+    impl EdgeFilteringCallback {
+        fn new(skip_ids: Vec<u64>) -> Self {
+            Self {
+                skip_version_ids: skip_ids,
+                batch_counts: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl MigrationCallback for EdgeFilteringCallback {
+        fn before_edge_migration(&self, version: &EdgeVersion) -> bool {
+            !self.skip_version_ids.contains(&version.id.as_u64())
+        }
+
+        fn after_batch(&self, node_count: usize, edge_count: usize) {
+            self.batch_counts
+                .lock()
+                .unwrap()
+                .push((node_count, edge_count));
+        }
+    }
+
+    #[test]
+    fn test_edge_migration_callback_filtering() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::default();
+        let callback = Arc::new(EdgeFilteringCallback::new(vec![2, 4, 6, 8, 10]));
+        let service = MigrationService::with_callback(cold.clone(), policy, callback.clone());
+
+        let versions: Vec<EdgeVersion> =
+            (1..=10).map(|i| create_test_edge_version(i, 200)).collect();
+
+        let migrated = service.migrate_edge_versions(&versions).unwrap();
+        assert_eq!(migrated, 5); // Only odd IDs migrated
+
+        // Verify only odd versions are in cold storage
+        assert!(
+            cold.contains_edge_version(VersionId::new(1).unwrap())
+                .unwrap()
+        );
+        assert!(
+            !cold
+                .contains_edge_version(VersionId::new(2).unwrap())
+                .unwrap()
+        );
+        assert!(
+            cold.contains_edge_version(VersionId::new(3).unwrap())
+                .unwrap()
+        );
+
+        // Verify batch callback was called
+        let batches = callback.batch_counts.lock().unwrap();
+        assert!(!batches.is_empty());
+        // All batches should be edge batches (node_count=0)
+        for (node_count, _edge_count) in batches.iter() {
+            assert_eq!(*node_count, 0);
+        }
+    }
+
+    // ========================================================================
+    // MigrationStats Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_migration_stats_throughput_zero_duration() {
+        let stats = MigrationStats {
+            node_versions_migrated: 1000,
+            edge_versions_migrated: 500,
+            bytes_migrated: 1_000_000,
+            runs_completed: 10,
+            errors: 0,
+            last_run_duration: Duration::ZERO,
+            last_run_time: Some(Instant::now()),
+        };
+
+        // With zero duration, should return 0 to avoid division by zero
+        assert_eq!(stats.versions_per_second(), 0.0);
+    }
+
+    #[test]
+    fn test_migration_stats_default() {
+        let stats = MigrationStats::default();
+        assert_eq!(stats.node_versions_migrated, 0);
+        assert_eq!(stats.edge_versions_migrated, 0);
+        assert_eq!(stats.bytes_migrated, 0);
+        assert_eq!(stats.runs_completed, 0);
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.last_run_duration, Duration::ZERO);
+        assert!(stats.last_run_time.is_none());
+    }
+
+    // ========================================================================
+    // AtomicMigrationStats Tests
+    // ========================================================================
+
+    #[test]
+    fn test_atomic_migration_stats_new() {
+        let stats = AtomicMigrationStats::new();
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.node_versions_migrated, 0);
+        assert_eq!(snapshot.edge_versions_migrated, 0);
+        assert_eq!(snapshot.bytes_migrated, 0);
+        assert_eq!(snapshot.runs_completed, 0);
+        assert_eq!(snapshot.errors, 0);
+    }
+
+    #[test]
+    fn test_atomic_migration_stats_snapshot() {
+        let stats = AtomicMigrationStats::new();
+        stats.node_versions_migrated.store(100, Ordering::Relaxed);
+        stats.edge_versions_migrated.store(50, Ordering::Relaxed);
+        stats.bytes_migrated.store(10000, Ordering::Relaxed);
+        stats.runs_completed.store(5, Ordering::Relaxed);
+        stats.errors.store(2, Ordering::Relaxed);
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.node_versions_migrated, 100);
+        assert_eq!(snapshot.edge_versions_migrated, 50);
+        assert_eq!(snapshot.bytes_migrated, 10000);
+        assert_eq!(snapshot.runs_completed, 5);
+        assert_eq!(snapshot.errors, 2);
+    }
+
+    // ========================================================================
+    // Service API Tests
+    // ========================================================================
+
+    #[test]
+    fn test_service_policy_getter() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::builder()
+            .age_threshold(Duration::from_secs(123456))
+            .min_hot_versions(7)
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        assert_eq!(service.policy().age_threshold, Duration::from_secs(123456));
+        assert_eq!(service.policy().min_hot_versions, 7);
+    }
+
+    #[test]
+    fn test_migrate_empty_edge_versions() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::default();
+        let service = MigrationService::new(cold.clone(), policy);
+
+        let edge_versions: Vec<EdgeVersion> = vec![];
+        let migrated = service.migrate_edge_versions(&edge_versions).unwrap();
+        assert_eq!(migrated, 0);
+
+        let stats = service.stats();
+        assert_eq!(stats.edge_versions_migrated, 0);
+    }
+
+    #[test]
+    fn test_identify_edge_candidates_empty_versions() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::builder()
+            .age_threshold(Duration::ZERO)
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        let empty_versions: HashMap<VersionId, EdgeVersion> = HashMap::new();
+        let empty_heads: HashMap<EdgeId, VersionId> = HashMap::new();
+        let empty_counts: HashMap<EdgeId, usize> = HashMap::new();
+
+        let candidates = service.identify_edge_candidates(
+            &empty_versions,
+            &empty_heads,
+            &empty_counts,
+            Instant::now(),
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_identify_candidates_version_count_zero() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::builder()
+            .min_hot_versions(1)
+            .age_threshold(Duration::ZERO)
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let counts: HashMap<NodeId, usize> = HashMap::new(); // Empty counts
+
+        let node_id = NodeId::new(100).unwrap();
+        for i in 1..=3 {
+            let v = create_test_node_version(i, 100);
+            versions.insert(v.id, v);
+        }
+        heads.insert(node_id, VersionId::new(3).unwrap());
+        // counts is empty - simulate missing count data
+
+        let candidates =
+            service.identify_node_candidates(&versions, &heads, &counts, Instant::now());
+
+        // With zero count, max_migrate = 0 - 1 = saturates to 0, so no candidates
+        assert!(candidates.is_empty());
+    }
+
+    // ========================================================================
+    // MigrationCandidate Tests
+    // ========================================================================
+
+    #[test]
+    fn test_migration_candidate_debug_and_clone() {
+        let candidate = MigrationCandidate {
+            version_id: VersionId::new(1).unwrap(),
+            is_node: true,
+            age: Duration::from_secs(3600),
+            estimated_size: 1024,
+        };
+
+        // Test Clone
+        let cloned = candidate.clone();
+        assert_eq!(cloned.version_id, candidate.version_id);
+        assert_eq!(cloned.is_node, candidate.is_node);
+        assert_eq!(cloned.age, candidate.age);
+        assert_eq!(cloned.estimated_size, candidate.estimated_size);
+
+        // Test Debug
+        let debug_str = format!("{:?}", candidate);
+        assert!(debug_str.contains("MigrationCandidate"));
+    }
+
+    // ========================================================================
+    // Additional Policy Preset Tests
+    // ========================================================================
+
+    #[test]
+    fn test_conservative_policy_values() {
+        let policy = MigrationPolicy::conservative();
+        assert_eq!(policy.age_threshold, Duration::from_secs(30 * 24 * 60 * 60));
+        assert_eq!(policy.memory_threshold_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(policy.min_hot_versions, 5);
+        assert_eq!(policy.batch_size, 500);
+        assert_eq!(policy.run_interval, Duration::from_secs(300));
+        assert!(policy.enabled);
+    }
+
+    #[test]
+    fn test_aggressive_policy_values() {
+        let policy = MigrationPolicy::aggressive();
+        assert_eq!(policy.age_threshold, Duration::from_secs(24 * 60 * 60));
+        assert_eq!(policy.memory_threshold_bytes, 512 * 1024 * 1024);
+        assert_eq!(policy.min_hot_versions, 1);
+        assert_eq!(policy.batch_size, 2000);
+        assert_eq!(policy.run_interval, Duration::from_secs(30));
+        assert!(policy.enabled);
+        assert!(policy.enable_lru); // Aggressive mode uses LRU
+    }
+
+    #[test]
+    fn test_default_policy_run_interval() {
+        let policy = MigrationPolicy::default();
+        assert_eq!(policy.run_interval, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_policy_builder_default() {
+        let builder = MigrationPolicyBuilder::default();
+        let policy = builder.build();
+        // Should match MigrationPolicy::default()
+        assert_eq!(policy.age_threshold, Duration::from_secs(7 * 24 * 60 * 60));
+    }
+
+    // ========================================================================
+    // Multiple Entity Migration Tests
+    // ========================================================================
+
+    #[test]
+    fn test_identify_candidates_multiple_nodes() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::builder()
+            .min_hot_versions(1)
+            .age_threshold(Duration::ZERO)
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
+
+        // Create versions for multiple nodes
+        for node_num in [100u64, 101, 102] {
+            let node_id = NodeId::new(node_num).unwrap();
+            for i in 1..=3 {
+                let version_id = node_num * 10 + i;
+                let v = create_test_node_version(version_id, node_num);
+                versions.insert(v.id, v);
+            }
+            heads.insert(node_id, VersionId::new(node_num * 10 + 3).unwrap());
+            counts.insert(node_id, 3);
+        }
+
+        let candidates =
+            service.identify_node_candidates(&versions, &heads, &counts, Instant::now());
+
+        // Each node has 3 versions, min_hot=1, head is skipped
+        // So each node can have 2 candidates (max_migrate = 3-1 = 2)
+        // Total should be 6 candidates (2 per node * 3 nodes)
+        assert_eq!(candidates.len(), 6);
+    }
+
+    #[test]
+    fn test_identify_edge_candidates_multiple_edges() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::builder()
+            .min_hot_versions(1)
+            .age_threshold(Duration::ZERO)
+            .build();
+        let service = MigrationService::new(cold, policy);
+
+        let mut versions = HashMap::new();
+        let mut heads = HashMap::new();
+        let mut counts = HashMap::new();
+
+        // Create versions for multiple edges
+        for edge_num in [200u64, 201, 202] {
+            let edge_id = EdgeId::new(edge_num).unwrap();
+            for i in 1..=3 {
+                let version_id = edge_num * 10 + i;
+                let v = create_test_edge_version(version_id, edge_num);
+                versions.insert(v.id, v);
+            }
+            heads.insert(edge_id, VersionId::new(edge_num * 10 + 3).unwrap());
+            counts.insert(edge_id, 3);
+        }
+
+        let candidates =
+            service.identify_edge_candidates(&versions, &heads, &counts, Instant::now());
+
+        // Each edge has 3 versions, min_hot=1, head is skipped
+        // So each edge can have 2 candidates (max_migrate = 3-1 = 2)
+        // Total should be 6 candidates (2 per edge * 3 edges)
+        assert_eq!(candidates.len(), 6);
+    }
+
+    // ========================================================================
+    // MigrationProgress Tests
+    // ========================================================================
+
+    #[test]
+    fn test_progress_estimated_remaining() {
+        let progress = MigrationProgress {
+            total_versions: 100,
+            migrated_versions: 50,
+            bytes_migrated: 1000,
+            current_batch: 5,
+            total_batches: 10,
+            elapsed: Duration::from_secs(5),
+        };
+
+        // 50 versions in 5 secs = 10 v/sec, 50 remaining = ~5 secs
+        let remaining = progress.estimated_remaining();
+        assert!(remaining.as_secs() <= 6 && remaining.as_secs() >= 4);
+    }
+
+    #[test]
+    fn test_progress_zero_elapsed() {
+        let progress = MigrationProgress {
+            total_versions: 100,
+            migrated_versions: 0,
+            bytes_migrated: 0,
+            current_batch: 0,
+            total_batches: 10,
+            elapsed: Duration::ZERO,
+        };
+
+        // Should return 0 without dividing by zero
+        assert_eq!(progress.versions_per_second(), 0.0);
+        assert_eq!(progress.bytes_per_second(), 0.0);
+        assert_eq!(progress.estimated_remaining(), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_progress_empty_total() {
+        let progress = MigrationProgress {
+            total_versions: 0,
+            migrated_versions: 0,
+            bytes_migrated: 0,
+            current_batch: 0,
+            total_batches: 0,
+            elapsed: Duration::from_secs(1),
+        };
+
+        // Empty migration should be 100% complete
+        assert_eq!(progress.percentage(), 100.0);
+        assert!(progress.is_complete());
+    }
+
+    // ========================================================================
+    // Access Tracking Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_clear_access_tracking() {
+        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let policy = MigrationPolicy::default();
+        let service = MigrationService::new(cold, policy);
+
+        let v1 = VersionId::new(1).unwrap();
+        let v2 = VersionId::new(2).unwrap();
+        let v3 = VersionId::new(3).unwrap();
+
+        // Record accesses
+        service.record_access(v1);
+        service.record_access(v2);
+        service.record_access(v3);
+
+        // Verify recorded
+        assert!(service.get_last_access(v1).is_some());
+        assert!(service.get_last_access(v2).is_some());
+        assert!(service.get_last_access(v3).is_some());
+
+        // Clear specific accesses
+        service.clear_access(&[v1, v2]);
+
+        // v1 and v2 should be cleared, v3 should remain
+        assert!(service.get_last_access(v1).is_none());
+        assert!(service.get_last_access(v2).is_none());
+        assert!(service.get_last_access(v3).is_some());
     }
 }
