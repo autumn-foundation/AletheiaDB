@@ -222,30 +222,90 @@ impl EntityTimeline {
 
     /// Find all metadata indices in this timeline that overlap with the given time range.
     ///
-    /// Returns indices into the consolidated version metadata storage.
+    /// Returns an iterator over indices into the consolidated version metadata storage.
     /// Callers must resolve these indices to `VersionId` using `EntityTimelines::get_version_metadata`.
-    fn find_indices_in_range(&self, range: TimeRange) -> Vec<VersionMetadataIndex> {
+    ///
+    /// # Performance Benefits (Issue #197)
+    ///
+    /// This iterator-based version provides zero-allocation access:
+    /// - Count results: `find_indices_in_range_iter(range).count()` - no allocation
+    /// - First result: `find_indices_in_range_iter(range).next()` - no allocation
+    /// - Lazy evaluation: Caller controls allocation strategy via `collect()`, `take()`, etc.
+    ///
+    /// # Implementation
+    ///
+    /// Uses binary search (`partition_point`) to find the cutoff, then filters the slice
+    /// for overlapping entries. The iterator is lazy and only computes results as needed.
+    fn find_indices_in_range_iter(
+        &self,
+        range: TimeRange,
+    ) -> impl Iterator<Item = VersionMetadataIndex> + '_ {
         // Find versions starting before the query range ends.
         let cutoff = self.versions.partition_point(|e| e.start < range.end());
+        let range_start = range.start();
 
-        // Adaptive pre-allocation heuristic:
-        // - Point/small range queries (< POINT_QUERY_THRESHOLD_TICKS) typically return 1-2 versions → cap at 4
-        // - Large range queries can return many versions → cap at 16
-        // Phase 2: Use wallclock components for arithmetic
+        // Return iterator over filtered entries.
+        // The filter closure captures range.start() to check for overlap.
+        self.versions[..cutoff]
+            .iter()
+            .filter(move |entry| entry.end > range_start)
+            .map(|entry| entry.metadata_idx)
+    }
+
+    /// Find all metadata indices in this timeline that overlap with the given time range.
+    ///
+    /// Returns indices into the consolidated version metadata storage.
+    /// Callers must resolve these indices to `VersionId` using `EntityTimelines::get_version_metadata`.
+    ///
+    /// # Performance
+    ///
+    /// This is a convenience method that collects results into a `Vec`. For better performance
+    /// when you only need a count, first element, or want to process results lazily, use
+    /// `find_indices_in_range_iter()` instead.
+    fn find_indices_in_range(&self, range: TimeRange) -> Vec<VersionMetadataIndex> {
+        // Use iterator version and collect with adaptive pre-allocation.
+        // The pre-allocation heuristic reduces reallocations for common cases.
+        let cutoff = self.versions.partition_point(|e| e.start < range.end());
         let range_size = range.end().wallclock() - range.start().wallclock();
         let estimated_capacity = if range_size < POINT_QUERY_THRESHOLD_TICKS {
             cutoff.min(4) // Point query or small range
         } else {
             cutoff.min(16) // Large range query
         };
-        let mut results = Vec::with_capacity(estimated_capacity);
-        for entry in &self.versions[..cutoff] {
-            if entry.end > range.start() {
-                results.push(entry.metadata_idx);
-            }
-        }
 
+        let mut results = Vec::with_capacity(estimated_capacity);
+        results.extend(self.find_indices_in_range_iter(range));
         results
+    }
+
+    /// Find all metadata indices that contain a specific point in time.
+    ///
+    /// Returns an iterator over indices into the consolidated version metadata storage.
+    /// A version [start, end) contains timestamp T if: start <= T < end
+    ///
+    /// # Performance Benefits (Issue #197)
+    ///
+    /// This iterator-based version provides zero-allocation access:
+    /// - Count results: `find_indices_at_point_iter(t).count()` - no allocation
+    /// - First result: `find_indices_at_point_iter(t).next()` - no allocation
+    /// - Lazy evaluation: Caller controls allocation strategy
+    ///
+    /// # Complexity
+    ///
+    /// - Time complexity: O(log N + K) where N = versions, K = overlapping versions
+    /// - For typical bi-temporal databases with non-overlapping intervals, K = 1
+    fn find_indices_at_point_iter(
+        &self,
+        timestamp: Timestamp,
+    ) -> impl Iterator<Item = VersionMetadataIndex> + '_ {
+        // Find all entries where start <= timestamp (these could potentially contain T)
+        let cutoff = self.versions.partition_point(|e| e.start <= timestamp);
+
+        // Filter to entries where end > timestamp (completing the containment check)
+        self.versions[..cutoff]
+            .iter()
+            .filter(move |entry| entry.end > timestamp)
+            .map(|entry| entry.metadata_idx)
     }
 
     /// Find all metadata indices that contain a specific point in time.
@@ -259,20 +319,14 @@ impl EntityTimeline {
     ///
     /// - Time complexity: O(log N + K) where N = versions, K = overlapping versions
     /// - For typical bi-temporal databases with non-overlapping intervals, K = 1
+    ///
+    /// This is a convenience method that collects results into a `Vec`. For better performance
+    /// when you only need a count, first element, or want to process results lazily, use
+    /// `find_indices_at_point_iter()` instead.
     fn find_indices_at_point(&self, timestamp: Timestamp) -> Vec<VersionMetadataIndex> {
-        // Find all entries where start <= timestamp (these could potentially contain T)
         let cutoff = self.versions.partition_point(|e| e.start <= timestamp);
-
-        // Pre-allocate for typical case (1-2 versions at a point)
         let mut results = Vec::with_capacity(cutoff.min(4));
-
-        // Filter to entries where end > timestamp (completing the containment check)
-        for entry in &self.versions[..cutoff] {
-            if entry.end > timestamp {
-                results.push(entry.metadata_idx);
-            }
-        }
-
+        results.extend(self.find_indices_at_point_iter(timestamp));
         results
     }
 }
@@ -2588,5 +2642,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Test for iterator-based find_indices_in_range (TDD - Issue #197)
+    ///
+    /// This test demonstrates the performance benefits of iterator-based access:
+    /// 1. Count results without allocation
+    /// 2. Get first result without collecting all
+    /// 3. Lazy evaluation for partial result processing
+    #[test]
+    fn test_find_indices_in_range_iterator() {
+        let mut timeline = EntityTimeline::default();
+
+        // Create 10 versions with non-overlapping intervals
+        for i in 0..10 {
+            timeline.insert((i * 100).into(), ((i + 1) * 100).into(), i as u32);
+        }
+
+        // Test 1: Count without allocation
+        // Query range [250, 550) should overlap with versions 2, 3, 4, 5
+        let range = TimeRange::new(250.into(), 550.into()).unwrap();
+        let count = timeline.find_indices_in_range_iter(range).count();
+        assert_eq!(count, 4, "Should find 4 overlapping versions");
+
+        // Test 2: Get first result without collecting all
+        let first = timeline.find_indices_in_range_iter(range).next();
+        assert_eq!(first, Some(2), "First result should be version 2");
+
+        // Test 3: Collect to vec when needed (same behavior as old API)
+        let collected: Vec<_> = timeline.find_indices_in_range_iter(range).collect();
+        assert_eq!(collected.len(), 4);
+        assert_eq!(collected[0], 2);
+        assert_eq!(collected[1], 3);
+        assert_eq!(collected[2], 4);
+        assert_eq!(collected[3], 5);
+
+        // Test 4: Iterator can be filtered/mapped without extra allocations
+        let sum: u32 = timeline.find_indices_in_range_iter(range).sum();
+        assert_eq!(sum, 2 + 3 + 4 + 5, "Sum of indices should be 14");
+
+        // Test 5: Point query (small range)
+        let point_range = TimeRange::at(250.into());
+        let point_results: Vec<_> = timeline.find_indices_in_range_iter(point_range).collect();
+        assert_eq!(point_results.len(), 1);
+        assert_eq!(point_results[0], 2);
+    }
+
+    /// Test for iterator-based find_indices_at_point (TDD - Issue #197)
+    #[test]
+    fn test_find_indices_at_point_iterator() {
+        let mut timeline = EntityTimeline::default();
+
+        // Create overlapping versions at timestamp 1000
+        timeline.insert(500.into(), 1500.into(), 0);
+        timeline.insert(800.into(), 1200.into(), 1);
+        timeline.insert(1100.into(), 2000.into(), 2);
+
+        // Test 1: Count overlapping versions
+        let count = timeline.find_indices_at_point_iter(1000.into()).count();
+        assert_eq!(count, 2, "Should find 2 versions at timestamp 1000");
+
+        // Test 2: Get first result
+        let first = timeline.find_indices_at_point_iter(1000.into()).next();
+        assert_eq!(first, Some(0), "First result should be version 0");
+
+        // Test 3: Collect all results
+        let collected: Vec<_> = timeline.find_indices_at_point_iter(1000.into()).collect();
+        assert_eq!(collected.len(), 2);
+        assert!(collected.contains(&0));
+        assert!(collected.contains(&1));
+        assert!(!collected.contains(&2));
     }
 }
