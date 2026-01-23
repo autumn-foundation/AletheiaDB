@@ -64,6 +64,11 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
         entries.extend(segment_entries);
     }
 
+    // Sort entries by LSN to ensure correct ordering across segments.
+    // In a striped WAL architecture, entries can be flushed to different segments
+    // in an order that differs from their LSN assignment order.
+    entries.sort_by_key(|entry| entry.lsn);
+
     Ok(entries)
 }
 
