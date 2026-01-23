@@ -452,12 +452,12 @@ impl CurrentIndexes {
     }
 
     /// Export outgoing CSR data for persistence.
-    pub fn export_outgoing_csr(&self) -> (Vec<u64>, Vec<u64>) {
+    pub fn export_outgoing_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.outgoing.load().export_csr()
     }
 
     /// Export incoming CSR data for persistence.
-    pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>) {
+    pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.incoming.load().export_csr()
     }
 
@@ -466,8 +466,10 @@ impl CurrentIndexes {
     /// This is used when loading persisted indexes to avoid rebuilding CSR from scratch.
     pub fn import_csr(
         &self,
+        outgoing_node_ids: Vec<u64>,
         outgoing_offsets: Vec<u64>,
         outgoing_edge_ids: Vec<u64>,
+        incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
     ) {
@@ -482,6 +484,7 @@ impl CurrentIndexes {
 
         // Import outgoing adjacency
         let outgoing = crate::index::adjacency::AdjacencyIndex::import_csr(
+            outgoing_node_ids,
             outgoing_offsets,
             outgoing_edge_ids,
             &edges_map,
@@ -497,6 +500,7 @@ impl CurrentIndexes {
 
         // Import incoming adjacency
         let incoming = crate::index::adjacency::AdjacencyIndex::import_csr(
+            incoming_node_ids,
             incoming_offsets,
             incoming_edge_ids,
             &edges_map,
