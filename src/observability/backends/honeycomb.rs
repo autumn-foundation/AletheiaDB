@@ -1,21 +1,25 @@
 //! Honeycomb backend for distributed tracing
 //!
-//! This module provides integration with Honeycomb.io for distributed tracing.
+//! This module provides integration with Honeycomb.io for sending telemetry events.
+//! Enable via the `observability-honeycomb` feature flag.
 //!
-//! # Feature Flags
+//! # Example
 //!
-//! - `observability-honeycomb-v2`: Uses the new custom Honeycomb client (recommended)
-//! - `observability-honeycomb-legacy`: Uses the legacy `libhoney-rust` git dependency
+//! ```ignore
+//! use gallifreydb::observability::backends::honeycomb::{HoneycombConfig, create_client};
 //!
-//! The `observability-honeycomb` feature now defaults to v2.
+//! let config = HoneycombConfig::new("api-key", "dataset", "my-service");
+//! let client = create_client(config)?;
+//!
+//! let mut event = client.new_event();
+//! event.add_field("operation", "query");
+//! event.add_field("duration_ms", 42);
+//! client.send(event)?;
+//! client.flush()?;
+//! ```
 
 use crate::Error;
 
-// Legacy imports (tracing-honeycomb + libhoney-rust)
-#[cfg(feature = "observability-honeycomb-legacy")]
-use {libhoney::Config as LibhoneyConfig, tracing_honeycomb::new_honeycomb_telemetry_layer};
-
-// New v2 imports (custom client)
 #[cfg(feature = "honeycomb")]
 use crate::honeycomb::{Client as HoneycombClient, Config as HoneycombClientConfig};
 
@@ -66,58 +70,13 @@ impl HoneycombConfig {
     }
 }
 
-/// Create a Honeycomb tracing layer (legacy implementation)
-///
-/// The layer automatically handles sending telemetry data to Honeycomb in the background.
-///
-/// # Errors
-///
-/// Returns an error if the Honeycomb configuration is invalid or if the layer
-/// cannot be created.
-///
-/// # Note
-///
-/// This function requires the `observability-honeycomb-legacy` feature.
-/// For new projects, consider using `create_client()` with the v2 implementation.
-#[cfg(feature = "observability-honeycomb-legacy")]
-pub fn create_layer<S>(
-    config: HoneycombConfig,
-) -> Result<Box<dyn tracing_subscriber::Layer<S> + Send + Sync>, Error>
-where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    let libhoney_config = LibhoneyConfig {
-        options: libhoney::client::Options {
-            api_key: config.api_key,
-            dataset: config.dataset,
-            ..Default::default()
-        },
-        transmission_options: Default::default(),
-    };
-
-    // Leak the service name to get a 'static lifetime (acceptable for telemetry config)
-    let service_name: &'static str = Box::leak(config.service_name.into_boxed_str());
-    let layer = new_honeycomb_telemetry_layer(service_name, libhoney_config);
-
-    Ok(Box::new(layer))
-}
-
-/// Create a Honeycomb tracing layer (stub when legacy feature is disabled)
-#[cfg(not(feature = "observability-honeycomb-legacy"))]
-pub fn create_layer(_config: HoneycombConfig) -> Result<(), Error> {
-    Err(Error::other(
-        "Legacy Honeycomb support not compiled in. \
-         Enable 'observability-honeycomb-legacy' feature or use create_client() with v2.",
-    ))
-}
-
-/// Create a Honeycomb client using the new v2 implementation.
+/// Create a Honeycomb client.
 ///
 /// This provides direct event sending capability with:
 /// - Modern `reqwest 0.11+` HTTP client
 /// - Exponential backoff retry logic
 /// - Event batching
-/// - No git dependencies
+/// - No git dependencies - all crates.io published
 ///
 /// # Example
 ///
@@ -150,22 +109,15 @@ pub fn create_client(config: HoneycombConfig) -> Result<HoneycombClient, Error> 
 #[cfg(not(feature = "honeycomb"))]
 pub fn create_client(_config: HoneycombConfig) -> Result<(), Error> {
     Err(Error::other(
-        "Honeycomb v2 support not compiled in. Enable the 'honeycomb' feature.",
+        "Honeycomb support not compiled in. Enable the 'honeycomb' or 'observability-honeycomb' feature.",
     ))
 }
 
 /// Re-export the custom Honeycomb client types when available.
 #[cfg(feature = "honeycomb")]
-pub mod v2 {
-    //! New v2 Honeycomb client types.
-    //!
-    //! This module re-exports the custom Honeycomb client implementation
-    //! that replaces the `libhoney-rust` git dependency.
-
-    pub use crate::honeycomb::{
-        BatchBuffer, Client, Config, Event, Options, Result, TransmissionOptions,
-    };
-}
+pub use crate::honeycomb::{
+    BatchBuffer, Client, Config, Event, Options, Result as HoneycombResult, TransmissionOptions,
+};
 
 #[cfg(test)]
 mod tests {
@@ -191,17 +143,6 @@ mod tests {
         let config = HoneycombConfig::new("key", "dataset", "service");
         let debug_str = format!("{config:?}");
         assert!(debug_str.contains("HoneycombConfig"));
-    }
-
-    #[test]
-    fn test_create_layer_without_feature() {
-        // When the legacy feature is not enabled, create_layer should return an error
-        #[cfg(not(feature = "observability-honeycomb-legacy"))]
-        {
-            let config = HoneycombConfig::new("key", "dataset", "service");
-            let result = create_layer(config);
-            assert!(result.is_err());
-        }
     }
 
     #[cfg(feature = "honeycomb")]
