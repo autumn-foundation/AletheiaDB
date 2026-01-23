@@ -17,6 +17,24 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// Default maximum number of interned strings (DoS protection)
 pub const DEFAULT_MAX_INTERNED_STRINGS: usize = 100_000;
 
+/// Common strings that are pre-interned at startup for optimal performance.
+///
+/// These strings represent frequently used property keys and labels across
+/// typical graph database usage patterns. Pre-interning them eliminates the
+/// initial allocation overhead on first access.
+pub const COMMON_STRINGS: &[&str] = &[
+    "name",
+    "id",
+    "type",
+    "label",
+    "created_at",
+    "updated_at",
+    "valid_from",
+    "valid_to",
+    "tx_from",
+    "tx_to",
+];
+
 /// A small, copyable handle to an interned string.
 ///
 /// This is just a u32 ID that can be used to look up the original string
@@ -296,7 +314,7 @@ impl StringInterner {
     /// pre-interning these strings, we eliminate the "allocation + hash + insert"
     /// penalty on first access, providing predictable startup performance.
     ///
-    /// Common strings that are warmed:
+    /// The list of common strings is defined in [`COMMON_STRINGS`] and includes:
     /// - Property keys: "name", "id", "type", "label"
     /// - Timestamps: "created_at", "updated_at"
     /// - Temporal: "valid_from", "valid_to", "tx_from", "tx_to"
@@ -321,20 +339,6 @@ impl StringInterner {
     /// let id = interner.intern("name").unwrap();
     /// ```
     pub fn warm_common_strings(&self) {
-        // Array of frequently used strings in the database
-        const COMMON_STRINGS: &[&str] = &[
-            "name",
-            "id",
-            "type",
-            "label",
-            "created_at",
-            "updated_at",
-            "valid_from",
-            "valid_to",
-            "tx_from",
-            "tx_to",
-        ];
-
         // Intern each common string using intern_unchecked since these are
         // known-good strings from a trusted internal source
         for s in COMMON_STRINGS {
@@ -816,20 +820,7 @@ mod tests {
         assert!(interner.len() > 0);
 
         // Verify all common strings are present
-        let common_strings = [
-            "name",
-            "id",
-            "type",
-            "label",
-            "created_at",
-            "updated_at",
-            "valid_from",
-            "valid_to",
-            "tx_from",
-            "tx_to",
-        ];
-
-        for s in &common_strings {
+        for s in COMMON_STRINGS {
             assert!(
                 interner.contains(s),
                 "Common string '{}' should be interned after warming",
@@ -838,7 +829,7 @@ mod tests {
         }
 
         // Should have exactly the number of common strings
-        assert_eq!(interner.len(), common_strings.len());
+        assert_eq!(interner.len(), COMMON_STRINGS.len());
     }
 
     #[test]
@@ -896,20 +887,7 @@ mod tests {
         interner.warm_common_strings();
 
         // Common strings should get sequential IDs starting from 0
-        let common_strings = [
-            "name",
-            "id",
-            "type",
-            "label",
-            "created_at",
-            "updated_at",
-            "valid_from",
-            "valid_to",
-            "tx_from",
-            "tx_to",
-        ];
-
-        let mut ids: Vec<_> = common_strings
+        let mut ids: Vec<_> = COMMON_STRINGS
             .iter()
             .map(|s| interner.get_id(s).unwrap().as_u32())
             .collect();
@@ -966,22 +944,10 @@ mod tests {
         }
 
         // Should still have exactly the common strings count (no duplicates)
-        let common_strings = [
-            "name",
-            "id",
-            "type",
-            "label",
-            "created_at",
-            "updated_at",
-            "valid_from",
-            "valid_to",
-            "tx_from",
-            "tx_to",
-        ];
-        assert_eq!(interner.len(), common_strings.len());
+        assert_eq!(interner.len(), COMMON_STRINGS.len());
 
         // All common strings should be present
-        for s in &common_strings {
+        for s in COMMON_STRINGS {
             assert!(interner.contains(s));
         }
     }
@@ -995,20 +961,7 @@ mod tests {
 
         // This test verifies that warmed strings are already in the fast path
         // by checking they can be retrieved without error
-        let common_strings = [
-            "name",
-            "id",
-            "type",
-            "label",
-            "created_at",
-            "updated_at",
-            "valid_from",
-            "valid_to",
-            "tx_from",
-            "tx_to",
-        ];
-
-        for s in &common_strings {
+        for s in COMMON_STRINGS {
             // get_id uses the fast path (no allocation)
             let id = interner.get_id(s);
             assert!(id.is_some(), "String '{}' should be pre-interned", s);
@@ -1022,21 +975,8 @@ mod tests {
     #[test]
     fn test_global_interner_automatically_warmed() {
         // GLOBAL_INTERNER should be automatically warmed at initialization
-        let common_strings = [
-            "name",
-            "id",
-            "type",
-            "label",
-            "created_at",
-            "updated_at",
-            "valid_from",
-            "valid_to",
-            "tx_from",
-            "tx_to",
-        ];
-
         // All common strings should already be present in the global interner
-        for s in &common_strings {
+        for s in COMMON_STRINGS {
             assert!(
                 GLOBAL_INTERNER.contains(s),
                 "Global interner should have '{}' pre-warmed",
@@ -1047,9 +987,9 @@ mod tests {
         // The global interner should have at least the common strings
         // (might have more if other tests have used it)
         assert!(
-            GLOBAL_INTERNER.len() >= common_strings.len(),
+            GLOBAL_INTERNER.len() >= COMMON_STRINGS.len(),
             "Global interner should have at least {} strings, has {}",
-            common_strings.len(),
+            COMMON_STRINGS.len(),
             GLOBAL_INTERNER.len()
         );
     }
