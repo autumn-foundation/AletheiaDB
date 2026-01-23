@@ -205,6 +205,13 @@ name = "checkpoints"
 harness = false
 path = "benches/checkpoints.rs"
 
+# Cold storage - tiered storage backend (Issue #120 / SCALE-002)
+[[bench]]
+name = "cold_storage"
+harness = false
+path = "benches/cold_storage.rs"
+required-features = []
+
 # Transaction layer - ACID guarantees and transaction overhead
 [[bench]]
 name = "transactions"
