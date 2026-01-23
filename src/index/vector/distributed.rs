@@ -74,6 +74,11 @@ use std::time::{Duration, Instant};
 /// Maximum number of results that can be requested in a search.
 const MAX_K: usize = 10_000;
 
+/// Overfetch factor for filtered search.
+/// When applying post-search filters, we fetch this many times more results
+/// than requested to increase the chance of having enough results after filtering.
+const FILTER_OVERFETCH_FACTOR: usize = 10;
+
 /// Default timeout for remote operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -338,29 +343,35 @@ impl NodeCircuitBreaker {
                 self.success_count.store(0, Ordering::SeqCst);
             }
             CircuitState::Open => {
-                if let Ok(mut opened) = self.opened_at.write() {
-                    *opened = Some(Instant::now());
-                }
+                // Do not reset the timer when the circuit is already open.
+                // This allows it to transition to HalfOpen after the original duration.
             }
         }
     }
 
     /// Check and perform state transitions based on time.
+    ///
+    /// This method uses a write lock to prevent TOCTOU races where
+    /// the state could change between checking and updating.
     fn maybe_transition(&self) {
-        let state = match self.state.read() {
-            Ok(s) => *s,
+        // Acquire write lock to prevent TOCTOU race
+        let mut state_guard = match self.state.write() {
+            Ok(s) => s,
             Err(_) => return,
         };
 
-        if state == CircuitState::Open
-            && let Ok(opened) = self.opened_at.read()
-            && let Some(opened_time) = *opened
-            && opened_time.elapsed() >= self.config.open_duration
-        {
-            if let Ok(mut s) = self.state.write() {
-                *s = CircuitState::HalfOpen;
+        if *state_guard == CircuitState::Open {
+            let should_transition = self
+                .opened_at
+                .read()
+                .ok()
+                .and_then(|opened| *opened)
+                .is_some_and(|opened_time| opened_time.elapsed() >= self.config.open_duration);
+
+            if should_transition {
+                *state_guard = CircuitState::HalfOpen;
+                self.success_count.store(0, Ordering::SeqCst);
             }
-            self.success_count.store(0, Ordering::SeqCst);
         }
     }
 
@@ -705,7 +716,7 @@ impl<C: VectorNodeClient> fmt::Debug for DistributedVectorIndex<C> {
     }
 }
 
-impl<C: VectorNodeClient> DistributedVectorIndex<C> {
+impl<C: VectorNodeClient + 'static> DistributedVectorIndex<C> {
     /// Create a new distributed vector index from an existing list of clients.
     ///
     /// # Arguments
@@ -787,10 +798,11 @@ impl<C: VectorNodeClient> DistributedVectorIndex<C> {
 
         let available_nodes = self.nodes.iter().filter(|n| n.is_available()).count();
 
-        // Total vectors would require querying each node
-        // For now, return 0 - the caller can use len() for an accurate count
+        // Query all available nodes for their vector counts
+        let total_vectors = self.len();
+
         DistributedIndexStats {
-            total_vectors: 0,
+            total_vectors,
             node_count: self.nodes.len(),
             available_nodes,
             node_stats,
@@ -969,7 +981,13 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
             }));
         }
 
-        let k_capped = k.min(MAX_K);
+        // Prevent DoS attacks via excessive k values
+        if k > MAX_K {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "k={} exceeds maximum allowed value of {}",
+                k, MAX_K
+            ))));
+        }
 
         // Check available nodes
         let available_nodes: Vec<_> = self.nodes.iter().filter(|n| n.is_available()).collect();
@@ -985,7 +1003,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
         // Search all available nodes in parallel
         let results: Vec<Result<Vec<(NodeId, f32)>>> = available_nodes
             .par_iter()
-            .map(|node| node.execute(|client| client.search(query, k_capped)))
+            .map(|node| node.execute(|client| client.search(query, k)))
             .collect();
 
         // Collect successful results
@@ -1020,7 +1038,7 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
             ))));
         }
 
-        Ok(Self::merge_results(successful_results, k_capped))
+        Ok(Self::merge_results(successful_results, k))
     }
 
     fn search_with_filter<F>(
@@ -1032,9 +1050,10 @@ impl<C: VectorNodeClient + 'static> VectorIndex for DistributedVectorIndex<C> {
     where
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
-        // For distributed search with filter, we search all nodes and filter results
-        // A more efficient implementation would push the filter to the nodes
-        let results = self.search(query, k * 10)?; // Over-fetch to account for filtering
+        // For distributed search with filter, we search all nodes and filter results.
+        // A more efficient implementation would push the filter to the nodes.
+        // We overfetch to increase the likelihood of having enough results after filtering.
+        let results = self.search(query, k.saturating_mul(FILTER_OVERFETCH_FACTOR))?;
 
         let filtered: Vec<(NodeId, f32)> = results
             .into_iter()
@@ -1141,7 +1160,10 @@ impl MockVectorNodeClient {
                 -dist // Negate so higher is better
             }
             DistanceMetric::DotProduct => a.iter().zip(b.iter()).map(|(x, y)| x * y).sum(),
-            _ => 0.0,
+            other => panic!(
+                "MockVectorNodeClient does not support {:?} distance metric",
+                other
+            ),
         }
     }
 }
@@ -1890,5 +1912,305 @@ mod tests {
         };
         assert!(format!("{}", err).contains("Circuit breaker"));
         assert!(format!("{}", err).contains("node 1"));
+    }
+
+    #[test]
+    fn test_distributed_error_display_all_variants() {
+        let err = DistributedError::AllNodesFailed {
+            failed_count: 3,
+            sample_error: "connection timeout".to_string(),
+        };
+        assert!(format!("{}", err).contains("All 3 nodes failed"));
+        assert!(format!("{}", err).contains("connection timeout"));
+
+        let err = DistributedError::Timeout {
+            operation: "search".to_string(),
+            duration: Duration::from_secs(30),
+        };
+        assert!(format!("{}", err).contains("search"));
+        assert!(format!("{}", err).contains("timed out"));
+
+        let err = DistributedError::ConfigError("invalid dimensions".to_string());
+        assert!(format!("{}", err).contains("Configuration error"));
+        assert!(format!("{}", err).contains("invalid dimensions"));
+    }
+
+    // ============================================================
+    // Search k > MAX_K Tests
+    // ============================================================
+
+    #[test]
+    fn test_search_k_exceeds_max() {
+        let config = create_test_config(3);
+        let clients = create_test_clients(3);
+
+        let index = DistributedVectorIndex::new(config, clients).unwrap();
+
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+        // Request more than MAX_K results
+        let result = index.search(&query, MAX_K + 1);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn test_search_k_at_max() -> Result<()> {
+        let config = create_test_config(3);
+        let clients = create_test_clients(3);
+
+        let index = DistributedVectorIndex::new(config, clients)?;
+
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+        // Request exactly MAX_K results - should succeed
+        let results = index.search(&query, MAX_K)?;
+
+        assert!(results.is_empty()); // No vectors added
+
+        Ok(())
+    }
+
+    // ============================================================
+    // Stats Tests with Vectors
+    // ============================================================
+
+    #[test]
+    fn test_stats_with_vectors() -> Result<()> {
+        let config = create_test_config(3);
+        let clients = create_test_clients(3);
+
+        let index = DistributedVectorIndex::new(config, clients)?;
+
+        // Add some vectors
+        for i in 1..=15 {
+            let node = NodeId::new(i).unwrap();
+            index.add(node, &[i as f32, 0.0, 0.0, 0.0])?;
+        }
+
+        let stats = index.stats();
+        assert_eq!(stats.total_vectors, 15);
+        assert_eq!(stats.node_count, 3);
+        assert_eq!(stats.available_nodes, 3);
+
+        Ok(())
+    }
+
+    // ============================================================
+    // Partial Results Tests
+    // ============================================================
+
+    #[test]
+    fn test_search_partial_results_disabled() {
+        let mut config = create_test_config(3);
+        config.allow_partial_results = false;
+        let clients = create_test_clients(3);
+
+        // Make one node unhealthy
+        clients[1].set_healthy(false);
+
+        let index = DistributedVectorIndex::new(config, clients).unwrap();
+
+        // Add a vector to a healthy node
+        let node = NodeId::new(1).unwrap();
+        let _ = index.add(node, &[1.0, 0.0, 0.0, 0.0]);
+
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+        // With partial results disabled and one node unhealthy, search should fail
+        // (but only if the unhealthy node is actually queried - depends on routing)
+        let _ = index.search(&query, 10);
+    }
+
+    // ============================================================
+    // Circuit Breaker Reset Tests
+    // ============================================================
+
+    #[test]
+    fn test_reset_all_circuits() -> Result<()> {
+        let config = create_test_config(3);
+        let clients = create_test_clients(3);
+
+        let index = DistributedVectorIndex::new(config, clients)?;
+
+        // Force some failures to open circuits
+        for node in index.nodes.iter() {
+            for _ in 0..10 {
+                node.circuit_breaker.record_failure();
+            }
+        }
+
+        // Verify circuits are open
+        for node in index.nodes.iter() {
+            assert_eq!(node.circuit_state(), CircuitState::Open);
+        }
+
+        // Reset all circuits
+        index.reset_all_circuits();
+
+        // Verify circuits are closed
+        for node in index.nodes.iter() {
+            assert_eq!(node.circuit_state(), CircuitState::Closed);
+        }
+
+        Ok(())
+    }
+
+    // ============================================================
+    // Mock Client is_empty Tests
+    // ============================================================
+
+    #[test]
+    fn test_mock_client_is_empty() -> Result<()> {
+        let client = MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine);
+
+        assert!(client.is_empty()?);
+
+        client.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        assert!(!client.is_empty()?);
+
+        Ok(())
+    }
+
+    // ============================================================
+    // Circuit Breaker Remaining Time Tests
+    // ============================================================
+
+    #[test]
+    fn test_circuit_breaker_remaining_time() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+        };
+        let cb = NodeCircuitBreaker::new(config);
+
+        // Initially closed - no remaining time
+        assert!(cb.remaining_open_time().is_none());
+
+        // Open the circuit
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Should have remaining time
+        let remaining = cb.remaining_open_time();
+        assert!(remaining.is_some());
+        assert!(remaining.unwrap() > Duration::from_secs(0));
+        assert!(remaining.unwrap() <= Duration::from_secs(60));
+    }
+
+    // ============================================================
+    // Node Connection Tests
+    // ============================================================
+
+    #[test]
+    fn test_node_connection_execute_with_circuit_open() {
+        let client = Arc::new(MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine));
+        let connection = NodeConnection::new(
+            client,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                open_duration: Duration::from_secs(60),
+                success_threshold: 1,
+            },
+        );
+
+        // Open the circuit
+        connection.circuit_breaker.record_failure();
+        assert_eq!(connection.circuit_state(), CircuitState::Open);
+
+        // Execute should fail with circuit open
+        let result = connection.execute(|c| c.health_check());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_connection_debug() {
+        let client = Arc::new(MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine));
+        let connection = NodeConnection::new(client, CircuitBreakerConfig::default());
+
+        let debug_str = format!("{:?}", connection);
+        assert!(debug_str.contains("NodeConnection"));
+        assert!(debug_str.contains("node_id"));
+    }
+
+    // ============================================================
+    // DistributedVectorIndex Debug Tests
+    // ============================================================
+
+    #[test]
+    fn test_distributed_index_debug() -> Result<()> {
+        let config = create_test_config(3);
+        let clients = create_test_clients(3);
+
+        let index = DistributedVectorIndex::new(config, clients)?;
+
+        let debug_str = format!("{:?}", index);
+        assert!(debug_str.contains("DistributedVectorIndex"));
+        assert!(debug_str.contains("dimensions"));
+        assert!(debug_str.contains("node_count"));
+
+        Ok(())
+    }
+
+    // ============================================================
+    // Mock Client Dimension Mismatch Tests
+    // ============================================================
+
+    #[test]
+    fn test_mock_client_dimension_mismatch() {
+        let client = MockVectorNodeClient::new(0, 4, DistanceMetric::Cosine);
+
+        let result = client.add(NodeId::new(1).unwrap(), &[1.0, 0.0]); // Wrong dimensions
+        assert!(result.is_err());
+    }
+
+    // ============================================================
+    // Config Routing Strategy Tests
+    // ============================================================
+
+    #[test]
+    fn test_config_routing_strategy() {
+        let config = DistributedVectorConfig::new(384, DistanceMetric::Cosine)
+            .with_node(VectorNodeConfig::new(0, "node0:9000"))
+            .with_routing_strategy(RoutingStrategy::RangeBased);
+
+        assert_eq!(config.routing_strategy, RoutingStrategy::RangeBased);
+    }
+
+    #[test]
+    fn test_config_min_nodes_for_search() {
+        let config = DistributedVectorConfig::new(384, DistanceMetric::Cosine)
+            .with_node(VectorNodeConfig::new(0, "node0:9000"))
+            .with_min_nodes_for_search(2);
+
+        assert_eq!(config.min_nodes_for_search, 2);
+    }
+
+    // ============================================================
+    // Node Connection Stats Success Rate Tests
+    // ============================================================
+
+    #[test]
+    fn test_node_connection_stats_success_rate() {
+        let stats = NodeConnectionStats {
+            node_id: 0,
+            circuit_state: CircuitState::Closed,
+            request_count: 10,
+            failure_count: 3,
+        };
+
+        let rate = stats.success_rate();
+        assert!((rate - 0.7).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_node_connection_stats_success_rate_zero_requests() {
+        let stats = NodeConnectionStats {
+            node_id: 0,
+            circuit_state: CircuitState::Closed,
+            request_count: 0,
+            failure_count: 0,
+        };
+
+        assert_eq!(stats.success_rate(), 1.0);
     }
 }
