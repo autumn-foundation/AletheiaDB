@@ -113,6 +113,29 @@ pub fn create_client(_config: HoneycombConfig) -> Result<(), Error> {
     ))
 }
 
+/// Create a tracing layer for Honeycomb integration.
+///
+/// **Note:** The custom Honeycomb client uses direct event sending rather than
+/// tracing layer integration. For tracing-based workflows, use [`create_client`]
+/// directly and manually send events, or consider using OpenTelemetry exporters.
+///
+/// # Errors
+///
+/// Currently returns an error as the custom client doesn't support tracing layers.
+/// This is a placeholder for future tracing integration.
+#[cfg(feature = "observability-honeycomb")]
+pub fn create_layer(
+    _config: HoneycombConfig,
+) -> Result<tracing_subscriber::layer::Identity, Error> {
+    // The custom honeycomb client uses direct event sending, not tracing layer integration.
+    // Return Identity layer (no-op) with a warning for now.
+    eprintln!(
+        "Warning: Honeycomb tracing layer not yet implemented. \
+         Use create_client() for direct event sending instead."
+    );
+    Ok(tracing_subscriber::layer::Identity::new())
+}
+
 /// Re-export the custom Honeycomb client types when available.
 #[cfg(feature = "honeycomb")]
 pub use crate::honeycomb::{
