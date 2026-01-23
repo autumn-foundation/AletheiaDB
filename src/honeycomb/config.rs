@@ -20,6 +20,10 @@ pub const DEFAULT_BATCH_TIMEOUT: Duration = Duration::from_millis(100);
 /// Default pending work capacity.
 pub const DEFAULT_PENDING_WORK_CAPACITY: usize = 10_000;
 
+/// Default maximum batch size in bytes (10 MB).
+/// Prevents OOM from malicious or buggy events with excessive field counts.
+pub const DEFAULT_MAX_BATCH_BYTES: usize = 10 * 1024 * 1024;
+
 /// Client options for connecting to Honeycomb.
 ///
 /// This struct is compatible with `libhoney::client::Options`.
@@ -152,6 +156,11 @@ pub struct TransmissionOptions {
 
     /// Additional string to append to the User-Agent header.
     pub user_agent_addition: Option<String>,
+
+    /// Maximum batch size in bytes.
+    /// Prevents OOM from events with excessive field counts.
+    /// Defaults to 10 MB.
+    pub max_batch_bytes: usize,
 }
 
 impl Default for TransmissionOptions {
@@ -162,6 +171,7 @@ impl Default for TransmissionOptions {
             batch_timeout: DEFAULT_BATCH_TIMEOUT,
             pending_work_capacity: DEFAULT_PENDING_WORK_CAPACITY,
             user_agent_addition: None,
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
         }
     }
 }
@@ -207,6 +217,15 @@ impl TransmissionOptions {
         self
     }
 
+    /// Set the maximum batch size in bytes.
+    ///
+    /// This prevents OOM from events with excessive field counts.
+    #[must_use]
+    pub fn with_max_batch_bytes(mut self, bytes: usize) -> Self {
+        self.max_batch_bytes = bytes;
+        self
+    }
+
     /// Validate the transmission options.
     pub fn validate(&self) -> Result<(), super::error::Error> {
         if self.max_batch_size == 0 {
@@ -222,6 +241,11 @@ impl TransmissionOptions {
         if self.pending_work_capacity == 0 {
             return Err(super::error::Error::Config(
                 "Pending work capacity must be greater than 0".to_string(),
+            ));
+        }
+        if self.max_batch_bytes == 0 {
+            return Err(super::error::Error::Config(
+                "Max batch bytes must be greater than 0".to_string(),
             ));
         }
         Ok(())
@@ -475,6 +499,25 @@ mod tests {
             err.to_string()
                 .contains("Pending work capacity must be greater than 0")
         );
+    }
+
+    #[test]
+    fn test_transmission_options_validate_zero_batch_bytes() {
+        let opts = TransmissionOptions::default().with_max_batch_bytes(0);
+        let err = opts.validate().unwrap_err();
+        assert!(err.to_string().contains("Max batch bytes must be greater than 0"));
+    }
+
+    #[test]
+    fn test_transmission_options_max_batch_bytes() {
+        let opts = TransmissionOptions::default().with_max_batch_bytes(5 * 1024 * 1024);
+        assert_eq!(opts.max_batch_bytes, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_transmission_options_default_max_batch_bytes() {
+        let opts = TransmissionOptions::default();
+        assert_eq!(opts.max_batch_bytes, DEFAULT_MAX_BATCH_BYTES);
     }
 
     #[test]

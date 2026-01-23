@@ -20,6 +20,9 @@ pub const DEFAULT_MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// Default maximum number of retries.
 pub const DEFAULT_MAX_RETRIES: u32 = 5;
 
+/// Default total timeout for all retry attempts.
+pub const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// User-Agent header value.
 /// Used when the `honeycomb` feature is enabled for HTTP requests.
 #[allow(dead_code)]
@@ -98,6 +101,8 @@ pub struct RetryConfig {
     pub max_retries: u32,
     /// Multiplier for exponential backoff.
     pub backoff_multiplier: f64,
+    /// Maximum total time for all retry attempts (prevents unbounded blocking).
+    pub total_timeout: Duration,
 }
 
 impl Default for RetryConfig {
@@ -107,6 +112,7 @@ impl Default for RetryConfig {
             max_delay: DEFAULT_MAX_RETRY_DELAY,
             max_retries: DEFAULT_MAX_RETRIES,
             backoff_multiplier: 2.0,
+            total_timeout: DEFAULT_TOTAL_TIMEOUT,
         }
     }
 }
@@ -135,6 +141,15 @@ impl RetryConfig {
     #[must_use]
     pub fn with_max_retries(mut self, retries: u32) -> Self {
         self.max_retries = retries;
+        self
+    }
+
+    /// Set the total timeout for all retry attempts.
+    ///
+    /// This prevents unbounded blocking when the endpoint is unavailable.
+    #[must_use]
+    pub fn with_total_timeout(mut self, timeout: Duration) -> Self {
+        self.total_timeout = timeout;
         self
     }
 
@@ -349,14 +364,38 @@ impl Client {
     }
 
     /// Send a batch via HTTP with retries.
+    ///
+    /// Respects both `max_retries` and `total_timeout` to prevent unbounded blocking.
+    /// Also enforces `max_batch_bytes` to prevent OOM from oversized batches.
     #[cfg(feature = "honeycomb")]
     fn send_batch_http(&self, batch: &[Event]) -> Result<Response> {
         let endpoint = self.config.options.batch_endpoint();
         let body = serde_json::to_string(batch)?;
 
+        // Check batch size limit to prevent OOM
+        let max_bytes = self.config.transmission_options.max_batch_bytes;
+        if body.len() > max_bytes {
+            self.buffer.stats().record_batch_failed();
+            return Err(Error::Buffer(format!(
+                "Batch size ({} bytes) exceeds maximum ({} bytes)",
+                body.len(),
+                max_bytes
+            )));
+        }
+
         let mut last_response = Response::error("No attempts made", Duration::ZERO);
+        let overall_start = std::time::Instant::now();
 
         for attempt in 0..=self.retry_config.max_retries {
+            // Check total timeout before each attempt
+            if overall_start.elapsed() >= self.retry_config.total_timeout {
+                self.buffer.stats().record_batch_failed();
+                return Err(Error::Timeout(format!(
+                    "Total timeout ({:?}) exceeded after {} attempts",
+                    self.retry_config.total_timeout, attempt
+                )));
+            }
+
             let start = std::time::Instant::now();
 
             let result = self
@@ -398,10 +437,17 @@ impl Client {
                 }
             }
 
-            // Wait before retrying
+            // Wait before retrying, but respect total timeout
             if self.retry_config.should_retry(attempt) {
                 let delay = self.retry_config.delay_for_attempt(attempt);
-                std::thread::sleep(delay);
+                let remaining = self
+                    .retry_config
+                    .total_timeout
+                    .saturating_sub(overall_start.elapsed());
+                if remaining.is_zero() {
+                    break;
+                }
+                std::thread::sleep(std::cmp::min(delay, remaining));
             }
         }
 
@@ -939,5 +985,20 @@ mod tests {
         assert_eq!(DEFAULT_INITIAL_RETRY_DELAY, Duration::from_millis(100));
         assert_eq!(DEFAULT_MAX_RETRY_DELAY, Duration::from_secs(5));
         assert_eq!(DEFAULT_MAX_RETRIES, 5);
+        assert_eq!(DEFAULT_TOTAL_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_retry_config_total_timeout() {
+        let config = RetryConfig::new().with_total_timeout(Duration::from_secs(60));
+
+        assert_eq!(config.total_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_retry_config_default_total_timeout() {
+        let config = RetryConfig::default();
+
+        assert_eq!(config.total_timeout, DEFAULT_TOTAL_TIMEOUT);
     }
 }

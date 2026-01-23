@@ -93,6 +93,16 @@ pub struct BatchStatsSnapshot {
 /// # Thread Safety
 ///
 /// `BatchBuffer` is thread-safe and can be shared across threads using `Arc`.
+///
+/// # Lock Ordering
+///
+/// This struct uses two mutexes internally. To prevent deadlocks, they MUST always
+/// be acquired in this order:
+/// 1. `events` mutex first
+/// 2. `batch_start` mutex second
+///
+/// All methods in this struct follow this ordering. If you modify this struct,
+/// ensure any new code maintains this lock ordering to prevent deadlocks.
 #[derive(Debug)]
 pub struct BatchBuffer {
     /// Internal buffer of events.
@@ -135,6 +145,9 @@ impl BatchBuffer {
     pub fn add(&self, event: Event) -> Result<Option<Vec<Event>>, super::error::Error> {
         // Recover from poisoned mutex - observability should work even after panics
         let mut events = self.events.lock().unwrap_or_else(|poisoned| {
+            #[cfg(feature = "observability")]
+            tracing::warn!("BatchBuffer events mutex was poisoned, recovering data");
+            #[cfg(not(feature = "observability"))]
             eprintln!("Warning: BatchBuffer events mutex was poisoned, recovering data");
             poisoned.into_inner()
         });
@@ -150,6 +163,9 @@ impl BatchBuffer {
         // Set batch start time if this is the first event
         // Recover from poisoned mutex
         let mut batch_start = self.batch_start.lock().unwrap_or_else(|poisoned| {
+            #[cfg(feature = "observability")]
+            tracing::warn!("BatchBuffer batch_start mutex was poisoned, recovering data");
+            #[cfg(not(feature = "observability"))]
             eprintln!("Warning: BatchBuffer batch_start mutex was poisoned, recovering data");
             poisoned.into_inner()
         });
@@ -198,11 +214,17 @@ impl BatchBuffer {
     pub fn flush(&self) -> Result<Vec<Event>, super::error::Error> {
         // Recover from poisoned mutex - observability should work even after panics
         let mut events = self.events.lock().unwrap_or_else(|poisoned| {
+            #[cfg(feature = "observability")]
+            tracing::warn!("BatchBuffer events mutex was poisoned during flush, recovering data");
+            #[cfg(not(feature = "observability"))]
             eprintln!("Warning: BatchBuffer events mutex was poisoned during flush, recovering data");
             poisoned.into_inner()
         });
 
         let mut batch_start = self.batch_start.lock().unwrap_or_else(|poisoned| {
+            #[cfg(feature = "observability")]
+            tracing::warn!("BatchBuffer batch_start mutex was poisoned during flush, recovering data");
+            #[cfg(not(feature = "observability"))]
             eprintln!("Warning: BatchBuffer batch_start mutex was poisoned during flush, recovering data");
             poisoned.into_inner()
         });

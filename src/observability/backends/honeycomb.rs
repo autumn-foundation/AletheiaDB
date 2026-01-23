@@ -129,6 +129,12 @@ pub fn create_layer(
 ) -> Result<tracing_subscriber::layer::Identity, Error> {
     // The custom honeycomb client uses direct event sending, not tracing layer integration.
     // Return Identity layer (no-op) with a warning for now.
+    #[cfg(feature = "observability")]
+    tracing::warn!(
+        "Honeycomb tracing layer not yet implemented. \
+         Use create_client() for direct event sending instead."
+    );
+    #[cfg(not(feature = "observability"))]
     eprintln!(
         "Warning: Honeycomb tracing layer not yet implemented. \
          Use create_client() for direct event sending instead."
