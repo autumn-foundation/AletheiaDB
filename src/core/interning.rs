@@ -288,6 +288,59 @@ impl StringInterner {
 
         strings
     }
+
+    /// Pre-intern common strings at startup to avoid initial allocation overhead.
+    ///
+    /// This method interns frequently used property keys and labels that are
+    /// commonly accessed throughout the database's operational lifetime. By
+    /// pre-interning these strings, we eliminate the "allocation + hash + insert"
+    /// penalty on first access, providing predictable startup performance.
+    ///
+    /// Common strings that are warmed:
+    /// - Property keys: "name", "id", "type", "label"
+    /// - Timestamps: "created_at", "updated_at"
+    /// - Temporal: "valid_from", "valid_to", "tx_from", "tx_to"
+    ///
+    /// This method is idempotent - calling it multiple times will not duplicate
+    /// strings or change their IDs.
+    ///
+    /// # Performance Impact
+    ///
+    /// The performance impact is minimal and only affects the initial access cost
+    /// for each string. Subsequent accesses remain efficient with O(1) lookups.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gallifreydb::core::interning::StringInterner;
+    ///
+    /// let interner = StringInterner::new();
+    /// interner.warm_common_strings();
+    ///
+    /// // These strings are now pre-interned (no allocation on first access)
+    /// let id = interner.intern("name").unwrap();
+    /// ```
+    pub fn warm_common_strings(&self) {
+        // Array of frequently used strings in the database
+        const COMMON_STRINGS: &[&str] = &[
+            "name",
+            "id",
+            "type",
+            "label",
+            "created_at",
+            "updated_at",
+            "valid_from",
+            "valid_to",
+            "tx_from",
+            "tx_to",
+        ];
+
+        // Intern each common string using intern_unchecked since these are
+        // known-good strings from a trusted internal source
+        for s in COMMON_STRINGS {
+            let _id = self.intern_unchecked(s);
+        }
+    }
 }
 
 impl Default for StringInterner {
@@ -319,7 +372,15 @@ use std::sync::LazyLock;
 ///
 /// This static provides a single, thread-safe string interner that can be used
 /// throughout the application to deduplicate common strings like labels and property keys.
-pub static GLOBAL_INTERNER: LazyLock<StringInterner> = LazyLock::new(StringInterner::new);
+///
+/// The global interner is automatically warmed at initialization with common strings
+/// such as "name", "id", "type", "label", "created_at", "updated_at", "valid_from",
+/// "valid_to", "tx_from", and "tx_to" to provide predictable startup performance.
+pub static GLOBAL_INTERNER: LazyLock<StringInterner> = LazyLock::new(|| {
+    let interner = StringInterner::new();
+    interner.warm_common_strings();
+    interner
+});
 
 #[cfg(test)]
 mod tests {
@@ -737,5 +798,259 @@ mod tests {
 
         // Should only have 1 unique string
         assert_eq!(interner.len(), 1);
+    }
+
+    // ========== Tests for warm_common_strings() ==========
+
+    #[test]
+    fn test_warm_common_strings_basic() {
+        let interner = StringInterner::new();
+
+        // Before warming, interner should be empty
+        assert_eq!(interner.len(), 0);
+
+        // Warm common strings
+        interner.warm_common_strings();
+
+        // After warming, common strings should be interned
+        assert!(interner.len() > 0);
+
+        // Verify all common strings are present
+        let common_strings = [
+            "name",
+            "id",
+            "type",
+            "label",
+            "created_at",
+            "updated_at",
+            "valid_from",
+            "valid_to",
+            "tx_from",
+            "tx_to",
+        ];
+
+        for s in &common_strings {
+            assert!(
+                interner.contains(s),
+                "Common string '{}' should be interned after warming",
+                s
+            );
+        }
+
+        // Should have exactly the number of common strings
+        assert_eq!(interner.len(), common_strings.len());
+    }
+
+    #[test]
+    fn test_warm_common_strings_idempotent() {
+        let interner = StringInterner::new();
+
+        // First warming
+        interner.warm_common_strings();
+        let len_after_first = interner.len();
+
+        // Get IDs of some common strings
+        let id_name_1 = interner.get_id("name").unwrap();
+        let id_type_1 = interner.get_id("type").unwrap();
+
+        // Second warming should not change anything
+        interner.warm_common_strings();
+        let len_after_second = interner.len();
+
+        // Length should be the same
+        assert_eq!(len_after_first, len_after_second);
+
+        // IDs should be the same
+        let id_name_2 = interner.get_id("name").unwrap();
+        let id_type_2 = interner.get_id("type").unwrap();
+
+        assert_eq!(id_name_1, id_name_2);
+        assert_eq!(id_type_1, id_type_2);
+    }
+
+    #[test]
+    fn test_warm_common_strings_no_allocation_on_subsequent_access() {
+        let interner = StringInterner::new();
+
+        // Warm common strings
+        interner.warm_common_strings();
+
+        // Subsequent intern calls should return existing IDs without allocation
+        let id_before = interner.get_id("name").unwrap();
+        let id_after = interner.intern("name").unwrap();
+
+        assert_eq!(id_before, id_after);
+
+        // Length shouldn't change
+        let expected_len = interner.len();
+        interner.intern("type").unwrap();
+        interner.intern("label").unwrap();
+        assert_eq!(interner.len(), expected_len);
+    }
+
+    #[test]
+    fn test_warm_common_strings_sequential_ids() {
+        let interner = StringInterner::new();
+
+        // Warm common strings
+        interner.warm_common_strings();
+
+        // Common strings should get sequential IDs starting from 0
+        let common_strings = [
+            "name",
+            "id",
+            "type",
+            "label",
+            "created_at",
+            "updated_at",
+            "valid_from",
+            "valid_to",
+            "tx_from",
+            "tx_to",
+        ];
+
+        let mut ids: Vec<_> = common_strings
+            .iter()
+            .map(|s| interner.get_id(s).unwrap().as_u32())
+            .collect();
+
+        ids.sort();
+
+        // IDs should be 0, 1, 2, ..., n-1
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(*id, i as u32);
+        }
+    }
+
+    #[test]
+    fn test_warm_common_strings_with_existing_data() {
+        let interner = StringInterner::new();
+
+        // Intern some strings before warming
+        let existing_id = interner.intern("existing").unwrap();
+
+        // Warm common strings
+        interner.warm_common_strings();
+
+        // Existing ID should still be valid
+        assert_eq!(interner.resolve(existing_id).unwrap().as_ref(), "existing");
+
+        // New common strings should also be present
+        assert!(interner.contains("name"));
+        assert!(interner.contains("type"));
+
+        // Total should be 1 (existing) + 10 (common strings)
+        assert_eq!(interner.len(), 11);
+    }
+
+    #[test]
+    fn test_warm_common_strings_concurrent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let interner = Arc::new(StringInterner::new());
+
+        // Spawn multiple threads that all call warm_common_strings
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let interner_clone = Arc::clone(&interner);
+            let handle = thread::spawn(move || {
+                interner_clone.warm_common_strings();
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should still have exactly the common strings count (no duplicates)
+        let common_strings = [
+            "name",
+            "id",
+            "type",
+            "label",
+            "created_at",
+            "updated_at",
+            "valid_from",
+            "valid_to",
+            "tx_from",
+            "tx_to",
+        ];
+        assert_eq!(interner.len(), common_strings.len());
+
+        // All common strings should be present
+        for s in &common_strings {
+            assert!(interner.contains(s));
+        }
+    }
+
+    #[test]
+    fn test_warm_common_strings_performance_benefit() {
+        let interner = StringInterner::new();
+
+        // Warm common strings
+        interner.warm_common_strings();
+
+        // This test verifies that warmed strings are already in the fast path
+        // by checking they can be retrieved without error
+        let common_strings = [
+            "name",
+            "id",
+            "type",
+            "label",
+            "created_at",
+            "updated_at",
+            "valid_from",
+            "valid_to",
+            "tx_from",
+            "tx_to",
+        ];
+
+        for s in &common_strings {
+            // get_id uses the fast path (no allocation)
+            let id = interner.get_id(s);
+            assert!(id.is_some(), "String '{}' should be pre-interned", s);
+
+            // intern should also be fast (returns existing ID)
+            let id_from_intern = interner.intern(s).unwrap();
+            assert_eq!(id.unwrap(), id_from_intern);
+        }
+    }
+
+    #[test]
+    fn test_global_interner_automatically_warmed() {
+        // GLOBAL_INTERNER should be automatically warmed at initialization
+        let common_strings = [
+            "name",
+            "id",
+            "type",
+            "label",
+            "created_at",
+            "updated_at",
+            "valid_from",
+            "valid_to",
+            "tx_from",
+            "tx_to",
+        ];
+
+        // All common strings should already be present in the global interner
+        for s in &common_strings {
+            assert!(
+                GLOBAL_INTERNER.contains(s),
+                "Global interner should have '{}' pre-warmed",
+                s
+            );
+        }
+
+        // The global interner should have at least the common strings
+        // (might have more if other tests have used it)
+        assert!(
+            GLOBAL_INTERNER.len() >= common_strings.len(),
+            "Global interner should have at least {} strings, has {}",
+            common_strings.len(),
+            GLOBAL_INTERNER.len()
+        );
     }
 }
