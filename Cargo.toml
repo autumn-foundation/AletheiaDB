@@ -61,7 +61,7 @@ tokenizers = { version = "0.15", optional = true }
 num_cpus = { version = "1.16", optional = true }
 
 # RocksDB for tiered cold storage (optional)
-rocksdb = { version = "0.22", optional = true }
+rocksdb = { version = "0.24", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
