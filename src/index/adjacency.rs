@@ -148,6 +148,9 @@ impl AdjacencyIndex {
             return Self::new();
         }
 
+        // Capture edge count before consuming the vector
+        let edge_count = edges.len();
+
         // Find maximum node ID for bounds checking
         let max_node_id = edges
             .iter()
@@ -170,7 +173,7 @@ impl AdjacencyIndex {
 
         // Build CSR format with sparse representation
         let mut offsets = Vec::with_capacity(node_ids.len() + 1);
-        let mut flat_edges = Vec::new();
+        let mut flat_edges = Vec::with_capacity(edge_count);
 
         offsets.push(0);
 
@@ -582,5 +585,50 @@ mod tests {
 
         // Total edges
         assert_eq!(index.edge_count(), 5);
+    }
+
+    #[test]
+    fn test_build_with_many_edges_preallocation() {
+        // Test that building with many edges works correctly.
+        // This test verifies the scenario mentioned in issue #193 where
+        // pre-allocating the flat_edges Vec avoids ~14 reallocations for 10,000 edges.
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Create 10,000 edges across 1,000 nodes
+        let edge_count = 10_000;
+        let node_count = 1_000;
+
+        let mut edges = Vec::with_capacity(edge_count);
+        for i in 0..edge_count {
+            let source = NodeId::new((i % node_count) as u64).unwrap();
+            let target = NodeId::new(((i + 1) % node_count) as u64).unwrap();
+            let edge_id = EdgeId::new(i as u64).unwrap();
+            edges.push((source, target, edge_id, knows));
+        }
+
+        // Build the index (should pre-allocate to avoid reallocations)
+        let index = AdjacencyIndex::build(edges);
+
+        // Verify correctness
+        assert_eq!(index.edge_count(), edge_count);
+
+        // Verify that each node has the correct number of outgoing edges.
+        // In this test setup, each node is a source for `edge_count / node_count` edges.
+        let expected_degree = edge_count / node_count;
+        for i in 0..node_count {
+            let node = NodeId::new(i as u64).unwrap();
+            let adj = index.get_adjacency(node);
+            assert_eq!(
+                adj.len(),
+                expected_degree,
+                "Node {} has an unexpected degree",
+                i
+            );
+            // All adjacency entries should be valid
+            for entry in adj {
+                assert!(entry.edge_id.as_u64() < edge_count as u64);
+                assert!(entry.target.as_u64() < node_count as u64);
+            }
+        }
     }
 }
