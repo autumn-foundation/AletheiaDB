@@ -76,7 +76,6 @@ use crate::core::id::NodeId;
 use crate::core::vector::validate_vector;
 use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, Quantization, VectorIndex};
 use crate::utils::{Error, Result, error::VectorError};
-use parking_lot::RwLock;
 use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -217,8 +216,6 @@ pub struct ShardedVectorIndex {
     config: ShardedVectorConfig,
     /// The underlying HNSW shards.
     shards: Vec<Arc<HnswIndex>>,
-    /// Lock for exclusive operations.
-    _lock: RwLock<()>,
 }
 
 impl ShardedVectorIndex {
@@ -251,11 +248,7 @@ impl ShardedVectorIndex {
             shards.push(Arc::new(shard));
         }
 
-        Ok(Self {
-            config,
-            shards,
-            _lock: RwLock::new(()),
-        })
+        Ok(Self { config, shards })
     }
 
     /// Creates a new sharded index with default configuration.
@@ -317,12 +310,9 @@ impl ShardedVectorIndex {
     ///
     /// The routing is deterministic: the same NodeId always maps to the same shard.
     fn shard_for_id(&self, id: NodeId) -> usize {
-        // Defensive check - should never happen due to construction validation
+        // num_shards is always >= 1 due to clamping in constructor
         debug_assert!(!self.shards.is_empty(), "shards cannot be empty");
         let num_shards = self.shards.len();
-        if num_shards == 0 {
-            return 0;
-        }
 
         match self.config.strategy {
             ShardingStrategy::HashBased => {
@@ -336,7 +326,9 @@ impl ShardedVectorIndex {
                 let num_shards_128 = num_shards as u128;
                 let id_128 = id.as_u64() as u128;
                 // We use (u64::MAX as u128 + 1) to represent the full range size
-                ((id_128 * num_shards_128) / (u64::MAX as u128 + 1)) as usize
+                let shard = ((id_128 * num_shards_128) / (u64::MAX as u128 + 1)) as usize;
+                // Clamp to valid range to handle edge case where id=u64::MAX
+                shard.min(num_shards - 1)
             }
         }
     }
@@ -384,13 +376,11 @@ impl ShardedVectorIndex {
     /// # }
     /// ```
     pub fn estimate_rebalance_cost(&self) -> Result<usize> {
+        // num_shards is always >= 1 due to clamping in constructor
+        debug_assert!(!self.shards.is_empty(), "shards cannot be empty");
+
         let stats = self.stats();
         if stats.imbalance_ratio <= self.config.rebalance_config.imbalance_threshold {
-            return Ok(0);
-        }
-
-        // Protect against division by zero
-        if self.shards.is_empty() {
             return Ok(0);
         }
 
@@ -441,11 +431,7 @@ impl ShardedVectorIndex {
             shards.push(Arc::new(shard));
         }
 
-        Ok(Self {
-            config,
-            shards,
-            _lock: RwLock::new(()),
-        })
+        Ok(Self { config, shards })
     }
 
     /// Validate a path for security concerns.
@@ -653,7 +639,7 @@ impl VectorIndex for ShardedVectorIndex {
     }
 
     fn add_batch(&self, items: &[(NodeId, Vec<f32>)]) -> Result<()> {
-        // Group item indices by shard to avoid cloning vectors
+        // Group item indices by shard first
         let mut shard_indices: Vec<Vec<usize>> = vec![Vec::new(); self.shards.len()];
 
         for (idx, (id, _)) in items.iter().enumerate() {
@@ -661,10 +647,11 @@ impl VectorIndex for ShardedVectorIndex {
             shard_indices[shard_idx].push(idx);
         }
 
-        // Add to each shard using the original items slice
+        // Add to each shard
         for (shard_idx, indices) in shard_indices.into_iter().enumerate() {
             if !indices.is_empty() {
-                // Build the batch for this shard by referencing the original items
+                // TODO: HnswIndex::add_batch requires owned Vec<f32>, so we must clone here.
+                // A future optimization could add a add_batch_ref method that accepts &[f32].
                 let shard_items: Vec<(NodeId, Vec<f32>)> = indices
                     .iter()
                     .map(|&idx| (items[idx].0, items[idx].1.clone()))
@@ -726,7 +713,6 @@ impl VectorIndex for ShardedVectorIndex {
 // Note: ShardedVectorIndex automatically implements Send + Sync because:
 // - `config`: ShardedVectorConfig is Send + Sync (contains only Send + Sync types)
 // - `shards`: Vec<Arc<HnswIndex>> - HnswIndex manually implements Send + Sync
-// - `_lock`: parking_lot::RwLock<()> is Send + Sync
 
 #[cfg(test)]
 mod tests {
@@ -1149,6 +1135,37 @@ mod tests {
 
         assert_eq!(shard1, shard2);
         assert_eq!(shard2, shard3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_based_max_id_edge_case() -> Result<()> {
+        // Test that u64::MAX doesn't cause index-out-of-bounds
+        let config = ShardedVectorConfig::new(4)
+            .with_strategy(ShardingStrategy::RangeBased)
+            .with_hnsw_config(HnswConfig::new(4, DistanceMetric::Cosine));
+        let index = ShardedVectorIndex::new(config)?;
+
+        // Test edge case IDs that could cause overflow or out-of-bounds
+        let edge_ids: Vec<u64> = vec![
+            0,
+            1,
+            u64::MAX - 1,
+            u64::MAX, // This was previously causing index-out-of-bounds
+        ];
+
+        for id in edge_ids {
+            if let Ok(node) = NodeId::new(id) {
+                let shard = index.shard_for_id(node);
+                assert!(
+                    shard < 4,
+                    "Shard index {} out of bounds for id {}",
+                    shard,
+                    id
+                );
+            }
+        }
 
         Ok(())
     }
