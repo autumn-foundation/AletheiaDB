@@ -118,11 +118,15 @@ pub struct GraphIndexData {
     /// Edge data
     pub edges: Vec<PersistedEdge>,
 
+    /// CSR outgoing adjacency: sorted node IDs with outgoing edges
+    pub outgoing_node_ids: Vec<u64>,
     /// CSR outgoing adjacency: offsets into neighbors array
     pub outgoing_offsets: Vec<u64>,
     /// CSR outgoing adjacency: packed edge IDs
     pub outgoing_neighbors: Vec<u64>,
 
+    /// CSR incoming adjacency: sorted node IDs with incoming edges
+    pub incoming_node_ids: Vec<u64>,
     /// CSR incoming adjacency: offsets into neighbors array
     pub incoming_offsets: Vec<u64>,
     /// CSR incoming adjacency: packed edge IDs

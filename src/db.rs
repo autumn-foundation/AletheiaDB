@@ -619,11 +619,13 @@ fn persist_graph_index(
     graph_data.edge_count = graph_data.edges.len() as u64;
 
     // Export CSR adjacency structures for fast loading
-    let (outgoing_offsets, outgoing_neighbors) = current.export_outgoing_csr();
-    let (incoming_offsets, incoming_neighbors) = current.export_incoming_csr();
+    let (outgoing_node_ids, outgoing_offsets, outgoing_neighbors) = current.export_outgoing_csr();
+    let (incoming_node_ids, incoming_offsets, incoming_neighbors) = current.export_incoming_csr();
 
+    graph_data.outgoing_node_ids = outgoing_node_ids;
     graph_data.outgoing_offsets = outgoing_offsets;
     graph_data.outgoing_neighbors = outgoing_neighbors;
+    graph_data.incoming_node_ids = incoming_node_ids;
     graph_data.incoming_offsets = incoming_offsets;
     graph_data.incoming_neighbors = incoming_neighbors;
 
@@ -1203,8 +1205,10 @@ impl GallifreyDB {
                             && !graph_data.incoming_offsets.is_empty()
                         {
                             db.current.import_csr(
+                                graph_data.outgoing_node_ids,
                                 graph_data.outgoing_offsets,
                                 graph_data.outgoing_neighbors,
+                                graph_data.incoming_node_ids,
                                 graph_data.incoming_offsets,
                                 graph_data.incoming_neighbors,
                             );
