@@ -505,7 +505,10 @@ mod tests {
     fn test_transmission_options_validate_zero_batch_bytes() {
         let opts = TransmissionOptions::default().with_max_batch_bytes(0);
         let err = opts.validate().unwrap_err();
-        assert!(err.to_string().contains("Max batch bytes must be greater than 0"));
+        assert!(
+            err.to_string()
+                .contains("Max batch bytes must be greater than 0")
+        );
     }
 
     #[test]

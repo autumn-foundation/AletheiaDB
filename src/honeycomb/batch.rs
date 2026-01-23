@@ -217,15 +217,21 @@ impl BatchBuffer {
             #[cfg(feature = "observability")]
             tracing::warn!("BatchBuffer events mutex was poisoned during flush, recovering data");
             #[cfg(not(feature = "observability"))]
-            eprintln!("Warning: BatchBuffer events mutex was poisoned during flush, recovering data");
+            eprintln!(
+                "Warning: BatchBuffer events mutex was poisoned during flush, recovering data"
+            );
             poisoned.into_inner()
         });
 
         let mut batch_start = self.batch_start.lock().unwrap_or_else(|poisoned| {
             #[cfg(feature = "observability")]
-            tracing::warn!("BatchBuffer batch_start mutex was poisoned during flush, recovering data");
+            tracing::warn!(
+                "BatchBuffer batch_start mutex was poisoned during flush, recovering data"
+            );
             #[cfg(not(feature = "observability"))]
-            eprintln!("Warning: BatchBuffer batch_start mutex was poisoned during flush, recovering data");
+            eprintln!(
+                "Warning: BatchBuffer batch_start mutex was poisoned during flush, recovering data"
+            );
             poisoned.into_inner()
         });
 
