@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::batch::{BatchBuffer, BatchStats};
 use super::config::Config;
-use super::error::Result;
+use super::error::{Error, Result};
 use super::event::Event;
 
 /// Default initial retry delay.
@@ -170,7 +170,7 @@ impl RetryConfig {
 /// use gallifreydb::honeycomb::{Client, Config, Event};
 ///
 /// let config = Config::new("api-key", "dataset");
-/// let client = Client::new(config);
+/// let client = Client::new(config).unwrap();
 ///
 /// let mut event = Event::new();
 /// event.add_field("message", "Hello!");
@@ -202,40 +202,83 @@ impl std::fmt::Debug for Client {
 
 impl Client {
     /// Create a new client with the given configuration.
-    pub fn new(config: Config) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client fails to initialize (when `honeycomb` feature is enabled).
+    #[cfg(feature = "honeycomb")]
+    pub fn new(config: Config) -> Result<Self> {
         let buffer = BatchBuffer::new(config.transmission_options.clone());
+        let http_client = Self::build_http_client(&config)?;
 
-        #[cfg(feature = "honeycomb")]
-        let http_client = Self::build_http_client(&config);
-
-        Self {
+        Ok(Self {
             config,
             buffer,
             retry_config: RetryConfig::default(),
-            #[cfg(feature = "honeycomb")]
             http_client,
-        }
+        })
+    }
+
+    /// Create a new client with the given configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client fails to initialize (when `honeycomb` feature is enabled).
+    /// Without the feature, this always succeeds.
+    #[cfg(not(feature = "honeycomb"))]
+    pub fn new(config: Config) -> Result<Self> {
+        let buffer = BatchBuffer::new(config.transmission_options.clone());
+
+        Ok(Self {
+            config,
+            buffer,
+            retry_config: RetryConfig::default(),
+        })
     }
 
     /// Create a new client with custom retry configuration.
-    pub fn with_retry_config(config: Config, retry_config: RetryConfig) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client fails to initialize (when `honeycomb` feature is enabled).
+    /// Without the feature, this always succeeds.
+    #[cfg(feature = "honeycomb")]
+    pub fn with_retry_config(config: Config, retry_config: RetryConfig) -> Result<Self> {
         let buffer = BatchBuffer::new(config.transmission_options.clone());
+        let http_client = Self::build_http_client(&config)?;
 
-        #[cfg(feature = "honeycomb")]
-        let http_client = Self::build_http_client(&config);
-
-        Self {
+        Ok(Self {
             config,
             buffer,
             retry_config,
-            #[cfg(feature = "honeycomb")]
             http_client,
-        }
+        })
+    }
+
+    /// Create a new client with custom retry configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client fails to initialize (when `honeycomb` feature is enabled).
+    /// Without the feature, this always succeeds.
+    #[cfg(not(feature = "honeycomb"))]
+    pub fn with_retry_config(config: Config, retry_config: RetryConfig) -> Result<Self> {
+        let buffer = BatchBuffer::new(config.transmission_options.clone());
+
+        Ok(Self {
+            config,
+            buffer,
+            retry_config,
+        })
     }
 
     /// Build the HTTP client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client fails to initialize (e.g., TLS backend issues).
     #[cfg(feature = "honeycomb")]
-    fn build_http_client(config: &Config) -> reqwest::blocking::Client {
+    fn build_http_client(config: &Config) -> Result<reqwest::blocking::Client> {
         let mut user_agent = USER_AGENT.to_string();
         if let Some(ref addition) = config.transmission_options.user_agent_addition {
             user_agent = format!("{user_agent} {addition}");
@@ -246,7 +289,7 @@ impl Client {
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(config.transmission_options.max_concurrent_batches)
             .build()
-            .expect("Failed to build HTTP client")
+            .map_err(|e| Error::Http(format!("Failed to build HTTP client: {e}")))
     }
 
     /// Send an event.
@@ -590,7 +633,7 @@ mod tests {
     #[test]
     fn test_client_new() {
         let config = Config::new("test-key", "test-dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         assert_eq!(client.buffered_events(), 0);
         assert_eq!(client.config().options.api_key, "test-key");
@@ -602,7 +645,7 @@ mod tests {
         let config = Config::new("key", "dataset");
         let retry_config = RetryConfig::new().with_max_retries(10);
 
-        let client = Client::with_retry_config(config, retry_config);
+        let client = Client::with_retry_config(config, retry_config).unwrap();
 
         assert_eq!(client.retry_config().max_retries, 10);
     }
@@ -612,7 +655,7 @@ mod tests {
         let config = Config::new("key", "dataset")
             .with_options(Options::new("key", "dataset").with_sample_rate(5));
 
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
         let event = client.new_event();
 
         assert_eq!(event.sample_rate, 5);
@@ -625,7 +668,7 @@ mod tests {
     #[test]
     fn test_client_send_buffers_event() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         let event = Event::new();
         client.send(event).unwrap();
@@ -636,7 +679,7 @@ mod tests {
     #[test]
     fn test_client_send_multiple_events() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         for _ in 0..10 {
             client.send(Event::new()).unwrap();
@@ -650,7 +693,7 @@ mod tests {
         let config = Config::new("key", "dataset")
             .with_options(Options::new("key", "dataset").with_sample_rate(100));
 
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         // Send many events with high sample rate
         for i in 0..1000 {
@@ -672,16 +715,19 @@ mod tests {
     #[test]
     fn test_client_flush_empty() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         client.flush().unwrap();
         assert_eq!(client.buffered_events(), 0);
     }
 
+    // This test triggers HTTP transmission when honeycomb feature is enabled,
+    // so we only run it in mock mode.
+    #[cfg(not(feature = "honeycomb"))]
     #[test]
     fn test_client_flush_clears_buffer() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         client.send(Event::new()).unwrap();
         client.send(Event::new()).unwrap();
@@ -691,10 +737,13 @@ mod tests {
         assert_eq!(client.buffered_events(), 0);
     }
 
+    // This test triggers HTTP transmission when honeycomb feature is enabled,
+    // so we only run it in mock mode.
+    #[cfg(not(feature = "honeycomb"))]
     #[test]
     fn test_client_flush_updates_stats() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         client.send(Event::new()).unwrap();
         client.send(Event::new()).unwrap();
@@ -702,12 +751,8 @@ mod tests {
 
         let stats = client.stats().snapshot();
         assert_eq!(stats.events_added, 2);
-        // Without honeycomb feature, send_batch records success
-        #[cfg(not(feature = "honeycomb"))]
-        {
-            assert_eq!(stats.events_sent, 2);
-            assert_eq!(stats.batches_sent, 1);
-        }
+        assert_eq!(stats.events_sent, 2);
+        assert_eq!(stats.batches_sent, 1);
     }
 
     // =====================================================
@@ -717,7 +762,7 @@ mod tests {
     #[test]
     fn test_client_should_flush_empty() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         assert!(!client.should_flush());
     }
@@ -727,7 +772,7 @@ mod tests {
         let config = Config::new("key", "dataset").with_transmission_options(
             TransmissionOptions::default().with_batch_timeout(Duration::from_millis(1)),
         );
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         client.send(Event::new()).unwrap();
 
@@ -740,10 +785,13 @@ mod tests {
     // Client Close Tests
     // =====================================================
 
+    // This test triggers HTTP transmission when honeycomb feature is enabled,
+    // so we only run it in mock mode.
+    #[cfg(not(feature = "honeycomb"))]
     #[test]
     fn test_client_close() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         client.send(Event::new()).unwrap();
         client.close().unwrap();
@@ -757,7 +805,7 @@ mod tests {
     #[test]
     fn test_client_config_accessor() {
         let config = Config::new("test-key", "test-dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         assert_eq!(client.config().options.api_key, "test-key");
         assert_eq!(client.config().options.dataset, "test-dataset");
@@ -767,7 +815,7 @@ mod tests {
     fn test_client_retry_config_accessor() {
         let config = Config::new("key", "dataset");
         let retry_config = RetryConfig::new().with_max_retries(7);
-        let client = Client::with_retry_config(config, retry_config);
+        let client = Client::with_retry_config(config, retry_config).unwrap();
 
         assert_eq!(client.retry_config().max_retries, 7);
     }
@@ -775,7 +823,7 @@ mod tests {
     #[test]
     fn test_client_stats_accessor() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         let stats = client.stats();
         assert_eq!(stats.snapshot().events_added, 0);
@@ -792,7 +840,7 @@ mod tests {
     #[test]
     fn test_client_debug() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         let debug_str = format!("{client:?}");
         assert!(debug_str.contains("Client"));
@@ -804,12 +852,15 @@ mod tests {
     // Integration Tests
     // =====================================================
 
+    // This test triggers HTTP transmission when honeycomb feature is enabled,
+    // so we only run it in mock mode.
+    #[cfg(not(feature = "honeycomb"))]
     #[test]
     fn test_client_batch_auto_flush() {
         // Create a client with small batch size
         let config = Config::new("key", "dataset")
             .with_transmission_options(TransmissionOptions::default().with_max_batch_size(3));
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         // Add events up to batch size
         client.send(Event::new()).unwrap();
@@ -827,7 +878,7 @@ mod tests {
     #[test]
     fn test_client_preserves_event_data() {
         let config = Config::new("key", "dataset");
-        let client = Client::new(config);
+        let client = Client::new(config).unwrap();
 
         let mut event = Event::new();
         event.add_field("test_key", "test_value");
@@ -849,7 +900,7 @@ mod tests {
                 .with_max_batch_size(1000)
                 .with_pending_work_capacity(10000),
         );
-        let client = Arc::new(Client::new(config));
+        let client = Arc::new(Client::new(config).unwrap());
 
         let handles: Vec<_> = (0..10)
             .map(|_| {

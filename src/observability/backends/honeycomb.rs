@@ -102,7 +102,7 @@ impl HoneycombConfig {
 #[cfg(feature = "honeycomb")]
 pub fn create_client(config: HoneycombConfig) -> Result<HoneycombClient, Error> {
     let client_config = HoneycombClientConfig::new(config.api_key, config.dataset);
-    Ok(HoneycombClient::new(client_config))
+    HoneycombClient::new(client_config).map_err(|e| Error::other(e.to_string()))
 }
 
 /// Create a Honeycomb client (stub when feature is disabled)
@@ -149,7 +149,8 @@ mod tests {
     #[test]
     fn test_create_client() {
         let config = HoneycombConfig::new("key", "dataset", "service");
-        let client = create_client(config).unwrap();
+        // create_client returns Result, and Client::new also returns Result when honeycomb feature is enabled
+        let client = create_client(config).expect("Failed to create test client");
         assert_eq!(client.buffered_events(), 0);
     }
 
