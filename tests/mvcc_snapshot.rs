@@ -6,14 +6,17 @@
 //!
 //! Tests are written FIRST (TDD), then implementation follows.
 
+use gallifreydb::core::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
 use gallifreydb::storage::current::CurrentStorage;
 use gallifreydb::storage::historical::HistoricalStorage;
-use gallifreydb::storage::wal::concurrent_system::ConcurrentWalSystem;
 use gallifreydb::storage::wal::LSN;
-use gallifreydb::core::GLOBAL_INTERNER;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use gallifreydb::storage::wal::concurrent_system::ConcurrentWalSystem;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::thread;
 use tempfile::tempdir;
 
@@ -32,9 +35,7 @@ fn test_snapshot_isolation_prevents_fuzzy_checkpointing() {
     // Create initial nodes at LSN 10
     let label = GLOBAL_INTERNER.intern("Person").unwrap();
     for i in 0..100 {
-        let props = PropertyMapBuilder::new()
-            .insert("id", i as i64)
-            .build();
+        let props = PropertyMapBuilder::new().insert("id", i as i64).build();
         current.create_node(label, props).unwrap();
     }
 
@@ -46,23 +47,25 @@ fn test_snapshot_isolation_prevents_fuzzy_checkpointing() {
     let current_clone = current.clone();
     let write_thread = thread::spawn(move || {
         for i in 100..200 {
-            let props = PropertyMapBuilder::new()
-                .insert("id", i as i64)
-                .build();
+            let props = PropertyMapBuilder::new().insert("id", i as i64).build();
             current_clone.create_node(label, props).unwrap();
         }
     });
 
     // Create checkpoint - should only see nodes 0-99 (before LSN 10)
-    let stats = manager.create_checkpoint(LSN(10), &current, &historical).unwrap();
+    let stats = manager
+        .create_checkpoint(LSN(10), &current, &historical)
+        .unwrap();
 
     write_thread.join().unwrap();
 
     // ASSERTION: Checkpoint should contain exactly 100 nodes (snapshot at LSN 10)
     // NOT 200 nodes (which would include concurrent writes)
-    assert_eq!(stats.node_count, 100,
+    assert_eq!(
+        stats.node_count, 100,
         "Checkpoint should only contain nodes present at snapshot time (LSN 10), \
-         not nodes added during checkpointing");
+         not nodes added during checkpointing"
+    );
 }
 
 #[test]
@@ -90,7 +93,10 @@ fn test_snapshot_provides_consistent_point_in_time_view() {
     // After snapshot LSN, modify all balances to 200
     for node in current.all_nodes() {
         let mut new_props = PropertyMapBuilder::new()
-            .insert("account_id", node.get_property("account_id").unwrap().as_int().unwrap())
+            .insert(
+                "account_id",
+                node.get_property("account_id").unwrap().as_int().unwrap(),
+            )
             .insert("balance", 200i64)
             .build();
         current.update_node(node.id, label, new_props).unwrap();
@@ -99,7 +105,9 @@ fn test_snapshot_provides_consistent_point_in_time_view() {
     // Create snapshot at LSN 5 (before modifications)
     let config = CheckpointConfig::with_data_dir(dir.path());
     let mut manager = CheckpointManager::new(config).unwrap();
-    manager.create_checkpoint(snapshot_lsn, &current, &historical).unwrap();
+    manager
+        .create_checkpoint(snapshot_lsn, &current, &historical)
+        .unwrap();
 
     // Recover from checkpoint
     let wal = ConcurrentWalSystem::new(dir.path().join("wal")).unwrap();
@@ -113,8 +121,11 @@ fn test_snapshot_provides_consistent_point_in_time_view() {
         assert_eq!(balance, 200, "Recovered node should have current state");
     }
 
-    assert_eq!(manager.get_persisted_lsn(), Some(snapshot_lsn),
-        "Checkpoint should preserve the snapshot LSN");
+    assert_eq!(
+        manager.get_persisted_lsn(),
+        Some(snapshot_lsn),
+        "Checkpoint should preserve the snapshot LSN"
+    );
 }
 
 #[test]
@@ -146,10 +157,14 @@ fn test_streaming_checkpoint_avoids_oom() {
 
     // This should NOT allocate a Vec of 10_000 nodes in memory
     // Memory usage should be bounded (streaming)
-    let stats = manager.create_checkpoint(LSN(1), &current, &historical).unwrap();
+    let stats = manager
+        .create_checkpoint(LSN(1), &current, &historical)
+        .unwrap();
 
-    assert_eq!(stats.node_count, node_count,
-        "All nodes should be checkpointed");
+    assert_eq!(
+        stats.node_count, node_count,
+        "All nodes should be checkpointed"
+    );
 
     // If this test runs without OOM, streaming is working
     // In production, we'd measure actual memory usage here
@@ -165,9 +180,7 @@ fn test_snapshot_iterator_does_not_allocate_vec() {
 
     // Create nodes
     for i in 0..1000 {
-        let props = PropertyMapBuilder::new()
-            .insert("id", i as i64)
-            .build();
+        let props = PropertyMapBuilder::new().insert("id", i as i64).build();
         current.create_node(label, props).unwrap();
     }
 
@@ -190,9 +203,7 @@ fn test_concurrent_modification_during_snapshot_iteration() {
 
     // Create initial nodes
     for i in 0..100 {
-        let props = PropertyMapBuilder::new()
-            .insert("value", i as i64)
-            .build();
+        let props = PropertyMapBuilder::new().insert("value", i as i64).build();
         current.create_node(label, props).unwrap();
     }
 
@@ -217,9 +228,7 @@ fn test_concurrent_modification_during_snapshot_iteration() {
         thread::sleep(std::time::Duration::from_millis(5));
         for node in current_clone.all_nodes().take(50) {
             let new_value = node.get_property("value").unwrap().as_int().unwrap() + 1000;
-            let props = PropertyMapBuilder::new()
-                .insert("value", new_value)
-                .build();
+            let props = PropertyMapBuilder::new().insert("value", new_value).build();
             current_clone.update_node(node.id, label, props).unwrap();
             mod_count_clone.fetch_add(1, Ordering::SeqCst);
         }
@@ -256,9 +265,7 @@ fn test_snapshot_captures_version_ids_correctly() {
     // Create nodes and track their version IDs
     let mut expected_versions = Vec::new();
     for i in 0..10 {
-        let props = PropertyMapBuilder::new()
-            .insert("id", i as i64)
-            .build();
+        let props = PropertyMapBuilder::new().insert("id", i as i64).build();
         let node_id = current.create_node(label, props).unwrap();
         let node = current.get_node(node_id).unwrap();
         expected_versions.push((node.id, node.current_version));
@@ -267,7 +274,9 @@ fn test_snapshot_captures_version_ids_correctly() {
     // Create checkpoint
     let config = CheckpointConfig::with_data_dir(dir.path());
     let mut manager = CheckpointManager::new(config).unwrap();
-    manager.create_checkpoint(LSN(1), &current, &historical).unwrap();
+    manager
+        .create_checkpoint(LSN(1), &current, &historical)
+        .unwrap();
 
     // Recover and verify version IDs are preserved
     let wal = ConcurrentWalSystem::new(dir.path().join("wal")).unwrap();
@@ -275,8 +284,10 @@ fn test_snapshot_captures_version_ids_correctly() {
 
     for (node_id, expected_version_id) in expected_versions {
         let recovered_node = recovered.get_node(node_id).unwrap();
-        assert_eq!(recovered_node.current_version, expected_version_id,
-            "Version ID must be preserved exactly, not synthesized");
+        assert_eq!(
+            recovered_node.current_version, expected_version_id,
+            "Version ID must be preserved exactly, not synthesized"
+        );
     }
 }
 

@@ -22,6 +22,7 @@ pub mod persistence;
 #[cfg(feature = "tiered-storage")]
 pub mod rocksdb_cold_storage;
 pub mod sharding;
+pub mod snapshot;
 pub mod tiered_storage;
 pub mod version;
 pub mod wal;
@@ -46,6 +47,7 @@ pub use observer::{Observer, StorageEvent, StorageObserver};
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
 #[cfg(feature = "tiered-storage")]
 pub use rocksdb_cold_storage::{RocksDBColdStorage, RocksDBConfig};
+pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot, StorageSnapshot};
 pub use tiered_storage::{
     LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
 };

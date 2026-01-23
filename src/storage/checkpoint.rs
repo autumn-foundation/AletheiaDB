@@ -202,6 +202,11 @@ impl CheckpointManager {
         let start_time = std::time::Instant::now();
         let mut bytes_written = 0u64;
 
+        // 0. Create MVCC snapshots for isolation
+        // This prevents fuzzy checkpointing (mixed state from different LSNs)
+        let current_snapshot = current.create_snapshot(lsn);
+        let historical_snapshot = historical.create_snapshot(lsn);
+
         // 1. Save string interner first (other indexes depend on it)
         self.persistence_manager
             .save_string_interner()
@@ -210,8 +215,8 @@ impl CheckpointManager {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // 2. Save graph index (current state)
-        let graph_data = self.extract_graph_data(current)?;
+        // 2. Save graph index (current state) from snapshot
+        let graph_data = self.extract_graph_data_from_snapshot(&current_snapshot)?;
         let graph_path = self.persistence_manager.graph_path().join("adjacency.idx");
         if self.config.enable_compression {
             crate::storage::index_persistence::graph::save_graph_index_compressed(
@@ -226,8 +231,8 @@ impl CheckpointManager {
         }
         bytes_written += std::fs::metadata(&graph_path).map(|m| m.len()).unwrap_or(0);
 
-        // 3. Save temporal index (historical versions)
-        let temporal_data = self.extract_temporal_data(historical)?;
+        // 3. Save temporal index (historical versions) from snapshot
+        let temporal_data = self.extract_temporal_data_from_snapshot(&historical_snapshot)?;
         let temporal_path = self
             .persistence_manager
             .temporal_path()
@@ -396,13 +401,20 @@ impl CheckpointManager {
     // Private Helper Methods
     // ========================================================================
 
-    /// Extract graph data from CurrentStorage for persistence.
-    fn extract_graph_data(&self, current: &CurrentStorage) -> Result<GraphIndexData> {
+    /// Extract graph data from CurrentStorage snapshot for persistence.
+    ///
+    /// Uses MVCC snapshot for isolation, preventing fuzzy checkpointing.
+    fn extract_graph_data_from_snapshot(
+        &self,
+        snapshot: &crate::storage::snapshot::CurrentStorageSnapshot,
+    ) -> Result<GraphIndexData> {
+        use crate::storage::snapshot::StorageSnapshot;
+
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
 
-        // Extract all nodes
-        for node in current.all_nodes() {
+        // Extract all nodes from snapshot (isolated from concurrent writes)
+        for node in snapshot.iter_nodes() {
             let persisted = PersistedNode {
                 id: node.id.as_u64(),
                 label_idx: node.label.as_u32(),
@@ -412,8 +424,8 @@ impl CheckpointManager {
             nodes.push(persisted);
         }
 
-        // Extract all edges
-        for edge in current.all_edges() {
+        // Extract all edges from snapshot (isolated from concurrent writes)
+        for edge in snapshot.iter_edges() {
             let persisted = PersistedEdge {
                 id: edge.id.as_u64(),
                 source_id: edge.source.as_u64(),
@@ -440,8 +452,23 @@ impl CheckpointManager {
         })
     }
 
-    /// Extract temporal data from HistoricalStorage for persistence.
-    fn extract_temporal_data(&self, historical: &HistoricalStorage) -> Result<TemporalIndexData> {
+    /// Extract graph data from CurrentStorage for persistence (legacy method).
+    ///
+    /// This is kept for backwards compatibility with existing tests.
+    /// New code should use extract_graph_data_from_snapshot for snapshot isolation.
+    #[allow(dead_code)]
+    fn extract_graph_data(&self, current: &CurrentStorage) -> Result<GraphIndexData> {
+        let snapshot = current.create_snapshot(LSN(0));
+        self.extract_graph_data_from_snapshot(&snapshot)
+    }
+
+    /// Extract temporal data from HistoricalStorage snapshot for persistence.
+    ///
+    /// Uses MVCC snapshot for isolation, preventing fuzzy checkpointing.
+    fn extract_temporal_data_from_snapshot(
+        &self,
+        snapshot: &crate::storage::snapshot::HistoricalStorageSnapshot,
+    ) -> Result<TemporalIndexData> {
         use crate::core::property::PropertyMapBuilder;
         use crate::storage::index_persistence::formats::{
             EdgeAnchorEntry, EdgeVersionEntry, NodeAnchorEntry, NodeVersionEntry,
@@ -453,8 +480,10 @@ impl CheckpointManager {
         let mut edge_versions = Vec::new();
         let mut edge_anchors = Vec::new();
 
-        // Extract node versions
-        for (version_id, version) in historical.get_node_versions() {
+        // Extract node versions from snapshot (isolated from concurrent writes)
+        for version_arc in snapshot.iter_node_versions() {
+            let version = &*version_arc;
+            let version_id = version.id;
             let (version_type, properties, vector_snapshot_id) = match &version.data {
                 VersionData::Anchor {
                     properties,
@@ -512,8 +541,10 @@ impl CheckpointManager {
             node_versions.push(entry);
         }
 
-        // Extract edge versions
-        for (version_id, version) in historical.get_edge_versions() {
+        // Extract edge versions from snapshot (isolated from concurrent writes)
+        for version_arc in snapshot.iter_edge_versions() {
+            let version = &*version_arc;
+            let version_id = version.id;
             let (version_type, properties) = match &version.data {
                 VersionData::Anchor { properties, .. } => {
                     // Also add to anchors list
@@ -574,6 +605,16 @@ impl CheckpointManager {
             edge_versions,
             edge_anchors,
         })
+    }
+
+    /// Extract temporal data from HistoricalStorage for persistence (legacy method).
+    ///
+    /// This is kept for backwards compatibility with existing tests.
+    /// New code should use extract_temporal_data_from_snapshot for snapshot isolation.
+    #[allow(dead_code)]
+    fn extract_temporal_data(&self, historical: &HistoricalStorage) -> Result<TemporalIndexData> {
+        let snapshot = historical.create_snapshot(LSN(0));
+        self.extract_temporal_data_from_snapshot(&snapshot)
     }
 
     /// Load CurrentStorage from persisted graph index.
