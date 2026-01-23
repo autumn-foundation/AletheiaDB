@@ -1748,8 +1748,9 @@ mod vector_distance_tests {
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         // The query succeeds (may return empty results, but no error about k)
         assert!(
-            value.get("results").is_some() || value.get("error").is_some(),
-            "Should handle large k gracefully"
+            value.get("results").is_some(),
+            "Should handle large k gracefully without an error, but got: {:?}",
+            value.get("error")
         );
     }
 }
@@ -2158,7 +2159,10 @@ mod hybrid_extended_tests {
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         // Should return temporal query result
         if value.get("error").is_none() {
-            assert!(value.get("temporal_query").is_some() || value.get("results").is_some());
+            assert!(
+                value.get("temporal_query").is_some() && value.get("results").is_some(),
+                "A successful temporal hybrid query should return both 'temporal_query' and 'results' fields."
+            );
         }
     }
 
