@@ -2318,18 +2318,10 @@ impl CurrentStorage {
         use std::sync::Arc;
 
         // Collect Arc references to all nodes (cheap, ~8 bytes per node)
-        let nodes: Vec<Arc<Node>> = self
-            .indexes
-            .iter_nodes()
-            .map(|node| Arc::new(node))
-            .collect();
+        let nodes: Vec<Arc<Node>> = self.indexes.iter_nodes().map(Arc::new).collect();
 
         // Collect Arc references to all edges (cheap, ~8 bytes per edge)
-        let edges: Vec<Arc<Edge>> = self
-            .indexes
-            .iter_edges()
-            .map(|edge| Arc::new(edge))
-            .collect();
+        let edges: Vec<Arc<Edge>> = self.indexes.iter_edges().map(Arc::new).collect();
 
         CurrentStorageSnapshot::new(lsn, nodes, edges)
     }

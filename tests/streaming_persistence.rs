@@ -7,8 +7,8 @@
 //!
 //! Tests are written FIRST (TDD), then implementation follows.
 
-use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::GLOBAL_INTERNER;
+use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
 use gallifreydb::storage::current::CurrentStorage;
 use gallifreydb::storage::historical::HistoricalStorage;
@@ -153,22 +153,17 @@ fn test_streaming_with_temporal_versions() {
 
     // Create nodes and versions
     for i in 0..100 {
-        let props = PropertyMapBuilder::new()
-            .insert("value", i as i64)
-            .build();
+        let props = PropertyMapBuilder::new().insert("value", i as i64).build();
         let node_id = current.create_node("VersionedNode", props).unwrap();
 
         // Add multiple versions for each node
         for v in 0..5 {
             use gallifreydb::core::id::VersionId;
-            use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
             use gallifreydb::core::temporal::time::now;
+            use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
 
             let version_id = VersionId::new((i * 10 + v) as u64 + 1000).unwrap();
-            let temporal = BiTemporalInterval::new(
-                TimeRange::from(now()),
-                TimeRange::from(now()),
-            );
+            let temporal = BiTemporalInterval::new(TimeRange::from(now()), TimeRange::from(now()));
 
             let updated_props = PropertyMapBuilder::new()
                 .insert("value", (i * 10 + v) as i64)
@@ -320,5 +315,8 @@ fn test_streaming_checkpoint_performance() {
         duration
     );
 
-    println!("Streaming checkpoint of {} nodes took {:?}", node_count, duration);
+    println!(
+        "Streaming checkpoint of {} nodes took {:?}",
+        node_count, duration
+    );
 }
