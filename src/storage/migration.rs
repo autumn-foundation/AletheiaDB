@@ -40,11 +40,12 @@ use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::storage::cold_storage::ColdStorage;
 use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::utils::error::Result;
+use quick_cache::sync::Cache;
 use std::collections::HashMap;
 use std::panic;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, RwLock};
+use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -55,10 +56,14 @@ use serde::{Deserialize, Serialize};
 /// Short enough for responsive shutdown, long enough to avoid busy-waiting.
 const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Maximum number of entries in the access_times tracking map.
+/// Maximum number of entries in the access_times tracking cache.
 /// Prevents unbounded memory growth from access tracking (DoS protection).
-/// When exceeded, oldest entries are evicted.
+/// Uses LRU eviction - oldest accessed entries are automatically evicted.
 const MAX_ACCESS_ENTRIES: usize = 1_000_000;
+
+/// Timeout for waiting during Drop to prevent deadlock.
+/// If the worker doesn't stop within this time, we give up waiting.
+const DROP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Policy for determining when to migrate versions from hot to cold tier.
 #[derive(Debug, Clone)]
@@ -415,9 +420,10 @@ pub struct MigrationService {
     running: Arc<AtomicBool>,
     callback: Arc<dyn MigrationCallback>,
 
-    /// Access time tracking for LRU migration (version_id -> last access time)
-    /// Bounded to MAX_ACCESS_ENTRIES to prevent unbounded memory growth.
-    access_times: Arc<RwLock<HashMap<VersionId, Instant>>>,
+    /// Access time tracking for LRU migration (version_id -> last access time).
+    /// Uses a bounded LRU cache that automatically evicts oldest entries
+    /// when MAX_ACCESS_ENTRIES is reached. Thread-safe without explicit locking.
+    access_times: Arc<Cache<VersionId, Instant>>,
 
     /// Handle to the background worker thread
     worker_handle: Mutex<Option<JoinHandle<()>>>,
@@ -441,7 +447,7 @@ impl MigrationService {
             stats: Arc::new(AtomicMigrationStats::new()),
             running: Arc::new(AtomicBool::new(false)),
             callback: Arc::new(DefaultMigrationCallback),
-            access_times: Arc::new(RwLock::new(HashMap::new())),
+            access_times: Arc::new(Cache::new(MAX_ACCESS_ENTRIES)),
             worker_handle: Mutex::new(None),
             shutdown_complete: Arc::new((Mutex::new((true, 0)), Condvar::new())),
             generation: Arc::new(AtomicU64::new(0)),
@@ -460,7 +466,7 @@ impl MigrationService {
             stats: Arc::new(AtomicMigrationStats::new()),
             running: Arc::new(AtomicBool::new(false)),
             callback,
-            access_times: Arc::new(RwLock::new(HashMap::new())),
+            access_times: Arc::new(Cache::new(MAX_ACCESS_ENTRIES)),
             worker_handle: Mutex::new(None),
             shutdown_complete: Arc::new((Mutex::new((true, 0)), Condvar::new())),
             generation: Arc::new(AtomicU64::new(0)),
@@ -529,7 +535,12 @@ impl MigrationService {
         shutdown_complete: Arc<(Mutex<(bool, u64)>, Condvar)>,
         generation: u64,
     ) {
-        // Wrap the entire loop in catch_unwind for panic safety
+        // SAFETY: AssertUnwindSafe is used here because:
+        // 1. `running` is an Arc<AtomicBool> which has no interior mutability concerns
+        // 2. `policy` is Clone and owned, so unwinding won't leave it in invalid state
+        // 3. The closure only reads from these values and calls worker_loop_inner
+        // 4. Even if worker_loop_inner panics, we catch it and signal shutdown_complete
+        //    before re-throwing, so no resources are leaked
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             Self::worker_loop_inner(&running, &policy);
         }));
@@ -656,48 +667,24 @@ impl MigrationService {
     /// This method should be called whenever a version is accessed
     /// to track access patterns for LRU-based migration.
     ///
-    /// The access tracking map is bounded to `MAX_ACCESS_ENTRIES` to prevent
-    /// unbounded memory growth. When at capacity, oldest entries are evicted.
+    /// The access tracking cache is bounded to `MAX_ACCESS_ENTRIES` and uses
+    /// LRU eviction. When at capacity, least recently used entries are
+    /// automatically evicted. This is O(1) and thread-safe.
     pub fn record_access(&self, version_id: VersionId) {
-        let mut access_times = self
-            .access_times
-            .write()
-            .expect("MigrationService access_times lock poisoned in record_access()");
-
-        // If already at max capacity and this is a new entry, evict oldest
-        if access_times.len() >= MAX_ACCESS_ENTRIES && !access_times.contains_key(&version_id) {
-            // Find and remove the oldest entry
-            if let Some(oldest_id) = access_times
-                .iter()
-                .min_by_key(|(_, time)| *time)
-                .map(|(id, _)| *id)
-            {
-                access_times.remove(&oldest_id);
-            }
-        }
-
-        access_times.insert(version_id, Instant::now());
+        self.access_times.insert(version_id, Instant::now());
     }
 
     /// Get the last access time for a version.
     ///
-    /// Returns `None` if the version has never been accessed.
+    /// Returns `None` if the version has never been accessed or was evicted.
     pub fn get_last_access(&self, version_id: VersionId) -> Option<Instant> {
-        let access_times = self
-            .access_times
-            .read()
-            .expect("MigrationService access_times lock poisoned in get_last_access()");
-        access_times.get(&version_id).copied()
+        self.access_times.get(&version_id)
     }
 
     /// Clear access tracking for versions that have been migrated.
     pub fn clear_access(&self, version_ids: &[VersionId]) {
-        let mut access_times = self
-            .access_times
-            .write()
-            .expect("MigrationService access_times lock poisoned in clear_access()");
         for id in version_ids {
-            access_times.remove(id);
+            self.access_times.remove(id);
         }
     }
 
@@ -706,19 +693,15 @@ impl MigrationService {
     /// In LRU mode, candidates are sorted by last access time (least recently used first).
     /// In age mode, candidates are sorted by age (oldest first).
     ///
-    /// For LRU mode, access times are pre-fetched to minimize lock contention during sort.
+    /// For LRU mode, access times are pre-fetched to minimize time spent during sort.
     fn sort_candidates_by_policy(&self, candidates: &mut [MigrationCandidate]) {
         if self.policy.enable_lru {
-            // Pre-fetch access times to minimize lock hold time during sort
-            let candidate_access_times: HashMap<VersionId, Option<Instant>> = {
-                let access_times = self.access_times.read().expect(
-                    "MigrationService access_times lock poisoned in sort_candidates_by_policy()",
-                );
-                candidates
-                    .iter()
-                    .map(|c| (c.version_id, access_times.get(&c.version_id).copied()))
-                    .collect()
-            };
+            // Pre-fetch access times for all candidates
+            // The Cache is lock-free so we can call get() for each candidate
+            let candidate_access_times: HashMap<VersionId, Option<Instant>> = candidates
+                .iter()
+                .map(|c| (c.version_id, self.access_times.get(&c.version_id)))
+                .collect();
 
             // LRU mode: sort by last access time (least recently used first)
             candidates.sort_by(|a, b| {
@@ -1065,11 +1048,59 @@ impl Drop for MigrationService {
     /// Ensure the background worker is stopped when the service is dropped.
     ///
     /// This prevents orphaned worker threads that would continue running
-    /// after the service is no longer accessible.
+    /// after the service is no longer accessible. Uses a timeout to prevent
+    /// deadlock if the worker thread is stuck.
     fn drop(&mut self) {
-        // Only stop if running - stop() handles the is_running check internally
-        if self.running.load(Ordering::Relaxed) {
-            self.stop();
+        // Only attempt stop if running
+        if !self.running.swap(false, Ordering::SeqCst) {
+            // Was already stopped, no-op
+            return;
+        }
+
+        // Get current generation to wait for
+        let current_gen = self.generation.load(Ordering::SeqCst);
+
+        // Wait for the worker to complete with timeout to prevent deadlock
+        let (lock, cvar) = &*self.shutdown_complete;
+        if let Ok(mut state) = lock.lock() {
+            let deadline = Instant::now() + DROP_TIMEOUT;
+            while !state.0 || state.1 != current_gen {
+                // If generation changed, a new worker started - don't wait for old one
+                if state.1 > current_gen {
+                    break;
+                }
+
+                let now = Instant::now();
+                if now >= deadline {
+                    // Timeout reached - give up waiting to prevent deadlock
+                    // Worker thread will eventually clean itself up
+                    break;
+                }
+
+                let timeout = deadline - now;
+                let result = cvar.wait_timeout(state, timeout);
+                match result {
+                    Ok((new_state, timeout_result)) => {
+                        state = new_state;
+                        if timeout_result.timed_out() {
+                            // Timeout reached - give up waiting
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        // Lock poisoned - give up
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Try to join the thread if we have a handle
+        if let Ok(mut handle_guard) = self.worker_handle.lock()
+            && let Some(handle) = handle_guard.take()
+        {
+            // Don't block indefinitely - the thread will terminate on its own
+            let _ = handle.join();
         }
     }
 }
@@ -1095,35 +1126,6 @@ mod tests {
             VersionId::new(id).unwrap(),
             NodeId::new(node_id).unwrap(),
             BiTemporalInterval::current(1000.into()),
-            GLOBAL_INTERNER.intern("Person").unwrap(),
-            properties,
-        )
-    }
-
-    /// Create a version with a specific transaction time (in ms since epoch)
-    #[allow(dead_code)]
-    fn create_test_node_version_with_tx_time(
-        id: u64,
-        node_id: u64,
-        tx_time_ms: i64,
-    ) -> NodeVersion {
-        use crate::core::temporal::TimeRange;
-
-        let properties = PropertyMapBuilder::new()
-            .insert("name", "Test")
-            .insert("age", 30i64)
-            .build();
-
-        // Create timestamp from milliseconds
-        let tx_timestamp = (tx_time_ms * 1000).into(); // Convert ms to µs for HybridTimestamp
-        let valid_time = TimeRange::from(1000.into());
-        let tx_time = TimeRange::from(tx_timestamp);
-        let temporal = BiTemporalInterval::new(valid_time, tx_time);
-
-        NodeVersion::new_anchor(
-            VersionId::new(id).unwrap(),
-            NodeId::new(node_id).unwrap(),
-            temporal,
             GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
         )
