@@ -33,8 +33,6 @@ tracy-client = { version = "0.17", optional = true, default-features = false }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"], optional = true }
 tracing-tracy = { version = "0.11", optional = true }
-tracing-honeycomb = { version = "0.4", optional = true }
-libhoney-rust = { version = "0.1", optional = true }
 
 # Prometheus metrics (optional)
 metrics = { version = "0.24", optional = true }
@@ -81,7 +79,7 @@ tracy = ["tracy-client/enable"]
 # Observability features
 observability = ["dep:tracing", "dep:tracing-subscriber"]
 observability-tracy = ["observability", "dep:tracing-tracy", "tracy"]
-observability-honeycomb = ["observability", "dep:tracing-honeycomb", "dep:libhoney-rust"]
+observability-honeycomb = ["observability", "honeycomb"]
 observability-prometheus = ["observability", "dep:metrics", "dep:metrics-exporter-prometheus"]
 
 # Default features
@@ -116,6 +114,13 @@ sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 
 # Tiered storage with RocksDB cold storage backend
 tiered-storage = ["dep:rocksdb"]
+
+# Custom Honeycomb client (replaces libhoney-rust git dependency)
+# This provides a minimal, security-focused client with modern dependencies
+honeycomb-client = ["dep:serde", "dep:serde_json"]
+
+# Honeycomb client with HTTP transmission support
+honeycomb = ["honeycomb-client", "dep:reqwest"]
 
 [profile.dev]
 # Fast compilation for development
@@ -270,10 +275,3 @@ name = "gallifrey-mcp"
 path = "src/bin/mcp_server.rs"
 required-features = ["mcp-server"]
 
-# Patch libhoney-rust to use git version with updated dependencies
-# This overrides the crates.io version for ALL dependencies (including tracing-honeycomb)
-# Reason: crates.io v0.1.6 uses reqwest 0.10 with known CVEs
-# Git version uses reqwest 0.11 and tokio 1.0 (updated Jan 2021, not published)
-# See: https://github.com/nlopes/libhoney-rust/issues/80
-[patch.crates-io]
-libhoney-rust = { git = "https://github.com/nlopes/libhoney-rust" }
