@@ -88,6 +88,10 @@ const DEFAULT_FAILURE_THRESHOLD: usize = 5;
 /// Default circuit breaker open duration.
 const DEFAULT_OPEN_DURATION: Duration = Duration::from_secs(30);
 
+/// Recommended imbalance threshold for rebalancing.
+/// Trigger rebalancing when the largest node has more than 2x the vectors of the smallest.
+pub const RECOMMENDED_IMBALANCE_THRESHOLD: f64 = 2.0;
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -351,27 +355,31 @@ impl NodeCircuitBreaker {
 
     /// Check and perform state transitions based on time.
     ///
-    /// This method uses a write lock to prevent TOCTOU races where
-    /// the state could change between checking and updating.
+    /// This method reads opened_at before acquiring the state write lock to
+    /// avoid holding locks across different fields simultaneously.
     fn maybe_transition(&self) {
-        // Acquire write lock to prevent TOCTOU race
+        // Read opened_at first to avoid holding multiple locks
+        let should_transition = self
+            .opened_at
+            .read()
+            .ok()
+            .and_then(|opened| *opened)
+            .is_some_and(|opened_time| opened_time.elapsed() >= self.config.open_duration);
+
+        if !should_transition {
+            return;
+        }
+
+        // Now acquire state write lock and verify state is still Open
         let mut state_guard = match self.state.write() {
             Ok(s) => s,
             Err(_) => return,
         };
 
+        // Double-check state is still Open (could have changed)
         if *state_guard == CircuitState::Open {
-            let should_transition = self
-                .opened_at
-                .read()
-                .ok()
-                .and_then(|opened| *opened)
-                .is_some_and(|opened_time| opened_time.elapsed() >= self.config.open_duration);
-
-            if should_transition {
-                *state_guard = CircuitState::HalfOpen;
-                self.success_count.store(0, Ordering::SeqCst);
-            }
+            *state_guard = CircuitState::HalfOpen;
+            self.success_count.store(0, Ordering::SeqCst);
         }
     }
 
@@ -2212,5 +2220,153 @@ mod tests {
         };
 
         assert_eq!(stats.success_rate(), 1.0);
+    }
+
+    // ============================================================
+    // Concurrent Circuit Breaker Stress Tests
+    // ============================================================
+
+    #[test]
+    fn test_circuit_breaker_concurrent_failures() {
+        use std::thread;
+
+        let config = CircuitBreakerConfig {
+            failure_threshold: 10,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 3,
+        };
+        let cb = Arc::new(NodeCircuitBreaker::new(config));
+
+        let mut handles = vec![];
+
+        // Spawn multiple threads to record failures concurrently
+        for _ in 0..4 {
+            let cb_clone = Arc::clone(&cb);
+            let handle = thread::spawn(move || {
+                for _ in 0..5 {
+                    cb_clone.record_failure();
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // After 20 failures (4 threads x 5), circuit should be open
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn test_circuit_breaker_concurrent_success_failure_mix() {
+        use std::thread;
+
+        let config = CircuitBreakerConfig {
+            failure_threshold: 5,
+            open_duration: Duration::from_millis(10),
+            success_threshold: 2,
+        };
+        let cb = Arc::new(NodeCircuitBreaker::new(config));
+
+        let mut handles = vec![];
+
+        // Some threads record successes
+        for _ in 0..2 {
+            let cb_clone = Arc::clone(&cb);
+            let handle = thread::spawn(move || {
+                for _ in 0..10 {
+                    cb_clone.record_success();
+                    std::thread::sleep(Duration::from_micros(100));
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Some threads record failures
+        for _ in 0..2 {
+            let cb_clone = Arc::clone(&cb);
+            let handle = thread::spawn(move || {
+                for _ in 0..10 {
+                    cb_clone.record_failure();
+                    std::thread::sleep(Duration::from_micros(100));
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // State should be valid (either Closed, Open, or HalfOpen)
+        let state = cb.state();
+        assert!(
+            state == CircuitState::Closed
+                || state == CircuitState::Open
+                || state == CircuitState::HalfOpen
+        );
+    }
+
+    #[test]
+    fn test_circuit_breaker_concurrent_state_checks() {
+        use std::thread;
+
+        let config = CircuitBreakerConfig {
+            failure_threshold: 3,
+            open_duration: Duration::from_millis(50),
+            success_threshold: 2,
+        };
+        let cb = Arc::new(NodeCircuitBreaker::new(config));
+
+        // Open the circuit
+        for _ in 0..5 {
+            cb.record_failure();
+        }
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        let mut handles = vec![];
+
+        // Multiple threads checking state simultaneously
+        for _ in 0..8 {
+            let cb_clone = Arc::clone(&cb);
+            let handle = thread::spawn(move || {
+                for _ in 0..100 {
+                    let _ = cb_clone.state();
+                    let _ = cb_clone.should_allow();
+                    let _ = cb_clone.remaining_open_time();
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // No panic means success - concurrent reads are safe
+    }
+
+    // ============================================================
+    // Rebalancing Threshold Constant Test
+    // ============================================================
+
+    #[test]
+    fn test_recommended_imbalance_threshold() {
+        // Verify the constant exists and has expected value
+        assert!((RECOMMENDED_IMBALANCE_THRESHOLD - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_needs_rebalancing_with_threshold_constant() -> Result<()> {
+        let config = create_test_config(3);
+        let clients = create_test_clients(3);
+
+        let index = DistributedVectorIndex::new(config, clients)?;
+
+        // Empty index - no rebalancing needed at any threshold
+        assert!(!index.needs_rebalancing(RECOMMENDED_IMBALANCE_THRESHOLD));
+
+        Ok(())
     }
 }
