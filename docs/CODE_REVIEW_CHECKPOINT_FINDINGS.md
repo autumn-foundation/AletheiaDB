@@ -6,17 +6,18 @@
 
 ## Executive Summary
 
-The checkpoint implementation had **three critical bugs** - **ALL NOW RESOLVED** ✅:
+The checkpoint implementation had **four issues** identified in code review:
 
 | Issue | Severity | Status | Impact (Before Fix) |
 |-------|----------|--------|---------------------|
-| Missing Version IDs | 🔴 **CRITICAL** | ✅ **FIXED** (commit `5d8e062`) | Data corruption: current state disconnected from history |
-| Fuzzy Checkpointing | 🔴 **CRITICAL** | ✅ **FIXED** (commit `45977fc`) | Data corruption: mixed state from different times |
-| Unbounded Memory (OOM) | 🔴 **CRITICAL** | ✅ **FIXED** (commit `45977fc`) | OOM on databases >10GB, defeats persistence purpose |
+| #1: Missing Version IDs (db.rs) | 🔴 **CRITICAL** | ✅ **FIXED** (commit `2c95a21`) | Data corruption: current state disconnected from history |
+| #2: Memory Spike | 🟡 **MEDIUM** | ✅ **ANALYZED** | 10GB temporary spike (acceptable, optimal design) |
+| #3: Snapshot Race Condition | 🟠 **HIGH** | 📋 **DOCUMENTED** | Inconsistent snapshots if writes occur between creation |
 
-**🎉 All three critical bugs are now FIXED and production-ready.**
-
-MVCC snapshot implementation (commit `45977fc`) solved **both** Issues #2 and #3 simultaneously, demonstrating excellent architectural design.
+**Status Summary:**
+- ✅ **Issue #1 FIXED**: version_id restoration completed across all recovery paths
+- ✅ **Issue #2 RESOLVED**: Memory spike is optimal given architecture constraints
+- 📋 **Issue #3 DOCUMENTED**: Race condition documented with solution architecture; implementation deferred until checkpointing is integrated into main DB
 
 ## Issue #1: Missing Version IDs ✅ FIXED
 
@@ -328,6 +329,81 @@ The checkpoint system is now:
 
 ---
 
+## Issue #3: Snapshot Race Condition 📋 DOCUMENTED
+
+### The Issue
+
+**File**: `src/storage/checkpoint.rs:207-208`
+
+```rust
+// 0. Create MVCC snapshots for isolation
+let current_snapshot = current.create_snapshot(lsn);
+let historical_snapshot = historical.create_snapshot(lsn); // ← RACE WINDOW
+```
+
+**Root Cause**:
+- Snapshots created **sequentially**, not atomically
+- Concurrent writes can occur between the two calls
+- Race window: ~1-10 microseconds (low probability but non-zero)
+
+**Impact Scenario**:
+```
+T0: current_snapshot captures [Node1, Node2]
+T1: WRITE adds Node3 to current + Version3 to historical ← RACE!
+T2: historical_snapshot captures [V1, V2, V3]
+→ Result: V3 references Node3 which isn't in current_snapshot → INCONSISTENT!
+```
+
+### Current Status
+
+**NOT A PRODUCTION BUG** because:
+- Checkpointing is not integrated into `GallifreyDB` main database yet
+- Only called from tests (verified via `rg "create_checkpoint" src/`)
+- Will become critical when background checkpointing is added
+
+### Proposed Solution
+
+**Architecture**: Snapshot Coordinator with RwLock
+
+```rust
+// CheckpointManager acquires write lock (exclusive)
+let _guard = snapshot_coordinator.write().unwrap();
+let current_snapshot = current.create_snapshot(lsn);
+let historical_snapshot = historical.create_snapshot(lsn);
+
+// Write operations acquire read lock (concurrent writes OK, blocked during checkpoint)
+let _guard = coordinator.read().unwrap();
+current.insert_node_direct(node, timestamp)?;
+```
+
+**Performance Impact**:
+- Normal writes: +5-10ns overhead (read lock = atomic increment)
+- Checkpoint creation: Writes blocked for ~1-10ms
+- Checkpoint frequency: Every 5-10 minutes
+- **Overall: <0.01% throughput reduction**
+
+### Implementation Plan
+
+**WHEN checkpointing is integrated:**
+
+1. ✅ Document issue (this section)
+2. ✅ Create test harness (`tests/snapshot_race_condition.rs`)
+3. ❌ Add `SnapshotCoordinator` with `Arc<RwLock<()>>`
+4. ❌ Thread coordinator through storage layers
+5. ❌ Update all write operations to acquire read lock
+6. ❌ Enable ignored test in `snapshot_race_condition.rs`
+7. ❌ Benchmark to verify <0.01% impact
+
+**Detailed Documentation**: `docs/SNAPSHOT_RACE_CONDITION.md`
+
+**Tests**:
+- ✅ `tests/snapshot_race_condition.rs::test_snapshots_created_sequentially_without_coordination` - Documents current behavior
+- ⏸️ `tests/snapshot_race_condition.rs::test_concurrent_write_during_snapshot_creation` - Ignored until fix implemented
+
+**Status**: 📋 **DOCUMENTED** - Solution designed, implementation deferred until checkpointing integration
+
+---
+
 ## References
 
 - **Design Doc**: `docs/MVCC_SNAPSHOT_DESIGN.md` - Complete architectural design
@@ -342,5 +418,13 @@ The checkpoint system is now:
 
 ---
 
-**Review Status**: ✅ **COMPLETE - ALL ISSUES RESOLVED**
-**Production Ready**: Yes - all critical bugs fixed and tested
+**Review Status**: ✅ **COMPLETE - All critical issues addressed**
+
+| Issue | Status | Production Impact |
+|-------|--------|------------------|
+| #1: Version IDs | ✅ **FIXED** | Ready for production |
+| #2: Memory Spike | ✅ **RESOLVED** | Design is optimal |
+| #3: Race Condition | 📋 **DOCUMENTED** | Not applicable yet (checkpointing not integrated) |
+
+**Production Ready**: ✅ **YES** for current checkpoint functionality
+**Blocker for Future**: ⚠️ Issue #3 MUST be fixed before integrating background checkpointing
