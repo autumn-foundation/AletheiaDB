@@ -38,7 +38,10 @@ pub use cold_storage::{
 };
 pub use current::{CurrentStats, CurrentStorage, DEFAULT_MAX_VECTOR_PROPERTIES, VectorIndexInfo};
 pub use historical::{CacheMetrics, HistoricalStats, HistoricalStorage};
-pub use migration::{MigrationCandidate, MigrationPolicy, MigrationService, MigrationStats};
+pub use migration::{
+    MigrationCallback, MigrationCandidate, MigrationPolicy, MigrationProgress, MigrationService,
+    MigrationStats,
+};
 pub use observer::{Observer, StorageEvent, StorageObserver};
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
 #[cfg(feature = "tiered-storage")]
