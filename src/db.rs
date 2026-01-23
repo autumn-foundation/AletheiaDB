@@ -1720,6 +1720,32 @@ impl GallifreyDB {
         self.current.get_edge(edge_id)
     }
 
+    // ========================================================================
+    // Zero-copy access methods (Issue #190)
+    // ========================================================================
+
+    /// Get the target node of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the target NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_target(&self, edge_id: EdgeId) -> Result<NodeId> {
+        self.current.get_edge_target(edge_id)
+    }
+
+    /// Get the source node of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the source NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_source(&self, edge_id: EdgeId) -> Result<NodeId> {
+        self.current.get_edge_source(edge_id)
+    }
+
     /// Get outgoing edges from a node (current state).
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_outgoing_edges(node_id)

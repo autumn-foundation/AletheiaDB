@@ -881,6 +881,79 @@ impl CurrentStorage {
             .ok_or_else(|| StorageError::EdgeNotFound(id).into())
     }
 
+    // ========================================================================
+    // Zero-copy access methods (Issue #190)
+    //
+    // These methods provide efficient access to node/edge data without cloning
+    // the entire structure. Use these for hot paths where you only need to
+    // read specific fields.
+    // ========================================================================
+
+    /// Get the target node of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the target NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_target(&self, id: EdgeId) -> Result<NodeId> {
+        self.indexes
+            .get_edge_target(id)
+            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+    }
+
+    /// Get the source node of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the source NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_source(&self, id: EdgeId) -> Result<NodeId> {
+        self.indexes
+            .get_edge_source(id)
+            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+    }
+
+    /// Get the endpoints (source, target) of an edge without cloning.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns two NodeIds (16 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_endpoints(&self, id: EdgeId) -> Result<(NodeId, NodeId)> {
+        self.indexes
+            .get_edge_endpoints(id)
+            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+    }
+
+    /// Get the label of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the label (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_label(&self, id: EdgeId) -> Result<InternedString> {
+        self.indexes
+            .get_edge_label(id)
+            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+    }
+
+    /// Get the label of a node without cloning the entire node.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the label (8 bytes)
+    /// - **No allocation**: Does not clone Node or PropertyMap
+    #[inline]
+    pub fn get_node_label(&self, id: NodeId) -> Result<InternedString> {
+        self.indexes
+            .get_node_label(id)
+            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+    }
+
     /// Delete a node.
     ///
     /// Note: This does not delete edges connected to the node.
