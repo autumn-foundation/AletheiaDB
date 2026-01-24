@@ -1050,14 +1050,15 @@ mod tests {
                 exact
             );
 
-            // Approximate should be reasonably close (within the number of iterations)
-            // In practice, on modern hardware with proper cache coherence,
-            // approximate should be very close to exact
-            assert!(
-                exact - approximate <= 100,
-                "At iteration {}: gap {} is too large",
+            // In a single-threaded context, `approximate` should always equal `exact` because
+            // the call to `next()` is sequenced-before `current_approximate()`.
+            // Relaxed ordering only affects cross-thread visibility, not same-thread ordering.
+            assert_eq!(
+                approximate, exact,
+                "At iteration {}: approximate {} should be equal to exact {}",
                 i,
-                exact - approximate
+                approximate,
+                exact
             );
         }
     }
