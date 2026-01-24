@@ -86,35 +86,21 @@ fn needs_recovery(wal_dir: &Path) -> bool {
     }
 
     // Check if there are any .log files in the WAL directory
-    std::fs::read_dir(wal_dir)
-        .ok()
-        .and_then(|entries| {
-            entries.filter_map(|e| e.ok()).find(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|s| s.ends_with(".log"))
-                    .unwrap_or(false)
-            })
-        })
-        .is_some()
+    std::fs::read_dir(wal_dir).is_ok_and(|entries| {
+        entries
+            .filter_map(|e| e.ok())
+            .any(|entry| entry.path().extension() == Some(std::ffi::OsStr::new("log")))
+    })
 }
 
 /// Count WAL files in directory
 fn count_wal_files(wal_dir: &Path) -> usize {
-    std::fs::read_dir(wal_dir)
-        .ok()
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_name()
-                        .to_str()
-                        .map(|s| s.ends_with(".log"))
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0)
+    std::fs::read_dir(wal_dir).map_or(0, |entries| {
+        entries
+            .filter_map(|e| e.ok())
+            .filter(|entry| entry.path().extension() == Some(std::ffi::OsStr::new("log")))
+            .count()
+    })
 }
 
 fn main() -> Result<()> {
@@ -122,8 +108,7 @@ fn main() -> Result<()> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // Create temporary directory for this example
-    let temp_dir = TempDir::new()
-        .map_err(|e| gallifreydb::utils::error::StorageError::IoError(format!("{}", e)))?;
+    let temp_dir = TempDir::new()?;
     let wal_dir = temp_dir.path().join("wal");
     let checkpoint_dir = temp_dir.path().join("checkpoints");
 
@@ -138,8 +123,9 @@ fn main() -> Result<()> {
 
     // Create 500 nodes
     for i in 1..=500 {
+        let node_id = NodeId::new(i)?;
         wal.append(WalOperation::CreateNode {
-            node_id: NodeId::new(i).unwrap(),
+            node_id,
             label: format!("Node{}", i),
             properties: PropertyMapBuilder::new()
                 .insert("id", i as i64)
@@ -151,10 +137,13 @@ fn main() -> Result<()> {
 
     // Create 499 edges (chain)
     for i in 1..=499 {
+        let edge_id = EdgeId::new(i)?;
+        let source = NodeId::new(i)?;
+        let target = NodeId::new(i + 1)?;
         wal.append(WalOperation::CreateEdge {
-            edge_id: EdgeId::new(i).unwrap(),
-            source: NodeId::new(i).unwrap(),
-            target: NodeId::new(i + 1).unwrap(),
+            edge_id,
+            source,
+            target,
             label: "LINKS_TO".to_string(),
             properties: PropertyMapBuilder::new().insert("weight", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -162,9 +151,10 @@ fn main() -> Result<()> {
     }
 
     // Update node 1 to create a second version
-    let version_id_500 = gallifreydb::core::id::VersionId::new(500).unwrap();
+    let version_id_500 = gallifreydb::core::id::VersionId::new(500)?;
+    let node_id_1 = NodeId::new(1)?;
     wal.append(WalOperation::UpdateNode {
-        node_id: NodeId::new(1).unwrap(),
+        node_id: node_id_1,
         version_id: version_id_500,
         label: "Node1Updated".to_string(),
         properties: PropertyMapBuilder::new()
@@ -284,7 +274,7 @@ fn main() -> Result<()> {
     println!("  ✓ All edges verified");
 
     // Verify sample node properties
-    let node_1 = current.get_node(NodeId::new(1).unwrap())?;
+    let node_1 = current.get_node(NodeId::new(1)?)?;
     assert!(node_1.has_label_str("Node1Updated"));
     assert!(matches!(
         node_1.properties.get("name"),
@@ -293,7 +283,7 @@ fn main() -> Result<()> {
     println!("  ✓ Properties preserved");
 
     // Verify sample edge label
-    let edge_1 = current.get_edge(EdgeId::new(1).unwrap())?;
+    let edge_1 = current.get_edge(EdgeId::new(1)?)?;
     assert!(edge_1.has_label_str("LINKS_TO"));
     println!("  ✓ Labels intact\n");
 

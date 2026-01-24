@@ -1,12 +1,15 @@
 //! Recovery with Progress Tracking Example
 //!
-//! Demonstrates tracking recovery progress with custom progress reporting.
+//! Demonstrates how to build a progress tracker for database recovery.
 //!
 //! This example shows:
 //! - Counting WAL entries before recovery
-//! - Tracking progress during recovery
-//! - Reporting recovery progress (percentage, operations/sec)
-//! - Estimating time remaining
+//! - Building a custom progress tracker
+//! - Simulating progress reporting (percentage, operations/sec)
+//! - Displaying progress with a visual progress bar
+//!
+//! **Note:** This example simulates progress tracking. In production, you would
+//! extend `PersistenceManager::recover()` to accept a progress callback.
 //!
 //! # Running
 //!
@@ -62,6 +65,7 @@ use gallifreydb::storage::{
     },
 };
 use gallifreydb::utils::error::Result;
+use std::io::Write;
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -91,10 +95,10 @@ impl RecoveryProgress {
         self.completed_operations += operations_done;
 
         // Print progress every N operations or at completion
+        // Note: clippy suggests is_multiple_of() but it's unstable, so we use % == 0
+        #[allow(clippy::manual_is_multiple_of)]
         if self.completed_operations >= self.total_operations
-            || self
-                .completed_operations
-                .is_multiple_of(self.update_interval_ops.max(1))
+            || self.completed_operations % self.update_interval_ops.max(1) == 0
         {
             self.print_progress();
         }
@@ -113,8 +117,11 @@ impl RecoveryProgress {
         // Create progress bar (20 characters wide)
         let bar_width = 20;
         let filled = ((percentage / 100.0) * bar_width as f64) as usize;
-        let bar: String = std::iter::repeat_n('█', filled)
-            .chain(std::iter::repeat_n('░', bar_width - filled))
+        // Note: clippy suggests repeat_n() but it's unstable, so we use repeat().take()
+        #[allow(clippy::manual_repeat_n)]
+        let bar: String = std::iter::repeat('█')
+            .take(filled)
+            .chain(std::iter::repeat('░').take(bar_width - filled))
             .collect();
 
         print!(
@@ -122,7 +129,6 @@ impl RecoveryProgress {
             bar, percentage, self.completed_operations, self.total_operations, ops_per_sec, elapsed
         );
 
-        use std::io::Write;
         std::io::stdout().flush().ok();
 
         self.last_update_time = Instant::now();
@@ -157,8 +163,7 @@ fn main() -> Result<()> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // Create temporary directory for this example
-    let temp_dir = TempDir::new()
-        .map_err(|e| gallifreydb::utils::error::StorageError::IoError(format!("{}", e)))?;
+    let temp_dir = TempDir::new()?;
     let wal_dir = temp_dir.path().join("wal");
     let checkpoint_dir = temp_dir.path().join("checkpoints");
 
@@ -175,8 +180,9 @@ fn main() -> Result<()> {
 
     // Create 5,000 nodes
     for i in 1..=5000 {
+        let node_id = NodeId::new(i)?;
         wal.append(WalOperation::CreateNode {
-            node_id: NodeId::new(i).unwrap(),
+            node_id,
             label: format!("Node{}", i),
             properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
@@ -185,11 +191,12 @@ fn main() -> Result<()> {
 
     // Create 5,000 edges
     for i in 1..=5000 {
-        let source = NodeId::new(((i - 1) % 5000) + 1).unwrap();
-        let target = NodeId::new((i % 5000) + 1).unwrap();
+        let source = NodeId::new(((i - 1) % 5000) + 1)?;
+        let target = NodeId::new((i % 5000) + 1)?;
+        let edge_id = EdgeId::new(i)?;
 
         wal.append(WalOperation::CreateEdge {
-            edge_id: EdgeId::new(i).unwrap(),
+            edge_id,
             source,
             target,
             label: "EDGE".to_string(),

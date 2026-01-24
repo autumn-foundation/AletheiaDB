@@ -11,7 +11,7 @@
 //! # Running
 //!
 //! ```bash
-//! cargo run --example basic_recovery
+//! cargo run --example recovery_basic
 //! ```
 //!
 //! # Expected Output
@@ -71,8 +71,7 @@ fn main() -> Result<()> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // Create temporary directory for this example
-    let temp_dir = TempDir::new()
-        .map_err(|e| gallifreydb::utils::error::StorageError::IoError(format!("{}", e)))?;
+    let temp_dir = TempDir::new()?;
     let wal_dir = temp_dir.path().join("wal");
     let checkpoint_dir = temp_dir.path().join("checkpoints");
 
@@ -89,8 +88,9 @@ fn main() -> Result<()> {
 
     // Create 50 nodes
     for i in 1..=50 {
+        let node_id = NodeId::new(i)?;
         wal.append(WalOperation::CreateNode {
-            node_id: NodeId::new(i).unwrap(),
+            node_id,
             label: format!("Person{}", i),
             properties: PropertyMapBuilder::new()
                 .insert("name", format!("Alice{}", i))
@@ -103,10 +103,13 @@ fn main() -> Result<()> {
 
     // Create edges forming a chain: 1→2, 2→3, ..., 49→50
     for i in 1..=49 {
+        let edge_id = EdgeId::new(i)?;
+        let source = NodeId::new(i)?;
+        let target = NodeId::new(i + 1)?;
         wal.append(WalOperation::CreateEdge {
-            edge_id: EdgeId::new(i).unwrap(),
-            source: NodeId::new(i).unwrap(),
-            target: NodeId::new(i + 1).unwrap(),
+            edge_id,
+            source,
+            target,
             label: "KNOWS".to_string(),
             properties: PropertyMapBuilder::new()
                 .insert("since", 2020 + (i as i64))
@@ -117,9 +120,10 @@ fn main() -> Result<()> {
     println!("✓ Created 49 edges (chain: 1→2→3→...→50)");
 
     // Update node 1
-    let version_id_51 = gallifreydb::core::id::VersionId::new(51).unwrap();
+    let version_id_51 = gallifreydb::core::id::VersionId::new(51)?;
+    let node_id_1 = NodeId::new(1)?;
     wal.append(WalOperation::UpdateNode {
-        node_id: NodeId::new(1).unwrap(),
+        node_id: node_id_1,
         version_id: version_id_51,
         label: "Person1Updated".to_string(),
         properties: PropertyMapBuilder::new()
@@ -132,8 +136,9 @@ fn main() -> Result<()> {
     println!("✓ Updated node 1 properties");
 
     // Delete node 25
+    let node_id_25 = NodeId::new(25)?;
     wal.append(WalOperation::DeleteNode {
-        node_id: NodeId::new(25).unwrap(),
+        node_id: node_id_25,
         temporal: BiTemporalInterval::current(time::now()),
     })?;
     println!("✓ Deleted node 25");
@@ -185,7 +190,7 @@ fn main() -> Result<()> {
     println!("─────────────────────────────");
 
     // Verify node 1 was updated
-    let node_1 = current.get_node(NodeId::new(1).unwrap())?;
+    let node_1 = current.get_node(NodeId::new(1)?)?;
     assert!(node_1.has_label_str("Person1Updated"));
     assert!(matches!(
         node_1.properties.get("name"),
@@ -198,7 +203,7 @@ fn main() -> Result<()> {
     println!("✓ Node 1 exists with updated properties");
 
     // Verify node 25 was deleted
-    assert!(current.get_node(NodeId::new(25).unwrap()).is_err());
+    assert!(current.get_node(NodeId::new(25)?).is_err());
     println!("✓ Node 25 correctly deleted");
 
     // Verify other nodes exist
@@ -206,16 +211,16 @@ fn main() -> Result<()> {
         if i == 25 {
             continue; // Skip deleted node
         }
-        let node = current.get_node(NodeId::new(i).unwrap())?;
+        let node = current.get_node(NodeId::new(i)?)?;
         assert!(node.has_label_str(&format!("Person{}", i)));
     }
     println!("✓ All other nodes exist (2-24, 26-50)");
 
     // Verify edges
     for i in 1..=49 {
-        let edge = current.get_edge(EdgeId::new(i).unwrap())?;
-        assert_eq!(edge.source, NodeId::new(i).unwrap());
-        assert_eq!(edge.target, NodeId::new(i + 1).unwrap());
+        let edge = current.get_edge(EdgeId::new(i)?)?;
+        assert_eq!(edge.source, NodeId::new(i)?);
+        assert_eq!(edge.target, NodeId::new(i + 1)?);
         assert!(edge.has_label_str("KNOWS"));
     }
     println!("✓ All edges intact (1→2, 2→3, ...)\n");
