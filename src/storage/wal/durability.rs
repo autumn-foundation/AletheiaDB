@@ -488,11 +488,13 @@ impl WriteOptions {
     const BULK_IMPORT_FLUSH_INTERVAL_MS: u64 = 100;
 
     /// Create new WriteOptions with default settings.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Set the durability mode for this transaction.
+    #[must_use]
     pub fn with_durability(mut self, mode: DurabilityMode) -> Self {
         self.durability_mode = Some(mode);
         self
@@ -531,6 +533,7 @@ impl WriteOptions {
     ///     Ok(())
     /// })?;
     /// ```
+    #[must_use]
     pub fn bulk_import() -> Self {
         Self {
             durability_mode: Some(DurabilityMode::Async {
@@ -567,6 +570,7 @@ impl WriteOptions {
     ///     Ok(())
     /// })?;
     /// ```
+    #[must_use]
     pub fn critical() -> Self {
         Self {
             durability_mode: Some(DurabilityMode::Synchronous),
