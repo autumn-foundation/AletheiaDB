@@ -329,6 +329,92 @@ fn bench_distance_metrics(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Benchmark: Filtered Search (Issue #206 - Hot Path Optimization)
+// ============================================================================
+
+fn bench_search_with_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("search_with_filter");
+
+    let dimensions = 384;
+    let index_size = 10000; // Large index to exercise the hot path
+    let k = 10;
+
+    // Create a populated index
+    let index = create_populated_index(dimensions, DistanceMetric::Cosine, index_size, 16, 128);
+    let query_vector = generate_random_vector(dimensions);
+
+    // Benchmark 1: Filter accepting all nodes (baseline)
+    group.bench_function("filter_accept_all", |b| {
+        b.iter(|| index.search_with_filter(black_box(&query_vector), black_box(k), |_| true));
+    });
+
+    // Benchmark 2: Filter accepting ~50% of nodes (realistic use case)
+    group.bench_function("filter_50_percent", |b| {
+        b.iter(|| {
+            index.search_with_filter(black_box(&query_vector), black_box(k), |id| {
+                id.as_u64() % 2 == 0
+            })
+        });
+    });
+
+    // Benchmark 3: Filter accepting ~10% of nodes (selective filter)
+    group.bench_function("filter_10_percent", |b| {
+        b.iter(|| {
+            index.search_with_filter(black_box(&query_vector), black_box(k), |id| {
+                id.as_u64() % 10 == 0
+            })
+        });
+    });
+
+    // Benchmark 4: More complex filter with multiple conditions
+    group.bench_function("filter_complex", |b| {
+        b.iter(|| {
+            index.search_with_filter(black_box(&query_vector), black_box(k), |id| {
+                let raw = id.as_u64();
+                raw % 2 == 0 && raw < 8000 && raw > 100
+            })
+        });
+    });
+
+    // Benchmark 5: Compare against unfiltered search (baseline)
+    group.bench_function("no_filter_baseline", |b| {
+        b.iter(|| index.search(black_box(&query_vector), black_box(k)));
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Benchmark: Filter Hot Path with Different Index Sizes
+// ============================================================================
+
+fn bench_filter_vs_index_size(c: &mut Criterion) {
+    let mut group = c.benchmark_group("filter_vs_index_size");
+
+    let dimensions = 384;
+    let k = 10;
+
+    for &index_size in &[1000, 5000, 10000, 20000] {
+        let index = create_populated_index(dimensions, DistanceMetric::Cosine, index_size, 16, 128);
+        let query_vector = generate_random_vector(dimensions);
+
+        group.bench_with_input(
+            BenchmarkId::new("index_size", index_size),
+            &index_size,
+            |b, _| {
+                b.iter(|| {
+                    index.search_with_filter(black_box(&query_vector), black_box(k), |id| {
+                        id.as_u64() % 2 == 0
+                    })
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Benchmark Groups
 // ============================================================================
 
@@ -356,4 +442,11 @@ criterion_group!(
     bench_distance_metrics,
 );
 
-criterion_main!(index_ops, search_ops, tuning_ops);
+criterion_group!(
+    name = filter_ops;
+    config = common::configure_criterion();
+    targets = bench_search_with_filter,
+    bench_filter_vs_index_size,
+);
+
+criterion_main!(index_ops, search_ops, tuning_ops, filter_ops);
