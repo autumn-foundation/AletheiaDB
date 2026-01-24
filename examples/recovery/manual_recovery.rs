@@ -8,6 +8,16 @@
 //! - Collecting recovery statistics
 //! - Understanding what was recovered
 //!
+//! **Note:** This example uses internal recovery APIs for demonstration purposes.
+//! In future versions, GallifreyDB will provide high-level methods like:
+//! ```ignore
+//! if GallifreyDB::needs_recovery("/data/mydb")? {
+//!     let stats = GallifreyDB::recover_with_stats("/data/mydb")?;
+//!     println!("Recovered {} nodes", stats.nodes_recovered);
+//! }
+//! ```
+//! See Issue #XXX for the high-level recovery API implementation.
+//!
 //! # Running
 //!
 //! ```bash

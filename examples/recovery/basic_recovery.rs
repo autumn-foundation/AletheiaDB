@@ -8,6 +8,13 @@
 //! - Automatic recovery on next startup
 //! - Verification that all data is preserved
 //!
+//! **Note:** This example uses internal recovery APIs (`PersistenceManager`, `ConcurrentWalSystem`)
+//! for demonstration purposes. In future versions, GallifreyDB will provide a high-level API like:
+//! ```ignore
+//! let db = GallifreyDB::open_with_recovery("/data/mydb")?;
+//! ```
+//! See Issue #XXX for the high-level recovery API implementation.
+//!
 //! # Running
 //!
 //! ```bash

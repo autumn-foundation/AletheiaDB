@@ -8,8 +8,15 @@
 //! - Simulating progress reporting (percentage, operations/sec)
 //! - Displaying progress with a visual progress bar
 //!
-//! **Note:** This example simulates progress tracking. In production, you would
-//! extend `PersistenceManager::recover()` to accept a progress callback.
+//! **Note:** This example uses internal recovery APIs and simulates progress tracking.
+//! In future versions, GallifreyDB will provide a high-level API with progress callbacks:
+//! ```ignore
+//! let db = GallifreyDB::recover_with_progress("/data/mydb", |progress| {
+//!     println!("{}% complete ({}/{})",
+//!              progress.percent, progress.completed, progress.total);
+//! })?;
+//! ```
+//! See Issue #XXX for the high-level recovery API implementation.
 //!
 //! # Running
 //!
@@ -86,7 +93,7 @@ impl RecoveryProgress {
             completed_operations: 0,
             start_time: now,
             last_update_time: now,
-            update_interval_ops: total_operations / 100, // Update every 1%
+            update_interval_ops: (total_operations / 100).max(1), // Update every 1%, minimum 1
         }
     }
 

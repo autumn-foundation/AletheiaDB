@@ -180,6 +180,19 @@ required-features = ["embedding-onnx"]
 name = "embedding_comparison"
 required-features = ["embedding-all"]
 
+# Recovery examples demonstrating database recovery functionality
+[[example]]
+name = "basic_recovery"
+path = "examples/recovery/basic_recovery.rs"
+
+[[example]]
+name = "manual_recovery"
+path = "examples/recovery/manual_recovery.rs"
+
+[[example]]
+name = "progress_callback"
+path = "examples/recovery/progress_callback.rs"
+
 # Performance targets - lightweight validation of key performance metrics
 [[bench]]
 name = "performance_targets"
