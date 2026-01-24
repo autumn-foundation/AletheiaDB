@@ -29,8 +29,8 @@ The following performance targets guide our recovery implementation:
 
 **Results:**
 ```
-Time: 2.18ms (mean), 2.14-2.22ms (range)
-Status: ✓ PASS (well under 100ms target - 45x faster)
+Time: 2.11ms (mean), 2.07-2.15ms (range)
+Status: ✓ PASS (well under 100ms target - 47x faster)
 ```
 
 **Analysis:**
@@ -45,12 +45,12 @@ Small dataset recovery is extremely fast, completing in approximately 2 millisec
 
 **Results:**
 ```
-Time: 72.56ms (mean), 70.27-75.60ms (range)
-Status: ✓ PASS (well under 5s target - 68x faster)
+Time: 55.42ms (mean), 54.56-56.72ms (range)
+Status: ✓ PASS (well under 5s target - 90x faster)
 ```
 
 **Analysis:**
-Medium dataset recovery completes in approximately 80 milliseconds, well under the 5-second target. This indicates strong scalability for typical production workloads.
+Medium dataset recovery completes in approximately 55 milliseconds, well under the 5-second target. This indicates strong scalability for typical production workloads.
 
 ### 3. Large Dataset Recovery
 
@@ -61,12 +61,12 @@ Medium dataset recovery completes in approximately 80 milliseconds, well under t
 
 **Results:**
 ```
-Time: 952.08ms (mean), 912.04-997.11ms (range)
-Status: ✓ PASS (well under 30s target - 31x faster)
+Time: 828.96ms (mean), 819.63-839.10ms (range)
+Status: ✓ PASS (well under 30s target - 36x faster)
 ```
 
 **Analysis:**
-Large dataset recovery tests our ability to handle substantial production databases. Results are measured across 10 samples to ensure statistical reliability.
+Large dataset recovery completes in under 1 second, demonstrating excellent scalability for substantial production databases. Results are measured across 10 samples to ensure statistical reliability.
 
 ### 4. WAL Replay Recovery
 
@@ -77,13 +77,12 @@ Large dataset recovery tests our ability to handle substantial production databa
 
 **Results:**
 ```
-Time: [Benchmark running - results pending]
-Target: < 10 seconds
-Expected: < 5 seconds based on checkpoint-based recovery performance
+Time: 362.65ms (mean), 360.09-365.86ms (range)
+Status: ✓ PASS (well under 10s target - 27x faster)
 ```
 
 **Analysis:**
-WAL replay recovery measures the overhead of replaying operations when no checkpoint is available or when recovering operations after the last checkpoint. This scenario is critical for ensuring minimal data loss during crash recovery. Initial testing shows recovery system can process 100k+ operations efficiently.
+WAL replay recovery measures the overhead of replaying operations when no checkpoint is available or when recovering operations after the last checkpoint. Recovery completes in under 400ms for 100,000 operations (50,000 creates + 50,000 updates), demonstrating excellent throughput of approximately 275,000 ops/second. This ensures minimal data loss and fast recovery during crash scenarios.
 
 ### 5. Vector-Indexed Recovery
 
@@ -95,13 +94,12 @@ WAL replay recovery measures the overhead of replaying operations when no checkp
 
 **Results:**
 ```
-Time: [Benchmark running - results pending]
-Target: < 10 seconds
-Expected: < 2 seconds based on checkpoint persistence with vector indexes
+Time: 52.76ms (mean), 52.38-53.17ms (range)
+Status: ✓ PASS (well under 10s target - 189x faster)
 ```
 
 **Analysis:**
-Vector-indexed recovery includes rebuilding HNSW (Hierarchical Navigable Small World) indexes for semantic similarity search. This benchmark ensures that advanced features don't significantly impact recovery time. The checkpoint system persists vector indexes, allowing fast restoration.
+Vector-indexed recovery completes in approximately 53 milliseconds for 10,000 nodes with 384-dimensional embeddings. This demonstrates that HNSW vector index recovery has minimal overhead compared to standard graph recovery, making it suitable for production deployments requiring semantic search capabilities.
 
 ## Recovery Architecture
 
@@ -260,7 +258,7 @@ let config = UnifiedCheckpointConfig {
 
 ## References
 
-- [Checkpoint Manager Implementation](../../src/storage/checkpoint/mod.rs)
+- [Checkpoint Manager Implementation](../../src/storage/checkpoint.rs)
 - [WAL System Documentation](../WAL.md)
 - [Index Persistence Guide](../guides/index-persistence-guide.md)
 - [Benchmark Source Code](../../benches/recovery_benchmarks.rs)
