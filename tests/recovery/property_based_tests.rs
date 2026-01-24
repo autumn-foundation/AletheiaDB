@@ -67,10 +67,29 @@ const TIMESTAMP_INCREMENT_US: i64 = 1000;
 
 /// Starting version ID for UpdateNode/UpdateEdge operations.
 ///
-/// Set to 1_000_000 to avoid conflicts with auto-generated version IDs during recovery.
-/// During WAL replay, CreateNode and CreateEdge operations generate version IDs starting from 1.
-/// By starting update version IDs at a large offset, we ensure no collisions.
-const UPDATE_VERSION_ID_START: u64 = 1_000_000;
+/// Set to 10_000_000 to avoid conflicts with auto-generated version IDs during recovery.
+///
+/// CRITICAL: Auto-generated version IDs come from CreateNode/CreateEdge/DeleteNode/DeleteEdge.
+/// When an UpdateNode with version_id=N is processed during recovery, next_version_id jumps
+/// to N+1. This means subsequent DeleteNode operations will generate tombstone version IDs
+/// starting from N+1, which can collide with subsequent UpdateNode operations!
+///
+/// Example collision scenario with UPDATE_VERSION_ID_START = 1_000_000:
+///   1. CreateNode(id=1) → version_id=1, next_version_id=2
+///   2. UpdateNode(id=1, version_id=1_000_000) → next_version_id=1_000_001
+///   3. DeleteNode(id=1) → tombstone version_id=1_000_001 (COLLISION!)
+///   4. UpdateNode(id=2, version_id=1_000_001) → DUPLICATE VERSION ID
+///
+/// With max 200 operations per test, auto-generated IDs stay well below 10 million.
+const UPDATE_VERSION_ID_START: u64 = 10_000_000;
+
+/// Increment between consecutive UpdateNode/UpdateEdge version IDs.
+///
+/// This must be large enough that CreateNode/CreateEdge/DeleteNode/DeleteEdge operations
+/// occurring between two Updates cannot generate version IDs that reach the next Update's ID.
+///
+/// With max 200 operations per test, we use 1000 as a safe increment (far exceeds max operations).
+const VERSION_ID_INCREMENT: u64 = 1000;
 
 // ============================================================================
 // Operation Strategies - Generate Random Database Operations
@@ -208,7 +227,7 @@ impl RecoveryTestHarness {
                 DbOperation::UpdateNode { id, new_value } => {
                     if created_nodes.contains(id) {
                         let version_id = VersionId::new(version_id_counter)?;
-                        version_id_counter += 1;
+                        version_id_counter += VERSION_ID_INCREMENT;
                         wal.append(WalOperation::UpdateNode {
                             node_id: NodeId::new(*id)?,
                             version_id,
@@ -253,7 +272,7 @@ impl RecoveryTestHarness {
                 DbOperation::UpdateEdge { id, new_value } => {
                     if created_edges.contains(id) {
                         let version_id = VersionId::new(version_id_counter)?;
-                        version_id_counter += 1;
+                        version_id_counter += VERSION_ID_INCREMENT;
                         wal.append(WalOperation::UpdateEdge {
                             edge_id: EdgeId::new(*id)?,
                             version_id,
