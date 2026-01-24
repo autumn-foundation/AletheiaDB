@@ -61,6 +61,9 @@ num_cpus = { version = "1.16", optional = true }
 # RocksDB for tiered cold storage (optional)
 rocksdb = { version = "0.24", optional = true }
 
+# SQL parser for SQL:2011 temporal syntax support (optional)
+sqlparser = { version = "0.40", optional = true }
+
 # Parallel iteration for sharded vector index
 rayon = "1.8"
 
@@ -116,6 +119,9 @@ sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 
 # Tiered storage with RocksDB cold storage backend
 tiered-storage = ["dep:rocksdb"]
+
+# SQL:2011 temporal syntax support
+sql = ["dep:sqlparser"]
 
 # Custom Honeycomb client (replaces libhoney-rust git dependency)
 # This provides a minimal, security-focused client with modern dependencies
