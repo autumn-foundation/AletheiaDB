@@ -966,6 +966,9 @@ impl CurrentStorage {
 
         // Best-effort vector index removal (ignore errors) - Issue #323
         // This prevents memory leaks and ensures deleted nodes don't appear in similarity searches
+        // Note: Temporal vector index cleanup is only available in delete_node_direct()
+        // which has timestamp context from the transaction. Non-transactional deletes
+        // via this method don't have temporal semantics.
         let _ = self.try_remove_from_index(id);
 
         Ok(node)
