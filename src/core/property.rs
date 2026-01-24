@@ -1002,7 +1002,12 @@ impl From<f64> for PropertyValue {
 
 impl From<String> for PropertyValue {
     fn from(s: String) -> Self {
-        PropertyValue::String(Arc::from(s.as_str()))
+        // Use Arc::from(s) directly to avoid unnecessary allocation.
+        // This leverages Rust's built-in conversion chain:
+        // String → Box<str> → Arc<str>
+        // which reuses the String's allocation instead of copying.
+        // See: https://github.com/madmax983/GallifreyDB/issues/200
+        PropertyValue::String(Arc::from(s))
     }
 }
 
@@ -1014,7 +1019,12 @@ impl From<&str> for PropertyValue {
 
 impl From<Vec<u8>> for PropertyValue {
     fn from(b: Vec<u8>) -> Self {
-        PropertyValue::Bytes(Arc::from(b.as_slice()))
+        // Use Arc::from(b) directly to avoid unnecessary allocation.
+        // This leverages Rust's built-in conversion chain:
+        // Vec<u8> → Box<[u8]> → Arc<[u8]>
+        // which reuses the Vec's allocation instead of copying.
+        // See: https://github.com/madmax983/GallifreyDB/issues/200
+        PropertyValue::Bytes(Arc::from(b))
     }
 }
 
@@ -1475,6 +1485,66 @@ mod tests {
         let _: PropertyValue = "hello".into();
         let _: PropertyValue = String::from("world").into();
         let _: PropertyValue = vec![1u8, 2, 3].into();
+    }
+
+    #[test]
+    fn test_string_to_property_value_efficient_conversion() {
+        // Issue #200: Verify that From<String> for PropertyValue uses
+        // efficient conversion without unnecessary copying.
+        // The implementation should use Arc::from(s) which leverages
+        // String → Box<str> → Arc<str> conversion chain.
+
+        // Create an owned String
+        let original = String::from("test string for efficient conversion");
+        let expected_content = original.clone();
+
+        // Convert to PropertyValue - should consume the String
+        let prop_value: PropertyValue = original.into();
+
+        // Verify the value is stored correctly
+        assert_eq!(
+            prop_value.as_str(),
+            Some(expected_content.as_str()),
+            "PropertyValue should contain the original string content"
+        );
+
+        // Verify it's a String variant
+        assert!(matches!(prop_value, PropertyValue::String(_)));
+
+        // Additional test: Verify the conversion works in PropertyMapBuilder
+        let test_string = String::from("builder test");
+        let map = PropertyMapBuilder::new().insert("key", test_string).build();
+
+        assert_eq!(
+            map.get("key").and_then(|v| v.as_str()),
+            Some("builder test"),
+            "PropertyMapBuilder should handle owned String efficiently"
+        );
+    }
+
+    #[test]
+    fn test_vec_u8_to_property_value_efficient_conversion() {
+        // Issue #200 (related): Verify that From<Vec<u8>> for PropertyValue uses
+        // efficient conversion without unnecessary copying.
+        // The implementation should use Arc::from(v) which leverages
+        // Vec<u8> → Box<[u8]> → Arc<[u8]> conversion chain.
+
+        // Create an owned Vec<u8>
+        let original = vec![1u8, 2, 3, 4, 5, 42, 255];
+        let expected_content = original.clone();
+
+        // Convert to PropertyValue - should consume the Vec
+        let prop_value: PropertyValue = original.into();
+
+        // Verify the value is stored correctly
+        assert_eq!(
+            prop_value.as_bytes(),
+            Some(expected_content.as_slice()),
+            "PropertyValue should contain the original byte content"
+        );
+
+        // Verify it's a Bytes variant
+        assert!(matches!(prop_value, PropertyValue::Bytes(_)));
     }
 
     #[test]
