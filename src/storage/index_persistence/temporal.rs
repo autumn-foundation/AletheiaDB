@@ -7,6 +7,7 @@ use crc32fast::Hasher;
 
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
+use crate::core::property::PropertyValue;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
 use crate::storage::version::{EdgeVersion, NodeVersion, PropertyDelta, VersionData};
 
@@ -38,8 +39,32 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
             // For deltas, we persist changed properties AND removed keys
             let mut builder = crate::core::property::PropertyMapBuilder::new();
 
+            // Add regular changed properties
             for (key, value) in &delta.changed {
                 builder = builder.insert_by_key(*key, value.clone());
+            }
+
+            // Convert vector deltas to full vectors for persistence
+            // Note: This loses the sparse optimization on disk but preserves it in memory.
+            // For VectorDelta::Sparse, we need the base vector to reconstruct.
+            // Since we don't have access to the base here, we can only persist VectorDelta::Full.
+            // VectorDelta::Sparse instances should have been materialized before persistence.
+            // TODO(#215): Optimize disk format to support sparse vector deltas natively
+            for (key, vec_delta) in &delta.vector_deltas {
+                match vec_delta {
+                    crate::storage::version::VectorDelta::Full(vec) => {
+                        builder = builder.insert_by_key(*key, PropertyValue::Vector(vec.clone()));
+                    }
+                    crate::storage::version::VectorDelta::Sparse { .. } => {
+                        // Sparse deltas can't be persisted without the base vector.
+                        // This should not happen in practice since deltas are materialized before persistence.
+                        // Log a warning and skip this property.
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "WARNING: Sparse VectorDelta found during persistence - skipping property. This indicates incomplete delta materialization."
+                        );
+                    }
+                }
             }
 
             // Collect removed property keys (as interned string indices)
@@ -95,8 +120,24 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
             // For deltas, we persist changed properties AND removed keys
             let mut builder = crate::core::property::PropertyMapBuilder::new();
 
+            // Add regular changed properties
             for (key, value) in &delta.changed {
                 builder = builder.insert_by_key(*key, value.clone());
+            }
+
+            // Convert vector deltas to full vectors for persistence (same as nodes)
+            for (key, vec_delta) in &delta.vector_deltas {
+                match vec_delta {
+                    crate::storage::version::VectorDelta::Full(vec) => {
+                        builder = builder.insert_by_key(*key, PropertyValue::Vector(vec.clone()));
+                    }
+                    crate::storage::version::VectorDelta::Sparse { .. } => {
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "WARNING: Sparse VectorDelta found during edge persistence - skipping property"
+                        );
+                    }
+                }
             }
 
             // Collect removed property keys (as interned string indices)

@@ -11,10 +11,17 @@
 use crate::api::transaction::types::TxId;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
-use crate::core::property::{PropertyKey, PropertyMap, PropertyValue};
+use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Epsilon for floating-point comparisons in vector deltas.
+///
+/// Used to determine if two f32 values are effectively equal, accounting for
+/// floating-point precision limitations. Value chosen to be robust for typical
+/// embedding use cases while avoiding spurious deltas.
+const VECTOR_EPSILON: f32 = 1e-7;
 
 /// Sparse representation of vector changes.
 ///
@@ -53,51 +60,77 @@ impl VectorDelta {
     /// Compute a delta between two vectors.
     ///
     /// Returns `None` if vectors are identical or have different dimensions.
-    /// Uses sparse storage if < 50% of elements changed, otherwise full storage.
+    /// Uses sparse storage when storing individual changes is more efficient
+    /// than storing the full vector (changes.len() * 2 < dimension).
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if:
+    /// - Vectors have different dimensions
+    /// - Vectors are identical (no changes)
+    /// - Vector dimension exceeds MAX_VECTOR_DIMENSIONS
     pub fn from_diff(old: &[f32], new: &[f32]) -> Option<Self> {
         if old.len() != new.len() {
             return None;
         }
 
-        // Collect changed indices
-        let changes: Vec<(u32, f32)> = old
-            .iter()
-            .zip(new.iter())
-            .enumerate()
-            .filter_map(|(idx, (old_val, new_val))| {
-                if old_val != new_val {
-                    Some((idx as u32, *new_val))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Validate dimension doesn't exceed maximum to prevent DoS
+        if old.len() > MAX_VECTOR_DIMENSIONS {
+            return None;
+        }
+
+        // Collect changed indices with epsilon-based comparison
+        let mut changes = Vec::new();
+        for (idx, (old_val, new_val)) in old.iter().zip(new.iter()).enumerate() {
+            // Use epsilon-based comparison to avoid spurious deltas from floating-point precision
+            if (old_val - new_val).abs() > VECTOR_EPSILON {
+                // Validate index fits in u32 (should always pass given MAX_VECTOR_DIMENSIONS check)
+                let idx_u32 = u32::try_from(idx).ok()?;
+                changes.push((idx_u32, *new_val));
+            }
+        }
 
         if changes.is_empty() {
             return None;
         }
 
         let dimension = old.len();
-        let threshold = (dimension as f32 * 0.5) as usize;
 
-        if changes.len() < threshold {
+        // Use sparse storage if it's more efficient than full storage
+        // Sparse cost: changes * 8 bytes (u32 + f32)
+        // Full cost: dimension * 4 bytes (f32)
+        // Sparse is better when: changes * 8 < dimension * 4
+        // Simplifies to: changes * 2 < dimension
+        if changes.len() * 2 < dimension {
             // Use sparse storage
             Some(VectorDelta::Sparse {
                 dimension,
                 changes: Arc::new(changes),
             })
         } else {
-            // Use full storage (>50% changed)
+            // Use full storage (sparse wouldn't save space)
             Some(VectorDelta::Full(Arc::from(new)))
         }
     }
 
     /// Apply this delta to a base vector, producing the new vector.
+    ///
+    /// # Panics (Debug Only)
+    ///
+    /// In debug builds, panics if the base vector dimension doesn't match the
+    /// expected dimension. In release builds, returns base unchanged on mismatch.
     pub fn apply(&self, base: &[f32]) -> Vec<f32> {
         match self {
             VectorDelta::Sparse { dimension, changes } => {
                 if base.len() != *dimension {
-                    // Dimension mismatch - return base unchanged
+                    // Dimension mismatch - this should never happen in correct usage
+                    debug_assert!(
+                        base.len() == *dimension,
+                        "VectorDelta applied to vector of wrong dimension. Expected: {}, Got: {}",
+                        *dimension,
+                        base.len()
+                    );
+                    // In release builds, return base unchanged to avoid corruption
                     return base.to_vec();
                 }
 
