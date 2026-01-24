@@ -110,21 +110,26 @@ fn test_adr_0009_matches_implementation() {
 
     // ADR should use SeqCst in the main implementation examples
     // Check that the main IdGenerator implementation section uses SeqCst
-    if let Some(id_gen_start) = adr_content.find("### ID Generation")
-        && let Some(memory_ordering_start) = adr_content.find("### Memory Ordering")
-    {
-        let id_gen_section = &adr_content[id_gen_start..memory_ordering_start];
+    // Note: Using nested if let instead of let_chains to maintain stable Rust compatibility
+    #[allow(clippy::collapsible_if)]
+    if let Some(id_gen_start) = adr_content.find("### ID Generation") {
+        if let Some(memory_ordering_offset) =
+            adr_content[id_gen_start..].find("### Memory Ordering")
+        {
+            let memory_ordering_start = id_gen_start + memory_ordering_offset;
+            let id_gen_section = &adr_content[id_gen_start..memory_ordering_start];
 
-        // The main implementation should use SeqCst, not Relaxed
-        if id_gen_section.contains("pub fn next") && id_gen_section.contains("fetch_add") {
-            assert!(
-                !id_gen_section.contains("Ordering::Relaxed"),
-                "Main ID generation implementation in ADR should use SeqCst, not Relaxed"
-            );
-            assert!(
-                id_gen_section.contains("Ordering::SeqCst"),
-                "Main ID generation implementation in ADR should use SeqCst"
-            );
+            // The main implementation should use SeqCst, not Relaxed
+            if id_gen_section.contains("pub fn next") && id_gen_section.contains("fetch_add") {
+                assert!(
+                    !id_gen_section.contains("Ordering::Relaxed"),
+                    "Main ID generation implementation in ADR should use SeqCst, not Relaxed"
+                );
+                assert!(
+                    id_gen_section.contains("Ordering::SeqCst"),
+                    "Main ID generation implementation in ADR should use SeqCst"
+                );
+            }
         }
     }
 }
@@ -143,5 +148,8 @@ fn test_adr_0009_references() {
 
     // After fix, should reference issue #21 regarding SeqCst discussion
     // (mentioned in the actual implementation comments)
-    // This is optional but recommended for traceability
+    assert!(
+        content.contains("issue #21"),
+        "ADR-0009 should reference issue #21 regarding the SeqCst discussion for traceability"
+    );
 }

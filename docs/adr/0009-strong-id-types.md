@@ -107,11 +107,11 @@ While `Ordering::Relaxed` guarantees **atomicity** (no torn reads/writes), it do
 
 ```rust
 // Thread A (using Relaxed)
-let tx_id = id_gen.fetch_add(1, Ordering::Relaxed); // Gets 100
+let tx_id = id_counter.fetch_add(1, Ordering::Relaxed); // Gets 100
 commit_transaction(tx_id); // Commits with ID 100
 
 // Thread B (concurrent)
-let snapshot_id = id_gen.load(Ordering::Relaxed); // Might still see 99!
+let snapshot_id = id_counter.load(Ordering::Relaxed); // Might still see 99!
 read_snapshot(snapshot_id); // Incorrectly includes uncommitted data
 ```
 
@@ -121,11 +121,11 @@ With `SeqCst`, all threads observe a single global order:
 
 ```rust
 // Thread A (using SeqCst)
-let tx_id = id_gen.fetch_add(1, Ordering::SeqCst); // Gets 100, globally visible
+let tx_id = id_counter.fetch_add(1, Ordering::SeqCst); // Gets 100, globally visible
 commit_transaction(tx_id);
 
 // Thread B (concurrent)
-let snapshot_id = id_gen.load(Ordering::SeqCst); // Guaranteed to see >= 100
+let snapshot_id = id_counter.load(Ordering::SeqCst); // Guaranteed to see >= 100
 read_snapshot(snapshot_id); // Correctly excludes thread A's commit
 ```
 
