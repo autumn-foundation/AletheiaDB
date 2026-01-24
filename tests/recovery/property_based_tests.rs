@@ -17,15 +17,15 @@
 //!
 //! 3. **Referential Integrity**
 //!    - All graph edges reference either existing nodes or their tombstones
-//!    - Node deletions cascade appropriately to connected edges
+//!    - Referenced nodes must overlap temporally with the edge's valid time
 //!
 //! 4. **ID Uniqueness**
 //!    - No duplicate identifiers exist for nodes, edges, or versions post-recovery
 //!
 //! ## Test Execution
 //!
-//! Each test executes 1000+ random operation sequences to thoroughly validate
-//! invariants under various conditions.
+//! Runs **1000 test cases**, each with **50-200 random operations**, totaling
+//! **50,000-200,000 operations** to thoroughly validate invariants.
 
 use gallifreydb::{
     core::{
@@ -48,6 +48,22 @@ use proptest::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use tempfile::TempDir;
+
+// ============================================================================
+// Test Configuration Constants
+// ============================================================================
+
+/// Number of property test cases to execute
+const PROPTEST_CASES: u32 = 1000;
+
+/// Minimum operations per test case
+const MIN_OPERATIONS_PER_TEST: usize = 50;
+
+/// Maximum operations per test case
+const MAX_OPERATIONS_PER_TEST: usize = 200;
+
+/// Timestamp increment in microseconds (1ms) for each operation
+const TIMESTAMP_INCREMENT_US: i64 = 1000;
 
 // ============================================================================
 // Operation Strategies - Generate Random Database Operations
@@ -116,7 +132,7 @@ fn operation_sequence_strategy() -> impl Strategy<Value = Vec<DbOperation>> {
             // 5% delete edges
             (1u64..100).prop_map(|id| DbOperation::DeleteEdge { id }),
         ],
-        50..200, // Generate 50-200 operations per test
+        MIN_OPERATIONS_PER_TEST..MAX_OPERATIONS_PER_TEST,
     )
 }
 
@@ -126,22 +142,26 @@ fn operation_sequence_strategy() -> impl Strategy<Value = Vec<DbOperation>> {
 
 /// Test harness for executing operations and recovering.
 struct RecoveryTestHarness {
+    /// Temporary directory (must be kept alive for test duration)
+    #[allow(dead_code)]
     temp_dir: TempDir,
     wal_dir: PathBuf,
     checkpoint_dir: PathBuf,
 }
 
 impl RecoveryTestHarness {
-    fn new() -> Self {
-        let temp_dir = TempDir::new().unwrap();
+    fn new() -> Result<Self> {
+        let temp_dir = TempDir::new().map_err(|e| {
+            gallifreydb::utils::error::Error::other(format!("Failed to create temp dir: {}", e))
+        })?;
         let wal_dir = temp_dir.path().join("wal");
         let checkpoint_dir = temp_dir.path().join("checkpoints");
 
-        Self {
+        Ok(Self {
             temp_dir,
             wal_dir,
             checkpoint_dir,
-        }
+        })
     }
 
     /// Execute a sequence of operations and return the WAL.
@@ -156,15 +176,16 @@ impl RecoveryTestHarness {
         let mut operation_counter: i64 = 0;
 
         for op in operations {
-            // Create a unique timestamp for each operation (increment by 1000 microseconds)
+            // Create a unique timestamp for each operation
             operation_counter += 1;
-            let timestamp_counter = Timestamp::from(base_time + operation_counter * 1000);
+            let timestamp_counter =
+                Timestamp::from(base_time + operation_counter * TIMESTAMP_INCREMENT_US);
 
             match op {
                 DbOperation::CreateNode { id, label, value } => {
                     if !created_nodes.contains(id) {
                         wal.append(WalOperation::CreateNode {
-                            node_id: NodeId::new(*id).unwrap(),
+                            node_id: NodeId::new(*id)?,
                             label: label.clone(),
                             properties: PropertyMapBuilder::new().insert("value", *value).build(),
                             temporal: BiTemporalInterval::current(timestamp_counter),
@@ -174,12 +195,12 @@ impl RecoveryTestHarness {
                 }
                 DbOperation::UpdateNode { id, new_value } => {
                     if created_nodes.contains(id) {
-                        let version_id = VersionId::new(version_id_counter).unwrap();
+                        let version_id = VersionId::new(version_id_counter)?;
                         version_id_counter += 1;
                         wal.append(WalOperation::UpdateNode {
-                            node_id: NodeId::new(*id).unwrap(),
+                            node_id: NodeId::new(*id)?,
                             version_id,
-                            label: "Updated".to_string(), // Keep a simple label
+                            label: "Updated".to_string(),
                             properties: PropertyMapBuilder::new()
                                 .insert("value", *new_value)
                                 .build(),
@@ -190,7 +211,7 @@ impl RecoveryTestHarness {
                 DbOperation::DeleteNode { id } => {
                     if created_nodes.contains(id) {
                         wal.append(WalOperation::DeleteNode {
-                            node_id: NodeId::new(*id).unwrap(),
+                            node_id: NodeId::new(*id)?,
                             temporal: BiTemporalInterval::current(timestamp_counter),
                         })?;
                         created_nodes.remove(id);
@@ -207,9 +228,9 @@ impl RecoveryTestHarness {
                         && created_nodes.contains(to)
                     {
                         wal.append(WalOperation::CreateEdge {
-                            edge_id: EdgeId::new(*id).unwrap(),
-                            source: NodeId::new(*from).unwrap(),
-                            target: NodeId::new(*to).unwrap(),
+                            edge_id: EdgeId::new(*id)?,
+                            source: NodeId::new(*from)?,
+                            target: NodeId::new(*to)?,
                             label: label.clone(),
                             properties: PropertyMapBuilder::new().build(),
                             temporal: BiTemporalInterval::current(timestamp_counter),
@@ -219,10 +240,10 @@ impl RecoveryTestHarness {
                 }
                 DbOperation::UpdateEdge { id, new_value } => {
                     if created_edges.contains(id) {
-                        let version_id = VersionId::new(version_id_counter).unwrap();
+                        let version_id = VersionId::new(version_id_counter)?;
                         version_id_counter += 1;
                         wal.append(WalOperation::UpdateEdge {
-                            edge_id: EdgeId::new(*id).unwrap(),
+                            edge_id: EdgeId::new(*id)?,
                             version_id,
                             label: "Updated".to_string(),
                             properties: PropertyMapBuilder::new()
@@ -235,7 +256,7 @@ impl RecoveryTestHarness {
                 DbOperation::DeleteEdge { id } => {
                     if created_edges.contains(id) {
                         wal.append(WalOperation::DeleteEdge {
-                            edge_id: EdgeId::new(*id).unwrap(),
+                            edge_id: EdgeId::new(*id)?,
                             temporal: BiTemporalInterval::current(timestamp_counter),
                         })?;
                         created_edges.remove(id);
@@ -263,6 +284,57 @@ impl RecoveryTestHarness {
 }
 
 // ============================================================================
+// Helper Functions - Reduce Code Duplication
+// ============================================================================
+
+/// Macro to verify temporal consistency for a set of versions.
+///
+/// Checks:
+/// - Valid time start <= end
+/// - Transaction timestamps increase monotonically
+macro_rules! verify_temporal_consistency_for {
+    ($entity_id:expr, $entity_type:expr, $versions:expr) => {{
+        let mut sorted_versions = $versions;
+        if !sorted_versions.is_empty() {
+            sorted_versions.sort_by_key(|v| v.temporal.transaction_time().start());
+
+            let mut prev_tx_time: Option<Timestamp> = None;
+
+            for version in sorted_versions {
+                let interval = version.temporal;
+
+                // Invariant: Valid time start <= Valid time end
+                if interval.valid_time().start() > interval.valid_time().end() {
+                    return Err(format!(
+                        "{} {:?}: Valid time start ({}) > end ({})",
+                        $entity_type,
+                        $entity_id,
+                        interval.valid_time().start(),
+                        interval.valid_time().end()
+                    ));
+                }
+
+                // Invariant: Transaction timestamps increase monotonically
+                if let Some(prev_tx) = prev_tx_time {
+                    if version.temporal.transaction_time().start() <= prev_tx {
+                        return Err(format!(
+                            "{} {:?}: Transaction time not monotonic: {} <= {}",
+                            $entity_type,
+                            $entity_id,
+                            version.temporal.transaction_time().start(),
+                            prev_tx
+                        ));
+                    }
+                }
+
+                prev_tx_time = Some(version.temporal.transaction_time().start());
+            }
+        }
+        std::result::Result::<(), String>::Ok(())
+    }};
+}
+
+// ============================================================================
 // Invariant 1: Temporal Consistency
 // ============================================================================
 
@@ -275,105 +347,33 @@ fn verify_temporal_consistency(
     historical: &HistoricalStorage,
 ) -> std::result::Result<(), String> {
     // Check all nodes in historical storage
-    let all_versions = historical.get_all_node_versions();
-
-    for (node_id, versions) in all_versions {
-        // Need to sort versions by transaction time first
-        let mut sorted_versions = versions;
-        sorted_versions.sort_by_key(|v| v.temporal.transaction_time().start());
-
-        let mut prev_tx_time: Option<Timestamp> = None;
-
-        for version in sorted_versions {
-            let interval = version.temporal;
-
-            // Invariant: Valid time start <= Valid time end
-            if interval.valid_time().start() > interval.valid_time().end() {
-                return Err(format!(
-                    "Node {:?}: Valid time start ({}) > end ({})",
-                    node_id,
-                    interval.valid_time().start(),
-                    interval.valid_time().end()
-                ));
-            }
-
-            // Invariant: Transaction timestamps increase monotonically
-            if let Some(prev_tx) = prev_tx_time {
-                if version.temporal.transaction_time().start() <= prev_tx {
-                    return Err(format!(
-                        "Node {:?}: Transaction time not monotonic: {} <= {}",
-                        node_id,
-                        version.temporal.transaction_time().start(),
-                        prev_tx
-                    ));
-                }
-            }
-
-            prev_tx_time = Some(version.temporal.transaction_time().start());
-        }
+    for (node_id, versions) in historical.get_all_node_versions() {
+        verify_temporal_consistency_for!(node_id, "Node", versions)?;
     }
 
     // Check all edges in historical storage
-    let all_edge_versions = historical.get_all_edge_versions();
-
-    for (edge_id, versions) in all_edge_versions {
-        // Need to sort versions by transaction time first
-        let mut sorted_versions = versions;
-        sorted_versions.sort_by_key(|v| v.temporal.transaction_time().start());
-
-        let mut prev_tx_time: Option<Timestamp> = None;
-
-        for version in sorted_versions {
-            let interval = version.temporal;
-
-            // Invariant: Valid time start <= Valid time end
-            if interval.valid_time().start() > interval.valid_time().end() {
-                return Err(format!(
-                    "Edge {:?}: Valid time start ({}) > end ({})",
-                    edge_id,
-                    interval.valid_time().start(),
-                    interval.valid_time().end()
-                ));
-            }
-
-            // Invariant: Transaction timestamps increase monotonically
-            if let Some(prev_tx) = prev_tx_time {
-                if version.temporal.transaction_time().start() <= prev_tx {
-                    return Err(format!(
-                        "Edge {:?}: Transaction time not monotonic: {} <= {}",
-                        edge_id,
-                        version.temporal.transaction_time().start(),
-                        prev_tx
-                    ));
-                }
-            }
-
-            prev_tx_time = Some(version.temporal.transaction_time().start());
-        }
+    for (edge_id, versions) in historical.get_all_edge_versions() {
+        verify_temporal_consistency_for!(edge_id, "Edge", versions)?;
     }
 
     Ok(())
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
 
     /// Property: Temporal consistency is maintained after recovery.
     #[test]
     fn prop_temporal_consistency(operations in operation_sequence_strategy()) {
-        let harness = RecoveryTestHarness::new();
+        let harness = RecoveryTestHarness::new()?;
 
-        // Execute operations
-        let wal = harness.execute_operations(&operations)
-            .expect("Failed to execute operations");
-
-        // Recover from WAL
-        let (current, historical, _lsn) = harness.recover(&wal)
-            .expect("Failed to recover");
+        // Execute operations and recover from WAL
+        let wal = harness.execute_operations(&operations)?;
+        let (current, historical, _lsn) = harness.recover(&wal)?;
 
         // Verify temporal consistency
         verify_temporal_consistency(&current, &historical)
-            .expect("Temporal consistency violated");
+            .map_err(TestCaseError::fail)?;
     }
 }
 
@@ -382,44 +382,29 @@ proptest! {
 // ============================================================================
 
 /// Verify version chain integrity:
-/// - Entities maintain unbroken version sequences
-/// - No temporal gaps exist between consecutive versions
 /// - Current storage matches the latest version state
+///
+/// Note: Monotonicity is already checked by verify_temporal_consistency
 fn verify_version_chain_integrity(
     current: &CurrentStorage,
     historical: &HistoricalStorage,
 ) -> std::result::Result<(), String> {
     // Check node version chains
-    let all_versions = historical.get_all_node_versions();
-
-    for (node_id, versions) in all_versions {
+    for (node_id, versions) in historical.get_all_node_versions() {
         if versions.is_empty() {
             continue;
         }
 
-        // Sort versions by transaction time
+        // Sort versions by transaction time (for finding latest)
         let mut sorted_versions = versions;
         sorted_versions.sort_by_key(|v| v.temporal.transaction_time().start());
 
-        // Check for temporal gaps between consecutive versions
-        for i in 1..sorted_versions.len() {
-            let prev = sorted_versions[i - 1];
-            let curr = sorted_versions[i];
-
-            // Transaction times should be strictly increasing
-            if curr.temporal.transaction_time().start() <= prev.temporal.transaction_time().start()
-            {
-                return Err(format!(
-                    "Node {:?}: Version chain has non-increasing transaction times at index {}",
-                    node_id, i
-                ));
-            }
-        }
-
         // Verify current storage matches latest version (if it exists in current)
         if let Ok(current_node) = current.get_node(node_id) {
-            let latest = sorted_versions.last().unwrap();
-            // Current node should match latest version's label
+            let latest = sorted_versions.last().ok_or_else(|| {
+                format!("Node {:?}: Empty version chain after filtering", node_id)
+            })?;
+
             if current_node.label != latest.label {
                 return Err(format!(
                     "Node {:?}: Current storage label differs from latest version",
@@ -430,36 +415,21 @@ fn verify_version_chain_integrity(
     }
 
     // Check edge version chains
-    let all_edge_versions = historical.get_all_edge_versions();
-
-    for (edge_id, versions) in all_edge_versions {
+    for (edge_id, versions) in historical.get_all_edge_versions() {
         if versions.is_empty() {
             continue;
         }
 
-        // Sort versions by transaction time
+        // Sort versions by transaction time (for finding latest)
         let mut sorted_versions = versions;
         sorted_versions.sort_by_key(|v| v.temporal.transaction_time().start());
 
-        // Check for temporal gaps between consecutive versions
-        for i in 1..sorted_versions.len() {
-            let prev = sorted_versions[i - 1];
-            let curr = sorted_versions[i];
-
-            // Transaction times should be strictly increasing
-            if curr.temporal.transaction_time().start() <= prev.temporal.transaction_time().start()
-            {
-                return Err(format!(
-                    "Edge {:?}: Version chain has non-increasing transaction times at index {}",
-                    edge_id, i
-                ));
-            }
-        }
-
         // Verify current storage matches latest version (if it exists in current)
         if let Ok(current_edge) = current.get_edge(edge_id) {
-            let latest = sorted_versions.last().unwrap();
-            // Current edge should match latest version's label
+            let latest = sorted_versions.last().ok_or_else(|| {
+                format!("Edge {:?}: Empty version chain after filtering", edge_id)
+            })?;
+
             if current_edge.label != latest.label {
                 return Err(format!(
                     "Edge {:?}: Current storage label differs from latest version",
@@ -473,24 +443,20 @@ fn verify_version_chain_integrity(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
 
     /// Property: Version chain integrity is maintained after recovery.
     #[test]
     fn prop_version_chain_integrity(operations in operation_sequence_strategy()) {
-        let harness = RecoveryTestHarness::new();
+        let harness = RecoveryTestHarness::new()?;
 
-        // Execute operations
-        let wal = harness.execute_operations(&operations)
-            .expect("Failed to execute operations");
-
-        // Recover from WAL
-        let (current, historical, _lsn) = harness.recover(&wal)
-            .expect("Failed to recover");
+        // Execute operations and recover from WAL
+        let wal = harness.execute_operations(&operations)?;
+        let (current, historical, _lsn) = harness.recover(&wal)?;
 
         // Verify version chain integrity
         verify_version_chain_integrity(&current, &historical)
-            .expect("Version chain integrity violated");
+            .map_err(TestCaseError::fail)?;
     }
 }
 
@@ -583,24 +549,20 @@ fn verify_referential_integrity(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
 
     /// Property: Referential integrity is maintained after recovery.
     #[test]
     fn prop_referential_integrity(operations in operation_sequence_strategy()) {
-        let harness = RecoveryTestHarness::new();
+        let harness = RecoveryTestHarness::new()?;
 
-        // Execute operations
-        let wal = harness.execute_operations(&operations)
-            .expect("Failed to execute operations");
-
-        // Recover from WAL
-        let (current, historical, _lsn) = harness.recover(&wal)
-            .expect("Failed to recover");
+        // Execute operations and recover from WAL
+        let wal = harness.execute_operations(&operations)?;
+        let (current, historical, _lsn) = harness.recover(&wal)?;
 
         // Verify referential integrity
         verify_referential_integrity(&current, &historical)
-            .expect("Referential integrity violated");
+            .map_err(TestCaseError::fail)?;
     }
 }
 
@@ -671,24 +633,20 @@ fn verify_id_uniqueness(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
 
     /// Property: ID uniqueness is maintained after recovery.
     #[test]
     fn prop_id_uniqueness(operations in operation_sequence_strategy()) {
-        let harness = RecoveryTestHarness::new();
+        let harness = RecoveryTestHarness::new()?;
 
-        // Execute operations
-        let wal = harness.execute_operations(&operations)
-            .expect("Failed to execute operations");
-
-        // Recover from WAL
-        let (current, historical, _lsn) = harness.recover(&wal)
-            .expect("Failed to recover");
+        // Execute operations and recover from WAL
+        let wal = harness.execute_operations(&operations)?;
+        let (current, historical, _lsn) = harness.recover(&wal)?;
 
         // Verify ID uniqueness
         verify_id_uniqueness(&current, &historical)
-            .expect("ID uniqueness violated");
+            .map_err(TestCaseError::fail)?;
     }
 }
 
@@ -697,7 +655,7 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
 
     /// Property: All four invariants hold after recovery.
     ///
@@ -705,27 +663,23 @@ proptest! {
     /// ensuring that recovery maintains complete database consistency.
     #[test]
     fn prop_all_invariants_hold(operations in operation_sequence_strategy()) {
-        let harness = RecoveryTestHarness::new();
+        let harness = RecoveryTestHarness::new()?;
 
-        // Execute operations
-        let wal = harness.execute_operations(&operations)
-            .expect("Failed to execute operations");
-
-        // Recover from WAL
-        let (current, historical, _lsn) = harness.recover(&wal)
-            .expect("Failed to recover");
+        // Execute operations and recover from WAL
+        let wal = harness.execute_operations(&operations)?;
+        let (current, historical, _lsn) = harness.recover(&wal)?;
 
         // Verify all invariants
         verify_temporal_consistency(&current, &historical)
-            .expect("Temporal consistency violated");
+            .map_err(TestCaseError::fail)?;
 
         verify_version_chain_integrity(&current, &historical)
-            .expect("Version chain integrity violated");
+            .map_err(TestCaseError::fail)?;
 
         verify_referential_integrity(&current, &historical)
-            .expect("Referential integrity violated");
+            .map_err(TestCaseError::fail)?;
 
         verify_id_uniqueness(&current, &historical)
-            .expect("ID uniqueness violated");
+            .map_err(TestCaseError::fail)?;
     }
 }
