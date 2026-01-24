@@ -65,6 +65,13 @@ const MAX_OPERATIONS_PER_TEST: usize = 200;
 /// Timestamp increment in microseconds (1ms) for each operation
 const TIMESTAMP_INCREMENT_US: i64 = 1000;
 
+/// Starting version ID for UpdateNode/UpdateEdge operations.
+///
+/// Set to 1_000_000 to avoid conflicts with auto-generated version IDs during recovery.
+/// During WAL replay, CreateNode and CreateEdge operations generate version IDs starting from 1.
+/// By starting update version IDs at a large offset, we ensure no collisions.
+const UPDATE_VERSION_ID_START: u64 = 1_000_000;
+
 // ============================================================================
 // Operation Strategies - Generate Random Database Operations
 // ============================================================================
@@ -171,12 +178,17 @@ impl RecoveryTestHarness {
 
         let mut created_nodes: HashSet<u64> = HashSet::new();
         let mut created_edges: HashSet<u64> = HashSet::new();
-        let mut version_id_counter: u64 = 1;
+        // Start version IDs at a large offset to avoid conflicts with auto-generated IDs
+        // from CreateNode/CreateEdge operations during recovery
+        let mut version_id_counter: u64 = UPDATE_VERSION_ID_START;
+
+        // Use deterministic timestamps (base + offset) rather than time::now() for each operation
+        // to ensure reproducible test failures and consistent temporal ordering
         let base_time = time::now().wallclock();
         let mut operation_counter: i64 = 0;
 
         for op in operations {
-            // Create a unique timestamp for each operation
+            // Create a unique timestamp for each operation (increments by 1ms)
             operation_counter += 1;
             let timestamp_counter =
                 Timestamp::from(base_time + operation_counter * TIMESTAMP_INCREMENT_US);
