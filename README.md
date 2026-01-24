@@ -747,6 +747,13 @@ cargo run --example observability_demo --all-features
 See `docs/adr/` for all architectural decisions.
 
 ### Examples
+
+**Recovery Examples:**
+- `examples/recovery_basic.rs` - Automatic database recovery after crash
+- `examples/recovery_manual.rs` - Manual recovery control with statistics
+- `examples/recovery_progress.rs` - Recovery with progress tracking
+
+**Other Examples:**
 - `examples/observability_demo.rs` - Production observability features
 - `examples/doctor_who_demo.rs` - Temporal graph modeling example
 
