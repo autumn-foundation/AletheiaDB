@@ -167,7 +167,10 @@ mod phase1_basic_sql {
         let filter_op = query.ops.iter().find(|op| matches!(op, QueryOp::Filter(_)));
         assert!(filter_op.is_some());
         if let Some(QueryOp::Filter(pred)) = filter_op {
-            assert!(matches!(pred, Predicate::NotExists(key) if key == "deleted_at"));
+            assert!(matches!(
+                pred,
+                Predicate::Eq { key, value: PredicateValue::Null } if key == "deleted_at"
+            ));
         }
     }
 
@@ -177,7 +180,10 @@ mod phase1_basic_sql {
         let filter_op = query.ops.iter().find(|op| matches!(op, QueryOp::Filter(_)));
         assert!(filter_op.is_some());
         if let Some(QueryOp::Filter(pred)) = filter_op {
-            assert!(matches!(pred, Predicate::Exists(key) if key == "email"));
+            assert!(matches!(
+                pred,
+                Predicate::Ne { key, value: PredicateValue::Null } if key == "email"
+            ));
         }
     }
 

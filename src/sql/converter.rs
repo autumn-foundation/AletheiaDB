@@ -13,7 +13,7 @@ use sqlparser::ast::{
 
 use crate::query::builder::Query;
 use crate::query::ir::{Predicate, PredicateValue, QueryOp, SortKey};
-use crate::query::plan::{QueryHints, TemporalContext};
+use crate::query::plan::QueryHints;
 
 use super::error::SqlError;
 use super::parser::SqlParser;
@@ -91,10 +91,11 @@ impl SqlConverter {
         };
 
         let mut ops = Vec::new();
-        let mut temporal_context = None;
+        // TODO: temporal_context will be populated when temporal syntax support is added
+        let temporal_context = None;
 
         // Convert FROM clause
-        self.convert_from(&select.from, &mut ops, &mut temporal_context)?;
+        self.convert_from(&select.from, &mut ops)?;
 
         // Convert WHERE clause
         if let Some(ref selection) = select.selection {
@@ -134,7 +135,6 @@ impl SqlConverter {
         &self,
         from: &[TableWithJoins],
         ops: &mut Vec<QueryOp>,
-        _temporal_context: &mut Option<TemporalContext>,
     ) -> Result<(), SqlError> {
         if from.is_empty() {
             return Err(SqlError::MissingClause(
@@ -208,7 +208,7 @@ impl SqlConverter {
                     }
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
-                    if let Some(_col) = self.expr_to_column_name(expr) {
+                    if self.expr_to_column_name(expr).is_some() {
                         columns.push(alias.value.clone());
                     }
                 }
@@ -243,7 +243,9 @@ impl SqlConverter {
             }
             Expr::CompoundIdentifier(parts) => {
                 // Handle table.column syntax
-                let col = parts.last().map(|p| p.value.clone()).unwrap_or_default();
+                let col = parts.last().map(|p| p.value.clone()).ok_or_else(|| {
+                    SqlError::InvalidColumn("Empty compound identifier in ORDER BY".to_string())
+                })?;
                 SortKey::Property(col)
             }
             _ => {
@@ -267,11 +269,17 @@ impl SqlConverter {
             Expr::Nested(inner) => self.convert_expr_to_predicate(inner),
             Expr::IsNull(inner) => {
                 let key = self.expr_to_property_key(inner)?;
-                Ok(Predicate::NotExists(key))
+                Ok(Predicate::Eq {
+                    key,
+                    value: PredicateValue::Null,
+                })
             }
             Expr::IsNotNull(inner) => {
                 let key = self.expr_to_property_key(inner)?;
-                Ok(Predicate::Exists(key))
+                Ok(Predicate::Ne {
+                    key,
+                    value: PredicateValue::Null,
+                })
             }
             Expr::InList {
                 expr,
@@ -296,21 +304,25 @@ impl SqlConverter {
                 let key = self.expr_to_property_key(expr)?;
                 let pattern_str = self.expr_to_string(pattern)?;
 
-                // Convert LIKE pattern to appropriate predicate
-                let pred = if pattern_str.starts_with('%') && pattern_str.ends_with('%') {
+                // Convert LIKE pattern to appropriate predicate using slicing
+                // to correctly handle patterns like 'a%b'
+                let pred = if pattern_str.starts_with('%')
+                    && pattern_str.ends_with('%')
+                    && pattern_str.len() > 1
+                {
                     // %substring% -> Contains
-                    let substring = pattern_str.trim_matches('%').to_string();
+                    let substring = pattern_str[1..pattern_str.len() - 1].to_string();
                     Predicate::Contains { key, substring }
-                } else if pattern_str.ends_with('%') {
+                } else if pattern_str.ends_with('%') && !pattern_str.starts_with('%') {
                     // prefix% -> StartsWith
-                    let prefix = pattern_str.trim_end_matches('%').to_string();
+                    let prefix = pattern_str[..pattern_str.len() - 1].to_string();
                     Predicate::StartsWith { key, prefix }
-                } else if pattern_str.starts_with('%') {
+                } else if pattern_str.starts_with('%') && !pattern_str.ends_with('%') {
                     // %suffix -> EndsWith
-                    let suffix = pattern_str.trim_start_matches('%').to_string();
+                    let suffix = pattern_str[1..].to_string();
                     Predicate::EndsWith { key, suffix }
                 } else {
-                    // Exact match (no wildcards)
+                    // Exact match (no wildcards or complex pattern)
                     Predicate::Eq {
                         key,
                         value: PredicateValue::String(pattern_str),

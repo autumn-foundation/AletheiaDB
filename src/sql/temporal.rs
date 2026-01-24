@@ -39,12 +39,13 @@ pub enum TemporalClause {
 }
 
 impl TemporalClause {
-    /// Parse a timestamp string in various formats.
+    /// Parse a timestamp string.
     ///
-    /// Supports:
-    /// - ISO 8601: `2024-01-15T10:00:00Z`
-    /// - SQL timestamp: `2024-01-15 10:00:00`
+    /// Currently supports:
     /// - Unix microseconds: `1705315200000000`
+    ///
+    /// Support for ISO 8601 (`2024-01-15T10:00:00Z`) and SQL timestamp
+    /// (`2024-01-15 10:00:00`) formats is planned for a future update.
     pub fn parse_timestamp(s: &str) -> Result<Timestamp, SqlError> {
         let trimmed = s.trim().trim_matches('\'').trim_matches('"');
 
