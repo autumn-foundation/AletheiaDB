@@ -132,6 +132,8 @@ fn test_search_with_filter_nodeid_safety() {
 /// large result sets without validation overhead.
 #[test]
 fn test_search_large_k_without_validation_overhead() {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
     let dimensions = 128;
     let num_nodes = 5000;
 
@@ -139,14 +141,17 @@ fn test_search_large_k_without_validation_overhead() {
 
     let index = HnswIndex::new(config).expect("Failed to create index");
 
+    // Use seeded RNG for reproducible tests
+    let mut rng = StdRng::seed_from_u64(42);
+
     // Insert many vectors
     for i in 0..num_nodes {
         let node_id = NodeId::new(i as u64).expect("Valid node ID");
-        let vector: Vec<f32> = (0..dimensions).map(|_| rand::random::<f32>()).collect();
+        let vector: Vec<f32> = (0..dimensions).map(|_| rng.gen_range(0.0..1.0)).collect();
         index.add(node_id, &vector).expect("Failed to add vector");
     }
 
-    let query: Vec<f32> = (0..dimensions).map(|_| rand::random()).collect();
+    let query: Vec<f32> = (0..dimensions).map(|_| rng.gen_range(0.0..1.0)).collect();
 
     // Request a large k to exercise the result conversion path
     let k = 100;
@@ -234,6 +239,8 @@ fn test_search_vs_search_with_filter_consistency() {
 /// in reasonable time even with many nodes.
 #[test]
 fn test_search_with_filter_performance_sanity_check() {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
     let dimensions = 256;
     let num_nodes = 10_000;
 
@@ -241,14 +248,17 @@ fn test_search_with_filter_performance_sanity_check() {
 
     let index = HnswIndex::new(config).expect("Failed to create index");
 
+    // Use seeded RNG for reproducible tests
+    let mut rng = StdRng::seed_from_u64(42);
+
     // Insert many nodes
     for i in 0..num_nodes {
         let node_id = NodeId::new(i as u64).expect("Valid node ID");
-        let vector: Vec<f32> = (0..dimensions).map(|_| rand::random()).collect();
+        let vector: Vec<f32> = (0..dimensions).map(|_| rng.gen_range(0.0..1.0)).collect();
         index.add(node_id, &vector).expect("Failed to add vector");
     }
 
-    let query: Vec<f32> = (0..dimensions).map(|_| rand::random()).collect();
+    let query: Vec<f32> = (0..dimensions).map(|_| rng.gen_range(0.0..1.0)).collect();
 
     // Perform multiple searches to amortize any startup costs
     let num_searches = 10;
@@ -265,10 +275,10 @@ fn test_search_with_filter_performance_sanity_check() {
     let elapsed = start.elapsed();
 
     // Sanity check: 10 searches on 10K nodes should complete in < 1 second
-    // Even with validation overhead, this should be well under the limit.
-    // This test mainly ensures we don't have a catastrophic performance bug.
+    // This catches catastrophic performance regressions while allowing for
+    // slower CI environments and debug builds.
     assert!(
-        elapsed.as_secs() < 5,
+        elapsed.as_secs() < 1,
         "Searches took too long: {:?} (possible performance regression)",
         elapsed
     );
