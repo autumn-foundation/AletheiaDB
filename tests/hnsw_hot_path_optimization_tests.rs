@@ -132,7 +132,7 @@ fn test_search_with_filter_nodeid_safety() {
 /// large result sets without validation overhead.
 #[test]
 fn test_search_large_k_without_validation_overhead() {
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     let dimensions = 128;
     let num_nodes = 5000;
@@ -239,7 +239,7 @@ fn test_search_vs_search_with_filter_consistency() {
 /// in reasonable time even with many nodes.
 #[test]
 fn test_search_with_filter_performance_sanity_check() {
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     let dimensions = 256;
     let num_nodes = 10_000;
