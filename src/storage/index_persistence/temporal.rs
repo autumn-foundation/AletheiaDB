@@ -554,6 +554,7 @@ mod tests {
 
         let delta = PropertyDelta {
             changed,
+            vector_deltas: Default::default(),
             removed: Default::default(),
         };
 
