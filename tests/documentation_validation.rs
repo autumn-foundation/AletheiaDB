@@ -38,26 +38,31 @@ fn test_claude_md_includes_recovery_guarantees() {
 fn test_claude_md_includes_recovery_flow() {
     let content = fs::read_to_string("CLAUDE.md").expect("Failed to read CLAUDE.md");
 
-    // Verify there's a WAL section (which should mention recovery)
-    assert!(
-        content.contains("Write-Ahead Log") || content.contains("WAL"),
-        "CLAUDE.md should have a Write-Ahead Log (WAL) section"
-    );
+    // Find the "Hybrid Storage" section to test its content, which is more robust
+    // than searching from the first occurrence of "WAL".
+    let hybrid_storage_heading = "### Hybrid Storage";
+    let next_heading = "## Rust Coding Standards";
 
-    // Verify recovery is mentioned in relation to WAL
-    let wal_section_start = content
-        .find("Write-Ahead Log")
-        .or_else(|| content.find("WAL"));
-    if let Some(start) = wal_section_start {
-        // Check the next 2000 characters for recovery-related content
-        let wal_section = &content[start..std::cmp::min(start + 2000, content.len())];
-        assert!(
-            wal_section.contains("recovery")
-                || wal_section.contains("Recovery")
-                || wal_section.contains("replay"),
-            "WAL section should mention recovery or replay"
-        );
-    }
+    let section_start = content
+        .find(hybrid_storage_heading)
+        .expect("Hybrid Storage section not found in CLAUDE.md");
+
+    let section_end = content[section_start..]
+        .find(next_heading)
+        .map(|i| section_start + i)
+        .unwrap_or_else(|| content.len());
+
+    let hybrid_storage_section = &content[section_start..section_end];
+
+    // Verify recovery flow is documented in this section
+    assert!(
+        hybrid_storage_section.contains("Recovery Flow"),
+        "Hybrid Storage section should contain 'Recovery Flow'"
+    );
+    assert!(
+        hybrid_storage_section.contains("Replay WAL") || hybrid_storage_section.contains("Replay"),
+        "Hybrid Storage section should mention 'Replay WAL' or 'Replay'"
+    );
 }
 
 /// Test that CLAUDE.md includes recovery benchmarks in the Testing Requirements section
