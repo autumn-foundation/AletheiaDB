@@ -1056,9 +1056,7 @@ mod tests {
             assert_eq!(
                 approximate, exact,
                 "At iteration {}: approximate {} should be equal to exact {}",
-                i,
-                approximate,
-                exact
+                i, approximate, exact
             );
         }
     }
