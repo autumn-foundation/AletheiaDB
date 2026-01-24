@@ -1495,8 +1495,8 @@ mod tests {
         // String → Box<str> → Arc<str> conversion chain.
 
         // Create an owned String
-        let original = String::from("test string for efficient conversion");
-        let expected_content = original.clone();
+        let content = "test string for efficient conversion";
+        let original = String::from(content);
 
         // Convert to PropertyValue - should consume the String
         let prop_value: PropertyValue = original.into();
@@ -1504,7 +1504,7 @@ mod tests {
         // Verify the value is stored correctly
         assert_eq!(
             prop_value.as_str(),
-            Some(expected_content.as_str()),
+            Some(content),
             "PropertyValue should contain the original string content"
         );
 
@@ -1530,8 +1530,8 @@ mod tests {
         // Vec<u8> → Box<[u8]> → Arc<[u8]> conversion chain.
 
         // Create an owned Vec<u8>
-        let original = vec![1u8, 2, 3, 4, 5, 42, 255];
-        let expected_content = original.clone();
+        let content: &[u8] = &[1u8, 2, 3, 4, 5, 42, 255];
+        let original = content.to_vec();
 
         // Convert to PropertyValue - should consume the Vec
         let prop_value: PropertyValue = original.into();
@@ -1539,7 +1539,7 @@ mod tests {
         // Verify the value is stored correctly
         assert_eq!(
             prop_value.as_bytes(),
-            Some(expected_content.as_slice()),
+            Some(content),
             "PropertyValue should contain the original byte content"
         );
 
