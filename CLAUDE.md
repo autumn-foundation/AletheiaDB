@@ -26,7 +26,7 @@ GallifreyDB is a high-performance bi-temporal graph database written in Rust. It
 
 1. **Performance First**: Current-state queries <1µs single-hop, temporal queries <10ms reconstruction
 2. **Storage Efficiency**: Anchor+delta compression, <2X overhead vs non-temporal storage
-3. **Correctness**: ACID guarantees via WAL, MVCC snapshot isolation
+3. **Correctness**: ACID guarantees via WAL, MVCC snapshot isolation, crash recovery with checkpoint-based replay
 
 ### Hybrid Storage
 
@@ -35,7 +35,17 @@ Query Engine
      │
      ├─→ Current Storage (fast path, no temporal overhead)
      └─→ Historical Storage (temporal path, anchor+delta compressed)
+
+Recovery Flow:
+   Startup → Load Checkpoint → Replay WAL → Restore Indexes → Ready
 ```
+
+**Durability & Recovery:**
+- **Synchronous Mode**: fsync on every commit, no data loss
+- **GroupCommit Mode**: batched fsync with waiting, ACID-compliant, ~100K+/sec
+- **Async Mode**: background fsync, eventual consistency, ~500K+/sec
+- **Recovery**: Checkpoint-based WAL replay, <5s for 10K nodes/50K edges
+- **Checkpoints**: Periodic snapshots for fast startup without full WAL replay
 
 **See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete architecture documentation.**
 
@@ -73,9 +83,23 @@ Query Engine
 just test              # Run all tests
 just coverage          # Generate HTML coverage report
 just coverage-check    # Verify coverage meets thresholds
-just bench             # Run benchmarks
+just bench             # Run benchmarks (includes recovery benchmarks)
 just check-all         # Full quality check (tests, coverage, lint)
 ```
+
+### Mandatory Benchmarks
+
+All performance-critical features must include benchmarks:
+
+- **Current-state queries**: <1µs single-hop traversal
+- **Temporal queries**: <10ms reconstruction
+- **WAL operations**: Throughput targets per durability mode
+- **Recovery operations**: <5s for medium datasets (10K nodes, 50K edges)
+  - Checkpoint creation/loading
+  - WAL replay with various entry counts
+  - Full crash recovery scenarios
+- **Vector search**: <10ms k-NN (k=10, 1M vectors)
+- **Hybrid queries**: <30ms graph+vector+temporal
 
 ## Major Features
 
