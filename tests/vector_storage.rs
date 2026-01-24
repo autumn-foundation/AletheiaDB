@@ -1165,14 +1165,22 @@ fn test_delete_node_removes_from_multiple_indexes() {
         )
         .unwrap();
 
-    // Verify node is in both indexes (using default index)
-    // Note: With current API, we can only query the default index
-    // This test verifies that at least one index is cleaned up
-    let results_before = db.find_similar_by_embedding(&text_emb, 10).unwrap();
+    // Verify node is in both indexes
+    let results_before_text = db
+        .search_vectors_in("text_embedding", &text_emb, 10)
+        .unwrap();
     assert_eq!(
-        results_before.len(),
+        results_before_text.len(),
         2,
-        "Should find 2 nodes before deletion"
+        "Should find 2 nodes in text_embedding index before deletion"
+    );
+    let results_before_image = db
+        .search_vectors_in("image_embedding", &image_emb, 10)
+        .unwrap();
+    assert_eq!(
+        results_before_image.len(),
+        2,
+        "Should find 2 nodes in image_embedding index before deletion"
     );
 
     // Delete the node via transaction
@@ -1182,16 +1190,31 @@ fn test_delete_node_removes_from_multiple_indexes() {
     })
     .unwrap();
 
-    // Verify node is removed from index
-    let results_after = db.find_similar_by_embedding(&text_emb, 10).unwrap();
+    // Verify node is removed from both indexes
+    let results_after_text = db
+        .search_vectors_in("text_embedding", &text_emb, 10)
+        .unwrap();
     assert_eq!(
-        results_after.len(),
+        results_after_text.len(),
         1,
-        "Should find only 1 node after deletion"
+        "Should find only 1 node in text_embedding index after deletion"
     );
     assert_eq!(
-        results_after[0].0, ref_node,
-        "Remaining node should be reference node"
+        results_after_text[0].0, ref_node,
+        "Remaining node should be reference node in text_embedding index"
+    );
+
+    let results_after_image = db
+        .search_vectors_in("image_embedding", &image_emb, 10)
+        .unwrap();
+    assert_eq!(
+        results_after_image.len(),
+        1,
+        "Should find only 1 node in image_embedding index after deletion"
+    );
+    assert_eq!(
+        results_after_image[0].0, ref_node,
+        "Remaining node should be reference node in image_embedding index"
     );
 }
 
