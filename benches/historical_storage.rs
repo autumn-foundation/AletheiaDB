@@ -1,0 +1,196 @@
+//! Benchmarks for HistoricalStorage anchor creation and version counting
+//!
+//! Issue #208: Measures the performance impact of count_versions_since_anchor
+//! walking the chain on every add operation.
+
+mod common;
+
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use gallifreydb::core::id::{NodeId, VersionId};
+use gallifreydb::core::interning::GLOBAL_INTERNER;
+use gallifreydb::core::property::PropertyMapBuilder;
+use gallifreydb::core::temporal::BiTemporalInterval;
+use gallifreydb::storage::historical::HistoricalStorage;
+use gallifreydb::storage::version::AnchorConfig;
+
+/// Benchmark: Add node versions with varying anchor intervals
+///
+/// This benchmark measures the performance impact of count_versions_since_anchor
+/// walking the chain on every add. With the default anchor_interval=10, each add
+/// performs up to 9 HashMap lookups just for counting.
+///
+/// Expected before fix: O(anchor_interval) - linear with anchor interval
+/// Expected after fix: O(1) - constant time regardless of anchor interval
+fn bench_add_node_version_with_varying_anchor_intervals(c: &mut Criterion) {
+    let mut group = c.benchmark_group("add_node_version_anchor_counting");
+
+    // Test with anchor intervals: 5, 10, 20, 50
+    // Before fix: Higher intervals = more lookups per add
+    // After fix: Should be constant regardless of interval
+    for anchor_interval in [5u32, 10, 20, 50] {
+        group.bench_with_input(
+            BenchmarkId::new("anchor_interval", anchor_interval),
+            &anchor_interval,
+            |b, &interval| {
+                b.iter_batched(
+                    || {
+                        // Setup: Create storage with specific anchor interval
+                        let config = AnchorConfig {
+                            anchor_interval: interval,
+                            max_delta_chain: 100,
+                        };
+                        let mut storage = HistoricalStorage::with_config(config);
+                        let node_id = NodeId::new(1).unwrap();
+                        (storage, node_id)
+                    },
+                    |(mut storage, node_id)| {
+                        // Benchmark: Add 100 versions
+                        // This simulates a bulk insert scenario
+                        let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
+                        for i in 0..100u64 {
+                            let version_id = VersionId::new(i).unwrap();
+                            let temporal =
+                                BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+                            let properties = PropertyMapBuilder::new()
+                                .insert("version", i as i64)
+                                .build();
+
+                            black_box(storage.add_node_version(
+                                node_id, version_id, temporal, label, properties,
+                            ))
+                            .unwrap();
+                        }
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Benchmark: Single add operation performance with different chain positions
+///
+/// Measures the cost of a single add_node_version at different positions in the
+/// version chain (early vs late in chain before anchor).
+///
+/// Expected before fix: Performance degrades as chain length increases
+/// Expected after fix: Constant performance regardless of position
+fn bench_single_add_at_chain_positions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("single_add_chain_position");
+
+    let config = AnchorConfig {
+        anchor_interval: 10,
+        max_delta_chain: 100,
+    };
+
+    // Test adding at different positions: 1, 3, 5, 7, 9 (deltas before anchor)
+    for position in [1, 3, 5, 7, 9] {
+        group.bench_with_input(
+            BenchmarkId::new("deltas_before_anchor", position),
+            &position,
+            |b, &pos| {
+                b.iter_batched(
+                    || {
+                        // Setup: Create storage and add 'pos' versions
+                        let mut storage = HistoricalStorage::with_config(config.clone());
+                        let node_id = NodeId::new(1).unwrap();
+                        let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
+
+                        // Pre-populate with 'pos' versions
+                        for i in 0..pos {
+                            let version_id = VersionId::new(i as u64).unwrap();
+                            let temporal =
+                                BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+                            let properties = PropertyMapBuilder::new()
+                                .insert("version", i as i64)
+                                .build();
+
+                            storage
+                                .add_node_version(node_id, version_id, temporal, label, properties)
+                                .unwrap();
+                        }
+
+                        (storage, node_id, pos)
+                    },
+                    |(mut storage, node_id, pos)| {
+                        // Benchmark: Add one more version at this position
+                        let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
+                        let version_id = VersionId::new(pos as u64).unwrap();
+                        let temporal =
+                            BiTemporalInterval::current((1000 + (pos as i64) * 100).into());
+                        let properties = PropertyMapBuilder::new()
+                            .insert("version", pos as i64)
+                            .build();
+
+                        black_box(
+                            storage
+                                .add_node_version(node_id, version_id, temporal, label, properties),
+                        )
+                        .unwrap();
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Benchmark: Bulk insert performance across multiple entities
+///
+/// Simulates a realistic workload with multiple entities being updated concurrently.
+/// This stresses the version counting logic across different entity chains.
+fn bench_bulk_insert_multiple_entities(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bulk_insert_multiple_entities");
+
+    for entity_count in [10, 50, 100] {
+        group.bench_with_input(
+            BenchmarkId::new("entities", entity_count),
+            &entity_count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        // Setup: Create storage with default anchor interval (10)
+                        let storage = HistoricalStorage::new();
+                        (storage, count)
+                    },
+                    |(mut storage, entity_count)| {
+                        // Benchmark: Add 20 versions to each entity
+                        let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
+                        for entity_id in 0..entity_count {
+                            let node_id = NodeId::new(entity_id).unwrap();
+
+                            for version in 0..20u64 {
+                                let version_id =
+                                    VersionId::new(entity_id * 1000 + version).unwrap();
+                                let temporal = BiTemporalInterval::current(
+                                    (1000 + (version as i64) * 100).into(),
+                                );
+                                let properties = PropertyMapBuilder::new()
+                                    .insert("entity_id", entity_id as i64)
+                                    .insert("version", version as i64)
+                                    .build();
+
+                                black_box(storage.add_node_version(
+                                    node_id, version_id, temporal, label, properties,
+                                ))
+                                .unwrap();
+                            }
+                        }
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_add_node_version_with_varying_anchor_intervals,
+    bench_single_add_at_chain_positions,
+    bench_bulk_insert_multiple_entities
+);
+criterion_main!(benches);

@@ -176,6 +176,18 @@ pub struct HistoricalStorage {
     node_version_counts: HashMap<NodeId, usize>,
     /// Cached version counts per edge (for O(1) capacity checks)
     edge_version_counts: HashMap<EdgeId, usize>,
+    /// Versions since last anchor per node (for O(1) anchor interval checks)
+    ///
+    /// Issue #208: Cache the count of versions since the last anchor to avoid
+    /// walking the version chain on every add operation. This improves write
+    /// performance from O(anchor_interval) to O(1).
+    node_versions_since_anchor: HashMap<NodeId, usize>,
+    /// Versions since last anchor per edge (for O(1) anchor interval checks)
+    ///
+    /// Issue #208: Cache the count of versions since the last anchor to avoid
+    /// walking the version chain on every add operation. This improves write
+    /// performance from O(anchor_interval) to O(1).
+    edge_versions_since_anchor: HashMap<EdgeId, usize>,
     /// TinyLFU cache for reconstructed node properties (reduces lock contention)
     node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
     /// TinyLFU cache for reconstructed edge properties
@@ -323,6 +335,8 @@ impl HistoricalStorage {
             edge_version_heads: HashMap::new(),
             node_version_counts: HashMap::new(),
             edge_version_counts: HashMap::new(),
+            node_versions_since_anchor: HashMap::new(),
+            edge_versions_since_anchor: HashMap::new(),
             node_property_cache: Arc::new(Cache::new(cache_size)),
             edge_property_cache: Arc::new(Cache::new(cache_size)),
             node_anchor_cache: Arc::new(Cache::new(anchor_cache_size)),
@@ -489,18 +503,29 @@ impl HistoricalStorage {
                 return Err(StorageError::VersionNotFound(prev_id).into());
             }
 
-            // Count versions since last anchor (including this new version)
-            let versions_since_anchor = self.count_versions_since_anchor_node(prev_id) + 1;
+            // Get cached counter and increment (O(1) instead of O(anchor_interval))
+            // Issue #208: Use cached counter to avoid walking version chain
+            let current_count = self
+                .node_versions_since_anchor
+                .get(&node_id)
+                .copied()
+                .unwrap_or(0);
+            let versions_since_anchor = current_count + 1;
 
             if versions_since_anchor >= self.config.anchor_interval as usize {
                 // Create anchor with link to previous version
                 let mut anchor =
                     NodeVersion::new_anchor(version_id, node_id, temporal, label, properties);
                 anchor.prev_version = Some(prev_id);
+                // Reset counter to 0 after creating anchor
+                self.node_versions_since_anchor.insert(node_id, 0);
                 anchor
             } else {
                 // Create delta from previous version
                 let old_properties = self.reconstruct_node_properties(prev_id)?;
+                // Update counter for next iteration
+                self.node_versions_since_anchor
+                    .insert(node_id, versions_since_anchor);
                 NodeVersion::new_delta(
                     version_id,
                     node_id,
@@ -513,6 +538,8 @@ impl HistoricalStorage {
             }
         } else {
             // First version is always an anchor
+            // Initialize counter to 0
+            self.node_versions_since_anchor.insert(node_id, 0);
             NodeVersion::new_anchor(version_id, node_id, temporal, label, properties)
         };
 
@@ -616,8 +643,14 @@ impl HistoricalStorage {
                 return Err(StorageError::VersionNotFound(prev_id).into());
             }
 
-            // Count versions since last anchor (including this new version)
-            let versions_since_anchor = self.count_versions_since_anchor_edge(prev_id) + 1;
+            // Get cached counter and increment (O(1) instead of O(anchor_interval))
+            // Issue #208: Use cached counter to avoid walking version chain
+            let current_count = self
+                .edge_versions_since_anchor
+                .get(&edge_id)
+                .copied()
+                .unwrap_or(0);
+            let versions_since_anchor = current_count + 1;
 
             if versions_since_anchor >= self.config.anchor_interval as usize {
                 // Create anchor with link to previous version
@@ -625,10 +658,15 @@ impl HistoricalStorage {
                     version_id, edge_id, temporal, label, source, target, properties,
                 );
                 anchor.prev_version = Some(prev_id);
+                // Reset counter to 0 after creating anchor
+                self.edge_versions_since_anchor.insert(edge_id, 0);
                 anchor
             } else {
                 // Create delta from previous version
                 let old_properties = self.reconstruct_edge_properties(prev_id)?;
+                // Update counter for next iteration
+                self.edge_versions_since_anchor
+                    .insert(edge_id, versions_since_anchor);
                 EdgeVersion::new_delta(
                     version_id,
                     edge_id,
@@ -643,6 +681,8 @@ impl HistoricalStorage {
             }
         } else {
             // First version is always an anchor
+            // Initialize counter to 0
+            self.edge_versions_since_anchor.insert(edge_id, 0);
             EdgeVersion::new_anchor(
                 version_id, edge_id, temporal, label, source, target, properties,
             )
@@ -1225,6 +1265,11 @@ impl HistoricalStorage {
     ///
     /// This is a generic helper that works for both nodes and edges, reducing code duplication.
     /// The `get_version` closure provides type-specific version lookup.
+    ///
+    /// # Note (Issue #208)
+    /// This method is no longer used in production code (replaced by cached counters for O(1) performance),
+    /// but is retained for testing purposes to verify cache correctness.
+    #[cfg(test)]
     fn count_versions_since_anchor<'a, V: EntityVersion + 'a>(
         &'a self,
         version_id: VersionId,
@@ -1255,6 +1300,10 @@ impl HistoricalStorage {
     ///
     /// Note: The closure overhead is negligible and typically optimized away by LLVM.
     /// If profiling shows this is a hotspot, consider monomorphizing.
+    ///
+    /// # Note (Issue #208)
+    /// This method is no longer used in production code, retained for testing only.
+    #[cfg(test)]
     fn count_versions_since_anchor_node(&self, version_id: VersionId) -> usize {
         self.count_versions_since_anchor(version_id, |vid| self.node_versions.get(&vid))
     }
@@ -1263,6 +1312,10 @@ impl HistoricalStorage {
     ///
     /// Note: The closure overhead is negligible and typically optimized away by LLVM.
     /// If profiling shows this is a hotspot, consider monomorphizing.
+    ///
+    /// # Note (Issue #208)
+    /// This method is no longer used in production code, retained for testing only.
+    #[cfg(test)]
     fn count_versions_since_anchor_edge(&self, version_id: VersionId) -> usize {
         self.count_versions_since_anchor(version_id, |vid| self.edge_versions.get(&vid))
     }
@@ -4944,5 +4997,189 @@ mod tests {
 
         // Test counting from version 3 (new anchor) - should find 0 deltas
         assert_eq!(storage.count_versions_since_anchor_node(version_ids[3]), 0);
+    }
+
+    #[test]
+    fn test_version_counter_cache() {
+        // Test that the version counter cache correctly tracks versions since last anchor
+        // This test verifies the fix for issue #208
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 5,
+            max_delta_chain: 10,
+        });
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Add first version - should be anchor, counter should be 0
+        let v0 = VersionId::new(0).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v0,
+                BiTemporalInterval::current(1000.into()),
+                label,
+                PropertyMapBuilder::new().insert("version", 0i64).build(),
+            )
+            .unwrap();
+
+        // Verify first version is an anchor
+        assert!(storage.get_node_version(v0).unwrap().is_anchor());
+
+        // Add 4 more versions (deltas)
+        for i in 1..5 {
+            let vid = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+
+            // All should be deltas
+            assert!(storage.get_node_version(vid).unwrap().is_delta());
+        }
+
+        // Add 5th version - should trigger anchor creation (interval = 5)
+        let v5 = VersionId::new(5).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v5,
+                BiTemporalInterval::current(1600.into()),
+                label,
+                PropertyMapBuilder::new().insert("version", 5i64).build(),
+            )
+            .unwrap();
+
+        // Version 5 should be an anchor
+        assert!(storage.get_node_version(v5).unwrap().is_anchor());
+
+        // Add one more version - should be delta, counter should reset
+        let v6 = VersionId::new(6).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v6,
+                BiTemporalInterval::current(1700.into()),
+                label,
+                PropertyMapBuilder::new().insert("version", 6i64).build(),
+            )
+            .unwrap();
+
+        // Version 6 should be a delta
+        assert!(storage.get_node_version(v6).unwrap().is_delta());
+
+        // Test with multiple entities to ensure counters are independent
+        let node_id2 = NodeId::new(2).unwrap();
+
+        // Add versions to second entity
+        for i in 0..3 {
+            let vid = VersionId::new(100 + i).unwrap();
+            storage
+                .add_node_version(
+                    node_id2,
+                    vid,
+                    BiTemporalInterval::current((2000 + (i as i64) * 100).into()),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        // First version of second entity should be anchor
+        assert!(
+            storage
+                .get_node_version(VersionId::new(100).unwrap())
+                .unwrap()
+                .is_anchor()
+        );
+        // Next two should be deltas
+        assert!(
+            storage
+                .get_node_version(VersionId::new(101).unwrap())
+                .unwrap()
+                .is_delta()
+        );
+        assert!(
+            storage
+                .get_node_version(VersionId::new(102).unwrap())
+                .unwrap()
+                .is_delta()
+        );
+    }
+
+    #[test]
+    fn test_edge_version_counter_cache() {
+        // Test that the version counter cache works for edges too
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        });
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let from = NodeId::new(1).unwrap();
+        let to = NodeId::new(2).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Add first version - should be anchor
+        let v0 = VersionId::new(0).unwrap();
+        storage
+            .add_edge_version(
+                edge_id,
+                v0,
+                BiTemporalInterval::current(1000.into()),
+                label,
+                from,
+                to,
+                PropertyMapBuilder::new().insert("version", 0i64).build(),
+            )
+            .unwrap();
+
+        assert!(storage.get_edge_version(v0).unwrap().is_anchor());
+
+        // Add 2 deltas
+        for i in 1..3 {
+            let vid = VersionId::new(i).unwrap();
+            storage
+                .add_edge_version(
+                    edge_id,
+                    vid,
+                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    label,
+                    from,
+                    to,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .build(),
+                )
+                .unwrap();
+
+            assert!(storage.get_edge_version(vid).unwrap().is_delta());
+        }
+
+        // Add 3rd delta - should trigger anchor creation (interval = 3)
+        let v3 = VersionId::new(3).unwrap();
+        storage
+            .add_edge_version(
+                edge_id,
+                v3,
+                BiTemporalInterval::current(1400.into()),
+                label,
+                from,
+                to,
+                PropertyMapBuilder::new().insert("version", 3i64).build(),
+            )
+            .unwrap();
+
+        // Version 3 should be an anchor
+        assert!(storage.get_edge_version(v3).unwrap().is_anchor());
     }
 }
