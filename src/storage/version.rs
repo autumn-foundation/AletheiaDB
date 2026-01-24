@@ -43,7 +43,13 @@ const VECTOR_EPSILON: f32 = 1e-7;
 ///
 /// Uses sparse storage when `num_changes < dimensions * 0.5` (50% threshold).
 /// For heavily modified vectors (>50% changed), falls back to full storage.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// # Equality
+///
+/// Custom `PartialEq` implementation uses epsilon-based comparison for float values
+/// to maintain consistency with `from_diff()`. Two VectorDelta instances are considered
+/// equal if their structures match and all float values are within `VECTOR_EPSILON`.
+#[derive(Debug, Clone)]
 pub enum VectorDelta {
     /// Sparse storage: (index, new_value) pairs for changed elements
     Sparse {
@@ -147,6 +153,17 @@ impl VectorDelta {
     }
 
     /// Estimate the heap memory usage of this delta in bytes.
+    ///
+    /// # Note on Arc Overhead
+    ///
+    /// This estimate includes only the data storage, not the Arc allocation overhead.
+    /// Arc adds approximately ~24 bytes of overhead per allocation (reference count + weak count + metadata).
+    ///
+    /// **Actual Storage Overhead:**
+    /// - **Sparse**: `Arc overhead (~24 bytes) + num_changes * 8 bytes (index + value)`
+    /// - **Full**: `Arc overhead (~24 bytes) + dimensions * 4 bytes`
+    ///
+    /// For small vectors or few changes, the Arc overhead becomes significant relative to the data size.
     pub fn estimated_heap_size(&self) -> usize {
         match self {
             VectorDelta::Sparse { changes, .. } => {
@@ -154,6 +171,62 @@ impl VectorDelta {
                 changes.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
             }
             VectorDelta::Full(vec) => vec.len() * std::mem::size_of::<f32>(),
+        }
+    }
+}
+
+/// Custom PartialEq implementation for VectorDelta using epsilon-based float comparison.
+///
+/// This maintains consistency with `from_diff()` which uses `VECTOR_EPSILON` to determine
+/// if two float values are effectively equal.
+impl PartialEq for VectorDelta {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                VectorDelta::Sparse {
+                    dimension: dim1,
+                    changes: changes1,
+                },
+                VectorDelta::Sparse {
+                    dimension: dim2,
+                    changes: changes2,
+                },
+            ) => {
+                // Dimensions must match
+                if dim1 != dim2 {
+                    return false;
+                }
+
+                // Must have same number of changes
+                if changes1.len() != changes2.len() {
+                    return false;
+                }
+
+                // Compare each (index, value) pair with epsilon for floats
+                for ((idx1, val1), (idx2, val2)) in changes1.iter().zip(changes2.iter()) {
+                    if idx1 != idx2 || (val1 - val2).abs() > VECTOR_EPSILON {
+                        return false;
+                    }
+                }
+
+                true
+            }
+            (VectorDelta::Full(vec1), VectorDelta::Full(vec2)) => {
+                // Must have same length
+                if vec1.len() != vec2.len() {
+                    return false;
+                }
+
+                // Compare each element with epsilon
+                for (v1, v2) in vec1.iter().zip(vec2.iter()) {
+                    if (v1 - v2).abs() > VECTOR_EPSILON {
+                        return false;
+                    }
+                }
+
+                true
+            }
+            _ => false, // Different variants are never equal
         }
     }
 }
@@ -347,6 +420,65 @@ impl PropertyDelta {
     /// Returns true if this delta has no changes.
     pub fn is_empty(&self) -> bool {
         self.changed.is_empty() && self.vector_deltas.is_empty() && self.removed.is_empty()
+    }
+
+    /// Materialize sparse vector deltas into full vectors for persistence.
+    ///
+    /// This converts all `VectorDelta::Sparse` entries into full `PropertyValue::Vector`
+    /// instances by applying them to the base properties. This is required before
+    /// persistence since sparse deltas cannot be persisted without their base vectors.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The base properties (typically from the anchor version)
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if all sparse deltas were successfully materialized.
+    /// Returns `Err` if any sparse delta cannot be materialized (e.g., base property missing).
+    ///
+    /// # Side Effects
+    ///
+    /// Moves materialized vectors from `vector_deltas` to `changed`, converting them
+    /// to full `PropertyValue::Vector` instances. After this operation, `vector_deltas`
+    /// will only contain `VectorDelta::Full` entries (which are then moved to `changed`).
+    pub fn materialize_vector_deltas(&mut self, base: &PropertyMap) -> Result<(), String> {
+        // Materialize ALL vector deltas (both Sparse and Full) into regular changed properties
+        // This is necessary for persistence since the persistence format doesn't support VectorDelta
+        let keys: Vec<_> = self.vector_deltas.keys().copied().collect();
+
+        for key in keys {
+            if let Some(vec_delta) = self.vector_deltas.remove(&key) {
+                match vec_delta {
+                    VectorDelta::Full(vec) => {
+                        // Full delta can be directly converted
+                        self.changed.insert(key, PropertyValue::Vector(vec));
+                    }
+                    VectorDelta::Sparse { .. } => {
+                        // Sparse delta requires base vector to materialize
+                        let base_value = base.get_by_interned_key(&key).ok_or_else(|| {
+                            format!(
+                                "Cannot materialize sparse vector delta: base property not found for key {:?}",
+                                key
+                            )
+                        })?;
+
+                        let base_vec = base_value.as_vector().ok_or_else(|| {
+                            format!(
+                                "Cannot materialize sparse vector delta: base property is not a vector for key {:?}",
+                                key
+                            )
+                        })?;
+
+                        // Apply sparse delta to get full vector
+                        let new_vec = vec_delta.apply(base_vec);
+                        self.changed.insert(key, PropertyValue::vector(&new_vec));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Estimate the heap memory usage of this delta in bytes.

@@ -45,24 +45,22 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
             }
 
             // Convert vector deltas to full vectors for persistence
-            // Note: This loses the sparse optimization on disk but preserves it in memory.
-            // For VectorDelta::Sparse, we need the base vector to reconstruct.
-            // Since we don't have access to the base here, we can only persist VectorDelta::Full.
-            // VectorDelta::Sparse instances should have been materialized before persistence.
-            // TODO(#215): Optimize disk format to support sparse vector deltas natively
+            // VectorDelta::Sparse instances MUST be materialized before persistence
+            // to prevent data loss. Use PropertyDelta::materialize_vector_deltas() first.
             for (key, vec_delta) in &delta.vector_deltas {
                 match vec_delta {
                     crate::storage::version::VectorDelta::Full(vec) => {
                         builder = builder.insert_by_key(*key, PropertyValue::Vector(vec.clone()));
                     }
                     crate::storage::version::VectorDelta::Sparse { .. } => {
-                        // Sparse deltas can't be persisted without the base vector.
-                        // This should not happen in practice since deltas are materialized before persistence.
-                        // Log a warning and skip this property.
-                        #[cfg(debug_assertions)]
-                        eprintln!(
-                            "WARNING: Sparse VectorDelta found during persistence - skipping property. This indicates incomplete delta materialization."
-                        );
+                        // CRITICAL: Cannot persist sparse deltas without base vector
+                        // This would cause silent data loss - return error instead
+                        return Err(IndexPersistenceError::Serialization(format!(
+                            "Cannot persist NodeVersion {}: VectorDelta::Sparse found for property key {:?}. \
+                             Call PropertyDelta::materialize_vector_deltas() before persistence to prevent data loss.",
+                            version.id.as_u64(),
+                            key
+                        )));
                     }
                 }
             }
@@ -125,17 +123,21 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
                 builder = builder.insert_by_key(*key, value.clone());
             }
 
-            // Convert vector deltas to full vectors for persistence (same as nodes)
+            // Convert vector deltas to full vectors for persistence
+            // VectorDelta::Sparse instances MUST be materialized before persistence
             for (key, vec_delta) in &delta.vector_deltas {
                 match vec_delta {
                     crate::storage::version::VectorDelta::Full(vec) => {
                         builder = builder.insert_by_key(*key, PropertyValue::Vector(vec.clone()));
                     }
                     crate::storage::version::VectorDelta::Sparse { .. } => {
-                        #[cfg(debug_assertions)]
-                        eprintln!(
-                            "WARNING: Sparse VectorDelta found during edge persistence - skipping property"
-                        );
+                        // CRITICAL: Cannot persist sparse deltas without base vector
+                        return Err(IndexPersistenceError::Serialization(format!(
+                            "Cannot persist EdgeVersion {}: VectorDelta::Sparse found for property key {:?}. \
+                             Call PropertyDelta::materialize_vector_deltas() before persistence to prevent data loss.",
+                            version.id.as_u64(),
+                            key
+                        )));
                     }
                 }
             }
@@ -862,5 +864,224 @@ mod tests {
         assert_eq!(version.temporal.valid_time().start().wallclock(), 1000);
         assert_eq!(version.temporal.valid_time().end().wallclock(), 2000);
         assert!(version.data.is_anchor());
+    }
+
+    // ========================================================================
+    // Vector Delta Persistence Tests (Issue #215, Code Review C1/C2)
+    // ========================================================================
+
+    #[test]
+    fn test_persist_delta_with_full_vector_delta() {
+        // Test that VectorDelta::Full can be persisted successfully
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::version::{PropertyDelta, VectorDelta};
+
+        let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
+        let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(
+            embedding_key,
+            VectorDelta::Full(Arc::from(embedding.as_slice())),
+        );
+
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
+        let version = NodeVersion {
+            id: VersionId::new(2).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            temporal: BiTemporalInterval::new(
+                TimeRange::new(2000.into(), 3000.into()).unwrap(),
+                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+            ),
+            label,
+            data: VersionData::Delta { delta },
+            next_version: None,
+            prev_version: Some(VersionId::new(1).unwrap()),
+        };
+
+        // Should succeed - Full deltas can be persisted
+        let entry = convert_node_version(&version).unwrap();
+        assert_eq!(entry.version_id, 2);
+        // Vector should be in properties as a full vector
+        assert!(!entry.properties.entries.is_empty());
+    }
+
+    #[test]
+    fn test_persist_delta_with_sparse_vector_delta_fails() {
+        // Test that VectorDelta::Sparse causes persistence to fail (prevents data loss)
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::version::{PropertyDelta, VectorDelta};
+
+        let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(
+            embedding_key,
+            VectorDelta::Sparse {
+                dimension: 384,
+                changes: Arc::new(vec![(0, 0.5f32), (100, 0.6f32)]),
+            },
+        );
+
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
+        let version = NodeVersion {
+            id: VersionId::new(2).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            temporal: BiTemporalInterval::new(
+                TimeRange::new(2000.into(), 3000.into()).unwrap(),
+                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+            ),
+            label,
+            data: VersionData::Delta { delta },
+            next_version: None,
+            prev_version: Some(VersionId::new(1).unwrap()),
+        };
+
+        // Should FAIL - Sparse deltas cannot be persisted without materialization
+        let result = convert_node_version(&version);
+        assert!(result.is_err(), "Should fail to persist Sparse delta");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("VectorDelta::Sparse"),
+            "Error should mention Sparse delta: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("materialize_vector_deltas"),
+            "Error should mention materialization: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_materialize_vector_deltas() {
+        // Test that PropertyDelta::materialize_vector_deltas() correctly converts Sparse to Full
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::version::{PropertyDelta, VectorDelta};
+
+        let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        // Create base properties with a vector
+        let base_embedding = vec![0.1f32; 384];
+        let base_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&base_embedding))
+            .build();
+
+        // Create a delta with a sparse change
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(
+            embedding_key,
+            VectorDelta::Sparse {
+                dimension: 384,
+                changes: Arc::new(vec![(0, 0.5f32), (100, 0.6f32)]),
+            },
+        );
+
+        // Materialize the delta
+        delta.materialize_vector_deltas(&base_props).unwrap();
+
+        // After materialization:
+        // 1. vector_deltas should be empty
+        // 2. changed should contain the full vector
+        assert_eq!(
+            delta.vector_deltas.len(),
+            0,
+            "vector_deltas should be empty after materialization"
+        );
+        assert_eq!(
+            delta.changed.len(),
+            1,
+            "changed should contain the materialized vector"
+        );
+
+        let materialized = delta.changed.get(&embedding_key).unwrap();
+        let materialized_vec = materialized.as_vector().unwrap();
+        assert_eq!(materialized_vec.len(), 384);
+        assert_eq!(
+            materialized_vec[0], 0.5f32,
+            "First element should be updated"
+        );
+        assert_eq!(
+            materialized_vec[100], 0.6f32,
+            "Element 100 should be updated"
+        );
+        assert_eq!(
+            materialized_vec[50], 0.1f32,
+            "Unchanged element should remain"
+        );
+    }
+
+    #[test]
+    fn test_materialize_vector_deltas_missing_base() {
+        // Test that materialization fails gracefully when base property is missing
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::version::{PropertyDelta, VectorDelta};
+
+        let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
+        let base_props = PropertyMapBuilder::new().build(); // Empty base
+
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(
+            embedding_key,
+            VectorDelta::Sparse {
+                dimension: 384,
+                changes: Arc::new(vec![(0, 0.5f32)]),
+            },
+        );
+
+        // Should fail - base property not found
+        let result = delta.materialize_vector_deltas(&base_props);
+        assert!(result.is_err(), "Should fail when base property missing");
+    }
+
+    #[test]
+    fn test_persist_materialized_delta_succeeds() {
+        // Round-trip test: create sparse delta, materialize it, then persist
+        use crate::core::GLOBAL_INTERNER;
+        use crate::storage::version::{PropertyDelta, VectorDelta};
+
+        let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
+
+        // Create base properties
+        let base_embedding = vec![0.1f32; 384];
+        let base_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&base_embedding))
+            .build();
+
+        // Create delta with sparse change
+        let mut delta = PropertyDelta::new();
+        delta.vector_deltas.insert(
+            embedding_key,
+            VectorDelta::Sparse {
+                dimension: 384,
+                changes: Arc::new(vec![(0, 0.5f32), (100, 0.6f32)]),
+            },
+        );
+
+        // Materialize BEFORE persistence
+        delta.materialize_vector_deltas(&base_props).unwrap();
+
+        // Create version with materialized delta
+        let label = GLOBAL_INTERNER.intern("Document").unwrap();
+        let version = NodeVersion {
+            id: VersionId::new(2).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            temporal: BiTemporalInterval::new(
+                TimeRange::new(2000.into(), 3000.into()).unwrap(),
+                TimeRange::new(2000.into(), crate::core::temporal::TIMESTAMP_MAX).unwrap(),
+            ),
+            label,
+            data: VersionData::Delta { delta },
+            next_version: None,
+            prev_version: Some(VersionId::new(1).unwrap()),
+        };
+
+        // Should succeed - delta is now materialized
+        let entry = convert_node_version(&version).unwrap();
+        assert_eq!(entry.version_id, 2);
+        assert!(
+            !entry.properties.entries.is_empty(),
+            "Should have materialized vector property"
+        );
     }
 }
