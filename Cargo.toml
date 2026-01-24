@@ -277,6 +277,12 @@ harness = false
 path = "benches/query_optimization.rs"
 required-features = []
 
+[[bench]]
+name = "recovery_benchmarks"
+harness = false
+path = "benches/recovery_benchmarks.rs"
+required-features = []
+
 # MCP server binary
 [[bin]]
 name = "gallifrey-mcp"
