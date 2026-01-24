@@ -959,9 +959,16 @@ impl CurrentStorage {
     /// Note: This does not delete edges connected to the node.
     /// See issue #364 for cascade delete option.
     pub fn delete_node(&self, id: NodeId) -> Result<Node> {
-        self.indexes
+        let node = self
+            .indexes
             .remove_node(id)
-            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+            .ok_or(StorageError::NodeNotFound(id))?;
+
+        // Best-effort vector index removal (ignore errors) - Issue #323
+        // This prevents memory leaks and ensures deleted nodes don't appear in similarity searches
+        let _ = self.try_remove_from_index(id);
+
+        Ok(node)
     }
 
     /// Delete an edge.
@@ -2874,6 +2881,70 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|(id, _)| *id != node1));
         assert_eq!(results[0].0, node2); // Most similar
+    }
+
+    /// Test for Issue #323: delete_node() should remove vectors from HNSW index
+    ///
+    /// This test verifies that CurrentStorage::delete_node() properly removes
+    /// vector embeddings from the HNSW index, preventing memory leaks and
+    /// incorrect search results.
+    #[test]
+    fn test_delete_node_removes_from_vector_index() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        // Create two nodes with embeddings
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let v2 = vec![0.0f32, 1.0, 0.0, 0.0];
+
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        let node2 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v2)
+                    .build(),
+            )
+            .unwrap();
+
+        // Verify both nodes are in the index
+        let results_before = storage.find_similar_by_embedding(&v1, 10).unwrap();
+        assert_eq!(
+            results_before.len(),
+            2,
+            "Should find 2 nodes before deletion"
+        );
+
+        // Delete node1
+        storage.delete_node(node1).unwrap();
+
+        // Verify node1 is removed from the index
+        let results_after = storage.find_similar_by_embedding(&v1, 10).unwrap();
+        assert_eq!(
+            results_after.len(),
+            1,
+            "Should find only 1 node after deletion"
+        );
+        assert_eq!(results_after[0].0, node2, "Remaining node should be node2");
+
+        // Deleted node should not appear in find_similar results
+        let similar_to_node2 = storage.find_similar(node2, 10).unwrap();
+        assert!(
+            !similar_to_node2.iter().any(|(id, _)| *id == node1),
+            "Deleted node should not appear in similarity search"
+        );
     }
 
     #[test]
