@@ -1316,6 +1316,7 @@ impl HistoricalStorage {
     /// # Note (Issue #208)
     /// This method is no longer used in production code, retained for testing only.
     #[cfg(test)]
+    #[allow(dead_code)]
     fn count_versions_since_anchor_edge(&self, version_id: VersionId) -> usize {
         self.count_versions_since_anchor(version_id, |vid| self.edge_versions.get(&vid))
     }

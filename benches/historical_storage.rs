@@ -39,7 +39,7 @@ fn bench_add_node_version_with_varying_anchor_intervals(c: &mut Criterion) {
                             anchor_interval: interval,
                             max_delta_chain: 100,
                         };
-                        let mut storage = HistoricalStorage::with_config(config);
+                        let storage = HistoricalStorage::with_config(config);
                         let node_id = NodeId::new(1).unwrap();
                         (storage, node_id)
                     },
