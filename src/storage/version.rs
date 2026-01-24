@@ -1464,9 +1464,9 @@ mod tests {
         // Case 1: 10% changed -> should use sparse
         let old_embedding = vec![0.1f32; 384];
         let mut new_embedding_sparse = old_embedding.clone();
-        for i in 0..38 {
+        for item in new_embedding_sparse.iter_mut().take(38) {
             // 10% of 384
-            new_embedding_sparse[i] = 0.9f32;
+            *item = 0.9f32;
         }
 
         let old_props = PropertyMapBuilder::new()
@@ -1482,9 +1482,9 @@ mod tests {
 
         // Case 2: 90% changed -> should use full storage
         let mut new_embedding_full = old_embedding.clone();
-        for i in 0..346 {
+        for item in new_embedding_full.iter_mut().take(346) {
             // 90% of 384
-            new_embedding_full[i] = 0.9f32;
+            *item = 0.9f32;
         }
 
         let full_props = PropertyMapBuilder::new()
