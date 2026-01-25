@@ -188,6 +188,26 @@ pub struct HistoricalStorage {
     /// walking the version chain on every add operation. This improves write
     /// performance from O(anchor_interval) to O(1).
     edge_versions_since_anchor: HashMap<EdgeId, usize>,
+    /// Cached count of node anchor versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when node anchors are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_node_anchor_count: usize,
+    /// Cached count of node delta versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when node deltas are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_node_delta_count: usize,
+    /// Cached count of edge anchor versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when edge anchors are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_edge_anchor_count: usize,
+    /// Cached count of edge delta versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when edge deltas are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_edge_delta_count: usize,
     /// TinyLFU cache for reconstructed node properties (reduces lock contention)
     node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
     /// TinyLFU cache for reconstructed edge properties
@@ -337,6 +357,10 @@ impl HistoricalStorage {
             edge_version_counts: HashMap::new(),
             node_versions_since_anchor: HashMap::new(),
             edge_versions_since_anchor: HashMap::new(),
+            cached_node_anchor_count: 0,
+            cached_node_delta_count: 0,
+            cached_edge_anchor_count: 0,
+            cached_edge_delta_count: 0,
             node_property_cache: Arc::new(Cache::new(cache_size)),
             edge_property_cache: Arc::new(Cache::new(cache_size)),
             node_anchor_cache: Arc::new(Cache::new(anchor_cache_size)),
@@ -572,6 +596,13 @@ impl HistoricalStorage {
         self.node_version_heads.insert(node_id, version_id);
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
 
+        // Issue #212: Update cached stats counters for O(1) stats() retrieval
+        if is_anchor {
+            self.cached_node_anchor_count += 1;
+        } else {
+            self.cached_node_delta_count += 1;
+        }
+
         // Populate caches for anchors (O(1) reconstruction)
         Self::populate_anchor_caches(
             is_anchor,
@@ -716,6 +747,13 @@ impl HistoricalStorage {
         self.edge_versions.insert(version_id, version);
         self.edge_version_heads.insert(edge_id, version_id);
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+
+        // Issue #212: Update cached stats counters for O(1) stats() retrieval
+        if is_anchor {
+            self.cached_edge_anchor_count += 1;
+        } else {
+            self.cached_edge_delta_count += 1;
+        }
 
         // Populate caches for anchors (O(1) reconstruction)
         Self::populate_anchor_caches(
@@ -1307,6 +1345,14 @@ impl HistoricalStorage {
                     if let Some(count) = self.node_version_counts.get_mut(&version.node_id) {
                         *count = count.saturating_sub(1);
                     }
+                    // Issue #212: Update cached stats counters when migrating to cold storage
+                    if version.is_anchor() {
+                        self.cached_node_anchor_count =
+                            self.cached_node_anchor_count.saturating_sub(1);
+                    } else {
+                        self.cached_node_delta_count =
+                            self.cached_node_delta_count.saturating_sub(1);
+                    }
                 }
             }
         }
@@ -1336,6 +1382,14 @@ impl HistoricalStorage {
                     && let Some(count) = self.edge_version_counts.get_mut(&version.edge_id)
                 {
                     *count = count.saturating_sub(1);
+                    // Issue #212: Update cached stats counters when migrating to cold storage
+                    if version.is_anchor() {
+                        self.cached_edge_anchor_count =
+                            self.cached_edge_anchor_count.saturating_sub(1);
+                    } else {
+                        self.cached_edge_delta_count =
+                            self.cached_edge_delta_count.saturating_sub(1);
+                    }
                 }
             }
         }
@@ -1655,35 +1709,38 @@ impl HistoricalStorage {
     }
 
     /// Get statistics about the storage.
+    ///
+    /// Issue #212: This method now returns cached counters in O(1) time instead of
+    /// iterating through all versions. The counters are maintained incrementally as
+    /// versions are added, making stats retrieval constant-time regardless of the
+    /// number of versions stored.
     pub fn stats(&self) -> HistoricalStats {
-        let mut node_anchor_count = 0;
-        let mut node_delta_count = 0;
-        let mut edge_anchor_count = 0;
-        let mut edge_delta_count = 0;
-
-        for version in self.node_versions.values() {
-            if version.is_anchor() {
-                node_anchor_count += 1;
-            } else {
-                node_delta_count += 1;
-            }
-        }
-
-        for version in self.edge_versions.values() {
-            if version.is_anchor() {
-                edge_anchor_count += 1;
-            } else {
-                edge_delta_count += 1;
-            }
-        }
+        // Debug assertions to verify counter invariants (zero cost in release builds)
+        debug_assert_eq!(
+            self.cached_node_anchor_count + self.cached_node_delta_count,
+            self.node_versions.len(),
+            "Node counter invariant violated: anchors({}) + deltas({}) != total({})",
+            self.cached_node_anchor_count,
+            self.cached_node_delta_count,
+            self.node_versions.len()
+        );
+        debug_assert_eq!(
+            self.cached_edge_anchor_count + self.cached_edge_delta_count,
+            self.edge_versions.len(),
+            "Edge counter invariant violated: anchors({}) + deltas({}) != total({})",
+            self.cached_edge_anchor_count,
+            self.cached_edge_delta_count,
+            self.edge_versions.len()
+        );
 
         HistoricalStats {
             total_node_versions: self.node_versions.len(),
             total_edge_versions: self.edge_versions.len(),
-            node_anchor_count,
-            node_delta_count,
-            edge_anchor_count,
-            edge_delta_count,
+            // Issue #212: Use cached counters instead of iterating (O(1) vs O(versions))
+            node_anchor_count: self.cached_node_anchor_count,
+            node_delta_count: self.cached_node_delta_count,
+            edge_anchor_count: self.cached_edge_anchor_count,
+            edge_delta_count: self.cached_edge_delta_count,
             unique_nodes: self.node_version_heads.len(),
             unique_edges: self.edge_version_heads.len(),
             // Separate regular and anchor cache entries for better visibility (Issue #338)
@@ -1867,6 +1924,7 @@ impl HistoricalStorage {
     pub(crate) fn insert_restored_node_version(&mut self, version: NodeVersion) -> Result<()> {
         let version_id = version.id;
         let node_id = version.node_id;
+        let is_anchor = version.is_anchor();
 
         // Store the version
         self.node_versions.insert(version_id, version);
@@ -1876,6 +1934,13 @@ impl HistoricalStorage {
 
         // Update version count
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+
+        // Issue #212: Update cached stats counters during persistence restore
+        if is_anchor {
+            self.cached_node_anchor_count += 1;
+        } else {
+            self.cached_node_delta_count += 1;
+        }
 
         Ok(())
     }
@@ -1892,6 +1957,7 @@ impl HistoricalStorage {
     pub(crate) fn insert_restored_edge_version(&mut self, version: EdgeVersion) -> Result<()> {
         let version_id = version.id;
         let edge_id = version.edge_id;
+        let is_anchor = version.is_anchor();
 
         // Store the version
         self.edge_versions.insert(version_id, version);
@@ -1901,6 +1967,13 @@ impl HistoricalStorage {
 
         // Update version count
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+
+        // Issue #212: Update cached stats counters during persistence restore
+        if is_anchor {
+            self.cached_edge_anchor_count += 1;
+        } else {
+            self.cached_edge_delta_count += 1;
+        }
 
         Ok(())
     }

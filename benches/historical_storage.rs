@@ -216,27 +216,16 @@ fn bench_stats_with_varying_version_counts(c: &mut Criterion) {
 
                 // Pre-populate with versions across multiple nodes to avoid hitting
                 // retention limits (max_versions_per_entity)
-                let nodes_needed = (count / 100) + 1; // 100 versions per node
-                for node_idx in 0..nodes_needed {
+                for i in 0..count {
+                    let node_idx = i / 100; // 100 versions per node
                     let node_id = NodeId::new(node_idx).unwrap();
-                    let versions_for_this_node = if node_idx == nodes_needed - 1 {
-                        count % 100
-                    } else {
-                        100
-                    };
+                    let version_id = VersionId::new(i).unwrap();
+                    let temporal = BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+                    let properties = PropertyMapBuilder::new().insert("value", i as i64).build();
 
-                    for version in 0..versions_for_this_node {
-                        let version_id = VersionId::new(node_idx * 1000 + version).unwrap();
-                        let temporal =
-                            BiTemporalInterval::current((1000 + (version as i64) * 100).into());
-                        let properties = PropertyMapBuilder::new()
-                            .insert("value", version as i64)
-                            .build();
-
-                        storage
-                            .add_node_version(node_id, version_id, temporal, label, properties)
-                            .unwrap();
-                    }
+                    storage
+                        .add_node_version(node_id, version_id, temporal, label, properties)
+                        .unwrap();
                 }
 
                 // Benchmark: Call stats() repeatedly
