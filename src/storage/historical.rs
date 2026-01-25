@@ -603,14 +603,21 @@ impl HistoricalStorage {
             self.cached_node_delta_count += 1;
         }
 
-        // Populate caches for anchors (O(1) reconstruction)
-        Self::populate_anchor_caches(
-            is_anchor,
-            version_id,
-            properties_for_hook,
-            &self.node_property_cache,
-            &self.node_anchor_cache,
-        );
+        // Issue #210: Cache properties for ALL versions (anchors and deltas) to avoid
+        // reconstructing properties we just added when creating the next delta.
+        //
+        // BEFORE: Only anchors were cached, causing delta creation to reconstruct
+        //         the previous delta's properties even though we just added them.
+        // AFTER:  All versions are cached in the main property cache, eliminating
+        //         unnecessary reconstructions during consecutive writes.
+        let props_arc = Arc::new(properties_for_hook);
+        self.node_property_cache
+            .insert(version_id, props_arc.clone());
+
+        // Anchors are also cached in the dedicated anchor cache for fallback
+        if is_anchor {
+            self.node_anchor_cache.insert(version_id, props_arc);
+        }
 
         // Notify observers
         let timestamp = temporal.transaction_time().start();
@@ -755,14 +762,16 @@ impl HistoricalStorage {
             self.cached_edge_delta_count += 1;
         }
 
-        // Populate caches for anchors (O(1) reconstruction)
-        Self::populate_anchor_caches(
-            is_anchor,
-            version_id,
-            properties_for_hook,
-            &self.edge_property_cache,
-            &self.edge_anchor_cache,
-        );
+        // Issue #210: Cache properties for ALL versions (anchors and deltas) to avoid
+        // reconstructing properties we just added when creating the next delta.
+        let props_arc = Arc::new(properties_for_hook);
+        self.edge_property_cache
+            .insert(version_id, props_arc.clone());
+
+        // Anchors are also cached in the dedicated anchor cache for fallback
+        if is_anchor {
+            self.edge_anchor_cache.insert(version_id, props_arc);
+        }
 
         // Notify observers
         let timestamp = temporal.transaction_time().start();
@@ -1637,24 +1646,6 @@ impl HistoricalStorage {
         }
 
         *prev_version.temporal_mut() = prev_temporal;
-    }
-
-    /// Populate caches for an anchor version.
-    ///
-    /// If the version is an anchor, immediately cache its properties in both the
-    /// dedicated anchor cache and the regular property cache for optimal performance.
-    fn populate_anchor_caches(
-        is_anchor: bool,
-        version_id: VersionId,
-        properties: PropertyMap,
-        property_cache: &Arc<Cache<VersionId, Arc<PropertyMap>>>,
-        anchor_cache: &Arc<Cache<VersionId, Arc<PropertyMap>>>,
-    ) {
-        if is_anchor {
-            let props_arc = Arc::new(properties);
-            anchor_cache.insert(version_id, props_arc.clone());
-            property_cache.insert(version_id, props_arc);
-        }
     }
 
     /// Extract version metadata and data for copy-out reconstruction (nodes).
@@ -6092,6 +6083,7 @@ mod tests {
             .unwrap();
         assert_eq!(props_v5.get("value").and_then(|v| v.as_int()), Some(5));
     }
+
     // ============================================================
     // Cached Stats Counter Tests (Issue #212)
     // ============================================================
@@ -6269,5 +6261,122 @@ mod tests {
             stats_after.node_delta_count, 3,
             "Delta count should be preserved after restore"
         );
+    }
+
+    /// Test for Issue #210: Delta creation should not reconstruct previous version properties
+    ///
+    /// When creating a delta version, we need the previous version's properties to compute
+    /// the diff. However, we just finished adding that previous version moments ago with its
+    /// full properties known. Currently, we reconstruct those properties even though we
+    /// just had them.
+    ///
+    /// This test verifies that after caching properties at write-time (not just for anchors),
+    /// we avoid unnecessary reconstructions during consecutive delta writes.
+    #[test]
+    fn test_delta_creation_caches_properties() {
+        // Use a large anchor interval to ensure we create many deltas
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 100,
+            max_delta_chain: 200,
+        });
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Add 10 consecutive versions - first will be anchor, rest will be deltas
+        for i in 0..10 {
+            let version_id = VersionId::new(100 + i).unwrap();
+            let temporal = BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+            let props = PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("version", i as i64)
+                .build();
+
+            storage
+                .add_node_version(node_id, version_id, temporal, label, props)
+                .unwrap();
+        }
+
+        // Get cache metrics
+        let metrics = storage.cache_metrics();
+
+        // After the fix, we expect ZERO full reconstructions because:
+        // - Version 0: anchor (no reconstruction needed)
+        // - Version 1: delta, needs version 0 properties (anchor, already cached)
+        // - Version 2: delta, needs version 1 properties (should be cached from write)
+        // - Version 3: delta, needs version 2 properties (should be cached from write)
+        // ... and so on
+        //
+        // BEFORE the fix: We would see full_reconstructions > 0 because when creating
+        // delta N, we reconstruct version N-1's properties even though we just added them.
+        //
+        // AFTER the fix: We should see full_reconstructions == 0 because we cache
+        // the NEW properties when adding each version.
+
+        assert_eq!(
+            metrics.full_reconstructions, 0,
+            "Expected 0 full reconstructions when adding consecutive deltas, but got {}. \
+             This indicates we're reconstructing properties we just added. \
+             Issue #210: Cache properties at write-time to avoid this.",
+            metrics.full_reconstructions
+        );
+
+        // Verify we can still reconstruct all properties correctly
+        for i in 0..10 {
+            let version_id = VersionId::new(100 + i).unwrap();
+            let props = storage.reconstruct_node_properties(version_id).unwrap();
+            assert_eq!(
+                props.get("version").unwrap().as_int().unwrap(),
+                i as i64,
+                "Property reconstruction failed for version {}",
+                i
+            );
+        }
+    }
+
+    /// Test for Issue #210: Edge delta creation should also cache properties
+    ///
+    /// Same as test_delta_creation_caches_properties but for edges.
+    #[test]
+    fn test_edge_delta_creation_caches_properties() {
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 100,
+            max_delta_chain: 200,
+        });
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let from = NodeId::new(1).unwrap();
+        let to = NodeId::new(2).unwrap();
+        let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Add 10 consecutive versions
+        for i in 0..10 {
+            let version_id = VersionId::new(100 + i).unwrap();
+            let temporal = BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+            let props = PropertyMapBuilder::new()
+                .insert("strength", i as i64)
+                .build();
+
+            storage
+                .add_edge_version(edge_id, version_id, temporal, label, from, to, props)
+                .unwrap();
+        }
+
+        let metrics = storage.cache_metrics();
+
+        // Same expectation as for nodes: 0 reconstructions after the fix
+        assert_eq!(
+            metrics.full_reconstructions, 0,
+            "Expected 0 full reconstructions for edge deltas, but got {}. \
+             Issue #210: Cache edge properties at write-time.",
+            metrics.full_reconstructions
+        );
+
+        // Verify correctness
+        for i in 0..10 {
+            let version_id = VersionId::new(100 + i).unwrap();
+            let props = storage.reconstruct_edge_properties(version_id).unwrap();
+            assert_eq!(props.get("strength").unwrap().as_int().unwrap(), i as i64);
+        }
     }
 }

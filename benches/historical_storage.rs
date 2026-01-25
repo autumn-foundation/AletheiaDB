@@ -238,11 +238,146 @@ fn bench_stats_with_varying_version_counts(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark: Delta creation with property caching (Issue #210)
+///
+/// This benchmark measures the performance improvement from caching properties
+/// at write-time for delta versions. Before the fix, creating each delta required
+/// reconstructing the previous version's properties. After the fix, properties are
+/// cached when added, eliminating reconstructions during consecutive writes.
+///
+/// Expected before fix: Each delta creation triggers property reconstruction
+/// Expected after fix: Zero reconstructions during consecutive delta writes
+fn bench_delta_creation_with_caching(c: &mut Criterion) {
+    let mut group = c.benchmark_group("delta_creation_property_caching");
+
+    // Use large anchor interval to create many consecutive deltas
+    let config = AnchorConfig {
+        anchor_interval: 1000,
+        max_delta_chain: 2000,
+    };
+
+    // Test with different numbers of consecutive deltas
+    for delta_count in [10, 50, 100, 200] {
+        group.bench_with_input(
+            BenchmarkId::new("consecutive_deltas", delta_count),
+            &delta_count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        // Setup: Create fresh storage
+                        let storage = HistoricalStorage::with_config(config.clone());
+                        let node_id = NodeId::new(1).unwrap();
+                        (storage, node_id)
+                    },
+                    |(mut storage, node_id)| {
+                        // Benchmark: Add many consecutive delta versions
+                        // With fix: All properties cached at write-time (0 reconstructions)
+                        // Without fix: Each delta reconstructs previous properties
+                        let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
+                        for i in 0..count {
+                            let version_id = VersionId::new(i).unwrap();
+                            let temporal =
+                                BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+                            let properties = PropertyMapBuilder::new()
+                                .insert("data", format!("version_{}", i))
+                                .insert("counter", i as i64)
+                                .build();
+
+                            black_box(storage.add_node_version(
+                                node_id, version_id, temporal, label, properties,
+                            ))
+                            .unwrap();
+                        }
+
+                        // Verify cache effectiveness
+                        let metrics = storage.cache_metrics();
+                        // After fix: full_reconstructions should be 0
+                        assert_eq!(
+                            metrics.full_reconstructions, 0,
+                            "Expected 0 reconstructions with caching fix"
+                        );
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Benchmark: Interleaved updates to multiple entities (Issue #210 real-world scenario)
+///
+/// Simulates a realistic write-heavy workload where multiple entities are updated
+/// in an interleaved fashion, typical of real-time data streams or event sourcing.
+///
+/// This stresses the property cache as properties from multiple entities compete
+/// for cache space. The fix ensures recently-written properties stay cached.
+fn bench_interleaved_multi_entity_updates(c: &mut Criterion) {
+    let mut group = c.benchmark_group("interleaved_entity_updates");
+
+    let config = AnchorConfig {
+        anchor_interval: 50,
+        max_delta_chain: 100,
+    };
+
+    // Simulate updating 10, 50, or 100 entities in interleaved fashion
+    for entity_count in [10, 50, 100] {
+        group.bench_with_input(
+            BenchmarkId::new("entities_interleaved", entity_count),
+            &entity_count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        let storage = HistoricalStorage::with_config(config.clone());
+                        storage
+                    },
+                    |mut storage| {
+                        // Add 10 versions to each entity in round-robin fashion
+                        let label = GLOBAL_INTERNER.intern("Sensor").unwrap();
+                        for round in 0..10 {
+                            for entity_id in 0..count {
+                                let node_id = NodeId::new(entity_id).unwrap();
+                                let version_id =
+                                    VersionId::new((round * count + entity_id) as u64).unwrap();
+                                let temporal = BiTemporalInterval::current(
+                                    (1000 + (round as i64) * 100).into(),
+                                );
+                                let properties = PropertyMapBuilder::new()
+                                    .insert("sensor_id", entity_id as i64)
+                                    .insert("reading", (round * 10 + entity_id) as i64)
+                                    .build();
+
+                                black_box(storage.add_node_version(
+                                    node_id, version_id, temporal, label, properties,
+                                ))
+                                .unwrap();
+                            }
+                        }
+
+                        // Verify that no reconstructions occurred. With the default cache size
+                        // (10,000 entries), all recently written versions should remain cached,
+                        // even with interleaved updates across multiple entities.
+                        let metrics = storage.cache_metrics();
+                        assert_eq!(
+                            metrics.full_reconstructions, 0,
+                            "Expected 0 reconstructions for interleaved updates with sufficient cache"
+                        );
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_add_node_version_with_varying_anchor_intervals,
     bench_single_add_at_chain_positions,
     bench_bulk_insert_multiple_entities,
-    bench_stats_with_varying_version_counts
+    bench_stats_with_varying_version_counts,
+    bench_delta_creation_with_caching,
+    bench_interleaved_multi_entity_updates
 );
 criterion_main!(benches);
