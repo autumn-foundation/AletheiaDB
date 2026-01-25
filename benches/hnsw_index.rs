@@ -455,11 +455,9 @@ fn bench_vector_updates(c: &mut Criterion) {
             |b, &count| {
                 b.iter(|| {
                     // Update all vectors
-                    for i in 0..count {
+                    for (i, vector) in update_vectors.iter().enumerate().take(count) {
                         let node_id = NodeId::new(i as u64).expect("Valid node ID");
-                        index
-                            .add(black_box(node_id), black_box(&update_vectors[i]))
-                            .ok();
+                        index.add(black_box(node_id), black_box(vector)).ok();
                     }
                 });
             },
