@@ -719,7 +719,19 @@ pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
 /// On little-endian platforms (x86, ARM, etc.), this uses bulk byte copying
 /// instead of serializing each f32 individually, providing 2-10x speedup for
 /// typical embedding sizes (384-1536 dimensions).
+///
+/// # Panics
+///
+/// Panics if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`.
 pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
+    if v.len() > MAX_VECTOR_DIMENSIONS {
+        panic!(
+            "Vector dimension {} exceeds maximum allowed {}",
+            v.len(),
+            MAX_VECTOR_DIMENSIONS
+        );
+    }
+
     buffer.push(TAG_VECTOR);
     buffer.extend_from_slice(&(v.len() as u32).to_le_bytes());
 
@@ -733,13 +745,12 @@ pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
         // This is safe because:
         // 1. f32 has well-defined byte representation (IEEE 754)
         // 2. We're only reading, not writing through the raw pointer
-        // 3. The slice lengths are correctly calculated (len * 4 bytes)
+        // 3. The slice lengths are correctly calculated. With the dimension check,
+        //    overflow is not possible on 64-bit or 32-bit systems.
         // 4. Alignment is not an issue - we're copying to a Vec<u8>
-        if !v.is_empty() {
-            let byte_slice =
-                unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
-            buffer.extend_from_slice(byte_slice);
-        }
+        let byte_slice =
+            unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) };
+        buffer.extend_from_slice(byte_slice);
     }
 
     #[cfg(not(target_endian = "little"))]
@@ -829,22 +840,25 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
 
     #[cfg(target_endian = "little")]
     let values = {
-        // SAFETY: On little-endian platforms, we can directly reinterpret the byte
-        // slice as f32 values since the in-memory representation is identical to
-        // the little-endian serialized format.
+        // SAFETY: On little-endian platforms, we can directly copy the bytes
+        // into an f32 vector using a single bulk memory operation.
         //
         // This is safe because:
-        // 1. We validated data_slice.len() == dimension * 4 above
-        // 2. f32 has well-defined byte representation (IEEE 754)
-        // 3. We're creating a new Vec, not aliasing existing data
-        // 4. Any bit pattern is valid for f32 (including NaN, infinity)
-        // 5. Alignment: we use ptr::read_unaligned to handle potentially unaligned data
+        // 1. We validated data_slice.len() == dimension * 4 above.
+        // 2. We allocate a Vec<f32> with sufficient capacity. Its buffer is correctly
+        //    aligned for f32.
+        // 3. `copy_nonoverlapping` safely copies bytes from the (potentially unaligned)
+        //    `data_slice` into the aligned `Vec` buffer.
+        // 4. After the copy, the memory is initialized, so calling `set_len` is safe.
+        // 5. Any bit pattern is valid for f32 (including NaN, infinity).
         let mut values = Vec::with_capacity(dimension);
-        unsafe {
-            let src = data_slice.as_ptr() as *const f32;
-            for i in 0..dimension {
-                // Use read_unaligned to avoid undefined behavior if data is not aligned
-                values.push(std::ptr::read_unaligned(src.add(i)));
+        if dimension > 0 {
+            unsafe {
+                let src_ptr = data_slice.as_ptr();
+                // The destination pointer is correctly aligned for f32.
+                let dst_ptr = values.as_mut_ptr() as *mut u8;
+                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, data_slice.len());
+                values.set_len(dimension);
             }
         }
         values
