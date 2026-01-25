@@ -2133,7 +2133,7 @@ mod tests {
             f32::MIN_POSITIVE,
             1.0,
             -1.0,
-            3.14159265359f32,
+            std::f32::consts::PI,
             f32::NAN,
         ];
 
@@ -2149,7 +2149,7 @@ mod tests {
         assert_eq!(deserialized[6], f32::MIN_POSITIVE);
         assert_eq!(deserialized[7], 1.0);
         assert_eq!(deserialized[8], -1.0);
-        assert!((deserialized[9] - 3.14159265359f32).abs() < f32::EPSILON);
+        assert!((deserialized[9] - std::f32::consts::PI).abs() < f32::EPSILON);
         assert!(deserialized[10].is_nan());
     }
 
