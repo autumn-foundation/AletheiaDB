@@ -642,42 +642,10 @@ impl FlushCoordinator {
 
         // Update segment LSN tracking (ADR-0025)
         // Use fetch_min/fetch_max for atomic updates
-        loop {
-            let current_min = self.current_segment_min_lsn.load(Ordering::Relaxed);
-            if batch_min_lsn >= current_min {
-                break;
-            }
-            if self
-                .current_segment_min_lsn
-                .compare_exchange_weak(
-                    current_min,
-                    batch_min_lsn,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                break;
-            }
-        }
-        loop {
-            let current_max = self.current_segment_max_lsn.load(Ordering::Relaxed);
-            if batch_max_lsn <= current_max {
-                break;
-            }
-            if self
-                .current_segment_max_lsn
-                .compare_exchange_weak(
-                    current_max,
-                    batch_max_lsn,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                break;
-            }
-        }
+        self.current_segment_min_lsn
+            .fetch_min(batch_min_lsn, Ordering::Relaxed);
+        self.current_segment_max_lsn
+            .fetch_max(batch_max_lsn, Ordering::Relaxed);
         self.current_segment_entry_count
             .fetch_add(entries.len() as u64, Ordering::Relaxed);
 

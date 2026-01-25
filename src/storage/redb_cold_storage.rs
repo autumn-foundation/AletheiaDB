@@ -212,72 +212,12 @@ impl RedbColdStorage {
 
     /// Compress data using the configured algorithm.
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        match self.config.compression.zstd_level() {
-            Some(level) => {
-                let compressed =
-                    zstd::encode_all(data, level).map_err(|e| -> crate::utils::error::Error {
-                        StorageError::io_error(e.to_string()).into()
-                    })?;
-
-                if self.config.enable_checksums {
-                    let checksum = crc32fast::hash(&compressed);
-                    let mut result = Vec::with_capacity(compressed.len() + 4);
-                    result.extend_from_slice(&checksum.to_le_bytes());
-                    result.extend_from_slice(&compressed);
-                    Ok(result)
-                } else {
-                    Ok(compressed)
-                }
-            }
-            None => {
-                if self.config.enable_checksums {
-                    let checksum = crc32fast::hash(data);
-                    let mut result = Vec::with_capacity(data.len() + 4);
-                    result.extend_from_slice(&checksum.to_le_bytes());
-                    result.extend_from_slice(data);
-                    Ok(result)
-                } else {
-                    Ok(data.to_vec())
-                }
-            }
-        }
+        crate::storage::compression::compress(data, &self.config.to_cold_storage_config())
     }
 
     /// Decompress data using the configured algorithm.
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let (data_to_decompress, expected_checksum) = if self.config.enable_checksums {
-            if data.len() < 4 {
-                return Err(
-                    StorageError::corruption("Data too short for checksum".to_string()).into(),
-                );
-            }
-            let checksum = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            let payload = &data[4..];
-            (payload, Some(checksum))
-        } else {
-            (data, None)
-        };
-
-        // Verify checksum if enabled
-        if let Some(expected) = expected_checksum {
-            let actual = crc32fast::hash(data_to_decompress);
-            if actual != expected {
-                return Err(StorageError::corruption(format!(
-                    "Checksum mismatch: expected {}, got {}",
-                    expected, actual
-                ))
-                .into());
-            }
-        }
-
-        match self.config.compression.zstd_level() {
-            Some(_) => {
-                zstd::decode_all(data_to_decompress).map_err(|e| -> crate::utils::error::Error {
-                    StorageError::io_error(e.to_string()).into()
-                })
-            }
-            None => Ok(data_to_decompress.to_vec()),
-        }
+        crate::storage::compression::decompress(data, &self.config.to_cold_storage_config())
     }
 
     /// Get the flushed LSN from the metadata table.

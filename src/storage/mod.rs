@@ -13,6 +13,7 @@
 
 pub mod checkpoint;
 pub mod cold_storage;
+pub mod compression;
 pub mod current;
 pub mod historical;
 pub mod index_persistence;
