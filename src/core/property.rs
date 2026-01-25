@@ -166,9 +166,22 @@ impl PropertyValue {
     /// - [`PropertyMapBuilder::insert_vector`] for a builder-pattern alternative
     /// - [`as_vector`](Self::as_vector) for retrieving the vector data
     /// - [`gallifreydb::core::vector`](crate::core::vector) for similarity functions
+    ///
+    /// # Panics
+    ///
+    /// Panics if the vector dimension exceeds [`MAX_VECTOR_DIMENSIONS`].
+    /// This validation ensures that vectors can be serialized without error.
     #[inline]
     pub fn vector<V: AsRef<[f32]>>(v: V) -> Self {
-        PropertyValue::Vector(Arc::from(v.as_ref()))
+        let slice = v.as_ref();
+        if slice.len() > MAX_VECTOR_DIMENSIONS {
+            panic!(
+                "Vector dimension {} exceeds maximum allowed {}",
+                slice.len(),
+                MAX_VECTOR_DIMENSIONS
+            );
+        }
+        PropertyValue::Vector(Arc::from(slice))
     }
 
     /// Returns true if this value is null.
@@ -728,7 +741,10 @@ pub fn serialize_vector(v: &[f32]) -> Vec<u8> {
 /// # Panics
 ///
 /// Panics if the vector dimension exceeds `MAX_VECTOR_DIMENSIONS`.
+/// This is a defensive check; vectors should be validated at construction
+/// time via [`PropertyValue::vector()`] which enforces this limit.
 pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
+    // Defensive check: vectors should be validated at construction via PropertyValue::vector()
     if v.len() > MAX_VECTOR_DIMENSIONS {
         panic!(
             "Vector dimension {} exceeds maximum allowed {}",
@@ -1798,6 +1814,22 @@ mod tests {
 
         assert_eq!(vec_prop.as_vector(), Some(&[][..]));
         assert_eq!(format!("{}", vec_prop), "<vector[0]>");
+    }
+
+    #[test]
+    #[should_panic(expected = "Vector dimension")]
+    fn test_vector_excessive_dimensions() {
+        // Test that creating a vector with excessive dimensions panics
+        let oversized: Vec<f32> = vec![0.0; MAX_VECTOR_DIMENSIONS + 1];
+        let _ = PropertyValue::vector(oversized);
+    }
+
+    #[test]
+    fn test_vector_max_dimensions_allowed() {
+        // Test that MAX_VECTOR_DIMENSIONS is exactly the limit
+        let max_size: Vec<f32> = vec![0.0; MAX_VECTOR_DIMENSIONS];
+        let vec_prop = PropertyValue::vector(max_size);
+        assert_eq!(vec_prop.as_vector().unwrap().len(), MAX_VECTOR_DIMENSIONS);
     }
 
     #[test]
