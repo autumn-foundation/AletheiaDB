@@ -92,6 +92,7 @@ pub fn decompress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::cold_storage::CompressionAlgorithm;
 
     #[test]
     fn test_compress_decompress_zstd() {
