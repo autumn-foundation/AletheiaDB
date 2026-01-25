@@ -296,6 +296,11 @@ harness = false
 path = "benches/recovery_benchmarks.rs"
 required-features = []
 
+[[bench]]
+name = "vector_serialization"
+harness = false
+path = "benches/vector_serialization.rs"
+
 # MCP server binary
 [[bin]]
 name = "gallifrey-mcp"
