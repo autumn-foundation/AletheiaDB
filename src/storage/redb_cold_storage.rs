@@ -1330,4 +1330,131 @@ mod tests {
         assert!(!config.enable_checksums);
         assert_eq!(config.cache_size_bytes, 1024 * 1024);
     }
+
+    // ========================================================================
+    // Critical Safety Tests (LSN Race Conditions)
+    // ========================================================================
+
+    #[test]
+    fn test_lsn_monotonic_increase_only() {
+        // Test that set_flushed_lsn only increases monotonically
+        // This prevents race conditions where out-of-order commits could
+        // overwrite a higher LSN with a lower LSN
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        let storage = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+
+        // Store with LSN 100
+        let node1 = create_test_node_version(1);
+        storage
+            .store_batch_with_lsn(std::slice::from_ref(&node1), &[], LSN(100))
+            .unwrap();
+
+        assert_eq!(storage.get_flushed_lsn().unwrap(), Some(LSN(100)));
+
+        // Try to store with lower LSN 50 (simulates out-of-order commit)
+        let node2 = create_test_node_version(2);
+        storage
+            .store_batch_with_lsn(&[node2], &[], LSN(50))
+            .unwrap();
+
+        // LSN should still be 100 (not overwritten by lower 50)
+        assert_eq!(
+            storage.get_flushed_lsn().unwrap(),
+            Some(LSN(100)),
+            "LSN should not decrease"
+        );
+
+        // Store with higher LSN 200
+        let node3 = create_test_node_version(3);
+        storage
+            .store_batch_with_lsn(&[node3], &[], LSN(200))
+            .unwrap();
+
+        // LSN should increase to 200
+        assert_eq!(storage.get_flushed_lsn().unwrap(), Some(LSN(200)));
+    }
+
+    #[test]
+    fn test_concurrent_lsn_updates() {
+        // Test concurrent LSN updates from multiple threads
+        // Verifies that the final LSN is the maximum of all updates
+        use std::sync::Arc;
+        use std::thread;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        let storage = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+
+        // Spawn multiple threads that update LSN in random order
+        let mut handles = vec![];
+        let lsns = [150, 100, 200, 50, 175, 125];
+
+        for (i, &lsn_value) in lsns.iter().enumerate() {
+            let storage_clone = Arc::clone(&storage);
+            let handle = thread::spawn(move || {
+                let node = create_test_node_version((i + 1) as u64);
+                storage_clone
+                    .store_batch_with_lsn(&[node], &[], LSN(lsn_value))
+                    .unwrap();
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Final LSN should be the maximum (200)
+        assert_eq!(
+            storage.get_flushed_lsn().unwrap(),
+            Some(LSN(200)),
+            "Final LSN should be max of all updates"
+        );
+    }
+
+    #[test]
+    fn test_lsn_persistence_across_reopen() {
+        // Verify that LSN persists correctly even with out-of-order updates
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // First session: store with LSN 100
+        {
+            let storage = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+            let node = create_test_node_version(1);
+            storage
+                .store_batch_with_lsn(&[node], &[], LSN(100))
+                .unwrap();
+        }
+
+        // Second session: try to store with lower LSN 50
+        {
+            let storage = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+
+            // LSN should still be 100 from first session
+            assert_eq!(storage.get_flushed_lsn().unwrap(), Some(LSN(100)));
+
+            let node = create_test_node_version(2);
+            storage.store_batch_with_lsn(&[node], &[], LSN(50)).unwrap();
+
+            // LSN should STILL be 100 (not overwritten)
+            assert_eq!(storage.get_flushed_lsn().unwrap(), Some(LSN(100)));
+        }
+
+        // Third session: verify LSN is still 100
+        {
+            let storage = RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap();
+            assert_eq!(
+                storage.get_flushed_lsn().unwrap(),
+                Some(LSN(100)),
+                "LSN should persist correctly"
+            );
+        }
+    }
 }
