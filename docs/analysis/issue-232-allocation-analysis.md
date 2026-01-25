@@ -39,7 +39,7 @@ fn search(&self, query: Vec<f32>, k: usize) -> Vec<SearchResult>;
 - Insert: ~1.5KB allocation per 384-dimensional vector
 - Query: ~1.5KB allocation per search
 - High-throughput: Thousands of allocations per second
-- GC pressure from numerous small allocations
+- Allocator overhead from numerous small allocations
 
 ## Current Implementation (usearch)
 
@@ -116,6 +116,7 @@ fn test_high_throughput_add_operations() -> Result<()> {
         index.add(node_id, &buffer)?;
     }
 
+    let elapsed = start.elapsed();
     let ops_per_sec = 1000.0 / elapsed.as_secs_f64();
     assert!(ops_per_sec > 100.0);  // Sanity check
 }
@@ -147,7 +148,7 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured
 ```
 Allocation per add():  ~1.5KB (384 dims × 4 bytes)
 Allocation per search(): ~1.5KB (query vector)
-Throughput impact:     Significant GC overhead
+Throughput impact:     Significant allocator overhead
 ```
 
 ### After (usearch - Measured)
@@ -221,6 +222,23 @@ usearch (C++ library) allocates internally for:
 - Internal buffers
 
 **Reason:** Inherent to HNSW algorithm, outside our control.
+
+### 3. Batch Operations API (`add_batch`)
+
+```rust
+fn add_batch(&self, items: &[(NodeId, Vec<f32>)]) -> Result<()>
+```
+
+**Issue:** Unlike `add()` and `search()`, the `add_batch()` API requires owned `Vec<f32>` for each item, forcing allocations.
+
+**Impact:** Less allocation-efficient than the slice-based `add()` API for batch insertions.
+
+**Potential Solution:** Use generics to accept slices:
+```rust
+fn add_batch<'a, V: AsRef<[f32]>>(&self, items: &'a [(NodeId, V)]) -> Result<()>
+```
+
+**Recommendation:** Consider as future enhancement if batch operations become a bottleneck.
 
 ## Recommendations
 

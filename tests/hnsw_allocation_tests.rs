@@ -209,14 +209,20 @@ fn test_slice_api_type_safety() -> Result<()> {
     Ok(())
 }
 
-/// Test add_batch to ensure it also uses slices efficiently.
+/// Test add_batch functionality.
+///
+/// Note: Unlike the slice-based add() API, add_batch() currently requires owned
+/// Vec<f32> for each item, which is less allocation-efficient. This is a limitation
+/// of the current API design that could be improved in a future enhancement.
+///
+/// See: Future enhancement to make add_batch accept slices via generics
 #[test]
-fn test_batch_operations_use_slices() -> Result<()> {
+fn test_add_batch_functionality() -> Result<()> {
     let dimensions = 128;
     let index = HnswIndex::new(HnswConfig::new(dimensions, DistanceMetric::Cosine))?;
 
-    // Create batch data - note that we're passing owned Vecs here,
-    // but the individual add() calls within add_batch should still use slices
+    // Create batch data - note that we're required to allocate owned Vecs here
+    // This is less efficient than the slice-based add() API
     let batch: Vec<(NodeId, Vec<f32>)> = (0..100)
         .map(|i| {
             let node_id = NodeId::new(i as u64).unwrap();
