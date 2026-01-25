@@ -327,10 +327,7 @@ fn bench_interleaved_multi_entity_updates(c: &mut Criterion) {
             &entity_count,
             |b, &count| {
                 b.iter_batched(
-                    || {
-                        let storage = HistoricalStorage::with_config(config.clone());
-                        storage
-                    },
+                    || HistoricalStorage::with_config(config.clone()),
                     |mut storage| {
                         // Add 10 versions to each entity in round-robin fashion
                         let label = GLOBAL_INTERNER.intern("Sensor").unwrap();
@@ -338,7 +335,7 @@ fn bench_interleaved_multi_entity_updates(c: &mut Criterion) {
                             for entity_id in 0..count {
                                 let node_id = NodeId::new(entity_id).unwrap();
                                 let version_id =
-                                    VersionId::new((round * count + entity_id) as u64).unwrap();
+                                    VersionId::new(round * count + entity_id).unwrap();
                                 let temporal = BiTemporalInterval::current(
                                     (1000 + (round as i64) * 100).into(),
                                 );
