@@ -1204,9 +1204,11 @@ impl WriteTransaction {
         // internally, so no explicit lock release needed (automatically released after inserts).
         drop(historical);
 
-        // Rebuild adjacency indexes once after all edge operations
-        // This is much more efficient than rebuilding after each operation
-        self.current.rebuild_adjacency();
+        // Rebuild adjacency indexes only if edge operations occurred
+        // This optimization avoids expensive rebuilds for node-only transactions
+        if self.buffer.has_edge_operations() {
+            self.current.rebuild_adjacency();
+        }
 
         Ok(())
     }
@@ -2434,7 +2436,7 @@ mod tests {
         let current = Arc::clone(&tx.current);
 
         // Commit empty transaction (no operations buffered)
-        // This should not panic when rebuild_adjacency() is called
+        // Should skip rebuild_adjacency() since no edge operations occurred
         tx.commit().unwrap();
 
         // Verify storage is still in valid state
@@ -2451,12 +2453,44 @@ mod tests {
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
         tx.create_node("Person", props).unwrap();
 
-        // Commit - should call rebuild_adjacency() with empty edge set
+        // Commit - should skip rebuild_adjacency() since no edge operations occurred
         tx.commit().unwrap();
 
         // Verify node was created and adjacency is valid
         assert_eq!(current.node_count(), 1);
         assert_eq!(current.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_transaction_with_edge_operations() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes and edges
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let alice = tx.create_node("Person", props).unwrap();
+
+        let props = PropertyMapBuilder::new().insert("name", "Bob").build();
+        let bob = tx.create_node("Person", props).unwrap();
+
+        let edge_props = PropertyMapBuilder::new().insert("since", 2020i64).build();
+        let edge_id = tx.create_edge(alice, bob, "KNOWS", edge_props).unwrap();
+
+        // Commit - should call rebuild_adjacency() since edge was created
+        tx.commit().unwrap();
+
+        // Verify adjacency was rebuilt correctly
+        assert_eq!(current.node_count(), 2);
+        assert_eq!(current.edge_count(), 1);
+
+        // Verify adjacency list is correct
+        let outgoing = current.get_outgoing_edges(alice);
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0], edge_id);
+
+        let incoming = current.get_incoming_edges(bob);
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0], edge_id);
     }
 
     #[test]
