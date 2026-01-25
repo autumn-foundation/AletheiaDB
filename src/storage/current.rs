@@ -2228,6 +2228,28 @@ impl CurrentStorage {
         self.indexes.iter_nodes().map(|n| n.id).collect()
     }
 
+    /// Get all edge IDs in the current storage.
+    ///
+    /// This is used by recovery tests and query executor for full edge scans.
+    /// For large graphs, prefer using filtered scans instead.
+    pub fn get_all_edge_ids(&self) -> Vec<EdgeId> {
+        self.indexes.iter_edges().map(|e| e.id).collect()
+    }
+
+    /// Get all nodes in the current storage.
+    ///
+    /// Used by recovery property tests to verify invariants.
+    pub fn get_all_nodes(&self) -> Vec<crate::Node> {
+        self.indexes.iter_nodes().collect()
+    }
+
+    /// Get all edges in the current storage.
+    ///
+    /// Used by recovery property tests to verify invariants.
+    pub fn get_all_edges(&self) -> Vec<crate::Edge> {
+        self.indexes.iter_edges().collect()
+    }
+
     /// Get nodes by label.
     ///
     /// Returns an iterator over all nodes with the given label.
