@@ -213,6 +213,12 @@ harness = false
 path = "benches/current_state.rs"
 required-features = []
 
+[[bench]]
+name = "historical_storage"
+harness = false
+path = "benches/historical_storage.rs"
+required-features = []
+
 # High-level API - includes transaction overhead and API layer
 [[bench]]
 name = "gallifreydb"
