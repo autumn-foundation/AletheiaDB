@@ -699,11 +699,13 @@ mod tests {
         data.nodes.push(PersistedNode {
             id: 1,
             label_idx: GLOBAL_INTERNER.intern("Person").unwrap().as_u32(),
+            version_id: 1,
             properties: PersistedPropertyMap { entries: vec![] },
         });
         data.nodes.push(PersistedNode {
             id: 2,
             label_idx: GLOBAL_INTERNER.intern("Document").unwrap().as_u32(),
+            version_id: 2,
             properties: PersistedPropertyMap { entries: vec![] },
         });
 

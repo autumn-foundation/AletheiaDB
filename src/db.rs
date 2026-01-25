@@ -597,6 +597,7 @@ fn persist_graph_index(
         graph_data.nodes.push(PersistedNode {
             id: node.id.as_u64(),
             label_idx: node.label.as_u32(),
+            version_id: node.current_version.as_u64(),
             properties,
         });
     }
@@ -613,6 +614,7 @@ fn persist_graph_index(
             source_id: edge.source.as_u64(),
             target_id: edge.target.as_u64(),
             label_idx: edge.label.as_u32(),
+            version_id: edge.current_version.as_u64(),
             properties,
         });
     }
@@ -1002,11 +1004,14 @@ impl GallifreyDB {
                         let mut edges_failed_version = 0usize;
 
                         // Pre-calculate max IDs before inserting to avoid race conditions
+                        let mut max_version_id = 0u64;
                         for persisted_node in &graph_data.nodes {
                             max_node_id = max_node_id.max(persisted_node.id);
+                            max_version_id = max_version_id.max(persisted_node.version_id);
                         }
                         for persisted_edge in &graph_data.edges {
                             max_edge_id = max_edge_id.max(persisted_edge.id);
+                            max_version_id = max_version_id.max(persisted_edge.version_id);
                         }
 
                         // Initialize ID generators BEFORE inserting entities to prevent collisions
@@ -1019,6 +1024,13 @@ impl GallifreyDB {
                             && let Ok(mut edge_gen) = db.edge_id_gen.lock_or_err()
                         {
                             *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
+                        }
+                        // Initialize version ID generator from max persisted version_id
+                        if max_version_id > 0
+                            && let Ok(mut version_gen) = db.version_id_gen.lock_or_err()
+                        {
+                            *version_gen =
+                                crate::core::id::IdGenerator::with_start(max_version_id + 1);
                         }
 
                         // Restore nodes with explicit error tracking
@@ -1052,29 +1064,16 @@ impl GallifreyDB {
                                 }
                             };
 
-                            // Generate version ID
-                            let version_id = {
-                                let version_gen = match db.version_id_gen.lock_or_err() {
-                                    Ok(g) => g,
-                                    Err(e) => {
-                                        nodes_failed_version += 1;
-                                        eprintln!(
-                                            "Warning: Skipping node {} (label '{}'): version generator lock failed: {}",
-                                            persisted_node.id, label_str, e
-                                        );
-                                        continue;
-                                    }
-                                };
-                                match version_gen.next() {
-                                    Ok(v) => VersionId::new_unchecked(v),
-                                    Err(e) => {
-                                        nodes_failed_version += 1;
-                                        eprintln!(
-                                            "Warning: Skipping node {} (label '{}'): version ID generation failed: {}",
-                                            persisted_node.id, label_str, e
-                                        );
-                                        continue;
-                                    }
+                            // Restore version ID from persisted data (CRITICAL for temporal provenance)
+                            let version_id = match VersionId::new(persisted_node.version_id) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    nodes_failed_version += 1;
+                                    eprintln!(
+                                        "Warning: Skipping node {} (label '{}'): invalid version ID {}: {}",
+                                        persisted_node.id, label_str, persisted_node.version_id, e
+                                    );
+                                    continue;
                                 }
                             };
 
@@ -1126,29 +1125,16 @@ impl GallifreyDB {
                                 }
                             };
 
-                            // Generate version ID
-                            let version_id = {
-                                let version_gen = match db.version_id_gen.lock_or_err() {
-                                    Ok(g) => g,
-                                    Err(e) => {
-                                        edges_failed_version += 1;
-                                        eprintln!(
-                                            "Warning: Skipping edge {} (label '{}'): version generator lock failed: {}",
-                                            persisted_edge.id, label_str, e
-                                        );
-                                        continue;
-                                    }
-                                };
-                                match version_gen.next() {
-                                    Ok(v) => VersionId::new_unchecked(v),
-                                    Err(e) => {
-                                        edges_failed_version += 1;
-                                        eprintln!(
-                                            "Warning: Skipping edge {} (label '{}'): version ID generation failed: {}",
-                                            persisted_edge.id, label_str, e
-                                        );
-                                        continue;
-                                    }
+                            // Restore version ID from persisted data (CRITICAL for temporal provenance)
+                            let version_id = match VersionId::new(persisted_edge.version_id) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    edges_failed_version += 1;
+                                    eprintln!(
+                                        "Warning: Skipping edge {} (label '{}'): invalid version ID {}: {}",
+                                        persisted_edge.id, label_str, persisted_edge.version_id, e
+                                    );
+                                    continue;
                                 }
                             };
 
@@ -3139,6 +3125,7 @@ impl GallifreyDB {
             graph_data.nodes.push(PersistedNode {
                 id: node.id.as_u64(),
                 label_idx,
+                version_id: node.current_version.as_u64(),
                 properties,
             });
         }
@@ -3156,6 +3143,7 @@ impl GallifreyDB {
                 source_id: edge.source.as_u64(),
                 target_id: edge.target.as_u64(),
                 label_idx,
+                version_id: edge.current_version.as_u64(),
                 properties,
             });
         }

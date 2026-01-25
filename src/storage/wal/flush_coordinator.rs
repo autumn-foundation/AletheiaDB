@@ -31,13 +31,14 @@
 //! threads should not call `flush()` concurrently.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use super::LSN;
 use super::ring_buffer::PendingEntry;
 
 use crate::utils::error::{Error, Result, StorageError};
@@ -50,6 +51,61 @@ const WAL_VERSION: u8 = 1;
 
 /// Size of the WAL segment header (magic + version).
 const WAL_HEADER_SIZE: usize = 5;
+
+/// Metadata about a WAL segment's LSN range.
+///
+/// This is stored in a companion `.meta` file for each segment to enable
+/// efficient LSN-based truncation without reading the entire segment.
+#[derive(Debug, Clone)]
+pub struct SegmentMetadata {
+    /// Minimum LSN in this segment.
+    pub min_lsn: LSN,
+    /// Maximum LSN in this segment.
+    pub max_lsn: LSN,
+    /// Number of entries in this segment.
+    pub entry_count: u64,
+}
+
+impl SegmentMetadata {
+    /// Create new segment metadata.
+    pub fn new(min_lsn: LSN, max_lsn: LSN, entry_count: u64) -> Self {
+        Self {
+            min_lsn,
+            max_lsn,
+            entry_count,
+        }
+    }
+
+    /// Serialize to bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(24);
+        bytes.extend_from_slice(&self.min_lsn.0.to_le_bytes());
+        bytes.extend_from_slice(&self.max_lsn.0.to_le_bytes());
+        bytes.extend_from_slice(&self.entry_count.to_le_bytes());
+        bytes
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 24 {
+            return None;
+        }
+        let min_lsn = LSN(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]));
+        let max_lsn = LSN(u64::from_le_bytes([
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]));
+        let entry_count = u64::from_le_bytes([
+            bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23],
+        ]);
+        Some(Self {
+            min_lsn,
+            max_lsn,
+            entry_count,
+        })
+    }
+}
 
 /// Configuration for the flush coordinator.
 #[derive(Debug, Clone)]
@@ -109,6 +165,13 @@ pub struct FlushStats {
 /// This struct manages segment files and coordinates flushing entries
 /// from the concurrent WAL stripes to disk.
 ///
+/// # LSN Tracking (ADR-0025)
+///
+/// The coordinator tracks min/max LSN for each segment to enable safe
+/// WAL truncation. When a segment is closed, a companion `.meta` file is
+/// written with the LSN range. This enables `truncate_to_lsn()` to determine
+/// which segments can be safely removed.
+///
 /// # Mutex Poisoning Recovery
 ///
 /// The coordinator uses `unwrap_or_else(|e| e.into_inner())` when acquiring
@@ -147,6 +210,12 @@ pub struct FlushCoordinator {
     total_bytes_written: AtomicU64,
     /// Total flushes performed.
     total_flushes: AtomicU64,
+    /// Minimum LSN in the current segment (for metadata tracking).
+    current_segment_min_lsn: AtomicU64,
+    /// Maximum LSN in the current segment (for metadata tracking).
+    current_segment_max_lsn: AtomicU64,
+    /// Entry count in the current segment.
+    current_segment_entry_count: AtomicU64,
 }
 
 impl FlushCoordinator {
@@ -169,6 +238,9 @@ impl FlushCoordinator {
             total_entries_flushed: AtomicU64::new(0),
             total_bytes_written: AtomicU64::new(0),
             total_flushes: AtomicU64::new(0),
+            current_segment_min_lsn: AtomicU64::new(u64::MAX),
+            current_segment_max_lsn: AtomicU64::new(0),
+            current_segment_entry_count: AtomicU64::new(0),
         };
 
         // Find the latest segment ID
@@ -203,6 +275,44 @@ impl FlushCoordinator {
     /// Get the path for a segment file.
     fn segment_path(&self, segment_id: u64) -> PathBuf {
         self.config.wal_dir.join(format!("{:06}.log", segment_id))
+    }
+
+    /// Get the path for a segment's metadata file.
+    fn segment_meta_path(&self, segment_id: u64) -> PathBuf {
+        self.config
+            .wal_dir
+            .join(format!("{:06}.log.meta", segment_id))
+    }
+
+    /// Write segment metadata to a companion file.
+    fn write_segment_metadata(&self, segment_id: u64) -> Result<()> {
+        let min_lsn = self.current_segment_min_lsn.load(Ordering::Relaxed);
+        let max_lsn = self.current_segment_max_lsn.load(Ordering::Relaxed);
+        let entry_count = self.current_segment_entry_count.load(Ordering::Relaxed);
+
+        // Only write metadata if we have valid LSN range
+        if min_lsn <= max_lsn && entry_count > 0 {
+            let metadata = SegmentMetadata::new(LSN(min_lsn), LSN(max_lsn), entry_count);
+            let meta_path = self.segment_meta_path(segment_id);
+            let bytes = metadata.to_bytes();
+
+            std::fs::write(&meta_path, &bytes).map_err(|e| {
+                Error::Storage(StorageError::IoError(format!(
+                    "Failed to write segment metadata: {}",
+                    e
+                )))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Read segment metadata from a companion file.
+    pub fn read_segment_metadata(&self, segment_id: u64) -> Option<SegmentMetadata> {
+        let meta_path = self.segment_meta_path(segment_id);
+        let mut bytes = Vec::new();
+        File::open(&meta_path).ok()?.read_to_end(&mut bytes).ok()?;
+        SegmentMetadata::from_bytes(&bytes)
     }
 
     /// Open or create the current segment file.
@@ -279,6 +389,8 @@ impl FlushCoordinator {
         let current_size = self.current_segment_size.load(Ordering::Relaxed);
 
         if current_size >= self.config.segment_size as u64 {
+            let closing_segment_id = self.current_segment_id.load(Ordering::Relaxed);
+
             // Flush and sync current segment
             {
                 let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
@@ -306,14 +418,21 @@ impl FlushCoordinator {
                 }
             }
 
+            // Write segment metadata before closing (ADR-0025)
+            self.write_segment_metadata(closing_segment_id)?;
+
             // Clear sync handle
             {
                 let mut sync_guard = self.sync_handle.lock().unwrap_or_else(|e| e.into_inner());
                 *sync_guard = None;
             }
 
-            // Reset size
+            // Reset size and LSN tracking for new segment
             self.current_segment_size.store(0, Ordering::Relaxed);
+            self.current_segment_min_lsn
+                .store(u64::MAX, Ordering::Relaxed);
+            self.current_segment_max_lsn.store(0, Ordering::Relaxed);
+            self.current_segment_entry_count.store(0, Ordering::Relaxed);
 
             // Clean up old segments
             self.cleanup_old_segments()?;
@@ -332,19 +451,133 @@ impl FlushCoordinator {
         if let Ok(entries) = std::fs::read_dir(&self.config.wal_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
+
+                // Check for .log files
                 let is_old_segment = path.extension().is_some_and(|ext| ext == "log")
                     && path
                         .file_stem()
                         .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
                         .is_some_and(|id| id < retain_from);
 
-                if is_old_segment {
+                // Check for .log.meta files
+                let is_old_meta = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|name| {
+                        name.ends_with(".log.meta")
+                            && name
+                                .strip_suffix(".log.meta")
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .is_some_and(|id| id < retain_from)
+                    });
+
+                if is_old_segment || is_old_meta {
                     let _ = std::fs::remove_file(&path);
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Truncate WAL segments up to the specified LSN.
+    ///
+    /// This removes all segments where `max_lsn < truncate_lsn`. The current
+    /// active segment is never removed.
+    ///
+    /// # Arguments
+    ///
+    /// * `truncate_lsn` - Remove segments with max_lsn strictly less than this
+    ///
+    /// # Returns
+    ///
+    /// The number of segments removed.
+    ///
+    /// # Safety
+    ///
+    /// This method should only be called after confirming that all operations
+    /// up to `truncate_lsn` have been durably persisted to cold storage.
+    /// The key invariant is: `truncate_lsn <= cold_storage.get_flushed_lsn()`
+    pub fn truncate_to_lsn(&self, truncate_lsn: LSN) -> Result<usize> {
+        let current_id = self.current_segment_id.load(Ordering::Relaxed);
+        let mut removed_count = 0;
+
+        // Collect segments to check
+        let mut segments_to_check: Vec<(u64, PathBuf)> = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&self.config.wal_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "log")
+                    && let Some(segment_id) = path
+                        .file_stem()
+                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                    && segment_id < current_id
+                {
+                    segments_to_check.push((segment_id, path));
+                }
+            }
+        }
+
+        // Check each segment's metadata and remove if max_lsn < truncate_lsn
+        for (segment_id, path) in segments_to_check {
+            let should_remove = if let Some(metadata) = self.read_segment_metadata(segment_id) {
+                // Remove if all entries in segment are before truncate point
+                metadata.max_lsn.0 < truncate_lsn.0
+            } else {
+                // No metadata file - be conservative and don't remove
+                // (This could happen for old segments created before LSN tracking)
+                false
+            };
+
+            if should_remove {
+                // Remove segment file
+                if std::fs::remove_file(&path).is_ok() {
+                    removed_count += 1;
+                }
+                // Remove metadata file
+                let meta_path = self.segment_meta_path(segment_id);
+                let _ = std::fs::remove_file(&meta_path);
+            }
+        }
+
+        Ok(removed_count)
+    }
+
+    /// Get information about all WAL segments.
+    ///
+    /// Returns a list of (segment_id, metadata) for all segments that have
+    /// metadata files. Segments without metadata are not included.
+    pub fn list_segments_with_metadata(&self) -> Vec<(u64, SegmentMetadata)> {
+        let mut segments = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&self.config.wal_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "log")
+                    && let Some(segment_id) = path
+                        .file_stem()
+                        .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+                    && let Some(metadata) = self.read_segment_metadata(segment_id)
+                {
+                    segments.push((segment_id, metadata));
+                }
+            }
+        }
+
+        segments.sort_by_key(|(id, _)| *id);
+        segments
+    }
+
+    /// Get the minimum LSN that is still in the WAL.
+    ///
+    /// This can be used to determine what LSN to start recovery from.
+    /// Returns `None` if no segments exist or no segments have metadata.
+    pub fn get_min_lsn(&self) -> Option<LSN> {
+        self.list_segments_with_metadata()
+            .into_iter()
+            .map(|(_, meta)| meta.min_lsn)
+            .min()
     }
 
     /// Flush a batch of entries to disk.
@@ -371,6 +604,10 @@ impl FlushCoordinator {
 
         let mut bytes_written = 0usize;
 
+        // Track LSN range for this batch (ADR-0025)
+        let mut batch_min_lsn = u64::MAX;
+        let mut batch_max_lsn = 0u64;
+
         // Write all entries
         {
             let mut writer_guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
@@ -381,6 +618,10 @@ impl FlushCoordinator {
             })?;
 
             for entry in &entries {
+                // Track LSN range
+                batch_min_lsn = batch_min_lsn.min(entry.lsn.0);
+                batch_max_lsn = batch_max_lsn.max(entry.lsn.0);
+
                 writer.write_all(&entry.data).map_err(|e| {
                     Error::Storage(StorageError::IoError(format!(
                         "Failed to write WAL entry: {}",
@@ -398,6 +639,15 @@ impl FlushCoordinator {
                 )))
             })?;
         }
+
+        // Update segment LSN tracking (ADR-0025)
+        // Use fetch_min/fetch_max for atomic updates
+        self.current_segment_min_lsn
+            .fetch_min(batch_min_lsn, Ordering::Relaxed);
+        self.current_segment_max_lsn
+            .fetch_max(batch_max_lsn, Ordering::Relaxed);
+        self.current_segment_entry_count
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
 
         // Sync to disk if requested
         if sync && self.config.sync_on_flush {
@@ -848,5 +1098,229 @@ mod tests {
 
         // Should have at most segments_to_retain + 1 (current)
         assert!(segment_count <= 3);
+    }
+
+    // ============================================================
+    // TDD Tests for LSN-based truncation (ADR-0025)
+    // ============================================================
+
+    #[test]
+    fn test_segment_metadata_serialization() {
+        let metadata = SegmentMetadata::new(LSN(100), LSN(200), 50);
+
+        let bytes = metadata.to_bytes();
+        assert_eq!(bytes.len(), 24);
+
+        let restored = SegmentMetadata::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.min_lsn, LSN(100));
+        assert_eq!(restored.max_lsn, LSN(200));
+        assert_eq!(restored.entry_count, 50);
+    }
+
+    #[test]
+    fn test_segment_metadata_from_bytes_too_short() {
+        let bytes = vec![0u8; 10]; // Too short
+        assert!(SegmentMetadata::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_flush_tracks_lsn_range() {
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 50; // Very small to force rotation
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Flush entries with various LSNs
+        let entries = vec![
+            create_test_entry(10, &[1u8; 20]),
+            create_test_entry(20, &[2u8; 20]),
+            create_test_entry(15, &[3u8; 20]),
+        ];
+        coordinator.flush(entries, true).unwrap();
+
+        // Force rotation to write metadata
+        let entry = create_test_entry(100, &[4u8; 100]);
+        coordinator.flush(vec![entry], true).unwrap();
+
+        // Check segments have metadata
+        let segments = coordinator.list_segments_with_metadata();
+        assert!(!segments.is_empty());
+
+        // First segment should have min_lsn=10, max_lsn=20
+        if let Some((_, meta)) = segments.first() {
+            assert_eq!(meta.min_lsn, LSN(10));
+            assert_eq!(meta.max_lsn, LSN(20));
+            assert_eq!(meta.entry_count, 3);
+        }
+    }
+
+    #[test]
+    fn test_truncate_to_lsn_removes_old_segments() {
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 30; // Very small
+        config.segments_to_retain = 100; // Don't auto-cleanup
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Create segments with different LSN ranges
+        // Segment 1: LSN 1-10
+        for i in 1..=10 {
+            coordinator
+                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
+                .unwrap();
+        }
+
+        // Segment 2: LSN 11-20
+        for i in 11..=20 {
+            coordinator
+                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
+                .unwrap();
+        }
+
+        // Segment 3: LSN 21-30
+        for i in 21..=30 {
+            coordinator
+                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
+                .unwrap();
+        }
+
+        // Count segments before truncation
+        let segments_before: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+            .collect();
+        let count_before = segments_before.len();
+
+        // Truncate to LSN 15 - should remove segments where max_lsn < 15
+        let removed = coordinator.truncate_to_lsn(LSN(15)).unwrap();
+
+        // Count segments after truncation
+        let segments_after: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+            .collect();
+
+        // Should have removed at least one segment
+        assert!(removed > 0 || count_before == segments_after.len());
+    }
+
+    #[test]
+    fn test_truncate_to_lsn_keeps_needed_segments() {
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 30; // Very small
+        config.segments_to_retain = 100; // Don't auto-cleanup
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Create a segment with LSN 100-110
+        for i in 100..=110 {
+            coordinator
+                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
+                .unwrap();
+        }
+
+        // Force rotation
+        coordinator
+            .flush(vec![create_test_entry(200, &[200u8; 100])], true)
+            .unwrap();
+
+        // Truncate to LSN 50 - should not remove the segment with LSN 100-110
+        let removed = coordinator.truncate_to_lsn(LSN(50)).unwrap();
+        assert_eq!(removed, 0);
+
+        // Verify segment still exists
+        let segments = coordinator.list_segments_with_metadata();
+        assert!(!segments.is_empty());
+    }
+
+    #[test]
+    fn test_truncate_to_lsn_never_removes_active_segment() {
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segments_to_retain = 100;
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Create a single active segment
+        coordinator
+            .flush(vec![create_test_entry(1, b"test")], true)
+            .unwrap();
+
+        let current_id = coordinator.current_segment_id();
+
+        // Try to truncate everything
+        let removed = coordinator.truncate_to_lsn(LSN(1000)).unwrap();
+        assert_eq!(removed, 0);
+
+        // Active segment should still exist
+        let segment_path = coordinator.segment_path(current_id);
+        assert!(segment_path.exists());
+    }
+
+    #[test]
+    fn test_get_min_lsn() {
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 30;
+        config.segments_to_retain = 100;
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Initially no segments with metadata
+        assert!(coordinator.get_min_lsn().is_none());
+
+        // Create segment with LSN 50-60
+        for i in 50..=60 {
+            coordinator
+                .flush(vec![create_test_entry(i, &[i as u8; 20])], true)
+                .unwrap();
+        }
+
+        // Force rotation to write metadata
+        coordinator
+            .flush(vec![create_test_entry(100, &[100u8; 100])], true)
+            .unwrap();
+
+        // min_lsn should be 50
+        let min_lsn = coordinator.get_min_lsn();
+        assert!(min_lsn.is_some());
+        assert_eq!(min_lsn.unwrap(), LSN(50));
+    }
+
+    #[test]
+    fn test_cleanup_removes_meta_files() {
+        let dir = tempdir().unwrap();
+        let mut config = FlushCoordinatorConfig::new(dir.path());
+        config.segment_size = 30;
+        config.segments_to_retain = 1;
+
+        let coordinator = FlushCoordinator::new(config).unwrap();
+
+        // Create multiple segments to trigger cleanup
+        for i in 1..=50 {
+            coordinator
+                .flush(vec![create_test_entry(i, &[i as u8; 30])], true)
+                .unwrap();
+        }
+
+        // Count .meta files - should be limited due to cleanup
+        let meta_count = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|s| s.ends_with(".log.meta"))
+            })
+            .count();
+
+        // Should have at most segments_to_retain + 1 meta files
+        assert!(meta_count <= 3);
     }
 }

@@ -225,17 +225,17 @@ Three-tier storage architecture for unlimited historical depth while preserving 
 **Architecture:**
 - **Hot Tier (RAM)**: Current state, 22-70ns lookup
 - **Warm Tier (LRU Cache)**: Recently accessed history, <1µs lookup
-- **Cold Tier (Disk/RocksDB)**: Compressed historical versions, <1ms lookup
+- **Cold Tier (Redb)**: Compressed historical versions, <1ms lookup
 
 **Quick Start:**
 ```rust
 use gallifreydb::storage::{
     TieredStorage, TieredStorageConfig,
-    FileColdStorage, ColdStorageConfig,
+    RedbColdStorage, RedbConfig,
 };
 
-// Create cold storage backend
-let cold = FileColdStorage::new("data/cold", ColdStorageConfig::default())?;
+// Create Redb cold storage backend
+let cold = RedbColdStorage::new("data/cold.redb", RedbConfig::new())?;
 
 // Create tiered storage
 let tiered = TieredStorage::new(TieredStorageConfig::default(), Box::new(cold));
@@ -244,17 +244,13 @@ let tiered = TieredStorage::new(TieredStorageConfig::default(), Box::new(cold));
 historical.set_tiered_storage(Arc::new(tiered));
 ```
 
-**RocksDB Backend (Production):**
-```toml
-[dependencies]
-gallifreydb = { version = "0.1", features = ["tiered-storage"] }
-```
-
 **Key Features:**
 - Unlimited historical depth on disk
+- Pure Rust implementation (no FFI dependencies)
 - Current-state performance unchanged (22-70ns)
 - Configurable migration policies (age, memory thresholds)
 - Zstd/LZ4 compression (3-5x compression ratio)
+- LSN-based WAL truncation for efficient recovery
 - Latency metrics with percentiles (p50, p95, p99)
 
 **See [docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md) for complete guide.**

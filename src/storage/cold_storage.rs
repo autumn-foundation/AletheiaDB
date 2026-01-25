@@ -40,6 +40,7 @@
 
 use crate::core::id::VersionId;
 use crate::storage::version::{EdgeVersion, NodeVersion};
+use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,7 +108,7 @@ impl Default for ColdStorageConfig {
 ///
 /// # Compression Stats Note
 ///
-/// For backends like RocksDB that handle compression internally at the block level,
+/// For backends that handle compression internally at the storage level,
 /// `bytes_written_compressed` may equal `bytes_written_raw` because the actual
 /// compression happens asynchronously during compaction. To get the true on-disk
 /// size, use the backend's `approximate_size()` method instead.
@@ -125,7 +126,7 @@ pub struct ColdStorageStats {
     pub bytes_written_raw: u64,
     /// Total bytes written (after compression).
     ///
-    /// Note: For backends like RocksDB that handle compression internally,
+    /// Note: For backends that handle compression internally,
     /// this may equal `bytes_written_raw`. Use `approximate_size()` or
     /// `compression_ratio()` on the backend for actual compression metrics.
     pub bytes_written_compressed: u64,
@@ -147,8 +148,8 @@ impl ColdStorageStats {
     ///
     /// Returns 1.0 if no data has been written.
     ///
-    /// Note: For backends like RocksDB, this ratio may be 1.0 because compression
-    /// happens at the block level during compaction. Use the backend's own
+    /// Note: For some backends, this ratio may be 1.0 because compression
+    /// happens at the storage level during compaction. Use the backend's own
     /// `compression_ratio()` method for actual on-disk compression metrics.
     pub fn compression_ratio(&self) -> f64 {
         if self.bytes_written_compressed == 0 {
@@ -297,6 +298,71 @@ pub trait ColdStorage: Send + Sync {
     /// Close the cold storage, flushing any pending writes.
     fn close(&self) -> Result<()> {
         self.flush()
+    }
+
+    // ========================================================================
+    // LSN Tracking (ADR-0025)
+    //
+    // These methods enable coordinated WAL truncation by tracking which LSN
+    // has been durably flushed to cold storage. The key invariant is:
+    //   WAL_truncation_lsn <= Redb_flushed_lsn
+    //
+    // This ensures any operation truncated from WAL has been durably persisted.
+    // ========================================================================
+
+    /// Get the highest LSN that has been durably flushed to cold storage.
+    ///
+    /// Returns `None` if no data has been flushed yet (cold storage is empty
+    /// or the backend doesn't support LSN tracking).
+    ///
+    /// # LSN Tracking
+    ///
+    /// The flushed LSN represents a recovery checkpoint:
+    /// - All operations with LSN <= flushed_lsn are in cold storage
+    /// - WAL can be safely truncated up to this LSN
+    /// - Recovery should replay from flushed_lsn + 1
+    ///
+    /// # Default Implementation
+    ///
+    /// Returns `None`, indicating LSN tracking is not supported.
+    /// Implementations that support LSN tracking should override this.
+    fn get_flushed_lsn(&self) -> Result<Option<LSN>> {
+        Ok(None)
+    }
+
+    /// Store a batch of versions with LSN tracking.
+    ///
+    /// This operation should be atomic - either all versions are stored and
+    /// the flushed_lsn is updated, or nothing is changed. This atomicity
+    /// enables safe WAL truncation.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - Node versions to store
+    /// * `edges` - Edge versions to store
+    /// * `lsn` - The LSN to record as flushed after this batch
+    ///
+    /// # LSN Semantics
+    ///
+    /// After a successful call, `get_flushed_lsn()` should return at least `lsn`.
+    /// The implementation may update the flushed_lsn to be:
+    /// - Exactly `lsn`, or
+    /// - `max(current_flushed_lsn, lsn)` if batches may arrive out of order
+    ///
+    /// # Default Implementation
+    ///
+    /// Delegates to `store_node_versions_batch` and `store_edge_versions_batch`,
+    /// ignoring the LSN. Implementations that support LSN tracking should
+    /// override this to provide atomic batch + LSN updates.
+    fn store_batch_with_lsn(
+        &self,
+        nodes: &[NodeVersion],
+        edges: &[EdgeVersion],
+        _lsn: LSN,
+    ) -> Result<()> {
+        self.store_node_versions_batch(nodes)?;
+        self.store_edge_versions_batch(edges)?;
+        Ok(())
     }
 }
 
@@ -960,7 +1026,7 @@ enum SerializablePropertyValue {
 
 /// Encode a NodeVersion to bytes for storage.
 ///
-/// This function is public for use by other cold storage implementations (e.g., RocksDB).
+/// This function is public for use by all cold storage implementations.
 pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
     use crate::core::interning::GLOBAL_INTERNER;
 
@@ -985,7 +1051,7 @@ pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
 
 /// Decode a NodeVersion from bytes.
 ///
-/// This function is public for use by other cold storage implementations (e.g., RocksDB).
+/// This function is public for use by all cold storage implementations.
 pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
     use crate::core::hlc::HybridTimestamp;
     use crate::core::id::NodeId;
@@ -1031,7 +1097,7 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
 
 /// Encode an EdgeVersion to bytes for storage.
 ///
-/// This function is public for use by other cold storage implementations (e.g., RocksDB).
+/// This function is public for use by all cold storage implementations.
 pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
     use crate::core::interning::GLOBAL_INTERNER;
 
@@ -1058,7 +1124,7 @@ pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
 
 /// Decode an EdgeVersion from bytes.
 ///
-/// This function is public for use by other cold storage implementations (e.g., RocksDB).
+/// This function is public for use by all cold storage implementations.
 pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
     use crate::core::hlc::HybridTimestamp;
     use crate::core::id::{EdgeId, NodeId};

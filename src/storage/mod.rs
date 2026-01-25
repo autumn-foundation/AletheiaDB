@@ -13,15 +13,16 @@
 
 pub mod checkpoint;
 pub mod cold_storage;
+pub mod compression;
 pub mod current;
 pub mod historical;
 pub mod index_persistence;
 pub mod migration;
 pub mod observer;
 pub mod persistence;
-#[cfg(feature = "tiered-storage")]
-pub mod rocksdb_cold_storage;
+pub mod redb_cold_storage;
 pub mod sharding;
+pub mod snapshot;
 pub mod tiered_storage;
 pub mod version;
 pub mod wal;
@@ -44,8 +45,8 @@ pub use migration::{
 };
 pub use observer::{Observer, StorageEvent, StorageObserver};
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
-#[cfg(feature = "tiered-storage")]
-pub use rocksdb_cold_storage::{RocksDBColdStorage, RocksDBConfig};
+pub use redb_cold_storage::{RedbColdStorage, RedbConfig};
+pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot, StorageSnapshot};
 pub use tiered_storage::{
     LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
 };

@@ -171,6 +171,9 @@ pub struct PersistedNode {
     pub id: u64,
     /// Label index in string interner
     pub label_idx: u32,
+    /// Current version ID (links to historical storage)
+    /// CRITICAL: This must be preserved to maintain temporal provenance
+    pub version_id: u64,
     /// Node properties
     pub properties: PersistedPropertyMap,
 }
@@ -186,6 +189,9 @@ pub struct PersistedEdge {
     pub target_id: u64,
     /// Label index in string interner
     pub label_idx: u32,
+    /// Current version ID (links to historical storage)
+    /// CRITICAL: This must be preserved to maintain temporal provenance
+    pub version_id: u64,
     /// Edge properties
     pub properties: PersistedPropertyMap,
 }
