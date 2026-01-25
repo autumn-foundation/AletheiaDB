@@ -355,7 +355,7 @@ fn estimate_property_map_size(properties: &PropertyMap) -> usize {
     let mut size = 4; // Count field
     for (key, value) in properties.iter() {
         // Key: length prefix (4) + key bytes
-        // SAFETY: We must resolve the key to get accurate size.
+        // Resolve the key to get accurate size.
         // If resolve fails (corrupted interner state), use a conservative upper bound
         // to ensure we never under-allocate. 256 is a reasonable maximum key length.
         let key_len = GLOBAL_INTERNER
