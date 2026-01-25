@@ -329,10 +329,24 @@ impl ConcurrentWal {
     ///
     /// Uses a thread-local buffer to avoid lock contention on the hot path.
     /// Each thread has its own serialization buffer, eliminating synchronization overhead.
+    ///
+    /// # Performance Optimization
+    ///
+    /// Pre-allocates buffer capacity based on operation type to avoid reallocations
+    /// during serialization. This is especially important for property-heavy operations
+    /// that may exceed the default 4KB thread-local buffer capacity.
     fn serialize_entry(&self, lsn: LSN, operation: &WalOperation) -> Result<Vec<u8>> {
         SERIALIZE_BUFFER.with(|cell| {
             let mut buffer = cell.borrow_mut();
             buffer.clear();
+
+            // Estimate required capacity and ensure buffer has enough space
+            // This avoids reallocations during serialization (issue #217)
+            let estimated_capacity = super::estimate_entry_capacity(operation);
+            let current_capacity = buffer.capacity();
+            if current_capacity < estimated_capacity {
+                buffer.reserve(estimated_capacity - current_capacity);
+            }
 
             let entry = WalEntry::new(lsn, operation.clone());
 
