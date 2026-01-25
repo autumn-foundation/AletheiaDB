@@ -423,12 +423,30 @@ impl PersistenceManager {
         false
     }
 
-    /// Find the most recent checkpoint
-    pub fn find_latest_checkpoint(&self) -> Result<Option<Checkpoint>> {
+    /// List all checkpoint files in the checkpoint directory, sorted by filename.
+    ///
+    /// This helper method extracts the common directory scanning logic used by
+    /// `find_latest_checkpoint()` and (future) `cleanup_old_checkpoints()`.
+    /// It reads the checkpoint directory, filters for valid checkpoint files
+    /// (matching "checkpoint_*.dat" pattern), and returns them sorted by filename.
+    ///
+    /// # Returns
+    ///
+    /// A vector of checkpoint file paths, sorted in ascending order by filename.
+    /// Returns an empty vector if the directory doesn't exist or contains no
+    /// checkpoint files.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` only for unexpected I/O errors. Missing directories are
+    /// handled gracefully by returning an empty vector.
+    pub fn list_checkpoints(&self) -> Result<Vec<PathBuf>> {
         let mut checkpoints = Vec::new();
 
+        // Read directory - if it fails, return empty vector (graceful handling)
         if let Ok(entries) = std::fs::read_dir(&self.config.checkpoint_dir) {
             for entry in entries.flatten() {
+                // Filter for checkpoint files matching pattern: checkpoint_*.dat
                 if let Some(name) = entry.file_name().to_str()
                     && name.starts_with("checkpoint_")
                     && name.ends_with(".dat")
@@ -438,14 +456,21 @@ impl PersistenceManager {
             }
         }
 
+        // Sort by filename (LSN is encoded in the filename)
+        checkpoints.sort();
+
+        Ok(checkpoints)
+    }
+
+    /// Find the most recent checkpoint
+    pub fn find_latest_checkpoint(&self) -> Result<Option<Checkpoint>> {
+        let checkpoints = self.list_checkpoints()?;
+
         if checkpoints.is_empty() {
             return Ok(None);
         }
 
-        // Sort by filename (LSN is in filename)
-        checkpoints.sort();
-
-        // Load the latest checkpoint
+        // Load the latest checkpoint (last element after sorting)
         if let Some(latest) = checkpoints.last() {
             let checkpoint = Checkpoint::load(latest)?;
             Ok(Some(checkpoint))
@@ -1947,6 +1972,131 @@ mod tests {
                 );
             }
         }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // List Checkpoints Helper Tests (Issue #213)
+    // ========================================================================
+
+    /// Test that list_checkpoints() returns empty vector when directory is empty
+    #[test]
+    fn test_list_checkpoints_empty_directory() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let config = CheckpointConfig {
+            checkpoint_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let manager = PersistenceManager::new(config)?;
+        let checkpoints = manager.list_checkpoints()?;
+
+        assert!(
+            checkpoints.is_empty(),
+            "Empty directory should return no checkpoints"
+        );
+        Ok(())
+    }
+
+    /// Test that list_checkpoints() filters checkpoint files correctly
+    #[test]
+    fn test_list_checkpoints_filters_correctly() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_dir = temp_dir.path();
+
+        // Create some checkpoint files
+        std::fs::write(checkpoint_dir.join("checkpoint_000001.dat"), b"test")?;
+        std::fs::write(checkpoint_dir.join("checkpoint_000002.dat"), b"test")?;
+
+        // Create some non-checkpoint files that should be ignored
+        std::fs::write(checkpoint_dir.join("other_file.txt"), b"test")?;
+        std::fs::write(checkpoint_dir.join("checkpoint.bak"), b"test")?;
+        std::fs::write(checkpoint_dir.join("data.dat"), b"test")?;
+
+        let config = CheckpointConfig {
+            checkpoint_dir: checkpoint_dir.to_path_buf(),
+            ..Default::default()
+        };
+
+        let manager = PersistenceManager::new(config)?;
+        let checkpoints = manager.list_checkpoints()?;
+
+        assert_eq!(
+            checkpoints.len(),
+            2,
+            "Should find exactly 2 checkpoint files"
+        );
+
+        // Verify only checkpoint files are included
+        for path in &checkpoints {
+            let filename = path.file_name().unwrap().to_str().unwrap();
+            assert!(filename.starts_with("checkpoint_"));
+            assert!(filename.ends_with(".dat"));
+        }
+
+        Ok(())
+    }
+
+    /// Test that list_checkpoints() returns files sorted by filename
+    #[test]
+    fn test_list_checkpoints_sorted() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_dir = temp_dir.path();
+
+        // Create checkpoint files in random order
+        std::fs::write(checkpoint_dir.join("checkpoint_000003.dat"), b"test")?;
+        std::fs::write(checkpoint_dir.join("checkpoint_000001.dat"), b"test")?;
+        std::fs::write(checkpoint_dir.join("checkpoint_000005.dat"), b"test")?;
+        std::fs::write(checkpoint_dir.join("checkpoint_000002.dat"), b"test")?;
+
+        let config = CheckpointConfig {
+            checkpoint_dir: checkpoint_dir.to_path_buf(),
+            ..Default::default()
+        };
+
+        let manager = PersistenceManager::new(config)?;
+        let checkpoints = manager.list_checkpoints()?;
+
+        assert_eq!(checkpoints.len(), 4);
+
+        // Verify files are sorted
+        let filenames: Vec<String> = checkpoints
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(filenames[0], "checkpoint_000001.dat");
+        assert_eq!(filenames[1], "checkpoint_000002.dat");
+        assert_eq!(filenames[2], "checkpoint_000003.dat");
+        assert_eq!(filenames[3], "checkpoint_000005.dat");
+
+        Ok(())
+    }
+
+    /// Test that list_checkpoints() handles directory read errors gracefully
+    #[test]
+    fn test_list_checkpoints_nonexistent_directory() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let nonexistent_dir = temp_dir.path().join("does_not_exist");
+
+        let config = CheckpointConfig {
+            checkpoint_dir: nonexistent_dir,
+            ..Default::default()
+        };
+
+        // Note: PersistenceManager::new creates the directory, so we need to
+        // delete it after creation to test the error case
+        let manager = PersistenceManager::new(config.clone())?;
+        std::fs::remove_dir(&config.checkpoint_dir)?;
+
+        let checkpoints = manager.list_checkpoints()?;
+
+        // Should return empty vector when directory doesn't exist
+        assert!(
+            checkpoints.is_empty(),
+            "Should return empty vector when directory doesn't exist"
+        );
 
         Ok(())
     }
