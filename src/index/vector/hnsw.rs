@@ -763,7 +763,16 @@ impl VectorIndex for HnswIndex {
         // Use usearch's native filtered search with retry logic for thread contention
         let index = self.inner.read();
 
-        // Create a filter that maps usearch keys to our predicate
+        // Create a filter that maps usearch keys to our predicate.
+        //
+        // PERFORMANCE OPTIMIZATION (Issue #206):
+        // We retrieve NodeIds from reverse_mapping without validation.
+        // This is safe because all NodeIds in reverse_mapping were validated
+        // when inserted via add(). The usearch keys come from our own insertions,
+        // so we can trust they map to valid NodeIds.
+        //
+        // This avoids ~1-2ns of validation overhead per candidate node examined.
+        // For searches examining 1,000 nodes, this saves ~1-2μs total.
         let reverse_mapping = &self.reverse_mapping;
         let filter = |key: u64| -> bool {
             if let Some(node_id_ref) = reverse_mapping.get(&key) {
@@ -922,6 +931,17 @@ impl HnswIndex {
     /// 1. Converting usearch keys back to NodeIds
     /// 2. Converting distances to similarities based on the configured metric
     /// 3. Sorting results by similarity (descending order)
+    ///
+    /// # Performance Optimization (Issue #206)
+    ///
+    /// This method retrieves NodeIds from `reverse_mapping` without validation.
+    /// This is safe because:
+    /// - All NodeIds in `reverse_mapping` were inserted via the `add()` method
+    /// - The `add()` method performs validation when accepting user-provided NodeIds
+    /// - Internal key allocation ensures all keys are within valid bounds
+    ///
+    /// By avoiding `NodeId::new()` validation on every result, we save ~1-2ns per
+    /// node examined. For a search examining 1,000 candidates, this saves ~1-2μs.
     ///
     /// # Arguments
     ///
