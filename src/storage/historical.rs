@@ -768,11 +768,243 @@ impl HistoricalStorage {
         self.reconstruct_node_properties_with_depth(version_id, 0)
     }
 
+    /// Iterative property reconstruction helper for nodes (Issue #211).
+    ///
+    /// This function implements the core iterative reconstruction algorithm.
+    /// It eliminates intermediate PropertyMap allocations and stack overflow risks.
+    ///
+    /// # Algorithm
+    /// 1. Collect version IDs backwards from target to anchor (O(anchor_interval) IDs)
+    /// 2. Extract anchor properties as base state
+    /// 3. Apply deltas in forward order (O(anchor_interval) delta applications)
+    ///
+    /// # Arguments
+    /// * `version_id` - The version to reconstruct properties for
+    ///
+    /// # Returns
+    /// * `Ok(PropertyMap)` - Reconstructed properties
+    /// * `Err(TemporalError::MaxDepthExceeded)` - Delta chain too deep (DoS protection)
+    /// * `Err(StorageError::VersionNotFound)` - Version not found
+    /// * `Err(TemporalError::CorruptedVersionChain)` - Invalid chain structure
+    fn reconstruct_node_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
+        // Collect version IDs backwards from target to anchor
+        // Pre-allocate with anchor_interval capacity to avoid reallocations
+        let mut version_ids: Vec<VersionId> =
+            Vec::with_capacity(self.config.anchor_interval as usize);
+        let mut current_id = version_id;
+        let mut chain_length = 0;
+
+        // Walk backwards until we find an anchor or hit depth limit
+        loop {
+            // Check depth limit for DoS protection
+            if chain_length >= self.max_reconstruction_depth {
+                let entity_id = self
+                    .node_versions
+                    .get(&version_id)
+                    .map(|v| v.node_id.to_string())
+                    .unwrap_or_else(|| format!("version {}", version_id));
+                return Err(TemporalError::MaxDepthExceeded {
+                    max_depth: MAX_RECONSTRUCTION_DEPTH,
+                    entity_id,
+                }
+                .into());
+            }
+
+            let version = self
+                .node_versions
+                .get(&current_id)
+                .ok_or(StorageError::VersionNotFound(current_id))?;
+
+            let is_anchor = version.is_anchor();
+            let prev_id = version.prev_version;
+
+            // Store version ID (we'll process these in reverse)
+            version_ids.push(current_id);
+
+            // If we found an anchor, we're done collecting
+            if is_anchor {
+                break;
+            }
+
+            // Get previous version for delta chain traversal
+            current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
+                entity_id: version.node_id.to_string(),
+                reason: "Delta version has no previous version".to_string(),
+            })?;
+
+            chain_length += 1;
+        }
+
+        // Now reconstruct properties by applying deltas in forward order
+        // The last element in version_ids is the anchor (base state)
+        let anchor_id =
+            version_ids
+                .last()
+                .copied()
+                .ok_or_else(|| TemporalError::CorruptedVersionChain {
+                    entity_id: format!("version {}", version_id),
+                    reason: "Empty version chain during reconstruction".to_string(),
+                })?;
+
+        let anchor_version = self
+            .node_versions
+            .get(&anchor_id)
+            .ok_or(StorageError::VersionNotFound(anchor_id))?;
+
+        let mut properties = match &anchor_version.data {
+            VersionData::Anchor { properties, .. } => properties.clone(),
+            VersionData::Delta { .. } => {
+                // This should never happen due to the is_anchor() check above
+                return Err(TemporalError::CorruptedVersionChain {
+                    entity_id: anchor_version.node_id.to_string(),
+                    reason: "Expected anchor at base of version chain".to_string(),
+                }
+                .into());
+            }
+        };
+
+        // Apply deltas in forward order (reverse of collection order)
+        // Skip the last element (anchor) since we already have its properties
+        for &vid in version_ids.iter().rev().skip(1) {
+            let version = self
+                .node_versions
+                .get(&vid)
+                .ok_or(StorageError::VersionNotFound(vid))?;
+
+            match &version.data {
+                VersionData::Delta { delta } => {
+                    properties = delta.apply(&properties);
+                }
+                VersionData::Anchor { .. } => {
+                    // This should never happen - only the last element should be an anchor
+                    return Err(TemporalError::CorruptedVersionChain {
+                        entity_id: version.node_id.to_string(),
+                        reason: "Found anchor in middle of delta chain".to_string(),
+                    }
+                    .into());
+                }
+            }
+        }
+
+        Ok(properties)
+    }
+
+    /// Iterative property reconstruction helper for edges (Issue #211).
+    ///
+    /// Mirrors the node reconstruction algorithm for consistency. See
+    /// `reconstruct_node_properties_iterative` for algorithm details.
+    fn reconstruct_edge_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
+        // Collect version IDs backwards from target to anchor
+        // Pre-allocate with anchor_interval capacity to avoid reallocations
+        let mut version_ids: Vec<VersionId> =
+            Vec::with_capacity(self.config.anchor_interval as usize);
+        let mut current_id = version_id;
+        let mut chain_length = 0;
+
+        // Walk backwards until we find an anchor or hit depth limit
+        loop {
+            // Check depth limit for DoS protection
+            if chain_length >= self.max_reconstruction_depth {
+                let entity_id = self
+                    .edge_versions
+                    .get(&version_id)
+                    .map(|v| v.edge_id.to_string())
+                    .unwrap_or_else(|| format!("version {}", version_id));
+                return Err(TemporalError::MaxDepthExceeded {
+                    max_depth: MAX_RECONSTRUCTION_DEPTH,
+                    entity_id,
+                }
+                .into());
+            }
+
+            let version = self
+                .edge_versions
+                .get(&current_id)
+                .ok_or(StorageError::VersionNotFound(current_id))?;
+
+            let is_anchor = version.is_anchor();
+            let prev_id = version.prev_version;
+
+            // Store version ID (we'll process these in reverse)
+            version_ids.push(current_id);
+
+            // If we found an anchor, we're done collecting
+            if is_anchor {
+                break;
+            }
+
+            // Get previous version for delta chain traversal
+            current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
+                entity_id: version.edge_id.to_string(),
+                reason: "Delta version has no previous version".to_string(),
+            })?;
+
+            chain_length += 1;
+        }
+
+        // Now reconstruct properties by applying deltas in forward order
+        // The last element in version_ids is the anchor (base state)
+        let anchor_id =
+            version_ids
+                .last()
+                .copied()
+                .ok_or_else(|| TemporalError::CorruptedVersionChain {
+                    entity_id: format!("version {}", version_id),
+                    reason: "Empty version chain during reconstruction".to_string(),
+                })?;
+
+        let anchor_version = self
+            .edge_versions
+            .get(&anchor_id)
+            .ok_or(StorageError::VersionNotFound(anchor_id))?;
+
+        let mut properties = match &anchor_version.data {
+            VersionData::Anchor { properties, .. } => properties.clone(),
+            VersionData::Delta { .. } => {
+                // This should never happen due to the is_anchor() check above
+                return Err(TemporalError::CorruptedVersionChain {
+                    entity_id: anchor_version.edge_id.to_string(),
+                    reason: "Expected anchor at base of version chain".to_string(),
+                }
+                .into());
+            }
+        };
+
+        // Apply deltas in forward order (reverse of collection order)
+        // Skip the last element (anchor) since we already have its properties
+        for &vid in version_ids.iter().rev().skip(1) {
+            let version = self
+                .edge_versions
+                .get(&vid)
+                .ok_or(StorageError::VersionNotFound(vid))?;
+
+            match &version.data {
+                VersionData::Delta { delta } => {
+                    properties = delta.apply(&properties);
+                }
+                VersionData::Anchor { .. } => {
+                    // This should never happen - only the last element should be an anchor
+                    return Err(TemporalError::CorruptedVersionChain {
+                        entity_id: version.edge_id.to_string(),
+                        reason: "Found anchor in middle of delta chain".to_string(),
+                    }
+                    .into());
+                }
+            }
+        }
+
+        Ok(properties)
+    }
+
     /// Internal helper for node property reconstruction with depth tracking.
     ///
-    /// The depth parameter tracks how many delta versions have been traversed.
-    /// If depth exceeds MAX_RECONSTRUCTION_DEPTH, returns an error to prevent
-    /// stack overflow from corrupted version chains or cycles.
+    /// Note (Issue #211): The iterative implementation only caches the final
+    /// reconstructed PropertyMap, not intermediate versions. This reduces memory
+    /// allocations at the cost of slightly lower cache hit rates compared to
+    /// the previous recursive approach.
+    ///
+    /// The depth parameter is kept for API compatibility but unused in the
+    /// iterative implementation.
     fn reconstruct_node_properties_with_depth(
         &self,
         version_id: VersionId,
@@ -803,95 +1035,10 @@ impl HistoricalStorage {
             return Ok(cached.as_ref().clone());
         }
 
-        // Cache miss - reconstruct properties iteratively (Issue #211)
-        //
-        // Iterative approach (vs recursive):
-        // - Memory: O(1) final PropertyMap instead of O(anchor_interval) intermediate allocations
-        // - Stack: No recursion depth concerns, safe for deep version chains
-        // - Cache: Better locality from single PropertyMap mutation vs scattered temporaries
+        // Cache miss - reconstruct properties using iterative helper
         self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
 
-        // Collect version chain backwards from target to anchor
-        // This uses a Vec<&NodeVersion> to avoid cloning versions
-        let mut version_chain: Vec<&NodeVersion> = Vec::new();
-        let mut current_id = version_id;
-        let mut chain_length = 0;
-
-        // Walk backwards until we find an anchor or hit depth limit
-        loop {
-            // Check depth limit for DoS protection
-            if chain_length >= self.max_reconstruction_depth {
-                let entity_id = self
-                    .node_versions
-                    .get(&version_id)
-                    .map(|v| v.node_id.to_string())
-                    .unwrap_or_else(|| format!("version {}", version_id));
-                return Err(TemporalError::MaxDepthExceeded {
-                    max_depth: MAX_RECONSTRUCTION_DEPTH,
-                    entity_id,
-                }
-                .into());
-            }
-
-            let version = self
-                .node_versions
-                .get(&current_id)
-                .ok_or(StorageError::VersionNotFound(current_id))?;
-
-            let is_anchor = version.is_anchor();
-            version_chain.push(version);
-
-            // If we found an anchor, we're done collecting
-            if is_anchor {
-                break;
-            }
-
-            // Get previous version for delta chain traversal
-            current_id = version
-                .prev_version
-                .ok_or(TemporalError::CorruptedVersionChain {
-                    entity_id: format!("{:?}", version.node_id),
-                    reason: "Delta version has no previous version".to_string(),
-                })?;
-
-            chain_length += 1;
-        }
-
-        // Now reconstruct properties by applying deltas in forward order
-        // The last element in version_chain is the anchor (base state)
-        let anchor_version = version_chain
-            .last()
-            .expect("version_chain should have at least one element");
-
-        let mut properties = match &anchor_version.data {
-            VersionData::Anchor { properties, .. } => properties.clone(),
-            VersionData::Delta { .. } => {
-                // This should never happen due to the is_anchor() check above
-                return Err(TemporalError::CorruptedVersionChain {
-                    entity_id: format!("{:?}", anchor_version.node_id),
-                    reason: "Expected anchor at base of version chain".to_string(),
-                }
-                .into());
-            }
-        };
-
-        // Apply deltas in forward order (reverse of collection order)
-        // Skip the last element (anchor) since we already have its properties
-        for version in version_chain.iter().rev().skip(1) {
-            match &version.data {
-                VersionData::Delta { delta } => {
-                    properties = delta.apply(&properties);
-                }
-                VersionData::Anchor { .. } => {
-                    // This should never happen - only the last element should be an anchor
-                    return Err(TemporalError::CorruptedVersionChain {
-                        entity_id: format!("{:?}", version.node_id),
-                        reason: "Found anchor in middle of delta chain".to_string(),
-                    }
-                    .into());
-                }
-            }
-        }
+        let properties = self.reconstruct_node_properties_iterative(version_id)?;
 
         // Populate cache for future reads
         self.node_property_cache
@@ -914,9 +1061,13 @@ impl HistoricalStorage {
 
     /// Internal helper for edge property reconstruction with depth tracking.
     ///
-    /// The depth parameter tracks how many delta versions have been traversed.
-    /// If depth exceeds MAX_RECONSTRUCTION_DEPTH, returns an error to prevent
-    /// stack overflow from corrupted version chains or cycles.
+    /// Note (Issue #211): The iterative implementation only caches the final
+    /// reconstructed PropertyMap, not intermediate versions. This reduces memory
+    /// allocations at the cost of slightly lower cache hit rates compared to
+    /// the previous recursive approach.
+    ///
+    /// The depth parameter is kept for API compatibility but unused in the
+    /// iterative implementation.
     fn reconstruct_edge_properties_with_depth(
         &self,
         version_id: VersionId,
@@ -947,95 +1098,10 @@ impl HistoricalStorage {
             return Ok(cached.as_ref().clone());
         }
 
-        // Cache miss - reconstruct properties iteratively (Issue #211)
-        //
-        // Iterative approach (vs recursive):
-        // - Memory: O(1) final PropertyMap instead of O(anchor_interval) intermediate allocations
-        // - Stack: No recursion depth concerns, safe for deep version chains
-        // - Cache: Better locality from single PropertyMap mutation vs scattered temporaries
+        // Cache miss - reconstruct properties using iterative helper
         self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
 
-        // Collect version chain backwards from target to anchor
-        // This uses a Vec<&EdgeVersion> to avoid cloning versions
-        let mut version_chain: Vec<&EdgeVersion> = Vec::new();
-        let mut current_id = version_id;
-        let mut chain_length = 0;
-
-        // Walk backwards until we find an anchor or hit depth limit
-        loop {
-            // Check depth limit for DoS protection
-            if chain_length >= self.max_reconstruction_depth {
-                let entity_id = self
-                    .edge_versions
-                    .get(&version_id)
-                    .map(|v| v.edge_id.to_string())
-                    .unwrap_or_else(|| format!("version {}", version_id));
-                return Err(TemporalError::MaxDepthExceeded {
-                    max_depth: MAX_RECONSTRUCTION_DEPTH,
-                    entity_id,
-                }
-                .into());
-            }
-
-            let version = self
-                .edge_versions
-                .get(&current_id)
-                .ok_or(StorageError::VersionNotFound(current_id))?;
-
-            let is_anchor = version.is_anchor();
-            version_chain.push(version);
-
-            // If we found an anchor, we're done collecting
-            if is_anchor {
-                break;
-            }
-
-            // Get previous version for delta chain traversal
-            current_id = version
-                .prev_version
-                .ok_or(TemporalError::CorruptedVersionChain {
-                    entity_id: format!("{:?}", version.edge_id),
-                    reason: "Delta version has no previous version".to_string(),
-                })?;
-
-            chain_length += 1;
-        }
-
-        // Now reconstruct properties by applying deltas in forward order
-        // The last element in version_chain is the anchor (base state)
-        let anchor_version = version_chain
-            .last()
-            .expect("version_chain should have at least one element");
-
-        let mut properties = match &anchor_version.data {
-            VersionData::Anchor { properties, .. } => properties.clone(),
-            VersionData::Delta { .. } => {
-                // This should never happen due to the is_anchor() check above
-                return Err(TemporalError::CorruptedVersionChain {
-                    entity_id: format!("{:?}", anchor_version.edge_id),
-                    reason: "Expected anchor at base of version chain".to_string(),
-                }
-                .into());
-            }
-        };
-
-        // Apply deltas in forward order (reverse of collection order)
-        // Skip the last element (anchor) since we already have its properties
-        for version in version_chain.iter().rev().skip(1) {
-            match &version.data {
-                VersionData::Delta { delta } => {
-                    properties = delta.apply(&properties);
-                }
-                VersionData::Anchor { .. } => {
-                    // This should never happen - only the last element should be an anchor
-                    return Err(TemporalError::CorruptedVersionChain {
-                        entity_id: format!("{:?}", version.edge_id),
-                        reason: "Found anchor in middle of delta chain".to_string(),
-                    }
-                    .into());
-                }
-            }
-        }
+        let properties = self.reconstruct_edge_properties_iterative(version_id)?;
 
         // Populate cache for future reads
         self.edge_property_cache
