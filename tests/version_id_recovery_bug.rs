@@ -1,11 +1,9 @@
-use gallifreydb::core::GLOBAL_INTERNER;
 /// TDD test to confirm version_id restoration bug in with_unified_config
 ///
 /// This test verifies that version IDs are PRESERVED when loading from
 /// index persistence (not checkpoints).
-use gallifreydb::core::id::{EdgeId, NodeId, VersionId};
-use gallifreydb::core::property::{PropertyMapBuilder, PropertyValue};
-use gallifreydb::storage::current::CurrentStorage;
+use gallifreydb::core::GLOBAL_INTERNER;
+use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::storage::index_persistence::IndexPersistenceManager;
 use gallifreydb::storage::index_persistence::formats::{PersistedEdge, PersistedNode};
 use gallifreydb::storage::index_persistence::graph::{

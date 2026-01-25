@@ -55,9 +55,7 @@ pub fn decompress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
     // Extract checksum if enabled
     let (data_to_decompress, expected_checksum) = if config.enable_checksums {
         if data.len() < 4 {
-            return Err(
-                StorageError::corruption("Data too short for checksum".to_string()).into(),
-            );
+            return Err(StorageError::corruption("Data too short for checksum".to_string()).into());
         }
         let checksum = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let payload = &data[4..];
@@ -145,9 +143,11 @@ mod tests {
         // Should fail checksum
         let result = decompress(&compressed, &config);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Checksum mismatch"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Checksum mismatch")
+        );
     }
 }

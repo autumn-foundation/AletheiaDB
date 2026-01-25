@@ -1021,12 +1021,31 @@ impl MigrationService {
         // Report callback
         self.callback.after_batch(nodes_migrated, edges_migrated);
 
-        // Step 2: On success, truncate WAL if coordinator is available
+        // Step 2: Get flushed LSN from cold storage and truncate WAL if coordinator is available
+        // Get the actual flushed LSN from cold storage to ensure invariant:
+        // WAL_truncation_lsn <= cold_storage.get_flushed_lsn()
+        let flushed_lsn_value = self.cold_storage.get_flushed_lsn()?;
+
         let segments_truncated = if let Some(coordinator) = &self.flush_coordinator {
-            // Truncate WAL segments up to (but not including) the flushed LSN
-            // This is safe because we just confirmed cold storage has the data
-            coordinator.truncate_to_lsn(lsn)?
+            // Defensive check: only truncate if we got a valid flushed LSN
+            if let Some(flushed_lsn) = flushed_lsn_value {
+                // Additional safety: verify the flushed LSN is >= what we just stored
+                // (Should always be true due to monotonic LSN updates)
+                debug_assert!(
+                    flushed_lsn.0 >= lsn.0,
+                    "Flushed LSN ({}) should be >= stored LSN ({})",
+                    flushed_lsn.0,
+                    lsn.0
+                );
+
+                // Truncate WAL segments up to the confirmed flushed LSN
+                coordinator.truncate_to_lsn(flushed_lsn)?
+            } else {
+                // No flushed LSN available, don't truncate
+                0
+            }
         } else {
+            // No coordinator, can't truncate WAL
             0
         };
 
@@ -1056,7 +1075,7 @@ impl MigrationService {
             nodes_migrated,
             edges_migrated,
             segments_truncated,
-            flushed_lsn: Some(lsn),
+            flushed_lsn: flushed_lsn_value,
         })
     }
 
@@ -2665,7 +2684,7 @@ mod tests {
     fn test_migration_failure_does_not_truncate_wal() {
         use crate::storage::wal::flush_coordinator::FlushCoordinatorConfig;
         use crate::utils::error::StorageError;
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::sync::atomic::AtomicBool;
         use tempfile::tempdir;
 
         // Create a failing cold storage that errors on batch store

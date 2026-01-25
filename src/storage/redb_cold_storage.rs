@@ -42,6 +42,7 @@ use crate::storage::cold_storage::{
 use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
+use redb::ReadableTable;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
@@ -257,11 +258,39 @@ impl RedbColdStorage {
     }
 
     /// Set the flushed LSN in the metadata table (internal helper).
+    ///
+    /// CRITICAL: Uses max(current_lsn, new_lsn) to prevent race conditions where
+    /// concurrent commits could overwrite a higher LSN with a lower LSN. This ensures
+    /// monotonic increase only, which is essential for WAL truncation safety.
     fn set_flushed_lsn_internal(
         table: &mut redb::Table<'_, &'static str, &'static [u8]>,
         lsn: LSN,
     ) -> Result<()> {
-        let lsn_bytes = lsn.0.to_le_bytes();
+        // Read current LSN to ensure we only increase it
+        let current_lsn = if let Ok(Some(value)) = table.get(FLUSHED_LSN_KEY) {
+            let bytes = value.value();
+            if bytes.len() == 8 {
+                let lsn_value = u64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ]);
+                Some(LSN(lsn_value))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Only update if new LSN is higher (prevents race condition)
+        let final_lsn = match current_lsn {
+            Some(current) if lsn.0 <= current.0 => {
+                // LSN is not higher, skip update
+                return Ok(());
+            }
+            _ => lsn,
+        };
+
+        let lsn_bytes = final_lsn.0.to_le_bytes();
         table
             .insert(FLUSHED_LSN_KEY, lsn_bytes.as_slice())
             .map_err(|e| -> crate::utils::error::Error {
