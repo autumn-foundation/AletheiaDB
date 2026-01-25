@@ -392,28 +392,66 @@ fn test_find_similar_in_range_deterministic() -> Result<()> {
 
     // Compare each snapshot's results
     for i in 0..results1.len() {
+        // Compare timestamps
         assert_eq!(
             results1[i].0, results2[i].0,
-            "Timestamps should match at position {}",
+            "Timestamp mismatch for results2 at index {}",
             i
         );
         assert_eq!(
             results1[i].0, results3[i].0,
-            "Timestamps should match at position {}",
+            "Timestamp mismatch for results3 at index {}",
+            i
+        );
+
+        let r1 = &results1[i].1;
+        let r2 = &results2[i].1;
+        let r3 = &results3[i].1;
+
+        // Compare result counts
+        assert_eq!(
+            r1.len(),
+            r2.len(),
+            "Result count mismatch for results2 at index {}",
             i
         );
         assert_eq!(
-            results1[i].1.len(),
-            results2[i].1.len(),
-            "Result count should match at position {}",
+            r1.len(),
+            r3.len(),
+            "Result count mismatch for results3 at index {}",
             i
         );
-        assert_eq!(
-            results1[i].1.len(),
-            results3[i].1.len(),
-            "Result count should match at position {}",
-            i
-        );
+
+        // Compare individual results (NodeId and score)
+        for j in 0..r1.len() {
+            assert_eq!(
+                r1[j].0, r2[j].0,
+                "NodeId mismatch for results2 at index {}/{}",
+                i, j
+            );
+            assert!(
+                (r1[j].1 - r2[j].1).abs() < 1e-6,
+                "Score mismatch for results2 at index {}/{}: {} vs {}",
+                i,
+                j,
+                r1[j].1,
+                r2[j].1
+            );
+
+            assert_eq!(
+                r1[j].0, r3[j].0,
+                "NodeId mismatch for results3 at index {}/{}",
+                i, j
+            );
+            assert!(
+                (r1[j].1 - r3[j].1).abs() < 1e-6,
+                "Score mismatch for results3 at index {}/{}: {} vs {}",
+                i,
+                j,
+                r1[j].1,
+                r3[j].1
+            );
+        }
     }
 
     Ok(())
