@@ -188,6 +188,26 @@ pub struct HistoricalStorage {
     /// walking the version chain on every add operation. This improves write
     /// performance from O(anchor_interval) to O(1).
     edge_versions_since_anchor: HashMap<EdgeId, usize>,
+    /// Cached count of node anchor versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when node anchors are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_node_anchor_count: usize,
+    /// Cached count of node delta versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when node deltas are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_node_delta_count: usize,
+    /// Cached count of edge anchor versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when edge anchors are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_edge_anchor_count: usize,
+    /// Cached count of edge delta versions for O(1) stats() (Issue #212)
+    ///
+    /// This counter is incremented when edge deltas are added and enables
+    /// constant-time stats retrieval instead of O(versions) iteration.
+    cached_edge_delta_count: usize,
     /// TinyLFU cache for reconstructed node properties (reduces lock contention)
     node_property_cache: Arc<Cache<VersionId, Arc<PropertyMap>>>,
     /// TinyLFU cache for reconstructed edge properties
@@ -337,6 +357,10 @@ impl HistoricalStorage {
             edge_version_counts: HashMap::new(),
             node_versions_since_anchor: HashMap::new(),
             edge_versions_since_anchor: HashMap::new(),
+            cached_node_anchor_count: 0,
+            cached_node_delta_count: 0,
+            cached_edge_anchor_count: 0,
+            cached_edge_delta_count: 0,
             node_property_cache: Arc::new(Cache::new(cache_size)),
             edge_property_cache: Arc::new(Cache::new(cache_size)),
             node_anchor_cache: Arc::new(Cache::new(anchor_cache_size)),
@@ -572,6 +596,13 @@ impl HistoricalStorage {
         self.node_version_heads.insert(node_id, version_id);
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
 
+        // Issue #212: Update cached stats counters for O(1) stats() retrieval
+        if is_anchor {
+            self.cached_node_anchor_count += 1;
+        } else {
+            self.cached_node_delta_count += 1;
+        }
+
         // Populate caches for anchors (O(1) reconstruction)
         Self::populate_anchor_caches(
             is_anchor,
@@ -716,6 +747,13 @@ impl HistoricalStorage {
         self.edge_versions.insert(version_id, version);
         self.edge_version_heads.insert(edge_id, version_id);
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+
+        // Issue #212: Update cached stats counters for O(1) stats() retrieval
+        if is_anchor {
+            self.cached_edge_anchor_count += 1;
+        } else {
+            self.cached_edge_delta_count += 1;
+        }
 
         // Populate caches for anchors (O(1) reconstruction)
         Self::populate_anchor_caches(
@@ -1307,6 +1345,14 @@ impl HistoricalStorage {
                     if let Some(count) = self.node_version_counts.get_mut(&version.node_id) {
                         *count = count.saturating_sub(1);
                     }
+                    // Issue #212: Update cached stats counters when migrating to cold storage
+                    if version.is_anchor() {
+                        self.cached_node_anchor_count =
+                            self.cached_node_anchor_count.saturating_sub(1);
+                    } else {
+                        self.cached_node_delta_count =
+                            self.cached_node_delta_count.saturating_sub(1);
+                    }
                 }
             }
         }
@@ -1336,6 +1382,14 @@ impl HistoricalStorage {
                     && let Some(count) = self.edge_version_counts.get_mut(&version.edge_id)
                 {
                     *count = count.saturating_sub(1);
+                    // Issue #212: Update cached stats counters when migrating to cold storage
+                    if version.is_anchor() {
+                        self.cached_edge_anchor_count =
+                            self.cached_edge_anchor_count.saturating_sub(1);
+                    } else {
+                        self.cached_edge_delta_count =
+                            self.cached_edge_delta_count.saturating_sub(1);
+                    }
                 }
             }
         }
@@ -1655,35 +1709,38 @@ impl HistoricalStorage {
     }
 
     /// Get statistics about the storage.
+    ///
+    /// Issue #212: This method now returns cached counters in O(1) time instead of
+    /// iterating through all versions. The counters are maintained incrementally as
+    /// versions are added, making stats retrieval constant-time regardless of the
+    /// number of versions stored.
     pub fn stats(&self) -> HistoricalStats {
-        let mut node_anchor_count = 0;
-        let mut node_delta_count = 0;
-        let mut edge_anchor_count = 0;
-        let mut edge_delta_count = 0;
-
-        for version in self.node_versions.values() {
-            if version.is_anchor() {
-                node_anchor_count += 1;
-            } else {
-                node_delta_count += 1;
-            }
-        }
-
-        for version in self.edge_versions.values() {
-            if version.is_anchor() {
-                edge_anchor_count += 1;
-            } else {
-                edge_delta_count += 1;
-            }
-        }
+        // Debug assertions to verify counter invariants (zero cost in release builds)
+        debug_assert_eq!(
+            self.cached_node_anchor_count + self.cached_node_delta_count,
+            self.node_versions.len(),
+            "Node counter invariant violated: anchors({}) + deltas({}) != total({})",
+            self.cached_node_anchor_count,
+            self.cached_node_delta_count,
+            self.node_versions.len()
+        );
+        debug_assert_eq!(
+            self.cached_edge_anchor_count + self.cached_edge_delta_count,
+            self.edge_versions.len(),
+            "Edge counter invariant violated: anchors({}) + deltas({}) != total({})",
+            self.cached_edge_anchor_count,
+            self.cached_edge_delta_count,
+            self.edge_versions.len()
+        );
 
         HistoricalStats {
             total_node_versions: self.node_versions.len(),
             total_edge_versions: self.edge_versions.len(),
-            node_anchor_count,
-            node_delta_count,
-            edge_anchor_count,
-            edge_delta_count,
+            // Issue #212: Use cached counters instead of iterating (O(1) vs O(versions))
+            node_anchor_count: self.cached_node_anchor_count,
+            node_delta_count: self.cached_node_delta_count,
+            edge_anchor_count: self.cached_edge_anchor_count,
+            edge_delta_count: self.cached_edge_delta_count,
             unique_nodes: self.node_version_heads.len(),
             unique_edges: self.edge_version_heads.len(),
             // Separate regular and anchor cache entries for better visibility (Issue #338)
@@ -1867,6 +1924,7 @@ impl HistoricalStorage {
     pub(crate) fn insert_restored_node_version(&mut self, version: NodeVersion) -> Result<()> {
         let version_id = version.id;
         let node_id = version.node_id;
+        let is_anchor = version.is_anchor();
 
         // Store the version
         self.node_versions.insert(version_id, version);
@@ -1876,6 +1934,13 @@ impl HistoricalStorage {
 
         // Update version count
         *self.node_version_counts.entry(node_id).or_insert(0) += 1;
+
+        // Issue #212: Update cached stats counters during persistence restore
+        if is_anchor {
+            self.cached_node_anchor_count += 1;
+        } else {
+            self.cached_node_delta_count += 1;
+        }
 
         Ok(())
     }
@@ -1892,6 +1957,7 @@ impl HistoricalStorage {
     pub(crate) fn insert_restored_edge_version(&mut self, version: EdgeVersion) -> Result<()> {
         let version_id = version.id;
         let edge_id = version.edge_id;
+        let is_anchor = version.is_anchor();
 
         // Store the version
         self.edge_versions.insert(version_id, version);
@@ -1901,6 +1967,13 @@ impl HistoricalStorage {
 
         // Update version count
         *self.edge_version_counts.entry(edge_id).or_insert(0) += 1;
+
+        // Issue #212: Update cached stats counters during persistence restore
+        if is_anchor {
+            self.cached_edge_anchor_count += 1;
+        } else {
+            self.cached_edge_delta_count += 1;
+        }
 
         Ok(())
     }
@@ -6018,5 +6091,183 @@ mod tests {
             .reconstruct_node_properties(VersionId::new(5).unwrap())
             .unwrap();
         assert_eq!(props_v5.get("value").and_then(|v| v.as_int()), Some(5));
+    }
+    // ============================================================
+    // Cached Stats Counter Tests (Issue #212)
+    // ============================================================
+
+    #[test]
+    fn test_stats_uses_cached_counters() {
+        // Issue #212: Verify stats() returns cached counters without iterating
+        // through all versions, making it O(1) instead of O(versions)
+        let config = AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        };
+        let mut storage = HistoricalStorage::with_config(config);
+
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+
+        // Create 7 node versions: anchor(0), delta(1), delta(2), anchor(3), delta(4), delta(5), anchor(6)
+        for i in 0..7 {
+            storage
+                .add_node_version(
+                    node_id,
+                    VersionId::new(i).unwrap(),
+                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    label,
+                    PropertyMapBuilder::new().insert("value", i as i64).build(),
+                )
+                .unwrap();
+        }
+
+        // Create 5 edge versions: anchor(0), delta(1), delta(2), anchor(3), delta(4)
+        for i in 0..5 {
+            storage
+                .add_edge_version(
+                    edge_id,
+                    VersionId::new(100 + i).unwrap(),
+                    BiTemporalInterval::current((2000 + (i as i64) * 100).into()),
+                    label,
+                    node_id,
+                    node_id,
+                    PropertyMapBuilder::new().insert("value", i as i64).build(),
+                )
+                .unwrap();
+        }
+
+        // Get stats - should return cached counters in O(1)
+        let stats = storage.stats();
+
+        // Verify node counts (7 total: 3 anchors, 4 deltas)
+        assert_eq!(stats.total_node_versions, 7);
+        assert_eq!(stats.node_anchor_count, 3, "Should have 3 node anchors");
+        assert_eq!(stats.node_delta_count, 4, "Should have 4 node deltas");
+
+        // Verify edge counts (5 total: 2 anchors, 3 deltas)
+        assert_eq!(stats.total_edge_versions, 5);
+        assert_eq!(stats.edge_anchor_count, 2, "Should have 2 edge anchors");
+        assert_eq!(stats.edge_delta_count, 3, "Should have 3 edge deltas");
+
+        // Verify other stats remain correct
+        assert_eq!(stats.unique_nodes, 1);
+        assert_eq!(stats.unique_edges, 1);
+    }
+
+    #[test]
+    fn test_stats_counters_with_multiple_entities() {
+        // Issue #212: Test that stats counters remain accurate across multiple entities
+        let config = AnchorConfig {
+            anchor_interval: 2,
+            max_delta_chain: 10,
+        };
+        let mut storage = HistoricalStorage::with_config(config);
+
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create versions for 3 different nodes
+        for node_idx in 1..=3 {
+            let node_id = NodeId::new(node_idx).unwrap();
+            // Each node gets 4 versions: anchor(0), delta(1), anchor(2), delta(3)
+            for i in 0..4 {
+                storage
+                    .add_node_version(
+                        node_id,
+                        VersionId::new(node_idx * 100 + i).unwrap(),
+                        BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                        label,
+                        PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    )
+                    .unwrap();
+            }
+        }
+
+        // Create versions for 2 different edges
+        for edge_idx in 1..=2 {
+            let edge_id = EdgeId::new(edge_idx).unwrap();
+            // Each edge gets 3 versions: anchor(0), delta(1), anchor(2)
+            for i in 0..3 {
+                storage
+                    .add_edge_version(
+                        edge_id,
+                        VersionId::new(edge_idx * 1000 + i).unwrap(),
+                        BiTemporalInterval::current((2000 + (i as i64) * 100).into()),
+                        label,
+                        NodeId::new(1).unwrap(),
+                        NodeId::new(2).unwrap(),
+                        PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    )
+                    .unwrap();
+            }
+        }
+
+        let stats = storage.stats();
+
+        // 3 nodes × 4 versions = 12 node versions (6 anchors, 6 deltas)
+        assert_eq!(stats.total_node_versions, 12);
+        assert_eq!(stats.node_anchor_count, 6, "Should have 6 node anchors");
+        assert_eq!(stats.node_delta_count, 6, "Should have 6 node deltas");
+
+        // 2 edges × 3 versions = 6 edge versions (4 anchors, 2 deltas)
+        assert_eq!(stats.total_edge_versions, 6);
+        assert_eq!(stats.edge_anchor_count, 4, "Should have 4 edge anchors");
+        assert_eq!(stats.edge_delta_count, 2, "Should have 2 edge deltas");
+
+        assert_eq!(stats.unique_nodes, 3);
+        assert_eq!(stats.unique_edges, 2);
+    }
+
+    #[test]
+    fn test_stats_counters_remain_accurate_after_persistence_restore() {
+        // Issue #212: Verify counters are correctly restored after persistence
+        let config = AnchorConfig {
+            anchor_interval: 3,
+            max_delta_chain: 10,
+        };
+        let mut original = HistoricalStorage::with_config(config.clone());
+
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+        let node_id = NodeId::new(1).unwrap();
+
+        // Create 5 versions: anchor(0), delta(1), delta(2), anchor(3), delta(4)
+        for i in 0..5 {
+            original
+                .add_node_version(
+                    node_id,
+                    VersionId::new(i).unwrap(),
+                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    label,
+                    PropertyMapBuilder::new().insert("value", i as i64).build(),
+                )
+                .unwrap();
+        }
+
+        // Verify stats before restore
+        let stats_before = original.stats();
+        assert_eq!(stats_before.total_node_versions, 5);
+        assert_eq!(stats_before.node_anchor_count, 2);
+        assert_eq!(stats_before.node_delta_count, 3);
+
+        // Extract and restore versions
+        let saved_versions: Vec<NodeVersion> = original.node_versions.values().cloned().collect();
+        let mut restored = HistoricalStorage::with_config(config);
+        for version in saved_versions {
+            restored.insert_restored_node_version(version).unwrap();
+        }
+        restored.rebuild_version_chains();
+
+        // Verify stats after restore match original
+        let stats_after = restored.stats();
+        assert_eq!(stats_after.total_node_versions, 5);
+        assert_eq!(
+            stats_after.node_anchor_count, 2,
+            "Anchor count should be preserved after restore"
+        );
+        assert_eq!(
+            stats_after.node_delta_count, 3,
+            "Delta count should be preserved after restore"
+        );
     }
 }

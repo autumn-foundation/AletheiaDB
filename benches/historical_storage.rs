@@ -187,10 +187,62 @@ fn bench_bulk_insert_multiple_entities(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark: stats() performance with varying version counts
+///
+/// Issue #212: This benchmark demonstrates that stats() is now O(1) instead of O(versions).
+/// Before the fix, stats() iterated through all versions to count anchors vs deltas.
+/// After the fix, it returns cached counters maintained during version insertion.
+///
+/// Expected before fix: Linear time with version count
+/// Expected after fix: Constant time regardless of version count
+fn bench_stats_with_varying_version_counts(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stats_performance");
+
+    // Test with different version counts: 1K, 10K, 100K, 1M
+    // Before fix: Performance degrades linearly
+    // After fix: Constant time regardless of count
+    for version_count in [1_000, 10_000, 100_000, 1_000_000] {
+        group.bench_with_input(
+            BenchmarkId::new("versions", version_count),
+            &version_count,
+            |b, &count| {
+                // Setup: Create storage with many versions
+                let config = AnchorConfig {
+                    anchor_interval: 10,
+                    max_delta_chain: 100,
+                };
+                let mut storage = HistoricalStorage::with_config(config);
+                let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
+
+                // Pre-populate with versions across multiple nodes to avoid hitting
+                // retention limits (max_versions_per_entity)
+                for i in 0..count {
+                    let node_idx = i / 100; // 100 versions per node
+                    let node_id = NodeId::new(node_idx).unwrap();
+                    let version_id = VersionId::new(i).unwrap();
+                    let temporal = BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+                    let properties = PropertyMapBuilder::new().insert("value", i as i64).build();
+
+                    storage
+                        .add_node_version(node_id, version_id, temporal, label, properties)
+                        .unwrap();
+                }
+
+                // Benchmark: Call stats() repeatedly
+                b.iter(|| {
+                    black_box(storage.stats());
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_add_node_version_with_varying_anchor_intervals,
     bench_single_add_at_chain_positions,
-    bench_bulk_insert_multiple_entities
+    bench_bulk_insert_multiple_entities,
+    bench_stats_with_varying_version_counts
 );
 criterion_main!(benches);
