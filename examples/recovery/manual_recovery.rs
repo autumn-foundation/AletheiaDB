@@ -74,6 +74,7 @@
 //! ```
 
 use gallifreydb::core::{
+    GLOBAL_INTERNER,
     id::{EdgeId, NodeId},
     property::{PropertyMapBuilder, PropertyValue},
     temporal::{BiTemporalInterval, time},
@@ -134,9 +135,10 @@ fn main() -> Result<()> {
     // Create 500 nodes
     for i in 1..=500 {
         let node_id = NodeId::new(i)?;
+        let label = format!("Node{}", i);
         wal.append(WalOperation::CreateNode {
             node_id,
-            label: format!("Node{}", i),
+            label: GLOBAL_INTERNER.intern(&label)?,
             properties: PropertyMapBuilder::new()
                 .insert("id", i as i64)
                 .insert("name", format!("Node {}", i))
@@ -154,7 +156,7 @@ fn main() -> Result<()> {
             edge_id,
             source,
             target,
-            label: "LINKS_TO".to_string(),
+            label: GLOBAL_INTERNER.intern("LINKS_TO")?,
             properties: PropertyMapBuilder::new().insert("weight", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -166,7 +168,7 @@ fn main() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id: node_id_1,
         version_id: version_id_500,
-        label: "Node1Updated".to_string(),
+        label: GLOBAL_INTERNER.intern("Node1Updated")?,
         properties: PropertyMapBuilder::new()
             .insert("id", 1)
             .insert("name", "Node 1 (Updated)")

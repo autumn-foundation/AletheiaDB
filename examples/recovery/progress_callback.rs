@@ -63,6 +63,7 @@ use gallifreydb::core::{
     id::{EdgeId, NodeId},
     property::PropertyMapBuilder,
     temporal::{BiTemporalInterval, time},
+    GLOBAL_INTERNER,
 };
 use gallifreydb::storage::{
     persistence::{CheckpointConfig, PersistenceManager},
@@ -188,9 +189,10 @@ fn main() -> Result<()> {
     // Create 5,000 nodes
     for i in 1..=5000 {
         let node_id = NodeId::new(i)?;
+        let label_str = format!("Node{}", i);
         wal.append(WalOperation::CreateNode {
             node_id,
-            label: format!("Node{}", i),
+            label: GLOBAL_INTERNER.intern(&label_str)?,
             properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -206,7 +208,7 @@ fn main() -> Result<()> {
             edge_id,
             source,
             target,
-            label: "EDGE".to_string(),
+            label: GLOBAL_INTERNER.intern("EDGE")?,
             properties: PropertyMapBuilder::new().insert("weight", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
