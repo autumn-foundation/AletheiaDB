@@ -21,6 +21,7 @@
 mod common;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use gallifreydb::core::GLOBAL_INTERNER;
 use gallifreydb::core::id::NodeId;
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::temporal::{BiTemporalInterval, time};
@@ -181,7 +182,7 @@ fn create_wal_only_database(operation_count: usize) -> (TempDir, ConcurrentWalSy
             // Create node operation
             WalOperation::CreateNode {
                 node_id: NodeId::new(i as u64).unwrap(),
-                label: "WalNode".to_string(),
+                label: GLOBAL_INTERNER.intern("WalNode").unwrap(),
                 properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
                 temporal: BiTemporalInterval::current(time::now()),
             }
@@ -194,7 +195,7 @@ fn create_wal_only_database(operation_count: usize) -> (TempDir, ConcurrentWalSy
                 node_id: NodeId::new(node_id).unwrap(),
                 version_id: gallifreydb::core::id::VersionId::new((update_count + 1) as u64)
                     .unwrap(),
-                label: "WalNode".to_string(),
+                label: GLOBAL_INTERNER.intern("WalNode").unwrap(),
                 properties: PropertyMapBuilder::new()
                     .insert("id", node_id as i64)
                     .insert("updated", true)

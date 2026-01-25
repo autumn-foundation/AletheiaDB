@@ -524,6 +524,7 @@ impl ConcurrentWal {
 mod tests {
     use super::*;
     use crate::core::id::NodeId;
+    use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMap;
     use crate::core::temporal::{BiTemporalInterval, time};
     use std::sync::Arc;
@@ -533,7 +534,7 @@ mod tests {
     fn test_operation() -> WalOperation {
         WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         }

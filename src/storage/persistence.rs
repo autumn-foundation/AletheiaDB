@@ -14,9 +14,9 @@
 
 use crate::api::transaction::types::TxId;
 use crate::core::{
-    GLOBAL_INTERNER,
     graph::{Edge, Node},
     id::{EdgeId, NodeId, VersionId},
+    interning::InternedString,
     property::PropertyMap,
     temporal::{BiTemporalInterval, Timestamp, time},
 };
@@ -705,21 +705,13 @@ impl PersistenceManager {
         current: &CurrentStorage,
         historical: &mut HistoricalStorage,
         node_id: NodeId,
-        label: String,
+        label: InternedString,
         properties: PropertyMap,
         temporal: BiTemporalInterval,
         next_version_id: &mut u64,
     ) -> Result<()> {
-        // Intern the label string (WAL stores strings, but Node needs InternedString)
-        let interned_label =
-            GLOBAL_INTERNER
-                .intern(&label)
-                .map_err(|e| StorageError::WalError {
-                    reason: format!(
-                        "Failed to intern node label '{}' for node_id={} during recovery: {}",
-                        label, node_id, e
-                    ),
-                })?;
+        // Issue #225: label is already an InternedString from WAL, no need to intern
+        let interned_label = label;
 
         // Extract commit timestamp from temporal interval
         let commit_timestamp = temporal.transaction_time().start();
@@ -758,21 +750,13 @@ impl PersistenceManager {
         edge_id: EdgeId,
         source: NodeId,
         target: NodeId,
-        label: String,
+        label: InternedString,
         properties: PropertyMap,
         temporal: BiTemporalInterval,
         next_version_id: &mut u64,
     ) -> Result<()> {
-        // Intern the label string (WAL stores strings, but Edge needs InternedString)
-        let interned_label =
-            GLOBAL_INTERNER
-                .intern(&label)
-                .map_err(|e| StorageError::WalError {
-                    reason: format!(
-                        "Failed to intern edge label '{}' for edge_id={} during recovery: {}",
-                        label, edge_id, e
-                    ),
-                })?;
+        // Issue #225: label is already an InternedString from WAL, no need to intern
+        let interned_label = label;
 
         // Extract commit timestamp from temporal interval
         let commit_timestamp = temporal.transaction_time().start();
@@ -820,19 +804,12 @@ impl PersistenceManager {
         historical: &mut HistoricalStorage,
         node_id: NodeId,
         version_id: VersionId,
-        label: String,
+        label: InternedString,
         properties: PropertyMap,
         temporal: BiTemporalInterval,
     ) -> Result<()> {
-        // Intern the label string (WAL stores strings, but Node needs InternedString)
-        let interned_label = GLOBAL_INTERNER.intern(&label).map_err(|e| {
-            StorageError::WalError {
-                reason: format!(
-                    "Failed to intern node label '{}' for node_id={} version_id={} during recovery: {}",
-                    label, node_id, version_id, e
-                ),
-            }
-        })?;
+        // Issue #225: label is already an InternedString from WAL, no need to intern
+        let interned_label = label;
 
         // Extract commit timestamp from temporal interval
         let commit_timestamp = temporal.transaction_time().start();
@@ -874,19 +851,12 @@ impl PersistenceManager {
         version_id: VersionId,
         source: NodeId,
         target: NodeId,
-        label: String,
+        label: InternedString,
         properties: PropertyMap,
         temporal: BiTemporalInterval,
     ) -> Result<()> {
-        // Intern the label string (WAL stores strings, but Edge needs InternedString)
-        let interned_label = GLOBAL_INTERNER.intern(&label).map_err(|e| {
-            StorageError::WalError {
-                reason: format!(
-                    "Failed to intern edge label '{}' for edge_id={} version_id={} during recovery: {}",
-                    label, edge_id, version_id, e
-                ),
-            }
-        })?;
+        // Issue #225: label is already an InternedString from WAL, no need to intern
+        let interned_label = label;
 
         // Extract commit timestamp from temporal interval
         let commit_timestamp = temporal.transaction_time().start();
@@ -1027,6 +997,7 @@ impl PersistenceManager {
 mod tests {
     use super::*;
     use crate::core::graph::Node;
+    use crate::core::interning::GLOBAL_INTERNER;
     use crate::storage::version::VersionMetadata;
     use crate::{PropertyMapBuilder, api::transaction::types::TxId};
     use tempfile::TempDir;
@@ -1493,7 +1464,7 @@ mod tests {
         for i in 1..=5 {
             wal.append(crate::storage::wal::WalOperation::CreateNode {
                 node_id: NodeId::new(i).unwrap(),
-                label: "Test".to_string(),
+                label: GLOBAL_INTERNER.intern("Test").unwrap(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -1652,15 +1623,15 @@ mod tests {
             let temporal = BiTemporalInterval::current(time::now());
 
             // Write to WAL
+            let interned_label = GLOBAL_INTERNER.intern("Document")?;
             wal.append(WalOperation::CreateNode {
                 node_id,
-                label: "Document".to_string(),
+                label: interned_label,
                 properties: props.clone(),
                 temporal,
             })?;
 
             // Create in storage for checkpoint
-            let interned_label = GLOBAL_INTERNER.intern("Document")?;
             let version_id = VersionId::new(i as u64 + 1)?;
             let commit_timestamp = temporal.transaction_time().start();
             let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
@@ -1776,7 +1747,7 @@ mod tests {
 
             wal.append(WalOperation::CreateNode {
                 node_id,
-                label: "Document".to_string(),
+                label: GLOBAL_INTERNER.intern("Document").unwrap(),
                 properties: props.clone(),
                 temporal,
             })?;
@@ -1860,7 +1831,7 @@ mod tests {
 
             wal.append(WalOperation::CreateNode {
                 node_id,
-                label: "Doc".to_string(),
+                label: GLOBAL_INTERNER.intern("Doc").unwrap(),
                 properties: props.clone(),
                 temporal,
             })?;
