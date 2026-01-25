@@ -68,7 +68,7 @@ fn test_version_lookup_correctness_many_versions() {
 
     // Test: Query at the beginning of each version interval
     for (expected_version_idx, &timestamp) in version_timestamps.iter().enumerate() {
-        let query_time = Timestamp::from(timestamp.wallclock() + 1); // Just after version start
+        let query_time = Timestamp::from(timestamp.wallclock() + 1i64); // Just after version start
 
         let version_id = hist_guard
             .find_node_version_at_time(node_id, query_time, query_time)
@@ -84,7 +84,9 @@ fn test_version_lookup_correctness_many_versions() {
             .reconstruct_node_properties(version_id)
             .expect("Failed to reconstruct properties");
 
-        let version_number = props.get("version").and_then(|v| v.as_int());
+        let version_number = props
+            .get("version")
+            .and_then(|v: &gallifreydb::core::property::PropertyValue| v.as_int());
 
         assert!(
             version_number.is_some(),
@@ -277,7 +279,9 @@ fn test_edge_version_lookup_correctness_many_versions() {
             .reconstruct_edge_properties(version_id)
             .expect("Failed to reconstruct edge properties");
 
-        let weight = props.get("weight").and_then(|v| v.as_int());
+        let weight = props
+            .get("weight")
+            .and_then(|v: &gallifreydb::core::property::PropertyValue| v.as_int());
         assert!(
             weight.is_some(),
             "Weight property should exist at timestamp {}",

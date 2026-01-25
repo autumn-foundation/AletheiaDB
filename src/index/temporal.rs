@@ -147,10 +147,19 @@ impl TimelineEntry {
 }
 
 /// Timeline for a specific entity.
+///
+/// # Performance Optimization (Issue #209)
+///
+/// This structure maintains a HashMap to enable O(1) lookups when updating
+/// interval end times. Without this, updating would require O(n) linear search
+/// through the versions vector, partially defeating the O(log n) query optimization.
 #[derive(Debug, Clone, Default)]
 struct EntityTimeline {
     /// Versions sorted by start time.
     versions: Vec<TimelineEntry>,
+    /// Fast lookup: metadata_idx -> position in versions vec.
+    /// Enables O(1) updates instead of O(n) linear search.
+    metadata_to_position: std::collections::HashMap<VersionMetadataIndex, usize>,
 }
 
 impl EntityTimeline {
@@ -170,19 +179,34 @@ impl EntityTimeline {
 
         // Optimization: if this version starts after the last one (common case), just push it.
         if self.versions.last().is_none_or(|last| last.start <= start) {
+            let position = self.versions.len();
             self.versions.push(entry);
+            self.metadata_to_position.insert(metadata_idx, position);
             return;
         }
 
         let idx = self.versions.partition_point(|e| e.start < start);
         self.versions.insert(idx, entry);
+
+        // Rebuild position map after insertion (positions shifted)
+        self.rebuild_position_map();
+    }
+
+    /// Rebuild the metadata_to_position HashMap after operations that shift positions.
+    ///
+    /// This is called after insertions that aren't at the end, which are rare
+    /// (most inserts are chronological and append to the end).
+    fn rebuild_position_map(&mut self) {
+        self.metadata_to_position.clear();
+        for (pos, entry) in self.versions.iter().enumerate() {
+            self.metadata_to_position.insert(entry.metadata_idx, pos);
+        }
     }
 
     /// Update the end time of an existing timeline entry.
     ///
     /// This is used when a version's temporal interval is closed (e.g., when a new
-    /// version supersedes it). Finds the entry with the given metadata_idx and
-    /// updates its end timestamp.
+    /// version supersedes it). Uses O(1) HashMap lookup to find the entry position.
     ///
     /// # Arguments
     ///
@@ -192,18 +216,20 @@ impl EntityTimeline {
     /// # Returns
     ///
     /// Returns `true` if the entry was found and updated, `false` otherwise.
+    ///
+    /// # Performance (Issue #209)
+    ///
+    /// This method is O(1) thanks to the metadata_to_position HashMap. Without it,
+    /// we'd need O(n) linear search, partially defeating the query optimization.
     fn update_end_time(&mut self, metadata_idx: VersionMetadataIndex, new_end: Timestamp) -> bool {
-        // Find the entry with matching metadata_idx
-        if let Some(entry) = self
-            .versions
-            .iter_mut()
-            .find(|e| e.metadata_idx == metadata_idx)
+        // O(1) lookup via HashMap
+        if let Some(&position) = self.metadata_to_position.get(&metadata_idx)
+            && let Some(entry) = self.versions.get_mut(position)
         {
             entry.end = new_end;
-            true
-        } else {
-            false
+            return true;
         }
+        false
     }
 
     /// Insert multiple versions at once and sort. Efficient for large retroactive updates.
@@ -246,6 +272,9 @@ impl EntityTimeline {
         // Deduplicate by metadata_idx to prevent memory leaks during recovery or bulk updates.
         // Keeps the first occurrence when duplicates exist.
         self.versions.dedup_by_key(|e| e.metadata_idx);
+
+        // Rebuild position map after bulk operations (Issue #209)
+        self.rebuild_position_map();
     }
 
     /// Find all metadata indices in this timeline that overlap with the given time range.
@@ -492,10 +521,26 @@ impl EntityTimelines {
     /// # Returns
     ///
     /// Returns `true` if the version was found and updated, `false` otherwise.
+    ///
+    /// # Invariants
+    ///
+    /// In correct operation, this should always succeed (version exists in temporal index
+    /// if it exists in storage). Debug builds assert this invariant.
     fn update_valid_time_end(&mut self, version_id: VersionId, new_end: Timestamp) -> bool {
         if let Some(metadata_idx) = self.find_metadata_index(version_id) {
-            self.valid.update_end_time(metadata_idx, new_end)
+            let result = self.valid.update_end_time(metadata_idx, new_end);
+            debug_assert!(
+                result,
+                "Temporal index inconsistency: version {:?} exists in metadata but not in valid timeline",
+                version_id
+            );
+            result
         } else {
+            debug_assert!(
+                false,
+                "Temporal index inconsistency: version {:?} not found in metadata",
+                version_id
+            );
             false
         }
     }
@@ -513,10 +558,26 @@ impl EntityTimelines {
     /// # Returns
     ///
     /// Returns `true` if the version was found and updated, `false` otherwise.
+    ///
+    /// # Invariants
+    ///
+    /// In correct operation, this should always succeed (version exists in temporal index
+    /// if it exists in storage). Debug builds assert this invariant.
     fn update_transaction_time_end(&mut self, version_id: VersionId, new_end: Timestamp) -> bool {
         if let Some(metadata_idx) = self.find_metadata_index(version_id) {
-            self.tx.update_end_time(metadata_idx, new_end)
+            let result = self.tx.update_end_time(metadata_idx, new_end);
+            debug_assert!(
+                result,
+                "Temporal index inconsistency: version {:?} exists in metadata but not in tx timeline",
+                version_id
+            );
+            result
         } else {
+            debug_assert!(
+                false,
+                "Temporal index inconsistency: version {:?} not found in metadata",
+                version_id
+            );
             false
         }
     }
@@ -3125,6 +3186,200 @@ mod tests {
         assert_eq!(iter_results.len(), vec_results.len());
         for version_id in &iter_results {
             assert!(vec_results.contains(version_id));
+        }
+    }
+
+    /// Test update_node_valid_time_end - Issue #209
+    #[test]
+    fn test_update_node_valid_time_end() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+
+        // Insert version with open-ended valid time
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::from(1000.into()), // open-ended
+                    TimeRange::from(0.into()),
+                ),
+            )
+            .unwrap();
+
+        // Should find version at time 2000
+        let results = indexes.find_node_version_at_point(node_id, 2000.into(), 100.into());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], v1);
+
+        // Close the valid time interval
+        indexes.update_node_valid_time_end(node_id, v1, 1500.into());
+
+        // Should still find at time 1200 (within closed interval)
+        let results = indexes.find_node_version_at_point(node_id, 1200.into(), 100.into());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], v1);
+
+        // Should NOT find at time 2000 (after closed interval)
+        let results = indexes.find_node_version_at_point(node_id, 2000.into(), 100.into());
+        assert_eq!(results.len(), 0);
+    }
+
+    /// Test update_edge_transaction_time_end - Issue #209
+    #[test]
+    fn test_update_edge_transaction_time_end() {
+        let indexes = TemporalIndexes::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+
+        // Insert version with open-ended transaction time
+        indexes
+            .insert_edge_version(
+                edge_id,
+                v1,
+                BiTemporalInterval::new(
+                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
+                    TimeRange::from(500.into()), // open-ended
+                ),
+            )
+            .unwrap();
+
+        // Should find version at tx_time 1000
+        let results = indexes.find_edge_version_at_point(edge_id, 1500.into(), 1000.into());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], v1);
+
+        // Close the transaction time interval
+        indexes.update_edge_transaction_time_end(edge_id, v1, 800.into());
+
+        // Should still find at tx_time 600 (within closed interval)
+        let results = indexes.find_edge_version_at_point(edge_id, 1500.into(), 600.into());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], v1);
+
+        // Should NOT find at tx_time 1000 (after closed interval)
+        let results = indexes.find_edge_version_at_point(edge_id, 1500.into(), 1000.into());
+        assert_eq!(results.len(), 0);
+    }
+
+    /// Test update with multiple versions - Issue #209
+    #[test]
+    fn test_update_multiple_versions() {
+        let indexes = TemporalIndexes::new();
+        let node_id = NodeId::new(1).unwrap();
+        let v1 = VersionId::new(100).unwrap();
+        let v2 = VersionId::new(101).unwrap();
+        let v3 = VersionId::new(102).unwrap();
+
+        // Insert three versions with overlapping intervals
+        indexes
+            .insert_node_version(
+                node_id,
+                v1,
+                BiTemporalInterval::new(TimeRange::from(1000.into()), TimeRange::from(0.into())),
+            )
+            .unwrap();
+
+        indexes
+            .insert_node_version(
+                node_id,
+                v2,
+                BiTemporalInterval::new(TimeRange::from(2000.into()), TimeRange::from(0.into())),
+            )
+            .unwrap();
+
+        indexes
+            .insert_node_version(
+                node_id,
+                v3,
+                BiTemporalInterval::new(TimeRange::from(3000.into()), TimeRange::from(0.into())),
+            )
+            .unwrap();
+
+        // Close v1's interval
+        indexes.update_node_valid_time_end(node_id, v1, 2000.into());
+
+        // Close v2's interval
+        indexes.update_node_valid_time_end(node_id, v2, 3000.into());
+
+        // v1 should be found only before 2000
+        let results = indexes.find_node_version_at_point(node_id, 1500.into(), 100.into());
+        assert_eq!(results, vec![v1]);
+
+        // v2 should be found between 2000 and 3000
+        let results = indexes.find_node_version_at_point(node_id, 2500.into(), 100.into());
+        assert_eq!(results, vec![v2]);
+
+        // v3 should be found after 3000
+        let results = indexes.find_node_version_at_point(node_id, 3500.into(), 100.into());
+        assert_eq!(results, vec![v3]);
+    }
+
+    /// Test concurrent updates (Issue #209 - thread safety)
+    #[test]
+    fn test_concurrent_updates() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let indexes = Arc::new(TemporalIndexes::new());
+        let node_id = NodeId::new(1).unwrap();
+
+        // Insert 100 versions from main thread
+        for i in 0..100 {
+            let v_id = VersionId::new(i).unwrap();
+            indexes
+                .insert_node_version(
+                    node_id,
+                    v_id,
+                    BiTemporalInterval::new(
+                        TimeRange::from(((i * 1000) as i64).into()),
+                        TimeRange::from(0.into()),
+                    ),
+                )
+                .unwrap();
+        }
+
+        // Spawn threads to close intervals concurrently
+        let mut handles = vec![];
+        for i in 0..10 {
+            let indexes_clone = Arc::clone(&indexes);
+            let handle = thread::spawn(move || {
+                for j in 0..10 {
+                    let idx = i * 10 + j;
+                    let v_id = VersionId::new(idx).unwrap();
+                    indexes_clone.update_node_valid_time_end(
+                        node_id,
+                        v_id,
+                        (((idx + 1) * 1000) as i64).into(),
+                    );
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify all intervals were closed correctly
+        for i in 0..100 {
+            let v_id = VersionId::new(i).unwrap();
+            let query_time = (((i * 1000) + 500) as i64).into();
+
+            let results = indexes.find_node_version_at_point(node_id, query_time, 100.into());
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0], v_id);
+
+            // Should NOT find after closed interval
+            let query_time = (((i + 1) * 1000 + 500) as i64).into();
+            let results = indexes.find_node_version_at_point(node_id, query_time, 100.into());
+            // Should find the next version (if it exists) or nothing
+            if i < 99 {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0], VersionId::new(i + 1).unwrap());
+            }
         }
     }
 }
