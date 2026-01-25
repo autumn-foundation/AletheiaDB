@@ -881,14 +881,97 @@ impl CurrentStorage {
             .ok_or_else(|| StorageError::EdgeNotFound(id).into())
     }
 
+    // ========================================================================
+    // Zero-copy access methods (Issue #190)
+    //
+    // These methods provide efficient access to node/edge data without cloning
+    // the entire structure. Use these for hot paths where you only need to
+    // read specific fields.
+    // ========================================================================
+
+    /// Get the target node of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the target NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_target(&self, id: EdgeId) -> Result<NodeId> {
+        self.indexes
+            .get_edge_target(id)
+            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+    }
+
+    /// Get the source node of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the source NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_source(&self, id: EdgeId) -> Result<NodeId> {
+        self.indexes
+            .get_edge_source(id)
+            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+    }
+
+    /// Get the endpoints (source, target) of an edge without cloning.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns two NodeIds (16 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_endpoints(&self, id: EdgeId) -> Result<(NodeId, NodeId)> {
+        self.indexes
+            .get_edge_endpoints(id)
+            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+    }
+
+    /// Get the label of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the label (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_label(&self, id: EdgeId) -> Result<InternedString> {
+        self.indexes
+            .get_edge_label(id)
+            .ok_or_else(|| StorageError::EdgeNotFound(id).into())
+    }
+
+    /// Get the label of a node without cloning the entire node.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the label (8 bytes)
+    /// - **No allocation**: Does not clone Node or PropertyMap
+    #[inline]
+    pub fn get_node_label(&self, id: NodeId) -> Result<InternedString> {
+        self.indexes
+            .get_node_label(id)
+            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+    }
+
     /// Delete a node.
     ///
     /// Note: This does not delete edges connected to the node.
     /// See issue #364 for cascade delete option.
     pub fn delete_node(&self, id: NodeId) -> Result<Node> {
-        self.indexes
+        let node = self
+            .indexes
             .remove_node(id)
-            .ok_or_else(|| StorageError::NodeNotFound(id).into())
+            .ok_or(StorageError::NodeNotFound(id))?;
+
+        // Best-effort vector index removal (ignore errors) - Issue #323
+        // This prevents memory leaks and ensures deleted nodes don't appear in similarity searches
+        // Note: Temporal vector index cleanup is only available in delete_node_direct()
+        // which has timestamp context from the transaction. Non-transactional deletes
+        // via this method don't have temporal semantics.
+        let _ = self.try_remove_from_index(id);
+
+        Ok(node)
     }
 
     /// Delete an edge.
@@ -1131,12 +1214,12 @@ impl CurrentStorage {
     }
 
     /// Export outgoing CSR adjacency data for persistence.
-    pub fn export_outgoing_csr(&self) -> (Vec<u64>, Vec<u64>) {
+    pub fn export_outgoing_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.indexes.export_outgoing_csr()
     }
 
     /// Export incoming CSR adjacency data for persistence.
-    pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>) {
+    pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.indexes.export_incoming_csr()
     }
 
@@ -1145,14 +1228,18 @@ impl CurrentStorage {
     /// This bypasses the need to rebuild adjacency structures from scratch.
     pub fn import_csr(
         &self,
+        outgoing_node_ids: Vec<u64>,
         outgoing_offsets: Vec<u64>,
         outgoing_edge_ids: Vec<u64>,
+        incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
     ) {
         self.indexes.import_csr(
+            outgoing_node_ids,
             outgoing_offsets,
             outgoing_edge_ids,
+            incoming_node_ids,
             incoming_offsets,
             incoming_edge_ids,
         );
@@ -2141,6 +2228,28 @@ impl CurrentStorage {
         self.indexes.iter_nodes().map(|n| n.id).collect()
     }
 
+    /// Get all edge IDs in the current storage.
+    ///
+    /// This is used by recovery tests and query executor for full edge scans.
+    /// For large graphs, prefer using filtered scans instead.
+    pub fn get_all_edge_ids(&self) -> Vec<EdgeId> {
+        self.indexes.iter_edges().map(|e| e.id).collect()
+    }
+
+    /// Get all nodes in the current storage.
+    ///
+    /// Used by recovery property tests to verify invariants.
+    pub fn get_all_nodes(&self) -> Vec<crate::Node> {
+        self.indexes.iter_nodes().collect()
+    }
+
+    /// Get all edges in the current storage.
+    ///
+    /// Used by recovery property tests to verify invariants.
+    pub fn get_all_edges(&self) -> Vec<crate::Edge> {
+        self.indexes.iter_edges().collect()
+    }
+
     /// Get nodes by label.
     ///
     /// Returns an iterator over all nodes with the given label.
@@ -2855,6 +2964,70 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|(id, _)| *id != node1));
         assert_eq!(results[0].0, node2); // Most similar
+    }
+
+    /// Test for Issue #323: delete_node() should remove vectors from HNSW index
+    ///
+    /// This test verifies that CurrentStorage::delete_node() properly removes
+    /// vector embeddings from the HNSW index, preventing memory leaks and
+    /// incorrect search results.
+    #[test]
+    fn test_delete_node_removes_from_vector_index() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        // Enable vector index
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        // Create two nodes with embeddings
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let v2 = vec![0.0f32, 1.0, 0.0, 0.0];
+
+        let node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        let node2 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v2)
+                    .build(),
+            )
+            .unwrap();
+
+        // Verify both nodes are in the index
+        let results_before = storage.find_similar_by_embedding(&v1, 10).unwrap();
+        assert_eq!(
+            results_before.len(),
+            2,
+            "Should find 2 nodes before deletion"
+        );
+
+        // Delete node1
+        storage.delete_node(node1).unwrap();
+
+        // Verify node1 is removed from the index
+        let results_after = storage.find_similar_by_embedding(&v1, 10).unwrap();
+        assert_eq!(
+            results_after.len(),
+            1,
+            "Should find only 1 node after deletion"
+        );
+        assert_eq!(results_after[0].0, node2, "Remaining node should be node2");
+
+        // Deleted node should not appear in find_similar results
+        let similar_to_node2 = storage.find_similar(node2, 10).unwrap();
+        assert!(
+            !similar_to_node2.iter().any(|(id, _)| *id == node1),
+            "Deleted node should not appear in similarity search"
+        );
     }
 
     #[test]

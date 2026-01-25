@@ -69,6 +69,9 @@ pub mod mcp;
 // Custom Honeycomb client module (replaces libhoney-rust git dependency)
 #[cfg(feature = "honeycomb-client")]
 pub mod honeycomb;
+// Optional SQL:2011 temporal syntax support
+#[cfg(feature = "sql")]
+pub mod sql;
 
 // Re-export commonly used types at the crate root
 pub use config::{

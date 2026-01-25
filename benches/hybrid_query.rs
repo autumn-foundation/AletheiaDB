@@ -644,10 +644,11 @@ fn bench_hybrid_vs_sequential(c: &mut Criterion) {
     group.bench_function("sequential_traverse_then_rank", |b| {
         b.iter(|| {
             // Get edges, resolve targets, load embeddings, compute similarities (chained)
+            // Zero-copy: use get_edge_target instead of get_edge (Issue #190)
             let edge_ids = db.get_outgoing_edges_with_label(start, "KNOWS");
             let mut scored: Vec<(NodeId, f32)> = edge_ids
                 .iter()
-                .filter_map(|&eid| db.get_edge(eid).ok().map(|e| e.target))
+                .filter_map(|&eid| db.get_edge_target(eid).ok())
                 .filter_map(|nid| {
                     let node = db.get_node(nid).ok()?;
                     let emb = node.get_property("embedding")?.as_vector()?;

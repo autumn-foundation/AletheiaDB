@@ -1050,8 +1050,18 @@ mod tests {
         // Request flush
         thread.request_flush();
 
-        // Wait for flush to complete (increased timeout for CI reliability)
-        std::thread::sleep(Duration::from_millis(200));
+        // Poll with timeout for flush to complete (more reliable than fixed sleep)
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(5);
+        while coordinator.total_entries_flushed() < 2 {
+            if start.elapsed() > timeout {
+                panic!(
+                    "Timeout waiting for flush: only {} entries flushed",
+                    coordinator.total_entries_flushed()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         // Should have flushed
         assert!(coordinator.total_entries_flushed() >= 2);

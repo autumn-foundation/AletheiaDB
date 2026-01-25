@@ -61,6 +61,9 @@ num_cpus = { version = "1.16", optional = true }
 # Redb for tiered cold storage (pure Rust, ADR-0025)
 redb = "2.4"
 
+# SQL parser for SQL:2011 temporal syntax support (optional)
+sqlparser = { version = "0.40", optional = true }
+
 # Parallel iteration for sharded vector index
 rayon = "1.8"
 
@@ -113,6 +116,9 @@ mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base6
 
 # Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+
+# SQL:2011 temporal syntax support
+sql = ["dep:sqlparser"]
 
 # Custom Honeycomb client (replaces libhoney-rust git dependency)
 # This provides a minimal, security-focused client with modern dependencies
@@ -176,6 +182,19 @@ required-features = ["embedding-onnx"]
 [[example]]
 name = "embedding_comparison"
 required-features = ["embedding-all"]
+
+# Recovery examples demonstrating database recovery functionality
+[[example]]
+name = "basic_recovery"
+path = "examples/recovery/basic_recovery.rs"
+
+[[example]]
+name = "manual_recovery"
+path = "examples/recovery/manual_recovery.rs"
+
+[[example]]
+name = "progress_callback"
+path = "examples/recovery/progress_callback.rs"
 
 # Performance targets - lightweight validation of key performance metrics
 [[bench]]
@@ -266,6 +285,12 @@ required-features = []
 name = "query_optimization"
 harness = false
 path = "benches/query_optimization.rs"
+required-features = []
+
+[[bench]]
+name = "recovery_benchmarks"
+harness = false
+path = "benches/recovery_benchmarks.rs"
 required-features = []
 
 # MCP server binary

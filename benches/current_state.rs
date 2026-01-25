@@ -322,6 +322,18 @@ fn bench_id_current(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("read_current_approximate", |b| {
+        let generator = IdGenerator::new();
+        // Generate some IDs first
+        for _ in 0..1000 {
+            generator.next().unwrap();
+        }
+
+        b.iter(|| {
+            black_box(generator.current_approximate());
+        });
+    });
+
     group.finish();
 }
 

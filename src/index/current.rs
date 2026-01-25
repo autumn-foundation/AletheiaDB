@@ -163,6 +163,305 @@ impl CurrentIndexes {
         self.edges.get(&id).map(|entry| entry.value().clone())
     }
 
+    // ========================================================================
+    // Zero-copy access methods (Issue #190)
+    //
+    // These methods provide efficient access to node/edge data without cloning
+    // the entire structure. Use these for hot paths where you only need to
+    // read specific fields.
+    // ========================================================================
+
+    /// Access a node without cloning, executing a closure on the node data.
+    ///
+    /// This method provides zero-copy read access to node data for hot paths
+    /// where only specific fields are needed. The closure receives a reference
+    /// to the node and can return any computed value.
+    ///
+    /// # Performance
+    ///
+    /// - **No allocation**: Does not clone the Node (~56 bytes saved)
+    /// - **No Arc increment**: Does not increment PropertyMap reference count
+    /// - **Lock duration**: Holds DashMap read lock only during closure execution
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Check if node has a specific label (zero-copy)
+    /// let is_person = indexes.with_node(node_id, |n| n.label == person_label)
+    ///     .unwrap_or(false);
+    ///
+    /// // Extract multiple fields in one call
+    /// let (id, label) = indexes.with_node(node_id, |n| (n.id, n.label))?;
+    /// ```
+    #[inline]
+    pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Option<R>
+    where
+        F: FnOnce(&Node) -> R,
+    {
+        self.nodes.get(&id).map(|entry| f(entry.value()))
+    }
+
+    /// Access an edge without cloning, executing a closure on the edge data.
+    ///
+    /// This method provides zero-copy read access to edge data for hot paths
+    /// where only specific fields are needed. The closure receives a reference
+    /// to the edge and can return any computed value.
+    ///
+    /// # Performance
+    ///
+    /// - **No allocation**: Does not clone the Edge (~72 bytes saved)
+    /// - **No Arc increment**: Does not increment PropertyMap reference count
+    /// - **Lock duration**: Holds DashMap read lock only during closure execution
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Get edge endpoints (zero-copy)
+    /// let (source, target) = indexes.with_edge(edge_id, |e| (e.source, e.target))?;
+    ///
+    /// // Check if edge connects specific nodes
+    /// let connects = indexes.with_edge(edge_id, |e| e.connects(src, tgt))
+    ///     .unwrap_or(false);
+    /// ```
+    #[inline]
+    pub fn with_edge<F, R>(&self, id: EdgeId, f: F) -> Option<R>
+    where
+        F: FnOnce(&Edge) -> R,
+    {
+        self.edges.get(&id).map(|entry| f(entry.value()))
+    }
+
+    /// Get the label of a node without cloning the entire node.
+    ///
+    /// This is a convenience method for the common case of checking a node's
+    /// label. It's equivalent to `with_node(id, |n| n.label)` but more concise.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the label (8 bytes)
+    /// - **No allocation**: Does not clone Node or PropertyMap
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if indexes.get_node_label(node_id) == Some(person_label) {
+    ///     // Node is a Person
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_node_label(&self, id: NodeId) -> Option<InternedString> {
+        self.nodes.get(&id).map(|entry| entry.value().label)
+    }
+
+    /// Get the endpoints (source, target) of an edge without cloning.
+    ///
+    /// This is a convenience method for the common case of getting an edge's
+    /// source and target nodes. It's equivalent to
+    /// `with_edge(id, |e| (e.source, e.target))` but more concise.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns two NodeIds (16 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some((source, target)) = indexes.get_edge_endpoints(edge_id) {
+    ///     // Process source and target
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_edge_endpoints(&self, id: EdgeId) -> Option<(NodeId, NodeId)> {
+        self.edges
+            .get(&id)
+            .map(|entry| (entry.value().source, entry.value().target))
+    }
+
+    /// Get the label of an edge without cloning the entire edge.
+    ///
+    /// This is a convenience method for the common case of checking an edge's
+    /// label. It's equivalent to `with_edge(id, |e| e.label)` but more concise.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the label (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if indexes.get_edge_label(edge_id) == Some(knows_label) {
+    ///     // Edge is a KNOWS relationship
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_edge_label(&self, id: EdgeId) -> Option<InternedString> {
+        self.edges.get(&id).map(|entry| entry.value().label)
+    }
+
+    /// Get the source node of an edge without cloning the entire edge.
+    ///
+    /// This is a convenience method for getting just the source node ID.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the source NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_source(&self, id: EdgeId) -> Option<NodeId> {
+        self.edges.get(&id).map(|entry| entry.value().source)
+    }
+
+    /// Get the target node of an edge without cloning the entire edge.
+    ///
+    /// This is a convenience method for getting just the target node ID.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the target NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_target(&self, id: EdgeId) -> Option<NodeId> {
+        self.edges.get(&id).map(|entry| entry.value().target)
+    }
+
+    /// Get a property value from a node without cloning the entire node.
+    ///
+    /// This is useful when you only need to read a single property from a node.
+    /// The property value is cloned (Arc types are cheap to clone), but the
+    /// rest of the node structure is not.
+    ///
+    /// # Performance
+    ///
+    /// - **Partial clone**: Only clones the PropertyValue (cheap for Arc types)
+    /// - **No Node clone**: Does not clone the entire Node structure
+    /// - **Interning cost**: The key is interned on each call; for hot paths
+    ///   with repeated lookups, use [`get_node_property_by_key`](Self::get_node_property_by_key)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(name) = indexes.get_node_property(node_id, "name") {
+    ///     println!("Node name: {:?}", name);
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_node_property(
+        &self,
+        id: NodeId,
+        key: &str,
+    ) -> Option<crate::core::property::PropertyValue> {
+        self.nodes
+            .get(&id)
+            .and_then(|entry| entry.value().properties.get(key).cloned())
+    }
+
+    /// Get a property value from an edge without cloning the entire edge.
+    ///
+    /// This is useful when you only need to read a single property from an edge.
+    /// The property value is cloned (Arc types are cheap to clone), but the
+    /// rest of the edge structure is not.
+    ///
+    /// # Performance
+    ///
+    /// - **Partial clone**: Only clones the PropertyValue (cheap for Arc types)
+    /// - **No Edge clone**: Does not clone the entire Edge structure
+    /// - **Interning cost**: The key is interned on each call; for hot paths
+    ///   with repeated lookups, use [`get_edge_property_by_key`](Self::get_edge_property_by_key)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(weight) = indexes.get_edge_property(edge_id, "weight") {
+    ///     println!("Edge weight: {:?}", weight);
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_edge_property(
+        &self,
+        id: EdgeId,
+        key: &str,
+    ) -> Option<crate::core::property::PropertyValue> {
+        self.edges
+            .get(&id)
+            .and_then(|entry| entry.value().properties.get(key).cloned())
+    }
+
+    /// Get a property value from a node using a pre-interned key.
+    ///
+    /// This is the high-performance version of [`get_node_property`](Self::get_node_property)
+    /// for hot paths where the same property key is accessed repeatedly.
+    ///
+    /// # Performance
+    ///
+    /// - **No interning**: Avoids HashMap lookup in the global interner
+    /// - **Partial clone**: Only clones the PropertyValue (cheap for Arc types)
+    /// - **Ideal for loops**: Pre-intern key once, use this method in the loop
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// // Pre-intern the key once outside the loop
+    /// let name_key = GLOBAL_INTERNER.intern("name").unwrap();
+    ///
+    /// // Use the interned key in the hot loop
+    /// for node_id in node_ids {
+    ///     if let Some(name) = indexes.get_node_property_by_key(node_id, &name_key) {
+    ///         // Process name
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_node_property_by_key(
+        &self,
+        id: NodeId,
+        key: &crate::core::property::PropertyKey,
+    ) -> Option<crate::core::property::PropertyValue> {
+        self.nodes
+            .get(&id)
+            .and_then(|entry| entry.value().properties.get_by_interned_key(key).cloned())
+    }
+
+    /// Get a property value from an edge using a pre-interned key.
+    ///
+    /// This is the high-performance version of [`get_edge_property`](Self::get_edge_property)
+    /// for hot paths where the same property key is accessed repeatedly.
+    ///
+    /// # Performance
+    ///
+    /// - **No interning**: Avoids HashMap lookup in the global interner
+    /// - **Partial clone**: Only clones the PropertyValue (cheap for Arc types)
+    /// - **Ideal for loops**: Pre-intern key once, use this method in the loop
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::core::interning::GLOBAL_INTERNER;
+    ///
+    /// // Pre-intern the key once outside the loop
+    /// let weight_key = GLOBAL_INTERNER.intern("weight").unwrap();
+    ///
+    /// // Use the interned key in the hot loop
+    /// for edge_id in edge_ids {
+    ///     if let Some(weight) = indexes.get_edge_property_by_key(edge_id, &weight_key) {
+    ///         // Process weight
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_edge_property_by_key(
+        &self,
+        id: EdgeId,
+        key: &crate::core::property::PropertyKey,
+    ) -> Option<crate::core::property::PropertyValue> {
+        self.edges
+            .get(&id)
+            .and_then(|entry| entry.value().properties.get_by_interned_key(key).cloned())
+    }
+
     /// Remove a node from the indexes.
     pub fn remove_node(&self, id: NodeId) -> Option<Node> {
         self.nodes.remove(&id).map(|(_, node)| node)
@@ -452,12 +751,12 @@ impl CurrentIndexes {
     }
 
     /// Export outgoing CSR data for persistence.
-    pub fn export_outgoing_csr(&self) -> (Vec<u64>, Vec<u64>) {
+    pub fn export_outgoing_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.outgoing.load().export_csr()
     }
 
     /// Export incoming CSR data for persistence.
-    pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>) {
+    pub fn export_incoming_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         self.incoming.load().export_csr()
     }
 
@@ -466,8 +765,10 @@ impl CurrentIndexes {
     /// This is used when loading persisted indexes to avoid rebuilding CSR from scratch.
     pub fn import_csr(
         &self,
+        outgoing_node_ids: Vec<u64>,
         outgoing_offsets: Vec<u64>,
         outgoing_edge_ids: Vec<u64>,
+        incoming_node_ids: Vec<u64>,
         incoming_offsets: Vec<u64>,
         incoming_edge_ids: Vec<u64>,
     ) {
@@ -482,6 +783,7 @@ impl CurrentIndexes {
 
         // Import outgoing adjacency
         let outgoing = crate::index::adjacency::AdjacencyIndex::import_csr(
+            outgoing_node_ids,
             outgoing_offsets,
             outgoing_edge_ids,
             &edges_map,
@@ -497,6 +799,7 @@ impl CurrentIndexes {
 
         // Import incoming adjacency
         let incoming = crate::index::adjacency::AdjacencyIndex::import_csr(
+            incoming_node_ids,
             incoming_offsets,
             incoming_edge_ids,
             &edges_map,
@@ -1442,6 +1745,484 @@ mod concurrency_tests {
             total_in_degree, 150,
             "Lazy rebuild should make all edges accessible via incoming adjacency"
         );
+    }
+}
+
+/// Tests for zero-copy node/edge access methods (Issue #190).
+///
+/// These tests verify the performance-optimized access patterns that avoid
+/// cloning entire Node/Edge structures when only partial data is needed.
+#[cfg(test)]
+mod zero_copy_access_tests {
+    use super::tests::{create_test_edge, create_test_node};
+    use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
+
+    // ========================================================================
+    // Tests for with_node callback method
+    // ========================================================================
+
+    /// Test that with_node provides zero-copy access to node data.
+    #[test]
+    fn test_with_node_returns_value() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(1, "Person");
+        indexes.insert_node(node);
+
+        // Use with_node to extract label without cloning the entire node
+        let label = indexes.with_node(NodeId::new(1).unwrap(), |n| n.label);
+        assert!(label.is_some());
+
+        let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+        assert_eq!(label.unwrap(), person_label);
+    }
+
+    /// Test that with_node returns None for non-existent node.
+    #[test]
+    fn test_with_node_nonexistent() {
+        let indexes = CurrentIndexes::new();
+
+        let result = indexes.with_node(NodeId::new(999).unwrap(), |n| n.label);
+        assert!(result.is_none());
+    }
+
+    /// Test that with_node can extract multiple fields in a single call.
+    #[test]
+    fn test_with_node_extract_multiple_fields() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(42, "Company");
+        indexes.insert_node(node);
+
+        // Extract multiple fields in one closure
+        let (id, label) = indexes
+            .with_node(NodeId::new(42).unwrap(), |n| (n.id, n.label))
+            .unwrap();
+
+        assert_eq!(id, NodeId::new(42).unwrap());
+        let company_label = GLOBAL_INTERNER.intern("Company").unwrap();
+        assert_eq!(label, company_label);
+    }
+
+    /// Test that with_node can perform computations on node data.
+    #[test]
+    fn test_with_node_computation() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(5, "Person");
+        indexes.insert_node(node);
+
+        let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        // Check if node has a specific label
+        let is_person = indexes
+            .with_node(NodeId::new(5).unwrap(), |n| n.label == person_label)
+            .unwrap_or(false);
+
+        assert!(is_person);
+    }
+
+    // ========================================================================
+    // Tests for with_edge callback method
+    // ========================================================================
+
+    /// Test that with_edge provides zero-copy access to edge data.
+    #[test]
+    fn test_with_edge_returns_value() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(1, 10, 20, "KNOWS");
+        indexes.insert_edge(edge);
+
+        // Use with_edge to extract endpoints without cloning
+        let endpoints = indexes.with_edge(EdgeId::new(1).unwrap(), |e| (e.source, e.target));
+        assert!(endpoints.is_some());
+
+        let (source, target) = endpoints.unwrap();
+        assert_eq!(source, NodeId::new(10).unwrap());
+        assert_eq!(target, NodeId::new(20).unwrap());
+    }
+
+    /// Test that with_edge returns None for non-existent edge.
+    #[test]
+    fn test_with_edge_nonexistent() {
+        let indexes = CurrentIndexes::new();
+
+        let result = indexes.with_edge(EdgeId::new(999).unwrap(), |e| e.label);
+        assert!(result.is_none());
+    }
+
+    /// Test that with_edge can extract label.
+    #[test]
+    fn test_with_edge_extract_label() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(7, 1, 2, "FOLLOWS");
+        indexes.insert_edge(edge);
+
+        let label = indexes
+            .with_edge(EdgeId::new(7).unwrap(), |e| e.label)
+            .unwrap();
+
+        let follows_label = GLOBAL_INTERNER.intern("FOLLOWS").unwrap();
+        assert_eq!(label, follows_label);
+    }
+
+    // ========================================================================
+    // Tests for get_node_label field accessor
+    // ========================================================================
+
+    /// Test that get_node_label returns the label without cloning.
+    #[test]
+    fn test_get_node_label() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(1, "Person");
+        indexes.insert_node(node);
+
+        let label = indexes.get_node_label(NodeId::new(1).unwrap());
+        assert!(label.is_some());
+
+        let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+        assert_eq!(label.unwrap(), person_label);
+    }
+
+    /// Test that get_node_label returns None for non-existent node.
+    #[test]
+    fn test_get_node_label_nonexistent() {
+        let indexes = CurrentIndexes::new();
+
+        let label = indexes.get_node_label(NodeId::new(999).unwrap());
+        assert!(label.is_none());
+    }
+
+    // ========================================================================
+    // Tests for get_edge_endpoints field accessor
+    // ========================================================================
+
+    /// Test that get_edge_endpoints returns source and target.
+    #[test]
+    fn test_get_edge_endpoints() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(1, 10, 20, "KNOWS");
+        indexes.insert_edge(edge);
+
+        let endpoints = indexes.get_edge_endpoints(EdgeId::new(1).unwrap());
+        assert!(endpoints.is_some());
+
+        let (source, target) = endpoints.unwrap();
+        assert_eq!(source, NodeId::new(10).unwrap());
+        assert_eq!(target, NodeId::new(20).unwrap());
+    }
+
+    /// Test that get_edge_endpoints returns None for non-existent edge.
+    #[test]
+    fn test_get_edge_endpoints_nonexistent() {
+        let indexes = CurrentIndexes::new();
+
+        let endpoints = indexes.get_edge_endpoints(EdgeId::new(999).unwrap());
+        assert!(endpoints.is_none());
+    }
+
+    // ========================================================================
+    // Tests for get_edge_label field accessor
+    // ========================================================================
+
+    /// Test that get_edge_label returns the label without cloning.
+    #[test]
+    fn test_get_edge_label() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(1, 10, 20, "KNOWS");
+        indexes.insert_edge(edge);
+
+        let label = indexes.get_edge_label(EdgeId::new(1).unwrap());
+        assert!(label.is_some());
+
+        let knows_label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        assert_eq!(label.unwrap(), knows_label);
+    }
+
+    /// Test that get_edge_label returns None for non-existent edge.
+    #[test]
+    fn test_get_edge_label_nonexistent() {
+        let indexes = CurrentIndexes::new();
+
+        let label = indexes.get_edge_label(EdgeId::new(999).unwrap());
+        assert!(label.is_none());
+    }
+
+    // ========================================================================
+    // Tests for get_edge_source and get_edge_target field accessors
+    // ========================================================================
+
+    /// Test that get_edge_source returns the source node.
+    #[test]
+    fn test_get_edge_source() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(1, 10, 20, "KNOWS");
+        indexes.insert_edge(edge);
+
+        let source = indexes.get_edge_source(EdgeId::new(1).unwrap());
+        assert!(source.is_some());
+        assert_eq!(source.unwrap(), NodeId::new(10).unwrap());
+    }
+
+    /// Test that get_edge_source returns None for non-existent edge.
+    #[test]
+    fn test_get_edge_source_nonexistent() {
+        let indexes = CurrentIndexes::new();
+
+        let source = indexes.get_edge_source(EdgeId::new(999).unwrap());
+        assert!(source.is_none());
+    }
+
+    /// Test that get_edge_target returns the target node.
+    #[test]
+    fn test_get_edge_target() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(1, 10, 20, "KNOWS");
+        indexes.insert_edge(edge);
+
+        let target = indexes.get_edge_target(EdgeId::new(1).unwrap());
+        assert!(target.is_some());
+        assert_eq!(target.unwrap(), NodeId::new(20).unwrap());
+    }
+
+    /// Test that get_edge_target returns None for non-existent edge.
+    #[test]
+    fn test_get_edge_target_nonexistent() {
+        let indexes = CurrentIndexes::new();
+
+        let target = indexes.get_edge_target(EdgeId::new(999).unwrap());
+        assert!(target.is_none());
+    }
+
+    // ========================================================================
+    // Tests for property accessors
+    // ========================================================================
+
+    /// Test that get_node_property returns a property value.
+    #[test]
+    fn test_get_node_property() {
+        let indexes = CurrentIndexes::new();
+
+        // Create a node with properties
+        use crate::core::id::VersionId;
+        use crate::core::property::PropertyMapBuilder;
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+            VersionId::new(1).unwrap(),
+        );
+        indexes.insert_node(node);
+
+        // Get specific properties
+        let name = indexes.get_node_property(NodeId::new(1).unwrap(), "name");
+        assert!(name.is_some());
+        assert_eq!(name.unwrap().as_str(), Some("Alice"));
+
+        let age = indexes.get_node_property(NodeId::new(1).unwrap(), "age");
+        assert!(age.is_some());
+        assert_eq!(age.unwrap().as_int(), Some(30));
+    }
+
+    /// Test that get_node_property returns None for non-existent property.
+    #[test]
+    fn test_get_node_property_missing_key() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(1, "Person");
+        indexes.insert_node(node);
+
+        let prop = indexes.get_node_property(NodeId::new(1).unwrap(), "nonexistent");
+        assert!(prop.is_none());
+    }
+
+    /// Test that get_node_property returns None for non-existent node.
+    #[test]
+    fn test_get_node_property_nonexistent_node() {
+        let indexes = CurrentIndexes::new();
+
+        let prop = indexes.get_node_property(NodeId::new(999).unwrap(), "name");
+        assert!(prop.is_none());
+    }
+
+    /// Test that get_edge_property returns a property value.
+    #[test]
+    fn test_get_edge_property() {
+        let indexes = CurrentIndexes::new();
+
+        // Create an edge with properties
+        use crate::core::id::VersionId;
+        use crate::core::property::PropertyMapBuilder;
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(10).unwrap(),
+            NodeId::new(20).unwrap(),
+            PropertyMapBuilder::new()
+                .insert("since", 2020i64)
+                .insert("strength", 0.9f64)
+                .build(),
+            VersionId::new(1).unwrap(),
+        );
+        indexes.insert_edge(edge);
+
+        // Get specific properties
+        let since = indexes.get_edge_property(EdgeId::new(1).unwrap(), "since");
+        assert!(since.is_some());
+        assert_eq!(since.unwrap().as_int(), Some(2020));
+
+        let strength = indexes.get_edge_property(EdgeId::new(1).unwrap(), "strength");
+        assert!(strength.is_some());
+        assert_eq!(strength.unwrap().as_float(), Some(0.9));
+    }
+
+    /// Test that get_edge_property returns None for non-existent property.
+    #[test]
+    fn test_get_edge_property_missing_key() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(1, 10, 20, "KNOWS");
+        indexes.insert_edge(edge);
+
+        let prop = indexes.get_edge_property(EdgeId::new(1).unwrap(), "nonexistent");
+        assert!(prop.is_none());
+    }
+
+    /// Test that get_edge_property returns None for non-existent edge.
+    #[test]
+    fn test_get_edge_property_nonexistent_edge() {
+        let indexes = CurrentIndexes::new();
+
+        let prop = indexes.get_edge_property(EdgeId::new(999).unwrap(), "weight");
+        assert!(prop.is_none());
+    }
+
+    // ========================================================================
+    // Tests for interned-key property accessors (hot path optimization)
+    // ========================================================================
+
+    /// Test that get_node_property_by_key works with pre-interned keys.
+    #[test]
+    fn test_get_node_property_by_key() {
+        let indexes = CurrentIndexes::new();
+
+        // Create a node with properties
+        use crate::core::id::VersionId;
+        use crate::core::property::PropertyMapBuilder;
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 30i64)
+                .build(),
+            VersionId::new(1).unwrap(),
+        );
+        indexes.insert_node(node);
+
+        // Pre-intern the key
+        let name_key = GLOBAL_INTERNER.intern("name").unwrap();
+
+        // Get property using interned key
+        let name = indexes.get_node_property_by_key(NodeId::new(1).unwrap(), &name_key);
+        assert!(name.is_some());
+        assert_eq!(name.unwrap().as_str(), Some("Alice"));
+    }
+
+    /// Test that get_node_property_by_key returns None for missing key.
+    #[test]
+    fn test_get_node_property_by_key_missing() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(1, "Person");
+        indexes.insert_node(node);
+
+        let nonexistent_key = GLOBAL_INTERNER.intern("nonexistent_key_test").unwrap();
+        let prop = indexes.get_node_property_by_key(NodeId::new(1).unwrap(), &nonexistent_key);
+        assert!(prop.is_none());
+    }
+
+    /// Test that get_edge_property_by_key works with pre-interned keys.
+    #[test]
+    fn test_get_edge_property_by_key() {
+        let indexes = CurrentIndexes::new();
+
+        // Create an edge with properties
+        use crate::core::id::VersionId;
+        use crate::core::property::PropertyMapBuilder;
+        let edge = Edge::new(
+            EdgeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(10).unwrap(),
+            NodeId::new(20).unwrap(),
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+            VersionId::new(1).unwrap(),
+        );
+        indexes.insert_edge(edge);
+
+        // Pre-intern the key
+        let since_key = GLOBAL_INTERNER.intern("since").unwrap();
+
+        // Get property using interned key
+        let since = indexes.get_edge_property_by_key(EdgeId::new(1).unwrap(), &since_key);
+        assert!(since.is_some());
+        assert_eq!(since.unwrap().as_int(), Some(2020));
+    }
+
+    /// Test that get_edge_property_by_key returns None for missing key.
+    #[test]
+    fn test_get_edge_property_by_key_missing() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(1, 10, 20, "KNOWS");
+        indexes.insert_edge(edge);
+
+        let nonexistent_key = GLOBAL_INTERNER.intern("nonexistent_edge_key_test").unwrap();
+        let prop = indexes.get_edge_property_by_key(EdgeId::new(1).unwrap(), &nonexistent_key);
+        assert!(prop.is_none());
+    }
+
+    // ========================================================================
+    // Integration tests - verify zero-copy methods work correctly with
+    // concurrent operations
+    // ========================================================================
+
+    /// Test that zero-copy methods work correctly under concurrent access.
+    #[test]
+    fn test_zero_copy_concurrent_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let indexes = Arc::new(CurrentIndexes::new());
+
+        // Insert initial data
+        for i in 0..100 {
+            indexes.insert_node(create_test_node(i, "Node"));
+            if i > 0 {
+                indexes.insert_edge(create_test_edge(i, i - 1, i, "LINK"));
+            }
+        }
+
+        let mut handles = Vec::new();
+
+        // Spawn readers using zero-copy methods
+        for _ in 0..4 {
+            let indexes_clone = Arc::clone(&indexes);
+            handles.push(thread::spawn(move || {
+                for i in 0..100 {
+                    let node_id = NodeId::new(i).unwrap();
+                    let _label = indexes_clone.get_node_label(node_id);
+
+                    if i > 0 {
+                        let edge_id = EdgeId::new(i).unwrap();
+                        let _endpoints = indexes_clone.get_edge_endpoints(edge_id);
+                        let _edge_label = indexes_clone.get_edge_label(edge_id);
+                    }
+                }
+            }));
+        }
+
+        // All threads should complete without issues
+        for handle in handles {
+            handle.join().expect("Thread should complete successfully");
+        }
     }
 }
 

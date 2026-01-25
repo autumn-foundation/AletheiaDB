@@ -621,11 +621,13 @@ fn persist_graph_index(
     graph_data.edge_count = graph_data.edges.len() as u64;
 
     // Export CSR adjacency structures for fast loading
-    let (outgoing_offsets, outgoing_neighbors) = current.export_outgoing_csr();
-    let (incoming_offsets, incoming_neighbors) = current.export_incoming_csr();
+    let (outgoing_node_ids, outgoing_offsets, outgoing_neighbors) = current.export_outgoing_csr();
+    let (incoming_node_ids, incoming_offsets, incoming_neighbors) = current.export_incoming_csr();
 
+    graph_data.outgoing_node_ids = outgoing_node_ids;
     graph_data.outgoing_offsets = outgoing_offsets;
     graph_data.outgoing_neighbors = outgoing_neighbors;
+    graph_data.incoming_node_ids = incoming_node_ids;
     graph_data.incoming_offsets = incoming_offsets;
     graph_data.incoming_neighbors = incoming_neighbors;
 
@@ -1189,8 +1191,10 @@ impl GallifreyDB {
                             && !graph_data.incoming_offsets.is_empty()
                         {
                             db.current.import_csr(
+                                graph_data.outgoing_node_ids,
                                 graph_data.outgoing_offsets,
                                 graph_data.outgoing_neighbors,
+                                graph_data.incoming_node_ids,
                                 graph_data.incoming_offsets,
                                 graph_data.incoming_neighbors,
                             );
@@ -1706,6 +1710,32 @@ impl GallifreyDB {
         self.current.get_edge(edge_id)
     }
 
+    // ========================================================================
+    // Zero-copy access methods (Issue #190)
+    // ========================================================================
+
+    /// Get the target node of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the target NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_target(&self, edge_id: EdgeId) -> Result<NodeId> {
+        self.current.get_edge_target(edge_id)
+    }
+
+    /// Get the source node of an edge without cloning the entire edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-copy**: Only reads and returns the source NodeId (8 bytes)
+    /// - **No allocation**: Does not clone Edge or PropertyMap
+    #[inline]
+    pub fn get_edge_source(&self, edge_id: EdgeId) -> Result<NodeId> {
+        self.current.get_edge_source(edge_id)
+    }
+
     /// Get outgoing edges from a node (current state).
     pub fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_outgoing_edges(node_id)
@@ -1903,44 +1933,40 @@ impl GallifreyDB {
             .iter()
             .map(|&node_id| {
                 // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
-                let version_ids = self.temporal_indexes.find_node_version_at_point(
-                    node_id,
-                    valid_time,
-                    transaction_time,
-                );
-
-                // Find the first version that is actually visible (handles closed intervals from deletions)
-                // Use explicit matching to ensure we check all candidates even if one is missing/corrupted
-                let node = version_ids.into_iter().find_map(|version_id| {
-                    match historical.get_node_version(version_id) {
-                        Some(version)
-                            if version.temporal.is_visible_at(valid_time, transaction_time) =>
-                        {
-                            // Reconstruct properties - return None on error to continue to next candidate
-                            // Note: Batch queries treat reconstruction errors as "not found" to allow
-                            // partial results. Errors are logged when observability is enabled.
-                            match historical.reconstruct_node_properties(version_id) {
-                                Ok(properties) => Some(Node::new(
-                                    version.node_id,
-                                    version.label,
-                                    properties,
-                                    version.id,
-                                )),
-                                Err(_e) => {
-                                    #[cfg(feature = "observability")]
-                                    tracing::error!(
-                                        version_id = %version_id,
-                                        node_id = %node_id,
-                                        error = %_e,
-                                        "Property reconstruction failed in batch query"
-                                    );
-                                    None
+                // Use iterator API to avoid Vec allocation when only first match is needed (Issue #197)
+                let node = self
+                    .temporal_indexes
+                    .find_node_version_at_point_iter(node_id, valid_time, transaction_time)
+                    .find_map(|version_id| {
+                        match historical.get_node_version(version_id) {
+                            Some(version)
+                                if version.temporal.is_visible_at(valid_time, transaction_time) =>
+                            {
+                                // Reconstruct properties - return None on error to continue to next candidate
+                                // Note: Batch queries treat reconstruction errors as "not found" to allow
+                                // partial results. Errors are logged when observability is enabled.
+                                match historical.reconstruct_node_properties(version_id) {
+                                    Ok(properties) => Some(Node::new(
+                                        version.node_id,
+                                        version.label,
+                                        properties,
+                                        version.id,
+                                    )),
+                                    Err(_e) => {
+                                        #[cfg(feature = "observability")]
+                                        tracing::error!(
+                                            version_id = %version_id,
+                                            node_id = %node_id,
+                                            error = %_e,
+                                            "Property reconstruction failed in batch query"
+                                        );
+                                        None
+                                    }
                                 }
                             }
+                            _ => None, // Version missing or not visible - continue to next candidate
                         }
-                        _ => None, // Version missing or not visible - continue to next candidate
-                    }
-                });
+                    });
 
                 Ok((node_id, node))
             })
@@ -2024,46 +2050,42 @@ impl GallifreyDB {
             .iter()
             .map(|&edge_id| {
                 // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
-                let version_ids = self.temporal_indexes.find_edge_version_at_point(
-                    edge_id,
-                    valid_time,
-                    transaction_time,
-                );
-
-                // Find the first version that is actually visible (handles closed intervals from deletions)
-                // Use explicit matching to ensure we check all candidates even if one is missing/corrupted
-                let edge = version_ids.into_iter().find_map(|version_id| {
-                    match historical.get_edge_version(version_id) {
-                        Some(version)
-                            if version.temporal.is_visible_at(valid_time, transaction_time) =>
-                        {
-                            // Reconstruct properties - return None on error to continue to next candidate
-                            // Note: Batch queries treat reconstruction errors as "not found" to allow
-                            // partial results. Errors are logged when observability is enabled.
-                            match historical.reconstruct_edge_properties(version_id) {
-                                Ok(properties) => Some(Edge::new(
-                                    version.edge_id,
-                                    version.label,
-                                    version.source,
-                                    version.target,
-                                    properties,
-                                    version.id,
-                                )),
-                                Err(_e) => {
-                                    #[cfg(feature = "observability")]
-                                    tracing::error!(
-                                        version_id = %version_id,
-                                        edge_id = %edge_id,
-                                        error = %_e,
-                                        "Property reconstruction failed in batch query"
-                                    );
-                                    None
+                // Use iterator API to avoid Vec allocation when only first match is needed (Issue #197)
+                let edge = self
+                    .temporal_indexes
+                    .find_edge_version_at_point_iter(edge_id, valid_time, transaction_time)
+                    .find_map(|version_id| {
+                        match historical.get_edge_version(version_id) {
+                            Some(version)
+                                if version.temporal.is_visible_at(valid_time, transaction_time) =>
+                            {
+                                // Reconstruct properties - return None on error to continue to next candidate
+                                // Note: Batch queries treat reconstruction errors as "not found" to allow
+                                // partial results. Errors are logged when observability is enabled.
+                                match historical.reconstruct_edge_properties(version_id) {
+                                    Ok(properties) => Some(Edge::new(
+                                        version.edge_id,
+                                        version.label,
+                                        version.source,
+                                        version.target,
+                                        properties,
+                                        version.id,
+                                    )),
+                                    Err(_e) => {
+                                        #[cfg(feature = "observability")]
+                                        tracing::error!(
+                                            version_id = %version_id,
+                                            edge_id = %edge_id,
+                                            error = %_e,
+                                            "Property reconstruction failed in batch query"
+                                        );
+                                        None
+                                    }
                                 }
                             }
+                            _ => None, // Version missing or not visible - continue to next candidate
                         }
-                        _ => None, // Version missing or not visible - continue to next candidate
-                    }
-                });
+                    });
 
                 Ok((edge_id, edge))
             })

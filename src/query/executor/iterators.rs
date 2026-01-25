@@ -457,10 +457,11 @@ impl TraversalIterator {
                             if !self.edge_visible_at_time(edge_id, &historical_guard) {
                                 return None;
                             }
+                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
                             self.current
-                                .get_edge(edge_id)
+                                .get_edge_target(edge_id)
                                 .ok()
-                                .map(|e| (e.target, edge_id))
+                                .map(|target| (target, edge_id))
                         })
                         .collect()
                 } else {
@@ -470,10 +471,11 @@ impl TraversalIterator {
                             if !self.edge_visible_at_time(edge_id, &historical_guard) {
                                 return None;
                             }
+                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
                             self.current
-                                .get_edge(edge_id)
+                                .get_edge_target(edge_id)
                                 .ok()
-                                .map(|e| (e.target, edge_id))
+                                .map(|target| (target, edge_id))
                         })
                         .collect()
                 }
@@ -487,10 +489,11 @@ impl TraversalIterator {
                             if !self.edge_visible_at_time(edge_id, &historical_guard) {
                                 return None;
                             }
+                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
                             self.current
-                                .get_edge(edge_id)
+                                .get_edge_source(edge_id)
                                 .ok()
-                                .map(|e| (e.source, edge_id))
+                                .map(|source| (source, edge_id))
                         })
                         .collect()
                 } else {
@@ -500,10 +503,11 @@ impl TraversalIterator {
                             if !self.edge_visible_at_time(edge_id, &historical_guard) {
                                 return None;
                             }
+                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
                             self.current
-                                .get_edge(edge_id)
+                                .get_edge_source(edge_id)
                                 .ok()
-                                .map(|e| (e.source, edge_id))
+                                .map(|source| (source, edge_id))
                         })
                         .collect()
                 }
@@ -513,12 +517,13 @@ impl TraversalIterator {
 
                 // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 // Helper closure to process edges and add to neighbors
+                // Zero-copy: only get target NodeId, not full Edge (Issue #190)
                 let mut process_outgoing = |edge_id| {
                     if !self.edge_visible_at_time(edge_id, &historical_guard) {
                         return;
                     }
-                    if let Ok(e) = self.current.get_edge(edge_id) {
-                        neighbors.push((e.target, edge_id));
+                    if let Ok(target) = self.current.get_edge_target(edge_id) {
+                        neighbors.push((target, edge_id));
                     }
                 };
 
@@ -535,12 +540,13 @@ impl TraversalIterator {
                     }
                 }
 
+                // Zero-copy: only get source NodeId, not full Edge (Issue #190)
                 let mut process_incoming = |edge_id| {
                     if !self.edge_visible_at_time(edge_id, &historical_guard) {
                         return;
                     }
-                    if let Ok(e) = self.current.get_edge(edge_id) {
-                        neighbors.push((e.source, edge_id));
+                    if let Ok(source) = self.current.get_edge_source(edge_id) {
+                        neighbors.push((source, edge_id));
                     }
                 };
 

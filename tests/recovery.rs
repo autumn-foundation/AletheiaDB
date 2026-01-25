@@ -58,6 +58,13 @@
 //!   - LSN consistency across checkpoint and recovery
 //!   - ID generator initialization from persisted state
 //!
+//! - **`property_based_tests`** - Property-based recovery invariant tests (Issue #295)
+//!   - Temporal consistency (monotonic timestamps, valid time ranges)
+//!   - Version chain integrity (unbroken sequences, no gaps)
+//!   - Referential integrity (edge references valid nodes)
+//!   - ID uniqueness (no duplicate IDs after recovery)
+//!   - 1000+ random operation sequences per test
+//!
 //! ## Running Tests
 //!
 //! ```bash
@@ -115,3 +122,6 @@ mod large_dataset_recovery;
 
 #[path = "recovery/checkpoint_recovery_tests.rs"]
 mod checkpoint_recovery_tests;
+
+#[path = "recovery/property_based_tests.rs"]
+mod property_based_tests;

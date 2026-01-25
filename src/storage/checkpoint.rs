@@ -657,8 +657,10 @@ impl CheckpointManager {
             nodes,
             edges,
             // CSR adjacency will be rebuilt during loading
+            outgoing_node_ids: Vec::new(),
             outgoing_offsets: Vec::new(),
             outgoing_neighbors: Vec::new(),
+            incoming_node_ids: Vec::new(),
             incoming_offsets: Vec::new(),
             incoming_neighbors: Vec::new(),
         })

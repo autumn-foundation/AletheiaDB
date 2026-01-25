@@ -11,9 +11,225 @@
 use crate::api::transaction::types::TxId;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
-use crate::core::property::{PropertyKey, PropertyMap, PropertyValue};
+use crate::core::property::{MAX_VECTOR_DIMENSIONS, PropertyKey, PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+/// Epsilon for floating-point comparisons in vector deltas.
+///
+/// Used to determine if two f32 values are effectively equal, accounting for
+/// floating-point precision limitations. Value chosen to be robust for typical
+/// embedding use cases while avoiding spurious deltas.
+const VECTOR_EPSILON: f32 = 1e-7;
+
+/// Sparse representation of vector changes.
+///
+/// Stores only the changed elements to minimize storage overhead when
+/// a small percentage of vector elements are modified. This is particularly
+/// effective for embeddings where individual element updates are rare.
+///
+/// # Storage Overhead
+///
+/// - **Sparse**: `num_changes * (4 bytes index + 4 bytes value)` = 8 bytes per change
+/// - **Full**: `dimensions * 4 bytes`
+///
+/// For a 1536-dimensional vector with 1 element changed:
+/// - Sparse: 8 bytes
+/// - Full: 6144 bytes
+/// - Savings: 768x
+///
+/// # Threshold Strategy
+///
+/// Uses sparse storage when `num_changes < dimensions * 0.5` (50% threshold).
+/// For heavily modified vectors (>50% changed), falls back to full storage.
+///
+/// # Equality
+///
+/// Custom `PartialEq` implementation uses epsilon-based comparison for float values
+/// to maintain consistency with `from_diff()`. Two VectorDelta instances are considered
+/// equal if their structures match and all float values are within `VECTOR_EPSILON`.
+#[derive(Debug, Clone)]
+pub enum VectorDelta {
+    /// Sparse storage: (index, new_value) pairs for changed elements
+    Sparse {
+        /// Original vector dimension
+        dimension: usize,
+        /// Changed indices and their new values
+        changes: Arc<Vec<(u32, f32)>>,
+    },
+    /// Full storage: complete new vector (used when >50% of elements changed)
+    Full(Arc<[f32]>),
+}
+
+impl VectorDelta {
+    /// Compute a delta between two vectors.
+    ///
+    /// Returns `None` if vectors are identical or have different dimensions.
+    /// Uses sparse storage when storing individual changes is more efficient
+    /// than storing the full vector (changes.len() * 2 < dimension).
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if:
+    /// - Vectors have different dimensions
+    /// - Vectors are identical (no changes)
+    /// - Vector dimension exceeds MAX_VECTOR_DIMENSIONS
+    pub fn from_diff(old: &[f32], new: &[f32]) -> Option<Self> {
+        if old.len() != new.len() {
+            return None;
+        }
+
+        // Validate dimension doesn't exceed maximum to prevent DoS
+        if old.len() > MAX_VECTOR_DIMENSIONS {
+            return None;
+        }
+
+        // Collect changed indices with epsilon-based comparison
+        let mut changes = Vec::new();
+        for (idx, (old_val, new_val)) in old.iter().zip(new.iter()).enumerate() {
+            // Use epsilon-based comparison to avoid spurious deltas from floating-point precision
+            if (old_val - new_val).abs() > VECTOR_EPSILON {
+                // Validate index fits in u32 (should always pass given MAX_VECTOR_DIMENSIONS check)
+                let idx_u32 = u32::try_from(idx).ok()?;
+                changes.push((idx_u32, *new_val));
+            }
+        }
+
+        if changes.is_empty() {
+            return None;
+        }
+
+        let dimension = old.len();
+
+        // Use sparse storage if it's more efficient than full storage
+        // Sparse cost: changes * 8 bytes (u32 + f32)
+        // Full cost: dimension * 4 bytes (f32)
+        // Sparse is better when: changes * 8 < dimension * 4
+        // Simplifies to: changes * 2 < dimension
+        if changes.len() * 2 < dimension {
+            // Use sparse storage
+            Some(VectorDelta::Sparse {
+                dimension,
+                changes: Arc::new(changes),
+            })
+        } else {
+            // Use full storage (sparse wouldn't save space)
+            Some(VectorDelta::Full(Arc::from(new)))
+        }
+    }
+
+    /// Apply this delta to a base vector, producing the new vector.
+    ///
+    /// # Panics (Debug Only)
+    ///
+    /// In debug builds, panics if the base vector dimension doesn't match the
+    /// expected dimension. In release builds, returns base unchanged on mismatch.
+    pub fn apply(&self, base: &[f32]) -> Vec<f32> {
+        match self {
+            VectorDelta::Sparse { dimension, changes } => {
+                if base.len() != *dimension {
+                    // Dimension mismatch - this should never happen in correct usage
+                    debug_assert!(
+                        base.len() == *dimension,
+                        "VectorDelta applied to vector of wrong dimension. Expected: {}, Got: {}",
+                        *dimension,
+                        base.len()
+                    );
+                    // In release builds, return base unchanged to avoid corruption
+                    return base.to_vec();
+                }
+
+                let mut result = base.to_vec();
+                for &(idx, value) in changes.iter() {
+                    if (idx as usize) < result.len() {
+                        result[idx as usize] = value;
+                    }
+                }
+                result
+            }
+            VectorDelta::Full(new_vec) => new_vec.to_vec(),
+        }
+    }
+
+    /// Estimate the heap memory usage of this delta in bytes.
+    ///
+    /// # Note on Arc Overhead
+    ///
+    /// This estimate includes only the data storage, not the Arc allocation overhead.
+    /// Arc adds approximately ~24 bytes of overhead per allocation (reference count + weak count + metadata).
+    ///
+    /// **Actual Storage Overhead:**
+    /// - **Sparse**: `Arc overhead (~24 bytes) + num_changes * 8 bytes (index + value)`
+    /// - **Full**: `Arc overhead (~24 bytes) + dimensions * 4 bytes`
+    ///
+    /// For small vectors or few changes, the Arc overhead becomes significant relative to the data size.
+    pub fn estimated_heap_size(&self) -> usize {
+        match self {
+            VectorDelta::Sparse { changes, .. } => {
+                // Vec capacity * (u32 + f32) size
+                changes.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
+            }
+            VectorDelta::Full(vec) => vec.len() * std::mem::size_of::<f32>(),
+        }
+    }
+}
+
+/// Custom PartialEq implementation for VectorDelta using epsilon-based float comparison.
+///
+/// This maintains consistency with `from_diff()` which uses `VECTOR_EPSILON` to determine
+/// if two float values are effectively equal.
+impl PartialEq for VectorDelta {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                VectorDelta::Sparse {
+                    dimension: dim1,
+                    changes: changes1,
+                },
+                VectorDelta::Sparse {
+                    dimension: dim2,
+                    changes: changes2,
+                },
+            ) => {
+                // Dimensions must match
+                if dim1 != dim2 {
+                    return false;
+                }
+
+                // Must have same number of changes
+                if changes1.len() != changes2.len() {
+                    return false;
+                }
+
+                // Compare each (index, value) pair with epsilon for floats
+                for ((idx1, val1), (idx2, val2)) in changes1.iter().zip(changes2.iter()) {
+                    if idx1 != idx2 || (val1 - val2).abs() > VECTOR_EPSILON {
+                        return false;
+                    }
+                }
+
+                true
+            }
+            (VectorDelta::Full(vec1), VectorDelta::Full(vec2)) => {
+                // Must have same length
+                if vec1.len() != vec2.len() {
+                    return false;
+                }
+
+                // Compare each element with epsilon
+                for (v1, v2) in vec1.iter().zip(vec2.iter()) {
+                    if (v1 - v2).abs() > VECTOR_EPSILON {
+                        return false;
+                    }
+                }
+
+                true
+            }
+            _ => false, // Different variants are never equal
+        }
+    }
+}
 
 /// Trait for version types that have a bi-temporal interval.
 ///
@@ -105,11 +321,14 @@ impl Default for AnchorConfig {
 /// Delta representing changes to properties.
 ///
 /// This stores only the changes from the previous version, enabling
-/// efficient storage of temporal data.
+/// efficient storage of temporal data. For vector properties, uses
+/// sparse delta compression when beneficial (Issue #215).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDelta {
-    /// Properties that were added or modified
+    /// Properties that were added or modified (non-vector)
     pub changed: HashMap<PropertyKey, PropertyValue>,
+    /// Vector properties with sparse delta optimization
+    pub vector_deltas: HashMap<PropertyKey, VectorDelta>,
     /// Properties that were removed
     pub removed: HashSet<PropertyKey>,
 }
@@ -119,6 +338,7 @@ impl PropertyDelta {
     pub fn new() -> Self {
         PropertyDelta {
             changed: HashMap::new(),
+            vector_deltas: HashMap::new(),
             removed: HashSet::new(),
         }
     }
@@ -126,6 +346,7 @@ impl PropertyDelta {
     /// Create a delta by comparing two property maps.
     ///
     /// Returns the changes needed to transform `old` into `new`.
+    /// Uses sparse delta compression for vector properties (Issue #215).
     pub fn from_diff(old: &PropertyMap, new: &PropertyMap) -> Self {
         let mut delta = PropertyDelta::new();
 
@@ -135,8 +356,24 @@ impl PropertyDelta {
                 Some(old_value) if old_value == new_value => {
                     // Unchanged, skip
                 }
-                _ => {
-                    // Added or modified
+                Some(old_value) => {
+                    // Modified - check if both are vectors for sparse delta optimization
+                    match (old_value.as_vector(), new_value.as_vector()) {
+                        (Some(old_vec), Some(new_vec)) => {
+                            // Both are vectors - use sparse delta if beneficial
+                            if let Some(vec_delta) = VectorDelta::from_diff(old_vec, new_vec) {
+                                delta.vector_deltas.insert(*key, vec_delta);
+                            }
+                            // If from_diff returns None, vectors are identical (already handled above)
+                        }
+                        _ => {
+                            // Not both vectors, or value added/type changed - store full value
+                            delta.changed.insert(*key, new_value.clone());
+                        }
+                    }
+                }
+                None => {
+                    // Property added - store full value
                     delta.changed.insert(*key, new_value.clone());
                 }
             }
@@ -157,9 +394,19 @@ impl PropertyDelta {
         // Clone the base map using the builder to get a mutable version
         let mut builder = base.clone().builder();
 
-        // Apply changes
+        // Apply regular changes
         for (key, value) in &self.changed {
             builder = builder.insert_by_key(*key, value.clone());
+        }
+
+        // Apply vector deltas
+        for (key, vec_delta) in &self.vector_deltas {
+            if let Some(base_value) = base.get_by_interned_key(key)
+                && let Some(base_vec) = base_value.as_vector()
+            {
+                let new_vec = vec_delta.apply(base_vec);
+                builder = builder.insert_by_key(*key, PropertyValue::vector(&new_vec));
+            }
         }
 
         // Apply removals
@@ -172,7 +419,66 @@ impl PropertyDelta {
 
     /// Returns true if this delta has no changes.
     pub fn is_empty(&self) -> bool {
-        self.changed.is_empty() && self.removed.is_empty()
+        self.changed.is_empty() && self.vector_deltas.is_empty() && self.removed.is_empty()
+    }
+
+    /// Materialize sparse vector deltas into full vectors for persistence.
+    ///
+    /// This converts all `VectorDelta::Sparse` entries into full `PropertyValue::Vector`
+    /// instances by applying them to the base properties. This is required before
+    /// persistence since sparse deltas cannot be persisted without their base vectors.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The base properties (typically from the anchor version)
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if all sparse deltas were successfully materialized.
+    /// Returns `Err` if any sparse delta cannot be materialized (e.g., base property missing).
+    ///
+    /// # Side Effects
+    ///
+    /// Moves materialized vectors from `vector_deltas` to `changed`, converting them
+    /// to full `PropertyValue::Vector` instances. After this operation, `vector_deltas`
+    /// will only contain `VectorDelta::Full` entries (which are then moved to `changed`).
+    pub fn materialize_vector_deltas(&mut self, base: &PropertyMap) -> Result<(), String> {
+        // Materialize ALL vector deltas (both Sparse and Full) into regular changed properties
+        // This is necessary for persistence since the persistence format doesn't support VectorDelta
+        let keys: Vec<_> = self.vector_deltas.keys().copied().collect();
+
+        for key in keys {
+            if let Some(vec_delta) = self.vector_deltas.remove(&key) {
+                match vec_delta {
+                    VectorDelta::Full(vec) => {
+                        // Full delta can be directly converted
+                        self.changed.insert(key, PropertyValue::Vector(vec));
+                    }
+                    VectorDelta::Sparse { .. } => {
+                        // Sparse delta requires base vector to materialize
+                        let base_value = base.get_by_interned_key(&key).ok_or_else(|| {
+                            format!(
+                                "Cannot materialize sparse vector delta: base property not found for key {:?}",
+                                key
+                            )
+                        })?;
+
+                        let base_vec = base_value.as_vector().ok_or_else(|| {
+                            format!(
+                                "Cannot materialize sparse vector delta: base property is not a vector for key {:?}",
+                                key
+                            )
+                        })?;
+
+                        // Apply sparse delta to get full vector
+                        let new_vec = vec_delta.apply(base_vec);
+                        self.changed.insert(key, PropertyValue::vector(&new_vec));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Estimate the heap memory usage of this delta in bytes.
@@ -181,20 +487,29 @@ impl PropertyDelta {
     /// - HashMap/HashSet internal storage
     /// - PropertyKey interned strings (counted as pointer size since shared)
     /// - PropertyValue heap allocations (strings, vectors, etc.)
+    /// - VectorDelta heap allocations (sparse or full storage)
     pub fn estimated_heap_size(&self) -> usize {
         let mut size = 0;
 
-        // HashMap overhead: capacity * (key_size + value_size + ~8 bytes overhead)
-        // Use a conservative estimate
+        // HashMap overhead for changed properties
         size += self.changed.capacity()
             * (std::mem::size_of::<PropertyKey>() + std::mem::size_of::<PropertyValue>() + 8);
 
-        // Estimate PropertyValue heap sizes (conservative estimate per value)
+        // PropertyValue heap sizes
         for value in self.changed.values() {
             size += value.estimated_heap_size();
         }
 
-        // HashSet overhead
+        // HashMap overhead for vector deltas
+        size += self.vector_deltas.capacity()
+            * (std::mem::size_of::<PropertyKey>() + std::mem::size_of::<VectorDelta>() + 8);
+
+        // VectorDelta heap sizes
+        for vec_delta in self.vector_deltas.values() {
+            size += vec_delta.estimated_heap_size();
+        }
+
+        // HashSet overhead for removed
         size += self.removed.capacity() * (std::mem::size_of::<PropertyKey>() + 8);
 
         size
@@ -857,6 +1172,376 @@ mod tests {
         assert!(
             size >= std::mem::size_of::<NodeVersion>(),
             "Delta version size should include at least stack size"
+        );
+    }
+
+    // ========================================================================
+    // Vector Delta Optimization Tests (Issue #215)
+    // ========================================================================
+
+    #[test]
+    fn test_vector_delta_sparse_optimization_single_element() {
+        // Verify optimization: sparse delta for single element change
+        let old_embedding = vec![0.1f32; 1536]; // OpenAI ada-002 size
+        let mut new_embedding = old_embedding.clone();
+        new_embedding[500] = 0.2f32; // Change only one element
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&old_embedding))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_embedding))
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        // Optimized behavior: vector stored in vector_deltas, not in changed
+        assert_eq!(
+            delta.changed.len(),
+            0,
+            "Vector should not be in changed (uses sparse delta)"
+        );
+        assert_eq!(
+            delta.vector_deltas.len(),
+            1,
+            "Vector should be in vector_deltas"
+        );
+
+        let delta_size = delta.estimated_heap_size();
+        let full_vector_size = 1536 * std::mem::size_of::<f32>();
+
+        // Sparse storage should be much smaller than full vector
+        assert!(
+            delta_size < full_vector_size / 10,
+            "Sparse delta ({} bytes) should be much smaller than full vector ({} bytes)",
+            delta_size,
+            full_vector_size
+        );
+
+        println!(
+            "OPTIMIZATION SUCCESS: Storing {} bytes (vs {} full) for 1-element change in 1536-dim vector ({}x savings)",
+            delta_size,
+            full_vector_size,
+            full_vector_size / delta_size.max(1)
+        );
+    }
+
+    #[test]
+    fn test_vector_delta_sparse_optimization_multiple_elements() {
+        // Verify optimization: sparse delta for multiple elements changed
+        let old_embedding = vec![0.1f32; 384];
+        let mut new_embedding = old_embedding.clone();
+
+        // Change 5 elements (1.3% of vector)
+        new_embedding[10] = 0.5f32;
+        new_embedding[50] = 0.6f32;
+        new_embedding[100] = 0.7f32;
+        new_embedding[200] = 0.8f32;
+        new_embedding[300] = 0.9f32;
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&old_embedding))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_embedding))
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        // Optimized behavior: uses sparse delta
+        assert_eq!(delta.vector_deltas.len(), 1, "Should have vector delta");
+        assert_eq!(delta.changed.len(), 0, "Should not store in changed");
+
+        let delta_size = delta.estimated_heap_size();
+        let full_vector_size = 384 * std::mem::size_of::<f32>();
+
+        // Sparse storage should be much smaller
+        assert!(
+            delta_size < full_vector_size / 4,
+            "Sparse delta ({} bytes) should be much smaller than full vector ({} bytes)",
+            delta_size,
+            full_vector_size
+        );
+
+        let optimal_sparse_size = 5 * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>());
+        println!(
+            "OPTIMIZATION SUCCESS: {} bytes (vs {} full, {} raw sparse data) - {}x savings over full",
+            delta_size,
+            full_vector_size,
+            optimal_sparse_size,
+            full_vector_size / delta_size.max(1)
+        );
+    }
+
+    #[test]
+    fn test_vector_delta_no_change() {
+        // Test edge case: vector unchanged should result in empty delta
+        let embedding = vec![0.1f32; 384];
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&embedding))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&embedding))
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        assert!(
+            delta.is_empty(),
+            "Delta should be empty when vector is unchanged"
+        );
+    }
+
+    #[test]
+    fn test_vector_delta_complete_replacement() {
+        // Test case: entire vector changed (common case for regenerated embeddings)
+        let old_embedding = vec![0.1f32; 384];
+        let new_embedding = vec![0.9f32; 384]; // Completely different
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&old_embedding))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_embedding))
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        // For complete replacement, full storage is optimal (no benefit from sparse)
+        let delta_size = delta.estimated_heap_size();
+        let full_vector_size = 384 * std::mem::size_of::<f32>();
+
+        assert!(
+            delta_size >= full_vector_size,
+            "Full vector storage is expected for complete replacement"
+        );
+    }
+
+    #[test]
+    fn test_mixed_properties_with_vector_delta_optimization() {
+        // Test case: multiple properties changed, including a vector with sparse optimization
+        let old_embedding = vec![0.1f32; 384];
+        let mut new_embedding = old_embedding.clone();
+        new_embedding[0] = 0.2f32; // Change one element
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("embedding", PropertyValue::vector(&old_embedding))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("name", "Alice") // Unchanged
+            .insert("age", 31i64) // Changed
+            .insert("embedding", PropertyValue::vector(&new_embedding)) // One element changed
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        // Should have age in changed, embedding in vector_deltas
+        assert_eq!(delta.changed.len(), 1, "Should have age changed");
+        assert_eq!(
+            delta.vector_deltas.len(),
+            1,
+            "Should have embedding in vector_deltas"
+        );
+
+        let delta_size = delta.estimated_heap_size();
+        let full_vector_size = 384 * std::mem::size_of::<f32>();
+
+        // Even with mixed properties, vector delta should save space
+        assert!(
+            delta_size < full_vector_size / 2,
+            "Mixed delta with sparse vector should be smaller than full vector"
+        );
+
+        println!(
+            "OPTIMIZATION: Mixed delta stores {} bytes (sparse vector + age property)",
+            delta_size
+        );
+    }
+
+    // ========================================================================
+    // Sparse Vector Delta Tests (Desired Behavior - TDD)
+    // ========================================================================
+
+    #[test]
+    fn test_sparse_vector_delta_single_element() {
+        // Desired behavior: sparse storage for single element change
+        let old_embedding = vec![0.1f32; 1536];
+        let mut new_embedding = old_embedding.clone();
+        new_embedding[500] = 0.2f32;
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&old_embedding))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_embedding))
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        // Sparse storage: index (4 bytes) + value (4 bytes) + HashMap overhead
+        let sparse_data_size = std::mem::size_of::<u32>() + std::mem::size_of::<f32>();
+        let delta_size = delta.estimated_heap_size();
+        let full_vector_size = 1536 * std::mem::size_of::<f32>();
+
+        // Delta should be MUCH smaller than full vector (1536 * 4 = 6144 bytes)
+        // Even with HashMap overhead, sparse should be < 5% of full vector size
+        assert!(
+            delta_size < full_vector_size / 20,
+            "Sparse delta ({} bytes) should be much smaller than full vector ({} bytes). Raw data: {} bytes",
+            delta_size,
+            full_vector_size,
+            sparse_data_size
+        );
+
+        // Verify it can be applied correctly
+        let result = delta.apply(&old_props);
+        assert_eq!(
+            result.get("embedding").and_then(|v| v.as_vector()),
+            new_props.get("embedding").and_then(|v| v.as_vector()),
+            "Applied delta should produce correct result"
+        );
+    }
+
+    #[test]
+    fn test_sparse_vector_delta_few_elements() {
+        // Desired behavior: sparse storage for small percentage of changes
+        let old_embedding = vec![0.1f32; 384];
+        let mut new_embedding = old_embedding.clone();
+
+        // Change 10 elements (~2.6% of vector)
+        let changed_indices = vec![10, 50, 100, 150, 200, 250, 300, 350, 375, 383];
+        for &idx in &changed_indices {
+            new_embedding[idx] = 0.9f32;
+        }
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&old_embedding))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_embedding))
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        // Sparse storage: 10 * (4 bytes index + 4 bytes value) = 80 bytes + HashMap overhead
+        let sparse_data_size = 10 * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>());
+        let delta_size = delta.estimated_heap_size();
+        let full_vector_size = 384 * std::mem::size_of::<f32>();
+
+        // Should be much smaller than full vector (384 * 4 = 1536 bytes)
+        // Even with HashMap overhead, should be < 25% of full vector size
+        assert!(
+            delta_size < full_vector_size / 4,
+            "Sparse delta ({} bytes) should be much smaller than full vector ({} bytes). Raw data: {} bytes",
+            delta_size,
+            full_vector_size,
+            sparse_data_size
+        );
+
+        // Verify correctness
+        let result = delta.apply(&old_props);
+        assert_eq!(
+            result.get("embedding").and_then(|v| v.as_vector()),
+            new_props.get("embedding").and_then(|v| v.as_vector())
+        );
+    }
+
+    #[test]
+    fn test_sparse_vector_delta_threshold_behavior() {
+        // Desired behavior: use sparse storage for few changes, full storage for many changes
+        // This tests the threshold logic (e.g., if >50% changed, use full storage)
+
+        // Case 1: 10% changed -> should use sparse
+        let old_embedding = vec![0.1f32; 384];
+        let mut new_embedding_sparse = old_embedding.clone();
+        for item in new_embedding_sparse.iter_mut().take(38) {
+            // 10% of 384
+            *item = 0.9f32;
+        }
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&old_embedding))
+            .build();
+
+        let sparse_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_embedding_sparse))
+            .build();
+
+        let sparse_delta = PropertyDelta::from_diff(&old_props, &sparse_props);
+        let sparse_size = sparse_delta.estimated_heap_size();
+
+        // Case 2: 90% changed -> should use full storage
+        let mut new_embedding_full = old_embedding.clone();
+        for item in new_embedding_full.iter_mut().take(346) {
+            // 90% of 384
+            *item = 0.9f32;
+        }
+
+        let full_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_embedding_full))
+            .build();
+
+        let full_delta = PropertyDelta::from_diff(&old_props, &full_props);
+        let full_size = full_delta.estimated_heap_size();
+
+        // Sparse delta should be smaller than full delta
+        assert!(
+            sparse_size < full_size / 2,
+            "Sparse delta ({} bytes) should be significantly smaller than full delta ({} bytes)",
+            sparse_size,
+            full_size
+        );
+    }
+
+    #[test]
+    fn test_sparse_vector_delta_edge_cases() {
+        // Test edge cases for sparse vector optimization
+
+        // Case 1: First element changed
+        let old_embedding = vec![0.1f32; 384];
+        let mut new_embedding = old_embedding.clone();
+        new_embedding[0] = 0.9f32;
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&old_embedding))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_embedding))
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+        let result = delta.apply(&old_props);
+        assert_eq!(
+            result.get("embedding").and_then(|v| v.as_vector()),
+            new_props.get("embedding").and_then(|v| v.as_vector()),
+            "First element change should work correctly"
+        );
+
+        // Case 2: Last element changed
+        let mut new_embedding_last = old_embedding.clone();
+        new_embedding_last[383] = 0.9f32;
+
+        let new_props_last = PropertyMapBuilder::new()
+            .insert("embedding", PropertyValue::vector(&new_embedding_last))
+            .build();
+
+        let delta_last = PropertyDelta::from_diff(&old_props, &new_props_last);
+        let result_last = delta_last.apply(&old_props);
+        assert_eq!(
+            result_last.get("embedding").and_then(|v| v.as_vector()),
+            new_props_last.get("embedding").and_then(|v| v.as_vector()),
+            "Last element change should work correctly"
         );
     }
 }

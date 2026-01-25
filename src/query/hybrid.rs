@@ -135,8 +135,8 @@ pub fn traverse_and_rank(
     let mut visited = HashSet::with_capacity(edge_ids.len().min(k * 2));
 
     for edge_id in edge_ids {
-        let edge = db.get_edge(edge_id)?;
-        let target_id = edge.target;
+        // Zero-copy: only get target NodeId, not full Edge (Issue #190)
+        let target_id = db.get_edge_target(edge_id)?;
 
         // Handle cycles: skip if already visited
         if visited.contains(&target_id) {

@@ -115,6 +115,13 @@ pub struct WriteBuffer {
     /// This flag is used to optimize the commit path by only triggering
     /// temporal vector index updates when vector data was actually modified.
     has_vector_operations: bool,
+
+    /// Track whether any edge structure changes occurred in this transaction.
+    /// This flag is used to optimize the commit path by only calling
+    /// rebuild_adjacency() when the graph topology was modified.
+    /// Only CreateEdge and DeleteEdge set this flag; UpdateEdge does not,
+    /// since property-only updates don't affect adjacency structure.
+    has_edge_operations: bool,
 }
 
 impl WriteBuffer {
@@ -131,6 +138,7 @@ impl WriteBuffer {
             modified_edges: HashMap::new(),
             max_operations,
             has_vector_operations: false,
+            has_edge_operations: false,
         }
     }
 
@@ -145,6 +153,7 @@ impl WriteBuffer {
             modified_edges: HashMap::with_capacity(capacity / 2),
             max_operations: capacity,
             has_vector_operations: false,
+            has_edge_operations: false,
         }
     }
 
@@ -189,19 +198,30 @@ impl WriteBuffer {
                 edge_id,
                 properties,
                 ..
+            } => {
+                self.modified_edges.insert(*edge_id, index);
+                // Mark that edge structure was modified (create changes topology)
+                self.has_edge_operations = true;
+                // Check if this operation contains vector properties
+                self.has_vector_operations =
+                    self.has_vector_operations || properties.contains_vector();
             }
-            | BufferedWrite::UpdateEdge {
+            BufferedWrite::UpdateEdge {
                 edge_id,
                 properties,
                 ..
             } => {
                 self.modified_edges.insert(*edge_id, index);
+                // UpdateEdge only modifies properties, not topology (source/target/label)
+                // so it doesn't require adjacency rebuild
                 // Check if this operation contains vector properties
                 self.has_vector_operations =
                     self.has_vector_operations || properties.contains_vector();
             }
             BufferedWrite::DeleteEdge { edge_id } => {
                 self.modified_edges.insert(*edge_id, index);
+                // Mark that edge structure was modified (delete changes topology)
+                self.has_edge_operations = true;
             }
         }
 
@@ -244,6 +264,7 @@ impl WriteBuffer {
         self.modified_nodes.clear();
         self.modified_edges.clear();
         self.has_vector_operations = false;
+        self.has_edge_operations = false;
     }
 
     /// Get the number of buffered operations
@@ -271,6 +292,15 @@ impl WriteBuffer {
     /// the delete operation itself doesn't include property data in the buffer.
     pub fn mark_has_vector_operations(&mut self) {
         self.has_vector_operations = true;
+    }
+
+    /// Check whether any edge structure changes occurred in this transaction.
+    ///
+    /// This is used to optimize the commit path by only calling rebuild_adjacency()
+    /// when the graph topology was modified. Returns true only for CreateEdge and
+    /// DeleteEdge operations; UpdateEdge (property-only changes) returns false.
+    pub fn has_edge_operations(&self) -> bool {
+        self.has_edge_operations
     }
 }
 
@@ -806,5 +836,275 @@ mod tests {
         }
 
         assert!(buffer.has_vector_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_create_edge() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // Create edge
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                temporal,
+            })
+            .unwrap();
+
+        // Should now track edge operations
+        assert!(buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_update_edge() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // Update edge (property-only, doesn't change topology)
+        buffer
+            .add(BufferedWrite::UpdateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                temporal,
+            })
+            .unwrap();
+
+        // Should NOT track edge operations (property updates don't affect adjacency)
+        assert!(!buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_delete_edge() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // Delete edge
+        buffer.add(BufferedWrite::DeleteEdge { edge_id }).unwrap();
+
+        // Should now track edge operations
+        assert!(buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_only_nodes() {
+        let mut buffer = WriteBuffer::new();
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Create node (no edge operations)
+        let props = PropertyMap::new().builder().insert("name", "Alice").build();
+
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties: props,
+                temporal,
+            })
+            .unwrap();
+
+        // Should NOT track edge operations
+        assert!(!buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_clear() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Add edge operation
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                temporal,
+            })
+            .unwrap();
+
+        assert!(buffer.has_edge_operations());
+
+        // Clear should reset the flag
+        buffer.clear();
+        assert!(!buffer.has_edge_operations());
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_mixed_operations() {
+        let mut buffer = WriteBuffer::new();
+        let node_id = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(1).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("Person")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // Add node operation
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties: PropertyMap::new(),
+                temporal,
+            })
+            .unwrap();
+
+        // Should still be false (only node operations so far)
+        assert!(!buffer.has_edge_operations());
+
+        // Add edge operation
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source: node_id,
+                target: NodeId::new(2).unwrap(),
+                label,
+                properties: PropertyMap::new(),
+                temporal,
+            })
+            .unwrap();
+
+        // Should now track edge operations
+        assert!(buffer.has_edge_operations());
+
+        // Add more node operations - flag should remain true
+        buffer
+            .add(BufferedWrite::CreateNode {
+                node_id: NodeId::new(3).unwrap(),
+                version_id: VersionId::new(2).unwrap(),
+                label,
+                properties: PropertyMap::new(),
+                temporal,
+            })
+            .unwrap();
+
+        assert!(buffer.has_edge_operations());
+    }
+
+    #[test]
+    fn test_edge_operations_tracking_create_update_distinction() {
+        let mut buffer = WriteBuffer::new();
+        let edge_id_1 = EdgeId::new(1).unwrap();
+        let edge_id_2 = EdgeId::new(2).unwrap();
+        let version_id = VersionId::new(1).unwrap();
+        let source = NodeId::new(1).unwrap();
+        let target = NodeId::new(2).unwrap();
+        let label = crate::core::interning::GLOBAL_INTERNER
+            .intern("KNOWS")
+            .unwrap();
+        let temporal = BiTemporalInterval::current(time::now());
+
+        // Initially, no edge operations
+        assert!(!buffer.has_edge_operations());
+
+        // UpdateEdge alone should NOT trigger the flag
+        buffer
+            .add(BufferedWrite::UpdateEdge {
+                edge_id: edge_id_1,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                temporal,
+            })
+            .unwrap();
+
+        assert!(!buffer.has_edge_operations());
+
+        // CreateEdge SHOULD trigger the flag
+        buffer
+            .add(BufferedWrite::CreateEdge {
+                edge_id: edge_id_2,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                temporal,
+            })
+            .unwrap();
+
+        assert!(buffer.has_edge_operations());
+
+        // Clear and test with DeleteEdge
+        buffer.clear();
+        assert!(!buffer.has_edge_operations());
+
+        // UpdateEdge alone still shouldn't trigger
+        buffer
+            .add(BufferedWrite::UpdateEdge {
+                edge_id: edge_id_1,
+                version_id,
+                source,
+                target,
+                label,
+                properties: PropertyMap::new(),
+                temporal,
+            })
+            .unwrap();
+
+        assert!(!buffer.has_edge_operations());
+
+        // DeleteEdge SHOULD trigger the flag
+        buffer
+            .add(BufferedWrite::DeleteEdge { edge_id: edge_id_1 })
+            .unwrap();
+
+        assert!(buffer.has_edge_operations());
     }
 }
