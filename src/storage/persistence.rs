@@ -438,21 +438,43 @@ impl PersistenceManager {
     ///
     /// # Errors
     ///
-    /// Returns `Err` only for unexpected I/O errors. Missing directories are
-    /// handled gracefully by returning an empty vector.
-    pub fn list_checkpoints(&self) -> Result<Vec<PathBuf>> {
+    /// Returns `Err` for I/O errors other than "directory not found" (e.g.,
+    /// permission denied). Missing directories are handled gracefully by
+    /// returning an empty vector.
+    pub(crate) fn list_checkpoints(&self) -> Result<Vec<PathBuf>> {
         let mut checkpoints = Vec::new();
 
-        // Read directory - if it fails, return empty vector (graceful handling)
-        if let Ok(entries) = std::fs::read_dir(&self.config.checkpoint_dir) {
-            for entry in entries.flatten() {
-                // Filter for checkpoint files matching pattern: checkpoint_*.dat
-                if let Some(name) = entry.file_name().to_str()
-                    && name.starts_with("checkpoint_")
-                    && name.ends_with(".dat")
-                {
-                    checkpoints.push(entry.path());
+        // Read directory - handle missing directory gracefully, propagate other errors
+        match std::fs::read_dir(&self.config.checkpoint_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|e| {
+                        StorageError::IoError(format!(
+                            "Failed to read directory entry in checkpoint dir: {}",
+                            e
+                        ))
+                    })?;
+
+                    // Filter for checkpoint files matching pattern: checkpoint_*.dat
+                    if let Some(name) = entry.file_name().to_str()
+                        && name.starts_with("checkpoint_")
+                        && name.ends_with(".dat")
+                    {
+                        checkpoints.push(entry.path());
+                    }
                 }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Directory doesn't exist - return empty vector (graceful handling)
+                return Ok(checkpoints);
+            }
+            Err(e) => {
+                // Other I/O errors (e.g., permission denied) - propagate
+                return Err(StorageError::IoError(format!(
+                    "Failed to read checkpoint directory: {}",
+                    e
+                ))
+                .into());
             }
         }
 
@@ -464,19 +486,10 @@ impl PersistenceManager {
 
     /// Find the most recent checkpoint
     pub fn find_latest_checkpoint(&self) -> Result<Option<Checkpoint>> {
-        let checkpoints = self.list_checkpoints()?;
-
-        if checkpoints.is_empty() {
-            return Ok(None);
-        }
-
-        // Load the latest checkpoint (last element after sorting)
-        if let Some(latest) = checkpoints.last() {
-            let checkpoint = Checkpoint::load(latest)?;
-            Ok(Some(checkpoint))
-        } else {
-            Ok(None)
-        }
+        self.list_checkpoints()?
+            .last()
+            .map(|path| Checkpoint::load(path.as_ref()))
+            .transpose()
     }
 
     /// Recover database state from checkpoint and WAL
