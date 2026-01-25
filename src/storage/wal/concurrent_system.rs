@@ -446,6 +446,82 @@ impl ConcurrentWalSystem {
         Ok(lsn)
     }
 
+    /// Append a batch of operations efficiently.
+    ///
+    /// This method provides significant performance improvements for high-throughput
+    /// workloads by batching multiple operations into fewer I/O operations.
+    ///
+    /// # Performance Benefits
+    ///
+    /// Compared to calling `append()` multiple times:
+    /// - Single atomic LSN allocation for all operations (vs N atomic operations)
+    /// - Better CPU cache locality during serialization
+    /// - Reduced stripe buffer contention
+    ///
+    /// # Durability Behavior
+    ///
+    /// The durability semantics follow the configured `DurabilityMode`:
+    /// - **Synchronous**: All operations are flushed and synced before returning
+    /// - **Async/GroupCommit/AsyncBatched**: Operations are buffered and flushed by background thread
+    ///
+    /// # Arguments
+    ///
+    /// * `operations` - Vector of operations to append
+    ///
+    /// # Returns
+    ///
+    /// Vector of allocated LSNs in the same order as the operations.
+    /// Returns an empty vector if `operations` is empty.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::storage::wal::{WalOperation, ConcurrentWalSystem};
+    ///
+    /// let ops = vec![
+    ///     WalOperation::CreateNode { /* ... */ },
+    ///     WalOperation::CreateEdge { /* ... */ },
+    ///     WalOperation::UpdateNode { /* ... */ },
+    /// ];
+    ///
+    /// // Efficient batch append
+    /// let lsns = wal.append_batch(ops)?;
+    /// assert_eq!(lsns.len(), 3);
+    ///
+    /// // For GroupCommit mode, commit and wait
+    /// if let Some(epoch) = wal.commit()? {
+    ///     wal.group_commit_coordinator().unwrap().wait_for_flush(epoch)?;
+    /// }
+    /// ```
+    pub fn append_batch(&self, operations: Vec<WalOperation>) -> Result<Vec<LSN>> {
+        // Handle empty batch early
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Use the underlying WAL's batch append for async modes
+        match self.durability_mode {
+            DurabilityMode::Synchronous => {
+                // For synchronous mode, append batch then flush all
+                let lsns = self.wal.append_batch(operations)?;
+
+                // Drain and flush immediately for sync mode
+                let entries = self.wal.drain_all();
+                if !entries.is_empty() {
+                    self.coordinator.flush(entries, true)?;
+                }
+
+                Ok(lsns)
+            }
+            DurabilityMode::Async { .. }
+            | DurabilityMode::GroupCommit { .. }
+            | DurabilityMode::AsyncBatched { .. } => {
+                // For async modes, just batch append (background thread handles flush)
+                self.wal.append_batch(operations)
+            }
+        }
+    }
+
     /// Force a flush of all pending entries.
     pub fn flush(&self) -> Result<FlushStats> {
         let entries = self.wal.drain_all();
@@ -803,5 +879,84 @@ mod tests {
 
         // All entries should be flushed
         assert_eq!(wal.total_flushed(), 5);
+    }
+
+    // ============================================================
+    // Batch Append Tests (Issue #219)
+    // ============================================================
+
+    #[test]
+    fn test_append_batch_async() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path()).with_durability_mode(
+            DurabilityMode::Async {
+                flush_interval_ms: 10_000,
+            },
+        );
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let ops = vec![
+            create_test_operation(1),
+            create_test_operation(2),
+            create_test_operation(3),
+        ];
+
+        let lsns = wal.append_batch(ops).unwrap();
+
+        assert_eq!(lsns.len(), 3);
+        assert_eq!(lsns[0], LSN(1));
+        assert_eq!(lsns[1], LSN(2));
+        assert_eq!(lsns[2], LSN(3));
+        assert_eq!(wal.total_appends(), 3);
+    }
+
+    #[test]
+    fn test_append_batch_sync() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_durability_mode(DurabilityMode::Synchronous);
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let ops = vec![create_test_operation(1), create_test_operation(2)];
+
+        let lsns = wal.append_batch(ops).unwrap();
+
+        assert_eq!(lsns.len(), 2);
+        assert_eq!(lsns[0], LSN(1));
+        assert_eq!(lsns[1], LSN(2));
+        assert_eq!(wal.total_appends(), 2);
+    }
+
+    #[test]
+    fn test_append_batch_empty() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path());
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        let lsns = wal.append_batch(vec![]).unwrap();
+
+        assert_eq!(lsns.len(), 0);
+        assert_eq!(wal.total_appends(), 0);
+    }
+
+    #[test]
+    fn test_append_batch_large() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalSystemConfig::new(dir.path()).with_durability_mode(
+            DurabilityMode::Async {
+                flush_interval_ms: 10_000,
+            },
+        );
+        let wal = ConcurrentWalSystem::new(config).unwrap();
+
+        // Create 100 operations
+        let ops: Vec<_> = (1..=100).map(create_test_operation).collect();
+
+        let lsns = wal.append_batch(ops).unwrap();
+
+        assert_eq!(lsns.len(), 100);
+        assert_eq!(lsns[0], LSN(1));
+        assert_eq!(lsns[99], LSN(100));
+        assert_eq!(wal.total_appends(), 100);
     }
 }
