@@ -768,33 +768,248 @@ impl HistoricalStorage {
         self.reconstruct_node_properties_with_depth(version_id, 0)
     }
 
+    /// Iterative property reconstruction helper for nodes (Issue #211).
+    ///
+    /// This function implements the core iterative reconstruction algorithm.
+    /// It eliminates intermediate PropertyMap allocations and stack overflow risks.
+    ///
+    /// # Algorithm
+    /// 1. Collect version IDs backwards from target to anchor (O(anchor_interval) IDs)
+    /// 2. Extract anchor properties as base state
+    /// 3. Apply deltas in forward order (O(anchor_interval) delta applications)
+    ///
+    /// # Arguments
+    /// * `version_id` - The version to reconstruct properties for
+    ///
+    /// # Returns
+    /// * `Ok(PropertyMap)` - Reconstructed properties
+    /// * `Err(TemporalError::MaxDepthExceeded)` - Delta chain too deep (DoS protection)
+    /// * `Err(StorageError::VersionNotFound)` - Version not found
+    /// * `Err(TemporalError::CorruptedVersionChain)` - Invalid chain structure
+    fn reconstruct_node_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
+        // Collect version IDs backwards from target to anchor
+        // Pre-allocate with anchor_interval capacity to avoid reallocations
+        let mut version_ids: Vec<VersionId> =
+            Vec::with_capacity(self.config.anchor_interval as usize);
+        let mut current_id = version_id;
+        let mut chain_length = 0;
+
+        // Walk backwards until we find an anchor or hit depth limit
+        loop {
+            // Check depth limit for DoS protection
+            if chain_length >= self.max_reconstruction_depth {
+                let entity_id = self
+                    .node_versions
+                    .get(&version_id)
+                    .map(|v| v.node_id.to_string())
+                    .unwrap_or_else(|| format!("version {}", version_id));
+                return Err(TemporalError::MaxDepthExceeded {
+                    max_depth: MAX_RECONSTRUCTION_DEPTH,
+                    entity_id,
+                }
+                .into());
+            }
+
+            let version = self
+                .node_versions
+                .get(&current_id)
+                .ok_or(StorageError::VersionNotFound(current_id))?;
+
+            let is_anchor = version.is_anchor();
+            let prev_id = version.prev_version;
+
+            // Store version ID (we'll process these in reverse)
+            version_ids.push(current_id);
+
+            // If we found an anchor, we're done collecting
+            if is_anchor {
+                break;
+            }
+
+            // Get previous version for delta chain traversal
+            current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
+                entity_id: version.node_id.to_string(),
+                reason: "Delta version has no previous version".to_string(),
+            })?;
+
+            chain_length += 1;
+        }
+
+        // Now reconstruct properties by applying deltas in forward order
+        // The last element in version_ids is the anchor (base state)
+        let anchor_id =
+            version_ids
+                .last()
+                .copied()
+                .ok_or_else(|| TemporalError::CorruptedVersionChain {
+                    entity_id: format!("version {}", version_id),
+                    reason: "Empty version chain during reconstruction".to_string(),
+                })?;
+
+        let anchor_version = self
+            .node_versions
+            .get(&anchor_id)
+            .ok_or(StorageError::VersionNotFound(anchor_id))?;
+
+        let mut properties = match &anchor_version.data {
+            VersionData::Anchor { properties, .. } => properties.clone(),
+            VersionData::Delta { .. } => {
+                // This should never happen due to the is_anchor() check above
+                return Err(TemporalError::CorruptedVersionChain {
+                    entity_id: anchor_version.node_id.to_string(),
+                    reason: "Expected anchor at base of version chain".to_string(),
+                }
+                .into());
+            }
+        };
+
+        // Apply deltas in forward order (reverse of collection order)
+        // Skip the last element (anchor) since we already have its properties
+        for &vid in version_ids.iter().rev().skip(1) {
+            let version = self
+                .node_versions
+                .get(&vid)
+                .ok_or(StorageError::VersionNotFound(vid))?;
+
+            match &version.data {
+                VersionData::Delta { delta } => {
+                    properties = delta.apply(&properties);
+                }
+                VersionData::Anchor { .. } => {
+                    // This should never happen - only the last element should be an anchor
+                    return Err(TemporalError::CorruptedVersionChain {
+                        entity_id: version.node_id.to_string(),
+                        reason: "Found anchor in middle of delta chain".to_string(),
+                    }
+                    .into());
+                }
+            }
+        }
+
+        Ok(properties)
+    }
+
+    /// Iterative property reconstruction helper for edges (Issue #211).
+    ///
+    /// Mirrors the node reconstruction algorithm for consistency. See
+    /// `reconstruct_node_properties_iterative` for algorithm details.
+    fn reconstruct_edge_properties_iterative(&self, version_id: VersionId) -> Result<PropertyMap> {
+        // Collect version IDs backwards from target to anchor
+        // Pre-allocate with anchor_interval capacity to avoid reallocations
+        let mut version_ids: Vec<VersionId> =
+            Vec::with_capacity(self.config.anchor_interval as usize);
+        let mut current_id = version_id;
+        let mut chain_length = 0;
+
+        // Walk backwards until we find an anchor or hit depth limit
+        loop {
+            // Check depth limit for DoS protection
+            if chain_length >= self.max_reconstruction_depth {
+                let entity_id = self
+                    .edge_versions
+                    .get(&version_id)
+                    .map(|v| v.edge_id.to_string())
+                    .unwrap_or_else(|| format!("version {}", version_id));
+                return Err(TemporalError::MaxDepthExceeded {
+                    max_depth: MAX_RECONSTRUCTION_DEPTH,
+                    entity_id,
+                }
+                .into());
+            }
+
+            let version = self
+                .edge_versions
+                .get(&current_id)
+                .ok_or(StorageError::VersionNotFound(current_id))?;
+
+            let is_anchor = version.is_anchor();
+            let prev_id = version.prev_version;
+
+            // Store version ID (we'll process these in reverse)
+            version_ids.push(current_id);
+
+            // If we found an anchor, we're done collecting
+            if is_anchor {
+                break;
+            }
+
+            // Get previous version for delta chain traversal
+            current_id = prev_id.ok_or_else(|| TemporalError::CorruptedVersionChain {
+                entity_id: version.edge_id.to_string(),
+                reason: "Delta version has no previous version".to_string(),
+            })?;
+
+            chain_length += 1;
+        }
+
+        // Now reconstruct properties by applying deltas in forward order
+        // The last element in version_ids is the anchor (base state)
+        let anchor_id =
+            version_ids
+                .last()
+                .copied()
+                .ok_or_else(|| TemporalError::CorruptedVersionChain {
+                    entity_id: format!("version {}", version_id),
+                    reason: "Empty version chain during reconstruction".to_string(),
+                })?;
+
+        let anchor_version = self
+            .edge_versions
+            .get(&anchor_id)
+            .ok_or(StorageError::VersionNotFound(anchor_id))?;
+
+        let mut properties = match &anchor_version.data {
+            VersionData::Anchor { properties, .. } => properties.clone(),
+            VersionData::Delta { .. } => {
+                // This should never happen due to the is_anchor() check above
+                return Err(TemporalError::CorruptedVersionChain {
+                    entity_id: anchor_version.edge_id.to_string(),
+                    reason: "Expected anchor at base of version chain".to_string(),
+                }
+                .into());
+            }
+        };
+
+        // Apply deltas in forward order (reverse of collection order)
+        // Skip the last element (anchor) since we already have its properties
+        for &vid in version_ids.iter().rev().skip(1) {
+            let version = self
+                .edge_versions
+                .get(&vid)
+                .ok_or(StorageError::VersionNotFound(vid))?;
+
+            match &version.data {
+                VersionData::Delta { delta } => {
+                    properties = delta.apply(&properties);
+                }
+                VersionData::Anchor { .. } => {
+                    // This should never happen - only the last element should be an anchor
+                    return Err(TemporalError::CorruptedVersionChain {
+                        entity_id: version.edge_id.to_string(),
+                        reason: "Found anchor in middle of delta chain".to_string(),
+                    }
+                    .into());
+                }
+            }
+        }
+
+        Ok(properties)
+    }
+
     /// Internal helper for node property reconstruction with depth tracking.
     ///
-    /// The depth parameter tracks how many delta versions have been traversed.
-    /// If depth exceeds MAX_RECONSTRUCTION_DEPTH, returns an error to prevent
-    /// stack overflow from corrupted version chains or cycles.
+    /// Note (Issue #211): The iterative implementation only caches the final
+    /// reconstructed PropertyMap, not intermediate versions. This reduces memory
+    /// allocations at the cost of slightly lower cache hit rates compared to
+    /// the previous recursive approach.
+    ///
+    /// The depth parameter is kept for API compatibility but unused in the
+    /// iterative implementation.
     fn reconstruct_node_properties_with_depth(
         &self,
         version_id: VersionId,
-        depth: usize,
+        _depth: usize, // Kept for API compatibility but unused in iterative implementation
     ) -> Result<PropertyMap> {
-        // Check depth limit first (DoS protection)
-        // Using >= for clarity: depth is 0-indexed, so this limits to exactly
-        // MAX_RECONSTRUCTION_DEPTH recursive calls (depths 0..99 = 100 calls)
-        if depth >= self.max_reconstruction_depth {
-            // Get the node ID for error reporting
-            let entity_id = self
-                .node_versions
-                .get(&version_id)
-                .map(|v| v.node_id.to_string())
-                .unwrap_or_else(|| format!("version {}", version_id));
-            return Err(TemporalError::MaxDepthExceeded {
-                max_depth: MAX_RECONSTRUCTION_DEPTH,
-                entity_id,
-            }
-            .into());
-        }
-
         // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
         //
         // 1. Check regular cache first (holds all versions: anchors + deltas)
@@ -820,35 +1035,10 @@ impl HistoricalStorage {
             return Ok(cached.as_ref().clone());
         }
 
-        // Cache miss - reconstruct properties
+        // Cache miss - reconstruct properties using iterative helper
         self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
-        let version = self
-            .node_versions
-            .get(&version_id)
-            .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        let properties = match &version.data {
-            VersionData::Anchor { properties, .. } => {
-                // This shouldn't happen since anchors are pre-populated, but handle gracefully
-                properties.clone()
-            }
-            VersionData::Delta { delta } => {
-                // Find the previous version
-                let prev_id = version
-                    .prev_version
-                    .ok_or(TemporalError::CorruptedVersionChain {
-                        entity_id: format!("{:?}", version.node_id),
-                        reason: "Delta version has no previous version".to_string(),
-                    })?;
-
-                // Recursively reconstruct previous version with incremented depth
-                let base_properties =
-                    self.reconstruct_node_properties_with_depth(prev_id, depth + 1)?;
-
-                // Apply this delta
-                delta.apply(&base_properties)
-            }
-        };
+        let properties = self.reconstruct_node_properties_iterative(version_id)?;
 
         // Populate cache for future reads
         self.node_property_cache
@@ -871,31 +1061,18 @@ impl HistoricalStorage {
 
     /// Internal helper for edge property reconstruction with depth tracking.
     ///
-    /// The depth parameter tracks how many delta versions have been traversed.
-    /// If depth exceeds MAX_RECONSTRUCTION_DEPTH, returns an error to prevent
-    /// stack overflow from corrupted version chains or cycles.
+    /// Note (Issue #211): The iterative implementation only caches the final
+    /// reconstructed PropertyMap, not intermediate versions. This reduces memory
+    /// allocations at the cost of slightly lower cache hit rates compared to
+    /// the previous recursive approach.
+    ///
+    /// The depth parameter is kept for API compatibility but unused in the
+    /// iterative implementation.
     fn reconstruct_edge_properties_with_depth(
         &self,
         version_id: VersionId,
-        depth: usize,
+        _depth: usize, // Kept for API compatibility but unused in iterative implementation
     ) -> Result<PropertyMap> {
-        // Check depth limit first (DoS protection)
-        // Using >= for clarity: depth is 0-indexed, so this limits to exactly
-        // MAX_RECONSTRUCTION_DEPTH recursive calls (depths 0..99 = 100 calls)
-        if depth >= self.max_reconstruction_depth {
-            // Get the edge ID for error reporting
-            let entity_id = self
-                .edge_versions
-                .get(&version_id)
-                .map(|v| v.edge_id.to_string())
-                .unwrap_or_else(|| format!("version {}", version_id));
-            return Err(TemporalError::MaxDepthExceeded {
-                max_depth: MAX_RECONSTRUCTION_DEPTH,
-                entity_id,
-            }
-            .into());
-        }
-
         // Dual-cache lookup strategy (Improvement #1 & #2: Issue #338)
         //
         // 1. Check regular cache first (holds all versions: anchors + deltas)
@@ -921,32 +1098,10 @@ impl HistoricalStorage {
             return Ok(cached.as_ref().clone());
         }
 
-        // Cache miss - reconstruct properties
+        // Cache miss - reconstruct properties using iterative helper
         self.full_reconstructions.fetch_add(1, Ordering::Relaxed);
-        let version = self
-            .edge_versions
-            .get(&version_id)
-            .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        let properties = match &version.data {
-            VersionData::Anchor { properties, .. } => {
-                // This shouldn't happen since anchors are pre-populated, but handle gracefully
-                properties.clone()
-            }
-            VersionData::Delta { delta } => {
-                let prev_id = version
-                    .prev_version
-                    .ok_or(TemporalError::CorruptedVersionChain {
-                        entity_id: format!("{:?}", version.edge_id),
-                        reason: "Delta version has no previous version".to_string(),
-                    })?;
-
-                // Recursively reconstruct previous version with incremented depth
-                let base_properties =
-                    self.reconstruct_edge_properties_with_depth(prev_id, depth + 1)?;
-                delta.apply(&base_properties)
-            }
-        };
+        let properties = self.reconstruct_edge_properties_iterative(version_id)?;
 
         // Populate cache for future reads
         self.edge_property_cache
@@ -4572,13 +4727,28 @@ mod tests {
             "Cache should have entries after reconstruction"
         );
 
-        // Check hit rate - with repeated access, should be high
+        // Check hit rate - with repeated access, should be reasonable
         let hit_rate = storage.cache_hit_rate();
         assert!(hit_rate.is_some(), "Should have cache hit rate data");
-        // After 10 accesses to same version, most should be hits
+
+        // Note (Issue #211): After switching to iterative reconstruction, the cache
+        // behavior changed. The recursive implementation cached intermediate versions
+        // during reconstruction, while the iterative approach only caches the final
+        // result. This reduces memory allocations (O(1) vs O(anchor_interval)) at
+        // the cost of slightly lower cache hit rates in some scenarios.
+        //
+        // With 20 versions created (anchors at 0, 10, 20) and 10 accesses to v5:
+        // - Version creation triggers ~18 reconstructions (for deltas)
+        // - First access to v5: 1 reconstruction (if not already cached)
+        // - Next 9 accesses to v5: 9 cache hits
+        // - Expected hit rate: ~9/28 = ~32% (lower bound)
+        //
+        // The exact hit rate depends on which versions were cached during creation.
+        // We verify it's reasonable (>20%) rather than the old >50% expectation.
         assert!(
-            hit_rate.unwrap() > 0.5,
-            "Hit rate should be > 50% with repeated access"
+            hit_rate.unwrap() > 0.20,
+            "Hit rate should be > 20% with some repeated access, got {:?}",
+            hit_rate
         );
     }
 
@@ -5497,5 +5667,356 @@ mod tests {
                 .unwrap()
                 .is_anchor()
         );
+    }
+
+    // ========================================================================
+    // Tests for Issue #211: Iterative reconstruction (TDD)
+    // ========================================================================
+
+    #[test]
+    fn test_node_reconstruction_with_long_delta_chain() {
+        // Test reconstruction with a long chain of deltas to verify
+        // iterative approach handles deep chains efficiently
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 50, // Won't create anchors until 50 versions
+                max_delta_chain: 50,
+            },
+            RetentionPolicy::default(),
+            0, // Disable cache to test full reconstruction
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("TestNode").unwrap();
+
+        // Create anchor version with initial properties
+        let v0 = VersionId::new(0).unwrap();
+        storage
+            .add_node_version(
+                node_id,
+                v0,
+                BiTemporalInterval::current(0.into()),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("counter", 0i64)
+                    .insert("name", "test")
+                    .insert("active", true)
+                    .build(),
+            )
+            .unwrap();
+
+        // Create 40 delta versions, each modifying different properties
+        // Track current values to build complete property maps
+        let mut current_name = "test".to_string();
+        let mut current_active = true;
+
+        for i in 1..=40 {
+            let vid = VersionId::new(i).unwrap();
+
+            // Update properties based on iteration
+            if i % 3 == 0 {
+                current_name = format!("test_{}", i);
+            }
+            if i % 5 == 0 {
+                current_active = i % 2 == 0;
+            }
+
+            // Always include all properties (complete state, not just deltas)
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("counter", i as i64)
+                        .insert("name", current_name.clone())
+                        .insert("active", current_active)
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        // Reconstruct the final version (should traverse 40 deltas)
+        let final_version = VersionId::new(40).unwrap();
+        let props = storage.reconstruct_node_properties(final_version).unwrap();
+
+        // Verify final properties are correct
+        assert_eq!(props.get("counter").and_then(|v| v.as_int()), Some(40));
+        assert_eq!(props.get("name").and_then(|v| v.as_str()), Some("test_39")); // Last change at v39 (39 % 3 == 0)
+        assert_eq!(props.get("active").and_then(|v| v.as_bool()), Some(true)); // Last change at v40 (40 % 5 == 0, 40 % 2 == 0 = true)
+
+        // Verify reconstruction happened (cache was disabled)
+        let metrics = storage.cache_metrics();
+        assert!(
+            metrics.full_reconstructions > 0,
+            "Should have performed reconstruction"
+        );
+    }
+
+    #[test]
+    fn test_edge_reconstruction_with_long_delta_chain() {
+        // Test edge reconstruction with a long chain of deltas
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 50,
+                max_delta_chain: 50,
+            },
+            RetentionPolicy::default(),
+            0, // Disable cache to test full reconstruction
+        );
+
+        let edge_id = EdgeId::new(1).unwrap();
+        let source = NodeId::new(100).unwrap();
+        let target = NodeId::new(200).unwrap();
+        let label = GLOBAL_INTERNER.intern("TestEdge").unwrap();
+
+        // Create anchor version
+        let v0 = VersionId::new(0).unwrap();
+        storage
+            .add_edge_version(
+                edge_id,
+                v0,
+                BiTemporalInterval::current(0.into()),
+                label,
+                source,
+                target,
+                PropertyMapBuilder::new()
+                    .insert("weight", 0.0f64)
+                    .insert("type", "initial")
+                    .build(),
+            )
+            .unwrap();
+
+        // Create 40 delta versions
+        let mut current_type = "initial".to_string();
+
+        for i in 1..=40 {
+            let vid = VersionId::new(i).unwrap();
+
+            if i % 7 == 0 {
+                current_type = format!("updated_{}", i);
+            }
+
+            storage
+                .add_edge_version(
+                    edge_id,
+                    vid,
+                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    label,
+                    source,
+                    target,
+                    PropertyMapBuilder::new()
+                        .insert("weight", i as f64)
+                        .insert("type", current_type.clone())
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        // Reconstruct the final version
+        let final_version = VersionId::new(40).unwrap();
+        let props = storage.reconstruct_edge_properties(final_version).unwrap();
+
+        // Verify final properties
+        assert_eq!(props.get("weight").and_then(|v| v.as_float()), Some(40.0));
+        assert_eq!(
+            props.get("type").and_then(|v| v.as_str()),
+            Some("updated_35")
+        ); // Last change at v35 (35 % 7 == 0)
+
+        // Verify reconstruction happened
+        let metrics = storage.cache_metrics();
+        assert!(
+            metrics.full_reconstructions > 0,
+            "Should have performed reconstruction"
+        );
+    }
+
+    #[test]
+    fn test_reconstruction_correctness_at_various_depths() {
+        // Test that reconstruction is correct at various depths in the delta chain
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 20,
+                max_delta_chain: 20,
+            },
+            RetentionPolicy::default(),
+            0, // Disable cache
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create versions with predictable property values
+        for i in 0..15 {
+            let vid = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    label,
+                    PropertyMapBuilder::new()
+                        .insert("version", i as i64)
+                        .insert("sum", (i * (i + 1) / 2) as i64) // Cumulative sum for verification
+                        .build(),
+                )
+                .unwrap();
+        }
+
+        // Verify reconstruction at various depths
+        for i in 0..15 {
+            let vid = VersionId::new(i).unwrap();
+            let props = storage.reconstruct_node_properties(vid).unwrap();
+
+            assert_eq!(
+                props.get("version").and_then(|v| v.as_int()),
+                Some(i as i64),
+                "Version {} should have version={}",
+                i,
+                i
+            );
+            assert_eq!(
+                props.get("sum").and_then(|v| v.as_int()),
+                Some((i * (i + 1) / 2) as i64),
+                "Version {} should have correct sum",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_reconstruction_with_property_deletion() {
+        // Test that reconstruction correctly handles property deletions in deltas
+        let mut storage = HistoricalStorage::with_config_retention_and_cache_size(
+            AnchorConfig {
+                anchor_interval: 10,
+                max_delta_chain: 10,
+            },
+            RetentionPolicy::default(),
+            0,
+        );
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // v0: Create node with multiple properties
+        storage
+            .add_node_version(
+                node_id,
+                VersionId::new(0).unwrap(),
+                BiTemporalInterval::current(0.into()),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("a", "value_a")
+                    .insert("b", "value_b")
+                    .insert("c", "value_c")
+                    .build(),
+            )
+            .unwrap();
+
+        // v1: Update node, remove property 'b' (delta will have a, c but not b)
+        storage
+            .add_node_version(
+                node_id,
+                VersionId::new(1).unwrap(),
+                BiTemporalInterval::current(1000.into()),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("a", "value_a")
+                    .insert("c", "new_value_c")
+                    .build(),
+            )
+            .unwrap();
+
+        // v2: Add property 'd', keep a, c
+        storage
+            .add_node_version(
+                node_id,
+                VersionId::new(2).unwrap(),
+                BiTemporalInterval::current(2000.into()),
+                label,
+                PropertyMapBuilder::new()
+                    .insert("a", "value_a")
+                    .insert("c", "new_value_c")
+                    .insert("d", "value_d")
+                    .build(),
+            )
+            .unwrap();
+
+        // Verify v1 doesn't have 'b'
+        let props_v1 = storage
+            .reconstruct_node_properties(VersionId::new(1).unwrap())
+            .unwrap();
+        assert!(
+            props_v1.get("b").is_none(),
+            "v1 should not have property 'b'"
+        );
+        assert_eq!(
+            props_v1.get("c").and_then(|v| v.as_str()),
+            Some("new_value_c")
+        );
+
+        // Verify v2 has correct properties
+        let props_v2 = storage
+            .reconstruct_node_properties(VersionId::new(2).unwrap())
+            .unwrap();
+        assert!(
+            props_v2.get("b").is_none(),
+            "v2 should not have property 'b'"
+        );
+        assert_eq!(props_v2.get("d").and_then(|v| v.as_str()), Some("value_d"));
+    }
+
+    #[test]
+    fn test_reconstruction_with_anchor_interval() {
+        // Test that reconstruction works correctly across anchor boundaries
+        let mut storage = HistoricalStorage::with_config(AnchorConfig {
+            anchor_interval: 5,
+            max_delta_chain: 5,
+        });
+
+        let node_id = NodeId::new(1).unwrap();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        // Create 12 versions (anchors at 0, 5, 10)
+        for i in 0..12 {
+            let vid = VersionId::new(i).unwrap();
+            storage
+                .add_node_version(
+                    node_id,
+                    vid,
+                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    label,
+                    PropertyMapBuilder::new().insert("value", i as i64).build(),
+                )
+                .unwrap();
+        }
+
+        // Test reconstruction for versions in different delta chains
+        // v3 is in first chain (anchor at v0)
+        let props_v3 = storage
+            .reconstruct_node_properties(VersionId::new(3).unwrap())
+            .unwrap();
+        assert_eq!(props_v3.get("value").and_then(|v| v.as_int()), Some(3));
+
+        // v7 is in second chain (anchor at v5)
+        let props_v7 = storage
+            .reconstruct_node_properties(VersionId::new(7).unwrap())
+            .unwrap();
+        assert_eq!(props_v7.get("value").and_then(|v| v.as_int()), Some(7));
+
+        // v11 is in third chain (anchor at v10)
+        let props_v11 = storage
+            .reconstruct_node_properties(VersionId::new(11).unwrap())
+            .unwrap();
+        assert_eq!(props_v11.get("value").and_then(|v| v.as_int()), Some(11));
+
+        // Verify anchors themselves
+        let props_v5 = storage
+            .reconstruct_node_properties(VersionId::new(5).unwrap())
+            .unwrap();
+        assert_eq!(props_v5.get("value").and_then(|v| v.as_int()), Some(5));
     }
 }
