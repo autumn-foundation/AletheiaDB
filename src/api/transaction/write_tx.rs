@@ -1204,8 +1204,11 @@ impl WriteTransaction {
         // internally, so no explicit lock release needed (automatically released after inserts).
         drop(historical);
 
-        // Rebuild adjacency indexes only if edge operations occurred
-        // This optimization avoids expensive rebuilds for node-only transactions
+        // Rebuild adjacency indexes only if edge structure changed
+        // This optimization avoids expensive rebuilds for:
+        // - Node-only transactions
+        // - Transactions that only update edge properties (UpdateEdge)
+        // Only CreateEdge and DeleteEdge modify topology and trigger rebuild
         if self.buffer.has_edge_operations() {
             self.current.rebuild_adjacency();
         }
