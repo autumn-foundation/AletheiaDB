@@ -59,10 +59,10 @@
 //! ```
 
 use gallifreydb::core::{
+    GLOBAL_INTERNER,
     id::{EdgeId, NodeId},
     property::{PropertyMapBuilder, PropertyValue},
     temporal::{BiTemporalInterval, time},
-    GLOBAL_INTERNER,
 };
 use gallifreydb::storage::{
     persistence::{CheckpointConfig, PersistenceManager},
