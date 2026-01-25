@@ -346,6 +346,8 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
 ///   - Key bytes: key.len()
 ///   - Value: depends on type (see `estimate_property_value_size`)
 fn estimate_property_map_size(properties: &PropertyMap) -> usize {
+    use crate::core::interning::GLOBAL_INTERNER;
+
     if properties.is_empty() {
         return 4; // Just the count field
     }
@@ -353,9 +355,13 @@ fn estimate_property_map_size(properties: &PropertyMap) -> usize {
     let mut size = 4; // Count field
     for (key, value) in properties.iter() {
         // Key: length prefix (4) + key bytes
-        // Use GLOBAL_INTERNER from interning module
-        use crate::core::interning::GLOBAL_INTERNER;
-        let key_len = GLOBAL_INTERNER.resolve(*key).map(|s| s.len()).unwrap_or(0);
+        // SAFETY: We must resolve the key to get accurate size.
+        // If resolve fails (corrupted interner state), use a conservative upper bound
+        // to ensure we never under-allocate. 256 is a reasonable maximum key length.
+        let key_len = GLOBAL_INTERNER
+            .resolve(*key)
+            .map(|s| s.len())
+            .unwrap_or(256); // Conservative fallback: max reasonable key size
         size += 4 + key_len;
         // Value: type tag + data
         size += estimate_property_value_size(value);
@@ -373,8 +379,8 @@ fn estimate_property_map_size(properties: &PropertyMap) -> usize {
 /// - String: 1 + 4 + len (tag + length prefix + bytes)
 /// - Bytes: 1 + 4 + len (tag + length prefix + bytes)
 /// - Array: 1 + 4 + sum of element sizes (tag + count + elements)
-/// - Vector: 1 + 4 + 4 + (dims * 4) (tag + dims + compression + f32s)
-/// - SparseVector: 1 + 4 + 4 + (non-zero count * 12) (tag + dims + count + (index + value) pairs)
+/// - Vector: 1 + 4 + (dims * 4) (tag + dims + f32 array)
+/// - SparseVector: 1 + 4 + 4 + (nnz * 8) (tag + dims + nnz + indices + values)
 fn estimate_property_value_size(value: &crate::core::property::PropertyValue) -> usize {
     use crate::core::property::PropertyValue;
 
@@ -391,12 +397,15 @@ fn estimate_property_value_size(value: &crate::core::property::PropertyValue) ->
             1 + 4 + elements_size
         }
         PropertyValue::Vector(v) => {
-            // tag (1) + dims (4) + compression flag (4) + f32 array (dims * 4)
-            1 + 4 + 4 + (v.len() * 4)
+            // tag (1) + dims (4) + f32 array (dims * 4)
+            // Serialization: TAG_VECTOR + dimension(u32) + f32_values
+            1 + 4 + (v.len() * 4)
         }
         PropertyValue::SparseVector(sv) => {
-            // tag (1) + dims (4) + count (4) + (index (4) + value (4)) * count
-            1 + 4 + 4 + (sv.indices().len() * 8)
+            // tag (1) + dims (4) + nnz (4) + indices (nnz * 4) + values (nnz * 4)
+            // Serialization: TAG_SPARSE_VECTOR + dimension(u32) + nnz(u32) + indices[] + values[]
+            let nnz = sv.indices().len();
+            1 + 4 + 4 + (nnz * 4) + (nnz * 4)
         }
     }
 }
