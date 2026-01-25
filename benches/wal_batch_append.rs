@@ -31,7 +31,9 @@ fn create_wal() -> (ConcurrentWalSystem, TempDir) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
     let config = ConcurrentWalSystemConfig::new(temp_dir.path().to_path_buf())
         .with_durability_mode(DurabilityMode::Async {
-            flush_interval_ms: 10_000, // Long interval to avoid background flush
+            // Use 1-second interval to avoid background flush during benchmarks
+            // while keeping it realistic (10s was excessive)
+            flush_interval_ms: 1_000,
         });
     let wal = ConcurrentWalSystem::new(config).expect("failed to create WAL");
     (wal, temp_dir)
@@ -52,6 +54,18 @@ fn create_test_operations(count: usize) -> Vec<WalOperation> {
         .collect()
 }
 
+/// Helper to create minimal test operations (for LSN allocation benchmarks)
+fn create_minimal_operations(count: usize) -> Vec<WalOperation> {
+    (0..count)
+        .map(|i| WalOperation::CreateNode {
+            node_id: NodeId::new(i as u64 + 1).unwrap(),
+            label: "N".to_string(),
+            properties: PropertyMapBuilder::new().build(),
+            temporal: BiTemporalInterval::current(time::now()),
+        })
+        .collect()
+}
+
 /// Benchmark individual appends vs batch append for different batch sizes
 fn bench_batch_append_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_batch_append_comparison");
@@ -60,30 +74,29 @@ fn bench_batch_append_comparison(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*batch_size as u64));
 
         // Baseline: individual appends
+        // Use iter_with_setup to exclude operation creation from measurement
         group.bench_function(BenchmarkId::new("individual_appends", batch_size), |b| {
             let (wal, _guard) = create_wal();
 
-            b.iter(|| {
-                for i in 0..*batch_size {
-                    let operation = WalOperation::CreateNode {
-                        node_id: NodeId::new(i as u64 + 1).unwrap(),
-                        label: format!("Node{}", i),
-                        properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
-                        temporal: BiTemporalInterval::current(time::now()),
-                    };
-                    black_box(wal.append_async(operation).unwrap());
-                }
-            });
+            b.iter_with_setup(
+                || create_test_operations(*batch_size),
+                |ops| {
+                    for op in ops {
+                        black_box(wal.append_async(op).unwrap());
+                    }
+                },
+            );
         });
 
         // Optimized: batch append
+        // Use iter_with_setup to exclude operation creation from measurement
         group.bench_function(BenchmarkId::new("batch_append", batch_size), |b| {
             let (wal, _guard) = create_wal();
 
-            b.iter(|| {
-                let ops = create_test_operations(*batch_size);
-                black_box(wal.append_batch(ops).unwrap());
-            });
+            b.iter_with_setup(
+                || create_test_operations(*batch_size),
+                |ops| black_box(wal.append_batch(ops).unwrap()),
+            );
         });
     }
 
@@ -96,30 +109,29 @@ fn bench_batch_append_high_throughput(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1000));
 
     // Individual appends - 1000 operations
+    // Use iter_with_setup to exclude operation creation from measurement
     group.bench_function("individual_1000_ops", |b| {
         let (wal, _guard) = create_wal();
 
-        b.iter(|| {
-            for i in 0..1000 {
-                let operation = WalOperation::CreateNode {
-                    node_id: NodeId::new(i + 1).unwrap(),
-                    label: "Node".to_string(),
-                    properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
-                    temporal: BiTemporalInterval::current(time::now()),
-                };
-                black_box(wal.append_async(operation).unwrap());
-            }
-        });
+        b.iter_with_setup(
+            || create_test_operations(1000),
+            |ops| {
+                for op in ops {
+                    black_box(wal.append_async(op).unwrap());
+                }
+            },
+        );
     });
 
     // Batch append - 1000 operations in a single batch
+    // Use iter_with_setup to exclude operation creation from measurement
     group.bench_function("batch_1000_ops", |b| {
         let (wal, _guard) = create_wal();
 
-        b.iter(|| {
-            let ops = create_test_operations(1000);
-            black_box(wal.append_batch(ops).unwrap());
-        });
+        b.iter_with_setup(
+            || create_test_operations(1000),
+            |ops| black_box(wal.append_batch(ops).unwrap()),
+        );
     });
 
     group.finish();
@@ -133,38 +145,29 @@ fn bench_lsn_allocation_overhead(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*batch_size as u64));
 
         // Individual LSN allocations
+        // Use minimal operations and iter_with_setup for accurate measurement
         group.bench_function(BenchmarkId::new("individual_lsn", batch_size), |b| {
             let (wal, _guard) = create_wal();
 
-            b.iter(|| {
-                // Just append minimal operations to focus on LSN allocation
-                for i in 0..*batch_size {
-                    let operation = WalOperation::CreateNode {
-                        node_id: NodeId::new(i as u64 + 1).unwrap(),
-                        label: "N".to_string(),
-                        properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
-                    };
-                    black_box(wal.append_async(operation).unwrap());
-                }
-            });
+            b.iter_with_setup(
+                || create_minimal_operations(*batch_size),
+                |ops| {
+                    for op in ops {
+                        black_box(wal.append_async(op).unwrap());
+                    }
+                },
+            );
         });
 
         // Batch LSN allocation
+        // Use minimal operations and iter_with_setup for accurate measurement
         group.bench_function(BenchmarkId::new("batch_lsn", batch_size), |b| {
             let (wal, _guard) = create_wal();
 
-            b.iter(|| {
-                let ops: Vec<_> = (0..*batch_size)
-                    .map(|i| WalOperation::CreateNode {
-                        node_id: NodeId::new(i as u64 + 1).unwrap(),
-                        label: "N".to_string(),
-                        properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
-                    })
-                    .collect();
-                black_box(wal.append_batch(ops).unwrap());
-            });
+            b.iter_with_setup(
+                || create_minimal_operations(*batch_size),
+                |ops| black_box(wal.append_batch(ops).unwrap()),
+            );
         });
     }
 
@@ -179,22 +182,23 @@ fn bench_mixed_workload(c: &mut Criterion) {
     group.bench_function("mixed_individual_and_batch", |b| {
         let (wal, _guard) = create_wal();
 
-        b.iter(|| {
-            // 10 individual operations
-            for i in 0..10 {
-                let operation = WalOperation::CreateNode {
-                    node_id: NodeId::new(i + 1).unwrap(),
-                    label: "Node".to_string(),
-                    properties: PropertyMapBuilder::new().build(),
-                    temporal: BiTemporalInterval::current(time::now()),
-                };
-                black_box(wal.append_async(operation).unwrap());
-            }
+        b.iter_with_setup(
+            || {
+                // Pre-create operations outside measurement
+                let individual_ops = create_test_operations(10);
+                let batch_ops = create_test_operations(90);
+                (individual_ops, batch_ops)
+            },
+            |(individual_ops, batch_ops)| {
+                // 10 individual operations
+                for op in individual_ops {
+                    black_box(wal.append_async(op).unwrap());
+                }
 
-            // 1 batch of 90 operations
-            let ops = create_test_operations(90);
-            black_box(wal.append_batch(ops).unwrap());
-        });
+                // 1 batch of 90 operations
+                black_box(wal.append_batch(batch_ops).unwrap());
+            },
+        );
     });
 
     group.finish();

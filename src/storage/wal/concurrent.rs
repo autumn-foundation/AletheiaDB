@@ -368,15 +368,17 @@ impl ConcurrentWal {
 
         let count = operations.len() as u64;
 
+        // Defensive check: ensure count > 0 to prevent panic in allocate_batch
+        debug_assert!(count > 0, "count should be > 0 after empty check");
+
         // Allocate all LSNs in a single atomic operation
         let (first_lsn, _last_lsn) = self.lsn_allocator.allocate_batch(count);
 
         // Pre-allocate result vector
         let mut lsns = Vec::with_capacity(operations.len());
 
-        // Serialize and append all operations
-        // We still need to serialize individually since each entry has its own LSN
-        // But we batch the stripe appends to reduce overhead
+        // Serialize and append each operation individually since each entry has its own LSN.
+        // The main optimization is the single batch LSN allocation above (vs N atomic operations).
         for (idx, operation) in operations.into_iter().enumerate() {
             let lsn = LSN(first_lsn.0 + idx as u64);
             lsns.push(lsn);

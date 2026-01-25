@@ -54,7 +54,7 @@ use super::flush_coordinator::{FlushCoordinator, FlushCoordinatorConfig, FlushSt
 use super::group_commit::GroupCommitCoordinator;
 use super::{LSN, WalOperation};
 use crate::storage::wal::DurabilityMode;
-use crate::utils::error::Result;
+use crate::utils::error::{Error, Result, StorageError};
 
 /// Configuration for the concurrent WAL system.
 #[derive(Debug, Clone)]
@@ -462,7 +462,9 @@ impl ConcurrentWalSystem {
     ///
     /// The durability semantics follow the configured `DurabilityMode`:
     /// - **Synchronous**: All operations are flushed and synced before returning
-    /// - **Async/GroupCommit/AsyncBatched**: Operations are buffered and flushed by background thread
+    /// - **Async**: Operations are buffered and flushed by background thread (eventual consistency)
+    /// - **GroupCommit**: Operations are buffered and flushed by background thread (caller must wait on epoch)
+    /// - **AsyncBatched**: Same as GroupCommit (operations buffered, background flush)
     ///
     /// # Arguments
     ///
@@ -508,7 +510,11 @@ impl ConcurrentWalSystem {
                 // Drain and flush immediately for sync mode
                 let entries = self.wal.drain_all();
                 if !entries.is_empty() {
-                    self.coordinator.flush(entries, true)?;
+                    self.coordinator.flush(entries, true).map_err(|e| {
+                        Error::Storage(StorageError::WalError {
+                            reason: format!("Failed to flush batch after drain: {}", e),
+                        })
+                    })?;
                 }
 
                 Ok(lsns)
