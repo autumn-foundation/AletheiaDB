@@ -65,25 +65,21 @@ historical.set_tiered_storage(Arc::new(tiered));
 // Now historical storage will use tiered access!
 ```
 
-### RocksDB Backend (Recommended for Production)
+### Redb Backend (Recommended for Production)
 
-Enable the `tiered-storage` feature in your `Cargo.toml`:
-
-```toml
-[dependencies]
-gallifreydb = { version = "0.1", features = ["tiered-storage"] }
-```
+Redb is a pure Rust embedded database that provides excellent performance without
+external dependencies. It's the recommended backend for production deployments.
 
 ```rust
 use gallifreydb::storage::{
     HistoricalStorage, TieredStorage, TieredStorageConfig,
-    RocksDBColdStorage, RocksDBConfig,
+    RedbColdStorage, RedbConfig,
 };
 use std::sync::Arc;
 
-// 1. Create RocksDB cold storage
-let rocksdb_config = RocksDBConfig::default();
-let cold = RocksDBColdStorage::open("data/cold", rocksdb_config)?;
+// 1. Create Redb cold storage
+let redb_config = RedbConfig::new();
+let cold = RedbColdStorage::new("data/cold.redb", redb_config)?;
 
 // 2. Create tiered storage
 let tiered = TieredStorage::with_default_config(Box::new(cold));
@@ -144,51 +140,32 @@ pub struct ColdStorageConfig {
 }
 ```
 
-### RocksDBConfig
+### RedbConfig
 
 ```rust
-pub struct RocksDBConfig {
-    /// Compression algorithm
+pub struct RedbConfig {
+    /// Compression algorithm for values
+    /// Default: Zstd
     pub compression: CompressionAlgorithm,
 
-    /// Write buffer size (bytes)
-    /// Default: 64MB
-    pub write_buffer_size: usize,
-
-    /// Maximum write buffers
+    /// Compression level (1-22 for Zstd)
     /// Default: 3
-    pub max_write_buffer_number: i32,
+    pub compression_level: u32,
 
-    /// Target file size (bytes)
-    /// Default: 64MB
-    pub target_file_size_base: u64,
-
-    /// Maximum open files
-    /// Default: 1000
-    pub max_open_files: i32,
-
-    /// Block cache size (bytes)
+    /// Cache size in bytes
     /// Default: 128MB
-    pub block_cache_size: usize,
-
-    /// Enable bloom filters
-    /// Default: true
-    pub enable_bloom_filter: bool,
-
-    /// Bloom filter bits per key
-    /// Default: 10
-    pub bloom_filter_bits: i32,
+    pub cache_size: usize,
 }
 ```
 
-**Preset Configurations:**
+**Creating Configurations:**
 
 ```rust
-// For write-heavy workloads (migration)
-let config = RocksDBConfig::write_optimized();
+// Default configuration
+let config = RedbConfig::new();
 
-// For read-heavy workloads (queries)
-let config = RocksDBConfig::read_optimized();
+// With custom cache size
+let config = RedbConfig::new().with_cache_size(256 * 1024 * 1024); // 256MB
 ```
 
 ## Migration
@@ -380,7 +357,7 @@ flowchart TD
 1. **Monitor cache hit ratios**: Aim for > 80% hot ratio, > 60% warm ratio
 2. **Tune warm cache size**: Increase if you see many cold hits
 3. **Enable prefetching**: For version chain traversals
-4. **Use RocksDB for production**: Better performance than file-based
+4. **Use Redb for production**: Better performance than file-based
 5. **Configure compression**: Zstd for size, LZ4 for speed
 
 ### Storage Recommendations
@@ -452,16 +429,17 @@ flowchart TD
 4. Decrease `age_threshold`
 5. Increase `batch_size`
 
-### RocksDB Errors
+### Redb Errors
 
-**"Failed to open RocksDB"**
+**"Failed to open Redb database"**
 - Check directory permissions
-- Ensure path exists
+- Ensure parent path exists
 - Check for lock files from crashed instances
 
-**"Column family not found"**
-- Database was created with different schema
-- Delete and recreate the database
+**"Database corrupted"**
+- Database file may be corrupted
+- Use the compact() method to attempt recovery
+- If persistent, delete and recreate the database
 
 ## API Reference
 

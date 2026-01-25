@@ -58,8 +58,8 @@ ort = { version = "2.0.0-rc.0", optional = true }
 tokenizers = { version = "0.15", optional = true }
 num_cpus = { version = "1.16", optional = true }
 
-# RocksDB for tiered cold storage (optional)
-rocksdb = { version = "0.24", optional = true }
+# Redb for tiered cold storage (pure Rust, ADR-0025)
+redb = "2.4"
 
 # Parallel iteration for sharded vector index
 rayon = "1.8"
@@ -113,9 +113,6 @@ mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base6
 
 # Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
-
-# Tiered storage with RocksDB cold storage backend
-tiered-storage = ["dep:rocksdb"]
 
 # Custom Honeycomb client (replaces libhoney-rust git dependency)
 # This provides a minimal, security-focused client with modern dependencies

@@ -144,16 +144,17 @@ gallifreydb = { version = "0.1", features = ["mcp-server"] }
 |---------|-------------|--------------|
 | `mcp-server` | Model Context Protocol server for LLM integration | `rmcp`, `tokio`, `serde` |
 
-### Sharding & Storage Features
+### Sharding Features
 ```toml
 [dependencies]
-gallifreydb = { version = "0.1", features = ["tiered-storage"] }
+gallifreydb = { version = "0.1", features = ["sharding-rpc"] }
 ```
 
 | Feature | Description | Dependencies |
 |---------|-------------|--------------|
 | `sharding-rpc` | RPC client for sharding coordination | `reqwest`, `serde` |
-| `tiered-storage` | RocksDB cold storage backend | `rocksdb` |
+
+Note: Tiered storage with Redb cold storage backend is included by default (no feature flag needed).
 
 ## Performance & Benchmarks
 
@@ -263,9 +264,10 @@ Benchmarks are automatically run on every push to trunk and published to GitHub 
 ### Tiered Storage (Complete ✅)
 - [x] Three-tier architecture (hot/warm/cold)
 - [x] File-based cold storage backend
-- [x] RocksDB cold storage backend (optional feature)
+- [x] Redb cold storage backend (pure Rust, built-in)
 - [x] Configurable migration policies
 - [x] Latency metrics with percentiles
+- [x] LSN-based WAL truncation
 
 ### In Progress / Planned
 - [ ] Vector Search Phase 5: Streaming and incremental updates

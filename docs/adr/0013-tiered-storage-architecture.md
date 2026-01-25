@@ -1,9 +1,13 @@
 # ADR-0013: Tiered Storage Architecture
 
-**Status:** Accepted
+**Status:** Accepted (Partially Superseded)
 **Date:** 2026-01-22
 **Deciders:** GallifreyDB Core Team
 **Categories:** storage, scalability, performance
+
+> **Note:** The cold storage backend decision in this ADR has been superseded by
+> [ADR-0025: Redb Cold Storage](0025-redb-cold-storage.md), which replaces RocksDB
+> with Redb (pure Rust). The overall tiered architecture remains as described here.
 
 ## Context
 

@@ -38,12 +38,14 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::core::GLOBAL_INTERNER;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
+use crate::storage::cold_storage::ColdStorage;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::{
@@ -100,6 +102,54 @@ impl CheckpointConfig {
         Self {
             data_dir: data_dir.into(),
             ..Default::default()
+        }
+    }
+}
+
+/// Result of a recovery operation with cold storage support.
+///
+/// This struct provides detailed information about the recovery process,
+/// including which data sources were used and how many WAL entries were replayed.
+pub struct RecoveryResult {
+    /// Recovered current storage.
+    pub current: CurrentStorage,
+    /// Recovered historical storage.
+    pub historical: HistoricalStorage,
+    /// Final LSN after WAL replay.
+    pub final_lsn: LSN,
+    /// Checkpoint LSN that was loaded (if checkpoint existed).
+    pub checkpoint_lsn: Option<LSN>,
+    /// Cold storage flushed LSN (if cold storage existed).
+    pub flushed_lsn: Option<LSN>,
+    /// Effective LSN used as the recovery point (max of checkpoint and flushed).
+    pub effective_lsn: LSN,
+    /// Number of WAL entries that were replayed.
+    pub wal_entries_replayed: u64,
+}
+
+impl RecoveryResult {
+    /// Check if cold storage data was used during recovery.
+    pub fn used_cold_storage(&self) -> bool {
+        match (self.checkpoint_lsn, self.flushed_lsn) {
+            (Some(checkpoint), Some(flushed)) => flushed.0 > checkpoint.0,
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Check if any checkpoint data was loaded.
+    pub fn used_checkpoint(&self) -> bool {
+        self.checkpoint_lsn.is_some()
+    }
+
+    /// Get the number of WAL entries that were skipped due to cold storage.
+    pub fn wal_entries_skipped_from_cold(&self) -> u64 {
+        match (self.checkpoint_lsn, self.flushed_lsn) {
+            (Some(checkpoint), Some(flushed)) if flushed.0 > checkpoint.0 => {
+                flushed.0 - checkpoint.0
+            }
+            (None, Some(flushed)) => flushed.0,
+            _ => 0,
         }
     }
 }
@@ -395,6 +445,168 @@ impl CheckpointManager {
             .load_manifest_and_strings()
             .ok()
             .map(|m| LSN(m.lsn))
+    }
+
+    /// Recover from checkpoint with cold storage support.
+    ///
+    /// This method extends the standard recovery process to account for data
+    /// that has been flushed to cold storage. When cold storage has a higher
+    /// `flushed_lsn` than the checkpoint, WAL replay can start from the
+    /// cold storage's LSN instead of the checkpoint LSN, skipping entries
+    /// that are already safely persisted to cold storage.
+    ///
+    /// # Recovery Flow
+    ///
+    /// 1. Open cold storage → get `flushed_lsn`
+    /// 2. Load checkpoint state
+    /// 3. Replay WAL from `max(checkpoint_lsn, flushed_lsn) + 1`
+    /// 4. Rebuild hot tier (warm cache starts empty)
+    ///
+    /// # Key Invariant
+    ///
+    /// `WAL_truncation_lsn <= cold_storage.get_flushed_lsn()` (always)
+    ///
+    /// # Arguments
+    ///
+    /// * `wal` - The concurrent WAL system for replay
+    /// * `cold_storage` - Optional cold storage for LSN tracking
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (CurrentStorage, HistoricalStorage, final_lsn, recovery_info).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if loading or WAL replay fails.
+    pub fn recover_with_cold_storage(
+        &mut self,
+        wal: &ConcurrentWalSystem,
+        cold_storage: Option<&Arc<dyn ColdStorage>>,
+    ) -> Result<RecoveryResult> {
+        // Get flushed_lsn from cold storage if available
+        let flushed_lsn = cold_storage.and_then(|cs| cs.get_flushed_lsn().ok().flatten());
+
+        // Check if persisted indexes exist
+        if !self.persistence_manager.indexes_exist() {
+            // No persisted state - determine replay start from cold storage or beginning
+            return self.recover_from_wal_with_cold_storage(wal, flushed_lsn);
+        }
+
+        // Load manifest and strings
+        let manifest = self
+            .persistence_manager
+            .load_manifest_and_strings()
+            .map_err(persistence_err)?;
+        let checkpoint_lsn = LSN(manifest.lsn);
+
+        // Validate checkpoint LSN is consistent with WAL
+        let wal_current_lsn = wal.current_lsn();
+        if checkpoint_lsn.0 > wal_current_lsn.0 {
+            return Err(StorageError::CheckpointError {
+                reason: format!(
+                    "Checkpoint LSN {} is ahead of WAL current LSN {}, \
+                     checkpoint may be from a different WAL or corrupted",
+                    checkpoint_lsn.0, wal_current_lsn.0
+                ),
+            }
+            .into());
+        }
+
+        // Load graph index
+        let current = self.load_current_storage(&manifest)?;
+
+        // Load temporal index
+        let (historical, historical_max_version_id) = self.load_historical_storage(&manifest)?;
+
+        // Ensure version ID generator accounts for historical versions
+        if historical_max_version_id > 0 {
+            use crate::core::id::MAX_VALID_ID;
+
+            let next_version_id = historical_max_version_id.saturating_add(1);
+            if next_version_id > MAX_VALID_ID {
+                return Err(StorageError::CheckpointError {
+                    reason: format!(
+                        "Historical max version ID {} would overflow MAX_VALID_ID on recovery",
+                        historical_max_version_id
+                    ),
+                }
+                .into());
+            }
+            current.ensure_version_id_generator_at_least(next_version_id);
+        }
+
+        // Determine the effective recovery point
+        // Use the higher of checkpoint_lsn or flushed_lsn
+        let effective_lsn = match flushed_lsn {
+            Some(flushed) if flushed.0 > checkpoint_lsn.0 => {
+                // Cold storage has more recent data than checkpoint
+                // Validate consistency: flushed_lsn should not exceed WAL current LSN
+                if flushed.0 > wal_current_lsn.0 {
+                    return Err(StorageError::CheckpointError {
+                        reason: format!(
+                            "Cold storage flushed_lsn {} is ahead of WAL current LSN {}, \
+                             data inconsistency detected",
+                            flushed.0, wal_current_lsn.0
+                        ),
+                    }
+                    .into());
+                }
+                flushed
+            }
+            _ => checkpoint_lsn,
+        };
+
+        // Replay WAL entries after effective LSN
+        let start_lsn = effective_lsn.next();
+        let (current, historical, final_lsn) =
+            self.replay_wal(wal, current, historical, start_lsn)?;
+
+        // Update tracking
+        self.last_checkpoint_lsn = checkpoint_lsn;
+
+        Ok(RecoveryResult {
+            current,
+            historical,
+            final_lsn,
+            checkpoint_lsn: Some(checkpoint_lsn),
+            flushed_lsn,
+            effective_lsn,
+            wal_entries_replayed: final_lsn.0.saturating_sub(start_lsn.0),
+        })
+    }
+
+    /// Recover from WAL only, with optional cold storage LSN.
+    ///
+    /// This is used when no checkpoint exists but cold storage may have data.
+    fn recover_from_wal_with_cold_storage(
+        &self,
+        wal: &ConcurrentWalSystem,
+        flushed_lsn: Option<LSN>,
+    ) -> Result<RecoveryResult> {
+        // Create empty storage
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        // Determine start LSN
+        let start_lsn = match flushed_lsn {
+            Some(lsn) => lsn.next(),
+            None => LSN::initial(),
+        };
+        let effective_lsn = flushed_lsn.unwrap_or(LSN::initial());
+
+        // Replay WAL from start
+        let (current, historical, final_lsn) =
+            self.replay_wal(wal, current, historical, start_lsn)?;
+
+        Ok(RecoveryResult {
+            current,
+            historical,
+            final_lsn,
+            checkpoint_lsn: None,
+            flushed_lsn,
+            effective_lsn,
+            wal_entries_replayed: final_lsn.0.saturating_sub(start_lsn.0),
+        })
     }
 
     // ========================================================================
@@ -2696,5 +2908,384 @@ mod tests {
         let err_string = converted.to_string();
 
         assert!(err_string.contains("Invalid magic bytes"));
+    }
+
+    // ========================================================================
+    // Cold Storage Recovery Tests (Issue 7: Redb + WAL replay)
+    // ========================================================================
+
+    #[test]
+    fn test_recovery_with_no_cold_storage() -> Result<()> {
+        // Full WAL replay when no cold storage is available
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let data_dir = temp_dir.path().join("data");
+
+        let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        let config = CheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+
+        // Recovery without cold storage should work
+        let result = manager.recover_with_cold_storage(&wal, None)?;
+
+        // Should have empty storage with no checkpoint
+        assert_eq!(result.current.node_count(), 0);
+        assert!(result.checkpoint_lsn.is_none());
+        assert!(result.flushed_lsn.is_none());
+        assert!(!result.used_cold_storage());
+        assert!(!result.used_checkpoint());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_with_checkpoint_no_cold_storage() -> Result<()> {
+        // Standard checkpoint-based recovery without cold storage
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let data_dir = temp_dir.path().join("data");
+
+        let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        // Write WAL entries to advance LSN to 100+
+        // In a real scenario, WAL entries would be written before checkpoint
+        for i in 1..=100 {
+            let op = WalOperation::CreateNode {
+                node_id: NodeId::new(i)?,
+                label: format!("Node{}", i),
+                properties: PropertyMapBuilder::new().build(),
+                temporal: BiTemporalInterval::current(time::now()),
+            };
+            wal.append_async(op)?;
+        }
+        wal.flush()?;
+
+        // Create checkpoint with some data
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::new(config)?;
+
+            let current = CurrentStorage::new();
+            for i in 1..=5 {
+                let props = PropertyMapBuilder::new()
+                    .insert("name", format!("Node{}", i))
+                    .build();
+                let node_id = NodeId::new(i)?;
+                let label = GLOBAL_INTERNER.intern("Person").unwrap();
+                let version_id = VersionId::new(i)?;
+                let node = Node::new(node_id, label, props, version_id);
+                current.insert_node_direct(node, time::now())?;
+            }
+
+            let historical = HistoricalStorage::new();
+            manager.create_checkpoint(LSN(100), &current, &historical)?;
+        }
+
+        // Recover without cold storage
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::new(config)?;
+
+            let result = manager.recover_with_cold_storage(&wal, None)?;
+
+            assert_eq!(result.current.node_count(), 5);
+            assert_eq!(result.checkpoint_lsn, Some(LSN(100)));
+            assert!(result.flushed_lsn.is_none());
+            assert!(!result.used_cold_storage());
+            assert!(result.used_checkpoint());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_loads_cold_storage_first() -> Result<()> {
+        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+
+        // Cold storage with flushed_lsn should be checked before WAL replay
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let data_dir = temp_dir.path().join("data");
+        let cold_dir = temp_dir.path().join("cold");
+
+        let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        // Create cold storage with a flushed_lsn
+        let cold_storage = Arc::new(RedbColdStorage::new(
+            cold_dir.join("cold.redb"),
+            RedbConfig::new(),
+        )?);
+
+        // Store some data with LSN tracking
+        let node = crate::storage::version::NodeVersion::new_anchor(
+            VersionId::new(1)?,
+            NodeId::new(1)?,
+            BiTemporalInterval::current(time::now()),
+            GLOBAL_INTERNER.intern("Test").unwrap(),
+            PropertyMapBuilder::new().build(),
+        );
+        cold_storage.store_batch_with_lsn(&[node], &[], LSN(50))?;
+
+        // Verify flushed_lsn is set
+        assert_eq!(cold_storage.get_flushed_lsn()?, Some(LSN(50)));
+
+        let config = CheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+
+        // Recovery should see the flushed_lsn
+        let cold: Arc<dyn ColdStorage> = cold_storage;
+        let result = manager.recover_with_cold_storage(&wal, Some(&cold))?;
+
+        // Should have detected cold storage
+        assert_eq!(result.flushed_lsn, Some(LSN(50)));
+        assert!(result.used_cold_storage());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_replays_wal_from_flushed_lsn() -> Result<()> {
+        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+
+        // When cold storage has higher flushed_lsn than checkpoint,
+        // WAL replay should start from flushed_lsn + 1
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let data_dir = temp_dir.path().join("data");
+        let cold_dir = temp_dir.path().join("cold");
+
+        let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        // Write WAL entries to advance LSN to 100+ (to match cold storage flushed_lsn)
+        for i in 1..=100 {
+            let op = WalOperation::CreateNode {
+                node_id: NodeId::new(i)?,
+                label: format!("Node{}", i),
+                properties: PropertyMapBuilder::new().build(),
+                temporal: BiTemporalInterval::current(time::now()),
+            };
+            wal.append_async(op)?;
+        }
+        wal.flush()?;
+
+        // Create checkpoint at LSN 50
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::new(config)?;
+
+            let current = CurrentStorage::new();
+            let historical = HistoricalStorage::new();
+            manager.create_checkpoint(LSN(50), &current, &historical)?;
+        }
+
+        // Create cold storage with flushed_lsn at 100 (higher than checkpoint)
+        let cold_storage = Arc::new(RedbColdStorage::new(
+            cold_dir.join("cold.redb"),
+            RedbConfig::new(),
+        )?);
+
+        let node = crate::storage::version::NodeVersion::new_anchor(
+            VersionId::new(1)?,
+            NodeId::new(1)?,
+            BiTemporalInterval::current(time::now()),
+            GLOBAL_INTERNER.intern("Test").unwrap(),
+            PropertyMapBuilder::new().build(),
+        );
+        cold_storage.store_batch_with_lsn(&[node], &[], LSN(100))?;
+
+        // Recover with cold storage
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::new(config)?;
+
+            let cold: Arc<dyn ColdStorage> = cold_storage;
+            let result = manager.recover_with_cold_storage(&wal, Some(&cold))?;
+
+            // Should use flushed_lsn as effective recovery point
+            assert_eq!(result.checkpoint_lsn, Some(LSN(50)));
+            assert_eq!(result.flushed_lsn, Some(LSN(100)));
+            assert_eq!(result.effective_lsn, LSN(100));
+            assert!(result.used_cold_storage());
+
+            // WAL entries between checkpoint and flushed_lsn should be skipped
+            assert_eq!(result.wal_entries_skipped_from_cold(), 50);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_with_no_wal_segments() -> Result<()> {
+        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+
+        // Recovery with just cold storage data and no WAL
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let data_dir = temp_dir.path().join("data");
+        let cold_dir = temp_dir.path().join("cold");
+
+        let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        // Create cold storage with some data
+        let cold_storage = Arc::new(RedbColdStorage::new(
+            cold_dir.join("cold.redb"),
+            RedbConfig::new(),
+        )?);
+
+        let node = crate::storage::version::NodeVersion::new_anchor(
+            VersionId::new(1)?,
+            NodeId::new(1)?,
+            BiTemporalInterval::current(time::now()),
+            GLOBAL_INTERNER.intern("Test").unwrap(),
+            PropertyMapBuilder::new().build(),
+        );
+        cold_storage.store_batch_with_lsn(&[node], &[], LSN(75))?;
+
+        let config = CheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+
+        let cold: Arc<dyn ColdStorage> = cold_storage;
+        let result = manager.recover_with_cold_storage(&wal, Some(&cold))?;
+
+        // Should have no WAL entries replayed
+        assert_eq!(result.wal_entries_replayed, 0);
+        assert_eq!(result.effective_lsn, LSN(75));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_validates_lsn_consistency() -> Result<()> {
+        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+
+        // flushed_lsn ahead of WAL should be detected as inconsistency
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let data_dir = temp_dir.path().join("data");
+        let cold_dir = temp_dir.path().join("cold");
+
+        let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+        let wal = ConcurrentWalSystem::new(wal_config)?;
+
+        // Write WAL entries to advance LSN to 50
+        for i in 1..=50 {
+            let op = WalOperation::CreateNode {
+                node_id: NodeId::new(i)?,
+                label: format!("Node{}", i),
+                properties: PropertyMapBuilder::new().build(),
+                temporal: BiTemporalInterval::current(time::now()),
+            };
+            wal.append_async(op)?;
+        }
+        wal.flush()?;
+        // WAL is now at LSN 50
+
+        // Create checkpoint at LSN 10 (valid, < WAL current LSN)
+        {
+            let config = CheckpointConfig::with_data_dir(&data_dir);
+            let mut manager = CheckpointManager::new(config)?;
+            let current = CurrentStorage::new();
+            let historical = HistoricalStorage::new();
+            manager.create_checkpoint(LSN(10), &current, &historical)?;
+        }
+
+        // Create cold storage with flushed_lsn = 1000 (way ahead of WAL)
+        let cold_storage = Arc::new(RedbColdStorage::new(
+            cold_dir.join("cold.redb"),
+            RedbConfig::new(),
+        )?);
+
+        let node = crate::storage::version::NodeVersion::new_anchor(
+            VersionId::new(1)?,
+            NodeId::new(1)?,
+            BiTemporalInterval::current(time::now()),
+            GLOBAL_INTERNER.intern("Test").unwrap(),
+            PropertyMapBuilder::new().build(),
+        );
+        cold_storage.store_batch_with_lsn(&[node], &[], LSN(1000))?;
+
+        let config = CheckpointConfig::with_data_dir(&data_dir);
+        let mut manager = CheckpointManager::new(config)?;
+
+        let cold: Arc<dyn ColdStorage> = cold_storage;
+        let result = manager.recover_with_cold_storage(&wal, Some(&cold));
+
+        // Should detect inconsistency
+        assert!(result.is_err());
+        let err = result.err().expect("Expected error").to_string();
+        assert!(
+            err.contains("flushed_lsn") || err.contains("inconsistency"),
+            "Error should mention LSN inconsistency: {}",
+            err
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recovery_result_helpers() {
+        // Test RecoveryResult helper methods
+
+        // Case 1: No cold storage, no checkpoint
+        let result = RecoveryResult {
+            current: CurrentStorage::new(),
+            historical: HistoricalStorage::new(),
+            final_lsn: LSN(0),
+            checkpoint_lsn: None,
+            flushed_lsn: None,
+            effective_lsn: LSN(0),
+            wal_entries_replayed: 0,
+        };
+        assert!(!result.used_cold_storage());
+        assert!(!result.used_checkpoint());
+        assert_eq!(result.wal_entries_skipped_from_cold(), 0);
+
+        // Case 2: Checkpoint only
+        let result = RecoveryResult {
+            current: CurrentStorage::new(),
+            historical: HistoricalStorage::new(),
+            final_lsn: LSN(50),
+            checkpoint_lsn: Some(LSN(50)),
+            flushed_lsn: None,
+            effective_lsn: LSN(50),
+            wal_entries_replayed: 0,
+        };
+        assert!(!result.used_cold_storage());
+        assert!(result.used_checkpoint());
+        assert_eq!(result.wal_entries_skipped_from_cold(), 0);
+
+        // Case 3: Cold storage ahead of checkpoint
+        let result = RecoveryResult {
+            current: CurrentStorage::new(),
+            historical: HistoricalStorage::new(),
+            final_lsn: LSN(100),
+            checkpoint_lsn: Some(LSN(50)),
+            flushed_lsn: Some(LSN(100)),
+            effective_lsn: LSN(100),
+            wal_entries_replayed: 0,
+        };
+        assert!(result.used_cold_storage());
+        assert!(result.used_checkpoint());
+        assert_eq!(result.wal_entries_skipped_from_cold(), 50);
+
+        // Case 4: Cold storage only (no checkpoint)
+        let result = RecoveryResult {
+            current: CurrentStorage::new(),
+            historical: HistoricalStorage::new(),
+            final_lsn: LSN(75),
+            checkpoint_lsn: None,
+            flushed_lsn: Some(LSN(75)),
+            effective_lsn: LSN(75),
+            wal_entries_replayed: 0,
+        };
+        assert!(result.used_cold_storage());
+        assert!(!result.used_checkpoint());
+        assert_eq!(result.wal_entries_skipped_from_cold(), 75);
     }
 }
