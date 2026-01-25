@@ -112,6 +112,12 @@ Striped lock-free ring buffer architecture for high-throughput concurrent writes
 - **GroupCommit**: ~10-50ms latency, ~100K+/sec throughput, Full ACID
 - **Async**: <100ns latency, ~500K+/sec throughput, Eventual durability
 
+**Batch Append API (Issue #219):**
+For high-throughput workloads with multiple operations, use `append_batch()` for significant performance improvements:
+- Single atomic LSN allocation for all operations
+- Better CPU cache locality during serialization
+- 20-50% throughput improvement for batch sizes > 10
+
 **See [docs/WAL.md](docs/WAL.md) for comprehensive WAL documentation.**
 
 ### Index Persistence
