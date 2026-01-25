@@ -178,6 +178,34 @@ impl EntityTimeline {
         self.versions.insert(idx, entry);
     }
 
+    /// Update the end time of an existing timeline entry.
+    ///
+    /// This is used when a version's temporal interval is closed (e.g., when a new
+    /// version supersedes it). Finds the entry with the given metadata_idx and
+    /// updates its end timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `metadata_idx` - Index of the version to update
+    /// * `new_end` - New end timestamp (exclusive)
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the entry was found and updated, `false` otherwise.
+    fn update_end_time(&mut self, metadata_idx: VersionMetadataIndex, new_end: Timestamp) -> bool {
+        // Find the entry with matching metadata_idx
+        if let Some(entry) = self
+            .versions
+            .iter_mut()
+            .find(|e| e.metadata_idx == metadata_idx)
+        {
+            entry.end = new_end;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Insert multiple versions at once and sort. Efficient for large retroactive updates.
     ///
     /// # Performance
@@ -438,6 +466,60 @@ impl EntityTimelines {
     fn resolve_version_ids(&self, indices: Vec<VersionMetadataIndex>) -> Vec<VersionId> {
         self.resolve_version_ids_iter(&indices).collect()
     }
+
+    /// Find the metadata index for a given VersionId.
+    ///
+    /// Returns `None` if the VersionId is not found in this entity's metadata.
+    #[inline]
+    fn find_metadata_index(&self, version_id: VersionId) -> Option<VersionMetadataIndex> {
+        self.version_metadata
+            .iter()
+            .position(|m| m.version_id() == version_id)
+            .map(|idx| idx as VersionMetadataIndex)
+    }
+
+    /// Update the valid time end timestamp for a version.
+    ///
+    /// This is used when closing a version's valid time interval (e.g., when a new
+    /// version supersedes it). Finds the version by its VersionId and updates the
+    /// end time in the valid timeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `version_id` - The version to update
+    /// * `new_end` - New valid time end timestamp (exclusive)
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the version was found and updated, `false` otherwise.
+    fn update_valid_time_end(&mut self, version_id: VersionId, new_end: Timestamp) -> bool {
+        if let Some(metadata_idx) = self.find_metadata_index(version_id) {
+            self.valid.update_end_time(metadata_idx, new_end)
+        } else {
+            false
+        }
+    }
+
+    /// Update the transaction time end timestamp for a version.
+    ///
+    /// This is used when closing a version's transaction time interval. Finds the
+    /// version by its VersionId and updates the end time in the transaction timeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `version_id` - The version to update
+    /// * `new_end` - New transaction time end timestamp (exclusive)
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the version was found and updated, `false` otherwise.
+    fn update_transaction_time_end(&mut self, version_id: VersionId, new_end: Timestamp) -> bool {
+        if let Some(metadata_idx) = self.find_metadata_index(version_id) {
+            self.tx.update_end_time(metadata_idx, new_end)
+        } else {
+            false
+        }
+    }
 }
 
 /// Temporal indexes for efficient time-based lookups.
@@ -659,6 +741,92 @@ impl TemporalIndexes {
         timelines.tx.insert_batch(tx_entries);
 
         Ok(())
+    }
+
+    /// Update the valid time end for a node version (Issue #209).
+    ///
+    /// This is called when a new version is created and the previous version's
+    /// valid time interval needs to be closed. Updates the temporal index to
+    /// reflect the new end time.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The node whose version is being updated
+    /// * `version_id` - The version to update
+    /// * `new_end` - New valid time end timestamp (exclusive)
+    pub fn update_node_valid_time_end(
+        &self,
+        node_id: NodeId,
+        version_id: VersionId,
+        new_end: Timestamp,
+    ) {
+        if let Some(mut timelines) = self.index.get_mut(&EntityId::Node(node_id)) {
+            timelines.update_valid_time_end(version_id, new_end);
+        }
+    }
+
+    /// Update the transaction time end for a node version (Issue #209).
+    ///
+    /// This is called when a version's transaction time interval needs to be closed.
+    /// Updates the temporal index to reflect the new end time.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The node whose version is being updated
+    /// * `version_id` - The version to update
+    /// * `new_end` - New transaction time end timestamp (exclusive)
+    pub fn update_node_transaction_time_end(
+        &self,
+        node_id: NodeId,
+        version_id: VersionId,
+        new_end: Timestamp,
+    ) {
+        if let Some(mut timelines) = self.index.get_mut(&EntityId::Node(node_id)) {
+            timelines.update_transaction_time_end(version_id, new_end);
+        }
+    }
+
+    /// Update the valid time end for an edge version (Issue #209).
+    ///
+    /// This is called when a new version is created and the previous version's
+    /// valid time interval needs to be closed. Updates the temporal index to
+    /// reflect the new end time.
+    ///
+    /// # Arguments
+    ///
+    /// * `edge_id` - The edge whose version is being updated
+    /// * `version_id` - The version to update
+    /// * `new_end` - New valid time end timestamp (exclusive)
+    pub fn update_edge_valid_time_end(
+        &self,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        new_end: Timestamp,
+    ) {
+        if let Some(mut timelines) = self.index.get_mut(&EntityId::Edge(edge_id)) {
+            timelines.update_valid_time_end(version_id, new_end);
+        }
+    }
+
+    /// Update the transaction time end for an edge version (Issue #209).
+    ///
+    /// This is called when a version's transaction time interval needs to be closed.
+    /// Updates the temporal index to reflect the new end time.
+    ///
+    /// # Arguments
+    ///
+    /// * `edge_id` - The edge whose version is being updated
+    /// * `version_id` - The version to update
+    /// * `new_end` - New transaction time end timestamp (exclusive)
+    pub fn update_edge_transaction_time_end(
+        &self,
+        edge_id: EdgeId,
+        version_id: VersionId,
+        new_end: Timestamp,
+    ) {
+        if let Some(mut timelines) = self.index.get_mut(&EntityId::Edge(edge_id)) {
+            timelines.update_transaction_time_end(version_id, new_end);
+        }
     }
 
     /// Find all node versions that overlap with the given valid time range.

@@ -18,9 +18,9 @@ use std::time::Instant;
 fn test_version_lookup_correctness_many_versions() {
     use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
 
-    // Create database with increased version limit
+    // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
-        .max_versions_per_entity(2000)
+        .max_versions_per_entity(3000)
         .expect("Failed to set max versions")
         .build();
 
@@ -119,9 +119,9 @@ fn test_version_lookup_correctness_many_versions() {
 fn test_version_lookup_performance_scaling() {
     use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
 
-    // Create database with increased version limit
+    // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
-        .max_versions_per_entity(2000)
+        .max_versions_per_entity(3000)
         .expect("Failed to set max versions")
         .build();
 
@@ -343,12 +343,10 @@ fn test_temporal_index_population() {
 /// This test compares the results from the temporal index-based lookup with
 /// the results from the linear scan to ensure correctness.
 ///
-/// **Currently ignored** because temporal indexes are not updated when version
-/// intervals are closed, causing stale interval data (see Issue #209 comments
-/// in historical.rs). Once interval updates are implemented, this test should
-/// be re-enabled to validate correctness.
+/// The temporal indexes are now properly updated when version intervals are
+/// closed (Issue #209), so this test validates that the optimization produces
+/// correct results.
 #[test]
-#[ignore = "Temporal index not updated on interval close - see Issue #209"]
 fn test_temporal_index_matches_linear_scan() {
     let db = GallifreyDB::new().expect("Failed to create database");
 

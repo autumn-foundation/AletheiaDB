@@ -572,7 +572,33 @@ impl HistoricalStorage {
         if let Some(prev_id) = prev_version_id
             && let Some(prev) = self.node_versions.get_mut(&prev_id)
         {
+            // Capture the intervals before modification for temporal index update
+            let old_temporal = *prev.temporal();
+
             Self::close_previous_version_intervals(prev, version_id, &temporal);
+
+            // Update temporal indexes to reflect the closed intervals (Issue #209)
+            if let Some(ref indexes) = self.temporal_indexes {
+                let new_temporal = *prev.temporal();
+
+                // Update valid time end if it was closed
+                if old_temporal.valid_time().end() != new_temporal.valid_time().end() {
+                    indexes.update_node_valid_time_end(
+                        node_id,
+                        prev_id,
+                        new_temporal.valid_time().end(),
+                    );
+                }
+
+                // Update transaction time end if it was closed
+                if old_temporal.transaction_time().end() != new_temporal.transaction_time().end() {
+                    indexes.update_node_transaction_time_end(
+                        node_id,
+                        prev_id,
+                        new_temporal.transaction_time().end(),
+                    );
+                }
+            }
         }
 
         // Check if anchor before storing (for notifications and caching)
@@ -717,7 +743,33 @@ impl HistoricalStorage {
         if let Some(prev_id) = prev_version_id
             && let Some(prev) = self.edge_versions.get_mut(&prev_id)
         {
+            // Capture the intervals before modification for temporal index update
+            let old_temporal = *prev.temporal();
+
             Self::close_previous_version_intervals(prev, version_id, &temporal);
+
+            // Update temporal indexes to reflect the closed intervals (Issue #209)
+            if let Some(ref indexes) = self.temporal_indexes {
+                let new_temporal = *prev.temporal();
+
+                // Update valid time end if it was closed
+                if old_temporal.valid_time().end() != new_temporal.valid_time().end() {
+                    indexes.update_edge_valid_time_end(
+                        edge_id,
+                        prev_id,
+                        new_temporal.valid_time().end(),
+                    );
+                }
+
+                // Update transaction time end if it was closed
+                if old_temporal.transaction_time().end() != new_temporal.transaction_time().end() {
+                    indexes.update_edge_transaction_time_end(
+                        edge_id,
+                        prev_id,
+                        new_temporal.transaction_time().end(),
+                    );
+                }
+            }
         }
 
         // Check if anchor before storing (for notifications and caching)
@@ -1244,8 +1296,17 @@ impl HistoricalStorage {
             .get_mut(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
+        // Get the node ID before closing (needed for temporal index update)
+        let node_id = version.node_id;
+
         // Use TemporalVersion trait method
         version.close_transaction_time(end_timestamp);
+
+        // Update temporal index to reflect the closed interval (Issue #209)
+        if let Some(ref indexes) = self.temporal_indexes {
+            indexes.update_node_transaction_time_end(node_id, version_id, end_timestamp);
+        }
+
         Ok(())
     }
 
@@ -1263,8 +1324,17 @@ impl HistoricalStorage {
             .get_mut(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
+        // Get the edge ID before closing (needed for temporal index update)
+        let edge_id = version.edge_id;
+
         // Use TemporalVersion trait method
         version.close_transaction_time(end_timestamp);
+
+        // Update temporal index to reflect the closed interval (Issue #209)
+        if let Some(ref indexes) = self.temporal_indexes {
+            indexes.update_edge_transaction_time_end(edge_id, version_id, end_timestamp);
+        }
+
         Ok(())
     }
 
@@ -1293,29 +1363,16 @@ impl HistoricalStorage {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Option<VersionId> {
-        // TODO(Issue #209): Temporal index optimization is currently disabled because
-        // the indexes are not updated when version intervals are closed via
-        // `close_previous_version_intervals()`. This causes incorrect query results
-        // because the indexes contain stale interval information (with TIMESTAMP_MAX
-        // as end times instead of the actual closed end times).
-        //
-        // To re-enable optimization:
-        // 1. Add interval update support to TemporalIndexes, OR
-        // 2. Rebuild affected timeline entries when intervals are modified, OR
-        // 3. Use a different index structure that supports in-place updates
-        //
-        // For now, we use the O(n) linear scan which correctly reads the current
-        // interval state from version storage.
-
-        /* Disabled temporal index fast path:
+        // Fast path: Use temporal index if available (O(log n)) - Issue #209
+        // The temporal indexes are now properly updated when intervals are closed
         if let Some(ref indexes) = self.temporal_indexes {
             return indexes
                 .find_node_version_at_point_iter(node_id, valid_time, transaction_time)
                 .next();
         }
-        */
 
-        // Linear scan through version chain (O(n))
+        // Fallback: Linear scan through version chain (O(n))
+        // This is only used when temporal indexes are not configured
         let mut current_id = self.node_version_heads.get(&node_id).copied()?;
 
         loop {
@@ -1356,29 +1413,16 @@ impl HistoricalStorage {
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Option<VersionId> {
-        // TODO(Issue #209): Temporal index optimization is currently disabled because
-        // the indexes are not updated when version intervals are closed via
-        // `close_previous_version_intervals()`. This causes incorrect query results
-        // because the indexes contain stale interval information (with TIMESTAMP_MAX
-        // as end times instead of the actual closed end times).
-        //
-        // To re-enable optimization:
-        // 1. Add interval update support to TemporalIndexes, OR
-        // 2. Rebuild affected timeline entries when intervals are modified, OR
-        // 3. Use a different index structure that supports in-place updates
-        //
-        // For now, we use the O(n) linear scan which correctly reads the current
-        // interval state from version storage.
-
-        /* Disabled temporal index fast path:
+        // Fast path: Use temporal index if available (O(log n)) - Issue #209
+        // The temporal indexes are now properly updated when intervals are closed
         if let Some(ref indexes) = self.temporal_indexes {
             return indexes
                 .find_edge_version_at_point_iter(edge_id, valid_time, transaction_time)
                 .next();
         }
-        */
 
-        // Linear scan through version chain (O(n))
+        // Fallback: Linear scan through version chain (O(n))
+        // This is only used when temporal indexes are not configured
         let mut current_id = self.edge_version_heads.get(&edge_id).copied()?;
 
         loop {
