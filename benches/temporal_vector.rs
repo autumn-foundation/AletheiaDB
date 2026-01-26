@@ -122,12 +122,13 @@ fn bench_point_in_time_queries(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark time-range vector queries
+/// Benchmark time-range vector queries (parallel processing)
 fn bench_time_range_queries(c: &mut Criterion) {
     let mut group = c.benchmark_group("time_range_queries");
     group.throughput(Throughput::Elements(1));
 
-    for snapshot_count in [5, 10, 20] {
+    // Test with increasing snapshot counts to demonstrate parallel scalability
+    for snapshot_count in [5, 10, 20, 40] {
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}snapshots", snapshot_count)),
             &snapshot_count,

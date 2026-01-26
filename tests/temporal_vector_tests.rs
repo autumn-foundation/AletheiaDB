@@ -238,3 +238,221 @@ fn test_config_builders() -> Result<()> {
 
     Ok(())
 }
+
+/// Test that find_similar_in_range results are sorted chronologically
+#[test]
+fn test_find_similar_in_range_chronological_order() -> Result<()> {
+    let index = create_test_index_with_snapshots()?;
+
+    // Create many snapshots
+    for i in 0i64..20 {
+        let node_id = NodeId::new(i as u64).unwrap();
+        let vector = vec![1.0, 0.0, 0.0, 0.0];
+        index.add(node_id, &vector, (i * 1000).into())?;
+        index.on_transaction_at((i * 1000).into())?;
+    }
+
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+    let time_range = TimeRange::new(0.into(), 20000.into()).unwrap();
+    let results = index.find_similar_in_range(&query, 5, time_range)?;
+
+    // Verify results are in chronological order
+    for i in 1..results.len() {
+        assert!(
+            results[i - 1].0 <= results[i].0,
+            "Results should be sorted chronologically, but found {:?} after {:?}",
+            results[i].0,
+            results[i - 1].0
+        );
+    }
+
+    Ok(())
+}
+
+/// Test find_similar_in_range with many snapshots (parallelism test)
+#[test]
+fn test_find_similar_in_range_many_snapshots() -> Result<()> {
+    let index = create_test_index_with_snapshots()?;
+
+    // Create 25 snapshots (more than typical core count to test parallelism)
+    for i in 0i64..25 {
+        for j in 0i64..10 {
+            let node_id = NodeId::new((i * 10 + j) as u64).unwrap();
+            let vector = vec![1.0 / (i + 1) as f32, (j as f32) / 10.0, 0.0, 0.0];
+            index.add(node_id, &vector, (i * 1000 + j * 10).into())?;
+        }
+        index.on_transaction_at((i * 1000).into())?;
+    }
+
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+    let time_range = TimeRange::new(0.into(), 25000.into()).unwrap();
+    let results = index.find_similar_in_range(&query, 5, time_range)?;
+
+    // Should have results from multiple snapshots
+    assert!(
+        results.len() >= 10,
+        "Should have results from multiple snapshots, got {}",
+        results.len()
+    );
+
+    // Verify chronological order
+    for i in 1..results.len() {
+        assert!(
+            results[i - 1].0 <= results[i].0,
+            "Results must be chronologically ordered"
+        );
+    }
+
+    // Verify each snapshot has results
+    for (timestamp, snapshot_results) in &results {
+        assert!(
+            !snapshot_results.is_empty(),
+            "Snapshot at timestamp {} should have results",
+            timestamp.wallclock()
+        );
+        assert!(snapshot_results.len() <= 5, "Should respect k=5 limit");
+    }
+
+    Ok(())
+}
+
+/// Test find_similar_in_range with edge cases
+#[test]
+fn test_find_similar_in_range_edge_cases() -> Result<()> {
+    let index = create_test_index_with_snapshots()?;
+
+    // Add vectors and create snapshots at specific timestamps
+    let node1 = NodeId::new(1).unwrap();
+    let node2 = NodeId::new(2).unwrap();
+    let node3 = NodeId::new(3).unwrap();
+    let vector = vec![1.0, 0.0, 0.0, 0.0];
+
+    index.add(node1, &vector, 1000.into())?;
+    index.on_transaction_at(1000.into())?;
+    index.add(node2, &vector, 2000.into())?;
+    index.on_transaction_at(2000.into())?;
+    index.add(node3, &vector, 3000.into())?;
+    index.on_transaction_at(3000.into())?;
+
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+
+    // Test empty range (no snapshots in range)
+    let empty_range = TimeRange::new(10000.into(), 11000.into()).unwrap();
+    let empty_results = index.find_similar_in_range(&query, 5, empty_range)?;
+    assert!(
+        empty_results.is_empty(),
+        "Should have no results for empty range"
+    );
+
+    // Test range with snapshots
+    let range_with_snapshots = TimeRange::new(1500.into(), 2500.into()).unwrap();
+    let results = index.find_similar_in_range(&query, 5, range_with_snapshots)?;
+    assert!(
+        !results.is_empty(),
+        "Should have results when snapshots exist in range"
+    );
+
+    Ok(())
+}
+
+/// Test that parallel implementation produces deterministic results
+#[test]
+fn test_find_similar_in_range_deterministic() -> Result<()> {
+    let index = create_test_index_with_snapshots()?;
+
+    // Create snapshots with diverse vectors
+    for i in 0i64..15 {
+        for j in 0i64..20 {
+            let node_id = NodeId::new((i * 20 + j) as u64).unwrap();
+            let angle = (j as f32) * std::f32::consts::PI / 10.0;
+            let vector = vec![angle.cos(), angle.sin(), (i as f32) / 15.0, 0.0];
+            index.add(node_id, &vector, (i * 1000 + j * 10).into())?;
+        }
+        index.on_transaction_at((i * 1000).into())?;
+    }
+
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+    let time_range = TimeRange::new(0.into(), 15000.into()).unwrap();
+
+    // Run multiple times and verify results are identical
+    let results1 = index.find_similar_in_range(&query, 10, time_range)?;
+    let results2 = index.find_similar_in_range(&query, 10, time_range)?;
+    let results3 = index.find_similar_in_range(&query, 10, time_range)?;
+
+    assert_eq!(
+        results1.len(),
+        results2.len(),
+        "Results should be deterministic (same length)"
+    );
+    assert_eq!(
+        results1.len(),
+        results3.len(),
+        "Results should be deterministic (same length)"
+    );
+
+    // Compare each snapshot's results
+    for i in 0..results1.len() {
+        // Compare timestamps
+        assert_eq!(
+            results1[i].0, results2[i].0,
+            "Timestamp mismatch for results2 at index {}",
+            i
+        );
+        assert_eq!(
+            results1[i].0, results3[i].0,
+            "Timestamp mismatch for results3 at index {}",
+            i
+        );
+
+        let r1 = &results1[i].1;
+        let r2 = &results2[i].1;
+        let r3 = &results3[i].1;
+
+        // Compare result counts
+        assert_eq!(
+            r1.len(),
+            r2.len(),
+            "Result count mismatch for results2 at index {}",
+            i
+        );
+        assert_eq!(
+            r1.len(),
+            r3.len(),
+            "Result count mismatch for results3 at index {}",
+            i
+        );
+
+        // Compare individual results (NodeId and score)
+        for j in 0..r1.len() {
+            assert_eq!(
+                r1[j].0, r2[j].0,
+                "NodeId mismatch for results2 at index {}/{}",
+                i, j
+            );
+            assert!(
+                (r1[j].1 - r2[j].1).abs() < 1e-6,
+                "Score mismatch for results2 at index {}/{}: {} vs {}",
+                i,
+                j,
+                r1[j].1,
+                r2[j].1
+            );
+
+            assert_eq!(
+                r1[j].0, r3[j].0,
+                "NodeId mismatch for results3 at index {}/{}",
+                i, j
+            );
+            assert!(
+                (r1[j].1 - r3[j].1).abs() < 1e-6,
+                "Score mismatch for results3 at index {}/{}: {} vs {}",
+                i,
+                j,
+                r1[j].1,
+                r3[j].1
+            );
+        }
+    }
+
+    Ok(())
+}
