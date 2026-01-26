@@ -842,6 +842,112 @@ fn bench_commit_vector_vs_nonvector(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark epoch-based compression for MVCC commit log (Issue #237).
+///
+/// This benchmark measures the memory savings and performance characteristics
+/// of the epoch-based compression optimization. It demonstrates:
+/// - Compression ratio for sequential transaction patterns
+/// - Memory usage reduction (10-100x target)
+/// - Compression algorithm performance
+/// - Impact on visibility checks after compression
+fn bench_mvcc_compression(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mvcc_compression");
+
+    // Benchmark 1: Compression of fully sequential commits
+    group.bench_function("compress_10k_sequential", |b| {
+        b.iter_batched(
+            || {
+                // Setup: Create DB and commit 10K sequential transactions
+                let db = GallifreyDB::new().unwrap();
+                for i in 1..=10000 {
+                    db.write(|tx| {
+                        tx.create_node(
+                            "Node",
+                            PropertyMapBuilder::new().insert("id", i as i64).build(),
+                        )
+                    })
+                    .unwrap();
+                }
+                db
+            },
+            |db| {
+                // Measure: compression time and ratio
+                db.compress_commit_log();
+                let stats = db.get_compression_stats();
+                // Verify compression is working
+                assert!(
+                    stats.compression_ratio > 100.0,
+                    "Expected >100x compression for sequential data"
+                );
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // Benchmark 2: Memory usage comparison
+    group.bench_function("memory_usage_10k_transactions", |b| {
+        b.iter_batched(
+            || {
+                let db = GallifreyDB::new().unwrap();
+                for i in 1..=10000 {
+                    db.write(|tx| {
+                        tx.create_node(
+                            "Node",
+                            PropertyMapBuilder::new().insert("id", i as i64).build(),
+                        )
+                    })
+                    .unwrap();
+                }
+                db
+            },
+            |db| {
+                let before_memory = db.commit_log_memory_usage();
+                db.compress_commit_log();
+                let after_memory = db.commit_log_memory_usage();
+                let stats = db.get_compression_stats();
+
+                // Verify significant memory savings
+                assert!(
+                    after_memory < before_memory / 10,
+                    "Expected >10x memory reduction, got {}x",
+                    before_memory / after_memory.max(1)
+                );
+
+                black_box(stats);
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // Benchmark 3: Visibility checks after compression (should have same performance)
+    group.bench_function("visibility_check_after_compression", |b| {
+        // Setup: Create DB with 10K transactions and compress
+        let db = Arc::new(GallifreyDB::new().unwrap());
+        let node_ids: Vec<_> = (1..=10000)
+            .map(|i| {
+                db.write(|tx| {
+                    tx.create_node(
+                        "Node",
+                        PropertyMapBuilder::new().insert("id", i as i64).build(),
+                    )
+                })
+                .unwrap()
+            })
+            .collect();
+
+        db.compress_commit_log();
+
+        b.iter(|| {
+            // Measure: visibility checks should still be fast after compression
+            for node_id in node_ids.iter().take(100) {
+                let _ = db.get_node(black_box(*node_id));
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
@@ -863,6 +969,7 @@ criterion_group!(
     bench_concurrent_transaction_creation_with_active_txs,
     bench_apply_changes_large_tx,
     bench_commit_vector_vs_nonvector,
+    bench_mvcc_compression,
 );
 
 criterion_main!(benches);

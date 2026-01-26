@@ -42,7 +42,7 @@ pub mod write_tx;
 
 pub use read_tx::ReadTransaction;
 pub use types::{TxId, TxIdGenerator, TxMetadata, TxState};
-pub use visibility::{TransactionSnapshot, TxVisibilityManager};
+pub use visibility::{CompressionStats, TransactionSnapshot, TxVisibilityManager};
 pub use write_buffer::{BufferedWrite, WriteBuffer};
 pub use write_tx::WriteTransaction;
 

@@ -3344,6 +3344,75 @@ impl GallifreyDB {
     pub fn invalidate_statistics(&self) {
         self.stats.invalidate();
     }
+
+    /// Compress the MVCC commit log to reduce memory usage (Issue #237).
+    ///
+    /// This applies epoch-based compression to the transaction visibility manager's
+    /// commit log, converting sequential transaction ranges into compressed epochs.
+    /// Achieves 10-100x memory reduction for typical workloads with sequential
+    /// transaction patterns.
+    ///
+    /// # When to Call
+    ///
+    /// - Periodically during bulk imports (e.g., every 10K commits)
+    /// - During idle periods
+    /// - Before checkpointing
+    ///
+    /// # Performance
+    ///
+    /// O(N log N) where N is the number of uncompressed transactions.
+    /// Relatively expensive, so should not be called on every commit.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // After bulk import
+    /// for i in 0..100000 {
+    ///     db.create_node("Node", props)?;
+    /// }
+    ///
+    /// // Compress commit log to free memory
+    /// db.compress_commit_log();
+    /// ```
+    pub fn compress_commit_log(&self) {
+        self.visibility_manager.compress_commit_log();
+    }
+
+    /// Get memory usage of the MVCC commit log in bytes.
+    ///
+    /// This reports the current memory footprint of the transaction commit log
+    /// in the visibility manager. Useful for monitoring and triggering compression.
+    ///
+    /// # Returns
+    ///
+    /// Memory usage in bytes
+    pub fn commit_log_memory_usage(&self) -> usize {
+        self.visibility_manager.commit_log_memory_usage()
+    }
+
+    /// Get detailed compression statistics for the MVCC commit log (Issue #237).
+    ///
+    /// Returns statistics about:
+    /// - Total transactions tracked
+    /// - Number of compressed epochs
+    /// - Number of exception entries
+    /// - Compression ratio
+    /// - Memory usage and savings
+    ///
+    /// # Returns
+    ///
+    /// Compression statistics
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let stats = db.get_compression_stats();
+    /// println!("Compression ratio: {}x", stats.compression_ratio);
+    /// println!("Memory saved: {} bytes", stats.memory_saved_bytes);
+    /// ```
+    pub fn get_compression_stats(&self) -> crate::api::transaction::visibility::CompressionStats {
+        self.visibility_manager.get_compression_stats()
+    }
 }
 
 impl Drop for GallifreyDB {
