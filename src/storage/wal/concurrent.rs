@@ -818,7 +818,7 @@ mod tests {
         let ops: Vec<WalOperation> = (0..100)
             .map(|i| WalOperation::CreateNode {
                 node_id: NodeId::new(i + 1).unwrap(),
-                label: format!("Node{}", i),
+                label: GLOBAL_INTERNER.intern(&format!("Node{}", i)).unwrap(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             })

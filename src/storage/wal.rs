@@ -335,32 +335,25 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
     const TEMPORAL_SIZE: usize = 48;
 
     let variable_size = match operation {
-        WalOperation::CreateNode {
-            label, properties, ..
-        } => {
-            // op type (1) + node_id (8) + label length prefix (4) + label + properties + temporal (48)
-            let base = 1 + 8 + 4 + label.len() + TEMPORAL_SIZE;
+        WalOperation::CreateNode { properties, .. } => {
+            // op type (1) + node_id (8) + InternedString ID (4) + properties + temporal (48)
+            // Note: labels are now 4-byte IDs, not length-prefixed strings (Issue #225)
+            let base = 1 + 8 + 4 + TEMPORAL_SIZE;
             base + estimate_property_map_size(properties)
         }
-        WalOperation::CreateEdge {
-            label, properties, ..
-        } => {
-            // op type (1) + edge_id (8) + source (8) + target (8) + label length (4) + label + properties + temporal (48)
-            let base = 1 + 8 + 8 + 8 + 4 + label.len() + TEMPORAL_SIZE;
+        WalOperation::CreateEdge { properties, .. } => {
+            // op type (1) + edge_id (8) + source (8) + target (8) + InternedString ID (4) + properties + temporal (48)
+            let base = 1 + 8 + 8 + 8 + 4 + TEMPORAL_SIZE;
             base + estimate_property_map_size(properties)
         }
-        WalOperation::UpdateNode {
-            label, properties, ..
-        } => {
-            // op type (1) + node_id (8) + version_id (8) + label length (4) + label + properties + temporal (48)
-            let base = 1 + 8 + 8 + 4 + label.len() + TEMPORAL_SIZE;
+        WalOperation::UpdateNode { properties, .. } => {
+            // op type (1) + node_id (8) + version_id (8) + InternedString ID (4) + properties + temporal (48)
+            let base = 1 + 8 + 8 + 4 + TEMPORAL_SIZE;
             base + estimate_property_map_size(properties)
         }
-        WalOperation::UpdateEdge {
-            label, properties, ..
-        } => {
-            // op type (1) + edge_id (8) + version_id (8) + label length (4) + label + properties + temporal (48)
-            let base = 1 + 8 + 8 + 4 + label.len() + TEMPORAL_SIZE;
+        WalOperation::UpdateEdge { properties, .. } => {
+            // op type (1) + edge_id (8) + version_id (8) + InternedString ID (4) + properties + temporal (48)
+            let base = 1 + 8 + 8 + 4 + TEMPORAL_SIZE;
             base + estimate_property_map_size(properties)
         }
         WalOperation::DeleteNode { .. } => {
@@ -560,9 +553,6 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-#[cfg(test)]
-mod tests {
-    use super::*;
     use crate::core::EdgeId;
     use crate::core::NodeId;
     use crate::core::interning::GLOBAL_INTERNER;
@@ -570,11 +560,6 @@ mod tests {
     use crate::core::temporal::{BiTemporalInterval, time};
 
     const WAL_VERSION: u8 = 1;
-
-use crate::core::EdgeId;
-    use crate::core::NodeId;
-    use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::BiTemporalInterval;
 
     /// Helper to create a test temporal interval
     fn test_temporal() -> BiTemporalInterval {
@@ -666,10 +651,10 @@ use crate::core::EdgeId;
 
     #[test]
     fn test_estimate_capacity_create_node_empty_properties() {
-        // CreateNode with empty properties:
+        // CreateNode with empty properties (Issue #225 - InternedString optimization):
         // Fixed: 24 bytes
-        // op type (1) + node_id (8) + label_len (4) + label (4 for "test") + properties (4 for count) + temporal (48)
-        // = 24 + 1 + 8 + 4 + 4 + 4 + 48 = 93 bytes
+        // op type (1) + node_id (8) + InternedString ID (4) + properties (4 for count) + temporal (48)
+        // = 24 + 1 + 8 + 4 + 4 + 48 = 89 bytes (was 93 bytes with length-prefixed strings)
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("test").unwrap(),
@@ -679,8 +664,8 @@ use crate::core::EdgeId;
 
         let estimated = estimate_entry_capacity(&op);
         assert_eq!(
-            estimated, 93,
-            "CreateNode with empty properties should be 93 bytes"
+            estimated, 89,
+            "CreateNode with empty properties should be 89 bytes"
         );
 
         // Verify by actually serializing
@@ -851,6 +836,7 @@ use crate::core::EdgeId;
             estimated,
             buffer.len()
         );
+    }
 
     // =============================================================================
     // TDD Tests for InternedString WAL operations (Issue #225)
