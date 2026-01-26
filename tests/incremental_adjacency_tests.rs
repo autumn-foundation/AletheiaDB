@@ -5,8 +5,9 @@
 
 use gallifreydb::core::id::{EdgeId, NodeId};
 use gallifreydb::core::interning::GLOBAL_INTERNER;
-use gallifreydb::index::adjacency::AdjacencyEntry;
+use gallifreydb::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
 use gallifreydb::index::incremental_adjacency::IncrementalAdjacencyIndex;
+use std::sync::Arc;
 
 // ============================================================================
 // Phase 1: Core Data Structure Tests
@@ -103,109 +104,105 @@ mod phase2_read_path {
 
     // Step 2.1 RED: Test read empty returns empty
     #[test]
-    #[ignore = "Phase 2.1 - not implemented yet"]
     fn test_read_empty_returns_empty() {
-        // let index = IncrementalAdjacencyIndex::new();
-        // let node = NodeId::new(0).unwrap();
-        //
-        // let guard = index.get_adjacency(node);
-        // assert_eq!(guard.iter().count(), 0);
-        todo!("Implement get_adjacency()");
+        let index = IncrementalAdjacencyIndex::new();
+        let node = NodeId::new(0).unwrap();
+
+        let guard = index.get_adjacency(node);
+        assert_eq!(guard.iter().count(), 0);
     }
 
     // Step 2.3 RED: Test read from delta only
     #[test]
-    #[ignore = "Phase 2.3 - not implemented yet"]
     fn test_read_from_delta_only() {
-        // let index = IncrementalAdjacencyIndex::new();
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        //
-        // let source = NodeId::new(0).unwrap();
-        // let target = NodeId::new(1).unwrap();
-        // let edge_id = EdgeId::new(0).unwrap();
-        //
-        // index.insert(source, AdjacencyEntry::new(target, edge_id, knows));
-        //
-        // let guard = index.get_adjacency(source);
-        // let edges: Vec<_> = guard.iter().collect();
-        // assert_eq!(edges.len(), 1);
-        // assert_eq!(edges[0].target, target);
-        // assert_eq!(edges[0].edge_id, edge_id);
-        todo!("Implement delta iteration in guard");
+        let index = IncrementalAdjacencyIndex::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        let source = NodeId::new(0).unwrap();
+        let target = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(0).unwrap();
+
+        index.insert(source, AdjacencyEntry::new(target, edge_id, knows));
+
+        let guard = index.get_adjacency(source);
+        let edges: Vec<_> = guard.iter().collect();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, target);
+        assert_eq!(edges[0].edge_id, edge_id);
     }
 
     // Step 2.5 RED: Test read from frozen only
     #[test]
-    #[ignore = "Phase 2.5 - not implemented yet"]
     fn test_read_from_frozen_only() {
-        // // Create index with frozen data
-        // let frozen_edges = vec![
-        //     (
-        //         NodeId::new(0).unwrap(),
-        //         NodeId::new(1).unwrap(),
-        //         EdgeId::new(0).unwrap(),
-        //         GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //     ),
-        // ];
-        // let frozen = AdjacencyIndex::build(frozen_edges);
-        //
-        // let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
-        //
-        // let guard = index.get_adjacency(NodeId::new(0).unwrap());
-        // let edges: Vec<_> = guard.iter().collect();
-        // assert_eq!(edges.len(), 1);
-        todo!("Implement frozen slice access");
+        // Create index with frozen data
+        let frozen_edges = vec![(
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            EdgeId::new(0).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        )];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        let guard = index.get_adjacency(NodeId::new(0).unwrap());
+        let edges: Vec<_> = guard.iter().collect();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, NodeId::new(1).unwrap());
+        assert_eq!(edges[0].edge_id, EdgeId::new(0).unwrap());
     }
 
     // Step 2.7 RED: Test read merges frozen and delta
     #[test]
-    #[ignore = "Phase 2.7 - not implemented yet"]
     fn test_read_merges_frozen_and_delta() {
-        // // Create frozen with 1 edge
-        // let frozen_edges = vec![(
-        //     NodeId::new(0).unwrap(),
-        //     NodeId::new(1).unwrap(),
-        //     EdgeId::new(0).unwrap(),
-        //     GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        // )];
-        // let frozen = AdjacencyIndex::build(frozen_edges);
-        // let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
-        //
-        // // Add 1 edge to delta
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        // index.insert(
-        //     NodeId::new(0).unwrap(),
-        //     AdjacencyEntry::new(NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
-        // );
-        //
-        // // Should see both edges
-        // let guard = index.get_adjacency(NodeId::new(0).unwrap());
-        // let edges: Vec<_> = guard.iter().collect();
-        // assert_eq!(edges.len(), 2);
-        todo!("Implement merged iterator");
+        // Create frozen with 1 edge
+        let frozen_edges = vec![(
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            EdgeId::new(0).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        )];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // Add 1 edge to delta
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        index.insert(
+            NodeId::new(0).unwrap(),
+            AdjacencyEntry::new(NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
+        );
+
+        // Should see both edges
+        let guard = index.get_adjacency(NodeId::new(0).unwrap());
+        let edges: Vec<_> = guard.iter().collect();
+        assert_eq!(edges.len(), 2);
+
+        // Verify both edges present
+        let targets: Vec<_> = edges.iter().map(|e| e.target).collect();
+        assert!(targets.contains(&NodeId::new(1).unwrap()));
+        assert!(targets.contains(&NodeId::new(2).unwrap()));
     }
 
     // Step 2.9 RED: Test fast path no delta
     #[test]
-    #[ignore = "Phase 2.9 - not implemented yet"]
     fn test_fast_path_no_delta() {
-        // // Create frozen only, no delta
-        // let frozen_edges = vec![(
-        //     NodeId::new(0).unwrap(),
-        //     NodeId::new(1).unwrap(),
-        //     EdgeId::new(0).unwrap(),
-        //     GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        // )];
-        // let frozen = AdjacencyIndex::build(frozen_edges);
-        // let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
-        //
-        // let guard = index.get_adjacency(NodeId::new(0).unwrap());
-        //
-        // // Fast path: should return slice directly
-        // assert!(guard.as_slice().is_some());
-        // let slice = guard.as_slice().unwrap();
-        // assert_eq!(slice.len(), 1);
-        todo!("Implement as_slice() fast path");
+        // Create frozen only, no delta
+        let frozen_edges = vec![(
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            EdgeId::new(0).unwrap(),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+        )];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        let guard = index.get_adjacency(NodeId::new(0).unwrap());
+
+        // Fast path: should return slice directly
+        assert!(guard.as_slice().is_some());
+        let slice = guard.as_slice().unwrap();
+        assert_eq!(slice.len(), 1);
+        assert_eq!(slice[0].target, NodeId::new(1).unwrap());
     }
 }
 

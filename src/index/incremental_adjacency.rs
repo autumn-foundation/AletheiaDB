@@ -13,8 +13,9 @@
 
 use crate::core::id::{EdgeId, NodeId};
 use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, Guard};
 use chrono::{DateTime, Utc};
+use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -163,6 +164,63 @@ impl IncrementalAdjacencyIndex {
             .push(entry);
 
         self.stats.delta_edge_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get adjacency list for a node, merging frozen + delta - tombstones.
+    ///
+    /// Returns a guard that provides zero-copy access to the merged adjacency.
+    /// Complexity: O(log n + k + d) where n=nodes with edges, k=frozen edges, d=delta edges.
+    pub fn get_adjacency(&self, node: NodeId) -> MergedAdjacencyGuard {
+        let frozen_guard = self.frozen.load();
+        let delta_guard = self.delta.get(&node);
+
+        MergedAdjacencyGuard {
+            node,
+            frozen: frozen_guard,
+            delta: delta_guard,
+            tombstones: &self.tombstones,
+        }
+    }
+}
+
+/// Zero-copy merged view of frozen + delta adjacency.
+///
+/// This guard provides an iterator over all adjacency entries (frozen + delta),
+/// excluding tombstones. The guard holds references to the frozen CSR and delta
+/// buffer, ensuring they remain valid during iteration.
+pub struct MergedAdjacencyGuard<'a> {
+    node: NodeId,
+    frozen: Guard<Arc<AdjacencyIndex>>,
+    delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
+    tombstones: &'a DashMap<EdgeId, Tombstone>,
+}
+
+impl<'a> MergedAdjacencyGuard<'a> {
+    /// Iterate over all adjacency entries (frozen + delta, excluding tombstones).
+    pub fn iter(&self) -> impl Iterator<Item = &AdjacencyEntry> + '_ {
+        let frozen_slice = self.frozen.get_adjacency(self.node);
+
+        let frozen_iter = frozen_slice
+            .iter()
+            .filter(|e| !self.tombstones.contains_key(&e.edge_id));
+
+        let delta_iter = self
+            .delta
+            .as_ref()
+            .into_iter()
+            .flat_map(|d| d.iter())
+            .filter(|e| !self.tombstones.contains_key(&e.edge_id));
+
+        frozen_iter.chain(delta_iter)
+    }
+
+    /// Fast path: if no delta and no tombstones, return frozen slice directly.
+    pub fn as_slice(&self) -> Option<&[AdjacencyEntry]> {
+        if self.delta.is_none() && self.tombstones.is_empty() {
+            Some(self.frozen.get_adjacency(self.node))
+        } else {
+            None
+        }
     }
 }
 
