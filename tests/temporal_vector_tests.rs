@@ -703,3 +703,196 @@ fn test_add_batch_large() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// RED PHASE TESTS for Issue #233 Critical Bugs - Atomicity & Ordering
+// ============================================================================
+
+/// Test that add_batch() maintains atomicity - if one vector fails, none should be added
+/// This test exposes the atomicity bug where Phase 2 commits state before Phase 3 validates HNSW
+#[test]
+fn test_add_batch_atomicity_on_dimension_mismatch() -> Result<()> {
+    let index = create_test_index()?; // 4 dimensions
+
+    // Batch with last vector having wrong dimensions (will fail in HNSW)
+    let batch = vec![
+        (
+            NodeId::new(1).unwrap(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            1000.into(),
+        ),
+        (
+            NodeId::new(2).unwrap(),
+            vec![0.0, 1.0, 0.0, 0.0],
+            1100.into(),
+        ),
+        // This vector has wrong dimensions - should cause ENTIRE batch to fail
+        (
+            NodeId::new(3).unwrap(),
+            vec![0.0, 0.0, 1.0], // Only 3 dimensions instead of 4!
+            1200.into(),
+        ),
+    ];
+
+    // Batch should fail
+    let result = index.add_batch(&batch);
+    assert!(
+        result.is_err(),
+        "Batch should fail due to dimension mismatch"
+    );
+
+    // CRITICAL: No vectors should be in the index (atomicity)
+    // If bug exists, first 2 vectors will be in current_state but not HNSW
+    assert_eq!(
+        index.current_index().len(),
+        0,
+        "No vectors should be added when batch fails"
+    );
+
+    // Also check memory stats to ensure current_state is empty
+    let stats = index.memory_stats();
+    assert_eq!(
+        stats.current_vectors, 0,
+        "current_state should have no vectors after failed batch"
+    );
+
+    Ok(())
+}
+
+/// Test that batch operations maintain consistency between HNSW and current_state
+#[test]
+fn test_add_batch_consistency() -> Result<()> {
+    let index = create_test_index()?;
+
+    // Add multiple batches
+    let batch1 = vec![
+        (
+            NodeId::new(1).unwrap(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            1000.into(),
+        ),
+        (
+            NodeId::new(2).unwrap(),
+            vec![0.9, 0.1, 0.0, 0.0],
+            1100.into(),
+        ),
+    ];
+    index.add_batch(&batch1)?;
+
+    // After successful batch, verify consistency
+    assert_eq!(index.current_index().len(), 2, "HNSW should have 2 vectors");
+    let stats = index.memory_stats();
+    assert_eq!(
+        stats.current_vectors, 2,
+        "current_state should have 2 vectors"
+    );
+
+    // Add another batch
+    let batch2 = vec![
+        (
+            NodeId::new(3).unwrap(),
+            vec![0.0, 1.0, 0.0, 0.0],
+            2000.into(),
+        ),
+        (
+            NodeId::new(4).unwrap(),
+            vec![0.0, 0.9, 0.1, 0.0],
+            2100.into(),
+        ),
+    ];
+    index.add_batch(&batch2)?;
+
+    // Verify all 4 vectors are in both HNSW and current_state
+    assert_eq!(index.current_index().len(), 4, "HNSW should have 4 vectors");
+    let stats = index.memory_stats();
+    assert_eq!(
+        stats.current_vectors, 4,
+        "current_state should have 4 vectors"
+    );
+
+    // Verify all vectors are searchable
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+    let results = index.current_index().search(&query, 4)?;
+    assert_eq!(results.len(), 4, "Should find all 4 vectors via search");
+
+    Ok(())
+}
+
+/// Test concurrent add_batch() calls don't cause data corruption
+#[test]
+fn test_concurrent_add_batch() -> Result<()> {
+    use std::sync::Arc;
+    use std::thread;
+
+    let index = Arc::new(create_test_index()?);
+
+    // Spawn multiple threads doing batch adds
+    let mut handles = vec![];
+    for thread_id in 0..4 {
+        let index_clone = Arc::clone(&index);
+        let handle = thread::spawn(move || {
+            let batch: Vec<_> = (0..25)
+                .map(|i| {
+                    let node_id = NodeId::new((thread_id * 25 + i) as u64).unwrap();
+                    let vector = vec![(thread_id as f32) / 10.0, (i as f32) / 100.0, 0.0, 0.0];
+                    let timestamp = ((thread_id * 25 + i) as i64 * 1000).into();
+                    (node_id, vector, timestamp)
+                })
+                .collect();
+
+            index_clone.add_batch(&batch)
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all threads
+    for handle in handles {
+        handle.join().unwrap()?;
+    }
+
+    // Verify all 100 vectors were added (4 threads * 25 vectors each)
+    assert_eq!(
+        index.current_index().len(),
+        100,
+        "All 100 vectors should be added"
+    );
+
+    let stats = index.memory_stats();
+    assert_eq!(
+        stats.current_vectors, 100,
+        "current_state should have 100 vectors"
+    );
+
+    Ok(())
+}
+
+/// Test that remove() is atomic - if HNSW remove fails, state shouldn't change
+#[test]
+fn test_remove_on_nonexistent_node() -> Result<()> {
+    let index = create_test_index()?;
+
+    // Add a vector
+    let node1 = NodeId::new(1).unwrap();
+    index.add(node1, &vec![1.0, 0.0, 0.0, 0.0], 1000.into())?;
+    assert_eq!(index.current_index().len(), 1);
+
+    // Try to remove a non-existent node
+    let node2 = NodeId::new(2).unwrap();
+    let result = index.remove(node2, 2000.into());
+
+    // Remove should fail (or succeed silently depending on implementation)
+    // The important thing is: node1 should still be in both HNSW and current_state
+    assert_eq!(
+        index.current_index().len(),
+        1,
+        "Node1 should still be in HNSW"
+    );
+
+    let stats = index.memory_stats();
+    assert_eq!(
+        stats.current_vectors, 1,
+        "Node1 should still be in current_state"
+    );
+
+    Ok(())
+}

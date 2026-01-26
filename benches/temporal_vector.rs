@@ -598,6 +598,54 @@ fn bench_add_batch_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark concurrent add() operations to measure RwLock contention
+///
+/// **Issue #233**: Tests whether RwLock causes performance regression compared to DashMap.
+/// Measures throughput of concurrent individual add() calls from multiple threads.
+fn bench_concurrent_add_operations(c: &mut Criterion) {
+    use std::sync::Arc;
+    use std::thread;
+
+    let mut group = c.benchmark_group("concurrent_add_operations");
+
+    for num_threads in [1, 2, 4, 8] {
+        group.throughput(Throughput::Elements((num_threads * 100) as u64));
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}threads", num_threads)),
+            &num_threads,
+            |b, &num_threads| {
+                b.iter_batched(
+                    || Arc::new(create_temporal_index(128)),
+                    |index| {
+                        let mut handles = vec![];
+                        for thread_id in 0..num_threads {
+                            let index_clone = Arc::clone(&index);
+                            let handle = thread::spawn(move || {
+                                for i in 0..100 {
+                                    let node_id =
+                                        NodeId::new((thread_id * 100 + i) as u64).unwrap();
+                                    let vector = gen_vector(128, (thread_id * 100 + i) as usize);
+                                    let timestamp = ((thread_id * 100 + i) as i64 * 1000).into();
+                                    let _ = black_box(index_clone.add(node_id, &vector, timestamp));
+                                }
+                            });
+                            handles.push(handle);
+                        }
+
+                        for handle in handles {
+                            handle.join().unwrap();
+                        }
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
@@ -613,5 +661,6 @@ criterion_group!(
     bench_semantic_evolution_memory_overhead,
     bench_add_batch_vs_individual,
     bench_add_batch_throughput,
+    bench_concurrent_add_operations,
 );
 criterion_main!(benches);

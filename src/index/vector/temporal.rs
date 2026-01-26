@@ -1008,18 +1008,19 @@ impl TemporalVectorIndex {
         Ok(time::now())
     }
 
-    /// Adds a vector to the current index and tracks it for snapshot creation.
+    /// Validates a vector and timestamp (helper to reduce duplication).
     ///
-    /// **Issue #233**: Optimized to acquire only ONE lock instead of three,
-    /// reducing lock contention during batch insertions.
+    /// **Issue #233**: Extracted from add() and add_batch() to eliminate code duplication.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The vector contains NaN or infinite values
-    /// - The timestamp is negative
-    /// - The underlying HNSW index fails to add the vector
-    pub fn add(&self, id: NodeId, vector: &[f32], timestamp: Timestamp) -> Result<()> {
+    /// - The vector contains NaN values
+    /// - The vector contains infinite values
+    /// - The timestamp is negative or exceeds MAX_VALID_TIMESTAMP
+    fn validate_vector_and_timestamp(vector: &[f32], timestamp: Timestamp) -> Result<()> {
+        use crate::core::hlc::HybridTimestamp;
+
         // Validate vector does not contain NaN values
         let nan_count = vector.iter().filter(|&&v| v.is_nan()).count();
         if nan_count > 0 {
@@ -1033,7 +1034,6 @@ impl TemporalVectorIndex {
         }
 
         // Validate timestamp is within valid range
-        use crate::core::hlc::HybridTimestamp;
         if timestamp.wallclock() < 0 {
             return Err(Error::Temporal(TemporalError::InvalidTimeRange {
                 start: timestamp,
@@ -1052,9 +1052,35 @@ impl TemporalVectorIndex {
             }));
         }
 
+        Ok(())
+    }
+
+    /// Adds a vector to the current index and tracks it for snapshot creation.
+    ///
+    /// **Issue #233**: Optimized to acquire only ONE lock instead of three,
+    /// reducing lock contention during batch insertions.
+    ///
+    /// **Atomicity Fix**: HNSW insertion happens BEFORE state update to ensure
+    /// atomicity. If HNSW fails, state remains unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The vector contains NaN or infinite values
+    /// - The timestamp is negative
+    /// - The underlying HNSW index fails to add the vector
+    pub fn add(&self, id: NodeId, vector: &[f32], timestamp: Timestamp) -> Result<()> {
+        // Validate inputs first (fail fast)
+        Self::validate_vector_and_timestamp(vector, timestamp)?;
+
+        // **ATOMICITY FIX**: Add to HNSW index FIRST
+        // If this fails, we return error without modifying state
+        self.current.add(id, vector)?;
+
         // **OPTIMIZATION (Issue #233)**: Single lock acquisition for both vector storage and metadata
         // Previously: 3 locks (DashMap internal, metadata.write(), potential snapshot_data)
         // Now: 1 lock (current_state.write())
+        // Only update state AFTER HNSW succeeds
         {
             let mut state = self.current_state.write();
 
@@ -1065,9 +1091,6 @@ impl TemporalVectorIndex {
             // Track change for snapshot detection
             state.metadata.record_change(id);
         } // Lock released here
-
-        // Add to current index (HNSW has its own internal locking)
-        self.current.add(id, vector)?;
 
         Ok(())
     }
@@ -1109,43 +1132,31 @@ impl TemporalVectorIndex {
     /// index.add_batch(&batch)?;
     /// ```
     pub fn add_batch(&self, batch: &[(NodeId, Vec<f32>, Timestamp)]) -> Result<()> {
-        use crate::core::hlc::HybridTimestamp;
-
-        // Phase 1: Validate all vectors first (fail fast before acquiring locks)
+        // Phase 1: Validate all vectors first (fail fast before any operations)
         for (_id, vector, timestamp) in batch {
-            // Validate vector does not contain NaN values
-            let nan_count = vector.iter().filter(|&&v| v.is_nan()).count();
-            if nan_count > 0 {
-                return Err(VectorError::ContainsNaN { count: nan_count }.into());
-            }
+            Self::validate_vector_and_timestamp(vector, *timestamp)?;
+        }
 
-            // Validate vector does not contain infinite values
-            let inf_count = vector.iter().filter(|&&v| v.is_infinite()).count();
-            if inf_count > 0 {
-                return Err(VectorError::ContainsInfinity { count: inf_count }.into());
-            }
-
-            // Validate timestamp is within valid range
-            if timestamp.wallclock() < 0 {
-                return Err(Error::Temporal(TemporalError::InvalidTimeRange {
-                    start: *timestamp,
-                    end: HybridTimestamp::new_unchecked(0, 0),
-                }));
-            }
-
-            if timestamp.wallclock() > crate::core::temporal::MAX_VALID_TIMESTAMP {
-                return Err(Error::Temporal(TemporalError::InvalidTimestamp {
-                    timestamp: *timestamp,
-                    reason: format!(
-                        "Timestamp wallclock {} exceeds MAX_VALID_TIMESTAMP {} (reserved range for internal use)",
-                        timestamp.wallclock(),
-                        crate::core::temporal::MAX_VALID_TIMESTAMP
-                    ),
-                }));
+        // Phase 2: **ATOMICITY FIX** - Add to HNSW index FIRST
+        // If any HNSW insertion fails, we rollback all previous insertions
+        // This ensures atomicity - either all vectors are added or none
+        let mut added_to_hnsw = Vec::new();
+        for (id, vector, _timestamp) in batch {
+            match self.current.add(*id, vector) {
+                Ok(()) => {
+                    added_to_hnsw.push(*id);
+                }
+                Err(e) => {
+                    // Rollback: remove all previously added vectors from HNSW
+                    for &rollback_id in &added_to_hnsw {
+                        let _ = self.current.remove(rollback_id);
+                    }
+                    return Err(e);
+                }
             }
         }
 
-        // Phase 2: Acquire lock ONCE and process entire batch
+        // Phase 3: Update current_state ONLY after all HNSW insertions succeed
         // **KEY OPTIMIZATION**: Single lock acquisition for all vectors
         {
             let mut state = self.current_state.write();
@@ -1159,11 +1170,6 @@ impl TemporalVectorIndex {
                 state.metadata.record_change(*id);
             }
         } // Lock released here
-
-        // Phase 3: Add to current HNSW index (done after releasing our lock)
-        for (id, vector, _timestamp) in batch {
-            self.current.add(*id, vector)?;
-        }
 
         Ok(())
     }
