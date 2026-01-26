@@ -456,3 +456,250 @@ fn test_find_similar_in_range_deterministic() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// RED PHASE TESTS for Issue #233: Batch API and Single Lock Optimization
+// ============================================================================
+
+/// Test add_batch() API - RED PHASE: This will fail until add_batch() is implemented
+#[test]
+fn test_add_batch_basic() -> Result<()> {
+    let index = create_test_index()?;
+
+    // Prepare batch of vectors to add
+    let batch = vec![
+        (
+            NodeId::new(1).unwrap(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            1000.into(),
+        ),
+        (
+            NodeId::new(2).unwrap(),
+            vec![0.0, 1.0, 0.0, 0.0],
+            1100.into(),
+        ),
+        (
+            NodeId::new(3).unwrap(),
+            vec![0.0, 0.0, 1.0, 0.0],
+            1200.into(),
+        ),
+    ];
+
+    // Add batch - this method doesn't exist yet (RED PHASE)
+    index.add_batch(&batch)?;
+
+    // Verify all vectors were added
+    assert_eq!(
+        index.current_index().len(),
+        3,
+        "All 3 vectors should be added"
+    );
+
+    Ok(())
+}
+
+/// Test add_batch() with empty batch
+#[test]
+fn test_add_batch_empty() -> Result<()> {
+    let index = create_test_index()?;
+
+    let batch: Vec<(NodeId, Vec<f32>, _)> = vec![];
+
+    // Should handle empty batch gracefully
+    index.add_batch(&batch)?;
+
+    assert_eq!(index.current_index().len(), 0);
+
+    Ok(())
+}
+
+/// Test add_batch() maintains correctness - vectors are searchable
+#[test]
+fn test_add_batch_correctness() -> Result<()> {
+    let index = create_test_index()?;
+
+    // Add batch of vectors
+    let batch = vec![
+        (
+            NodeId::new(1).unwrap(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            1000.into(),
+        ),
+        (
+            NodeId::new(2).unwrap(),
+            vec![0.9, 0.1, 0.0, 0.0],
+            1100.into(),
+        ),
+        (
+            NodeId::new(3).unwrap(),
+            vec![0.0, 0.0, 1.0, 0.0],
+            1200.into(),
+        ),
+    ];
+
+    index.add_batch(&batch)?;
+
+    // Verify vectors can be found via similarity search
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+    let results = index.current_index().search(&query, 2)?;
+
+    assert_eq!(results.len(), 2, "Should find 2 most similar vectors");
+
+    // The first two vectors should be most similar to query
+    assert!(
+        results.iter().any(|(id, _)| *id == NodeId::new(1).unwrap()),
+        "Node 1 should be in results"
+    );
+    assert!(
+        results.iter().any(|(id, _)| *id == NodeId::new(2).unwrap()),
+        "Node 2 should be in results"
+    );
+
+    Ok(())
+}
+
+/// Test add_batch() with invalid vectors (NaN)
+#[test]
+fn test_add_batch_nan_validation() -> Result<()> {
+    let index = create_test_index()?;
+
+    let batch = vec![
+        (
+            NodeId::new(1).unwrap(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            1000.into(),
+        ),
+        (
+            NodeId::new(2).unwrap(),
+            vec![f32::NAN, 1.0, 0.0, 0.0],
+            1100.into(),
+        ), // Invalid
+        (
+            NodeId::new(3).unwrap(),
+            vec![0.0, 0.0, 1.0, 0.0],
+            1200.into(),
+        ),
+    ];
+
+    // Should fail due to NaN in batch
+    let result = index.add_batch(&batch);
+    assert!(result.is_err(), "Should reject batch with NaN values");
+
+    Ok(())
+}
+
+/// Test add_batch() with invalid vectors (Infinity)
+#[test]
+fn test_add_batch_infinity_validation() -> Result<()> {
+    let index = create_test_index()?;
+
+    let batch = vec![
+        (
+            NodeId::new(1).unwrap(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            1000.into(),
+        ),
+        (
+            NodeId::new(2).unwrap(),
+            vec![f32::INFINITY, 1.0, 0.0, 0.0],
+            1100.into(),
+        ), // Invalid
+    ];
+
+    // Should fail due to Infinity in batch
+    let result = index.add_batch(&batch);
+    assert!(result.is_err(), "Should reject batch with Infinity values");
+
+    Ok(())
+}
+
+/// Test add_batch() produces same results as multiple add() calls
+#[test]
+fn test_add_batch_equivalence() -> Result<()> {
+    let index1 = create_test_index()?;
+    let index2 = create_test_index()?;
+
+    let vectors = vec![
+        (
+            NodeId::new(1).unwrap(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            1000.into(),
+        ),
+        (
+            NodeId::new(2).unwrap(),
+            vec![0.0, 1.0, 0.0, 0.0],
+            1100.into(),
+        ),
+        (
+            NodeId::new(3).unwrap(),
+            vec![0.0, 0.0, 1.0, 0.0],
+            1200.into(),
+        ),
+        (
+            NodeId::new(4).unwrap(),
+            vec![0.5, 0.5, 0.0, 0.0],
+            1300.into(),
+        ),
+    ];
+
+    // Add using batch API
+    index1.add_batch(&vectors)?;
+
+    // Add individually
+    for (id, vec, ts) in &vectors {
+        index2.add(*id, vec, *ts)?;
+    }
+
+    // Both should have same size
+    assert_eq!(index1.current_index().len(), index2.current_index().len());
+
+    // Both should produce same search results
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+    let results1 = index1.current_index().search(&query, 3)?;
+    let results2 = index2.current_index().search(&query, 3)?;
+
+    assert_eq!(
+        results1.len(),
+        results2.len(),
+        "Should return same number of results"
+    );
+
+    // Results should have same node IDs (order may vary due to tie-breaking)
+    let ids1: std::collections::HashSet<_> = results1.iter().map(|(id, _)| id).collect();
+    let ids2: std::collections::HashSet<_> = results2.iter().map(|(id, _)| id).collect();
+    assert_eq!(ids1, ids2, "Should return same nodes");
+
+    Ok(())
+}
+
+/// Test add_batch() with large batch size
+#[test]
+fn test_add_batch_large() -> Result<()> {
+    let index = create_test_index()?;
+
+    // Create large batch
+    let batch: Vec<_> = (0..1000)
+        .map(|i| {
+            let id = NodeId::new(i).unwrap();
+            let vec = vec![
+                (i as f32) / 1000.0,
+                ((i + 1) as f32) / 1000.0,
+                ((i + 2) as f32) / 1000.0,
+                ((i + 3) as f32) / 1000.0,
+            ];
+            let ts = ((i * 100) as i64).into();
+            (id, vec, ts)
+        })
+        .collect();
+
+    // Should handle large batch
+    index.add_batch(&batch)?;
+
+    assert_eq!(
+        index.current_index().len(),
+        1000,
+        "All 1000 vectors should be added"
+    );
+
+    Ok(())
+}
