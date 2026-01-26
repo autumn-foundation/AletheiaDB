@@ -104,15 +104,40 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 /// Uses `memmap2` for memory-mapped I/O. Peak memory usage is O(working set)
 /// rather than O(file size). See issue #216.
 pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
+    // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return Ok(Vec::new()), // File doesn't exist yet, return empty
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(StorageError::IoError(format!(
+                "Failed to open WAL segment {:?}: {}",
+                path, e
+            ))
+            .into());
+        }
     };
+
+    // Validate file size before mapping to prevent DoS attacks with huge files
+    let metadata = file
+        .metadata()
+        .map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
+
+    // Maximum reasonable segment size (configurable, but 1GB is a safe upper bound)
+    // Default segments are 64MB, so 1GB allows for 16x growth
+    const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+    if metadata.len() > MAX_SEGMENT_SIZE {
+        return Err(StorageError::CorruptedData(format!(
+            "WAL segment too large: {} bytes (max: {} bytes)",
+            metadata.len(),
+            MAX_SEGMENT_SIZE
+        ))
+        .into());
+    }
 
     // Memory-map the file for efficient reading without loading entire file into memory.
     // SAFETY: We only read from the memory map, never write. The file is opened read-only.
     // The mapping is valid for the lifetime of this function and is automatically unmapped
-    // when dropped. We verify the file size before accessing to prevent out-of-bounds reads.
+    // when dropped. We have verified the file size above to prevent out-of-bounds reads.
     let mmap = unsafe {
         memmap2::Mmap::map(&file).map_err(|e| {
             StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
@@ -120,7 +145,7 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     };
 
     // Use the memory-mapped region as a byte slice
-    let buffer: &[u8] = &mmap;
+    let buffer = &mmap[..];
 
     let mut entries = Vec::new();
 
@@ -1326,5 +1351,58 @@ mod tests {
         // Should only get the one complete entry
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].lsn, LSN(1));
+    }
+
+    // =============================================================================
+    // Security and Error Handling Tests - Issue #216 Fixes
+    // =============================================================================
+
+    /// Test that non-existent files return empty results (not an error).
+    #[test]
+    fn test_read_nonexistent_file_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let nonexistent = dir.path().join("does_not_exist.log");
+
+        // Should return Ok(empty vector), not an error
+        let result = read_segment(&nonexistent, LSN(1));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    /// Test that file size validation prevents reading excessively large files.
+    ///
+    /// This protects against DoS attacks where an attacker places a huge file
+    /// in the WAL directory.
+    #[test]
+    fn test_read_segment_rejects_oversized_file() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("oversized_segment.log");
+
+        let mut file = File::create(&segment_path).unwrap();
+
+        // Write WAL header
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        // Seek to a position beyond MAX_SEGMENT_SIZE (1GB)
+        // Note: We don't actually write 1GB of data, just seek past it
+        // This creates a sparse file that reports a large size
+        const OVERSIZED: u64 = 1024 * 1024 * 1024 + 1; // 1GB + 1 byte
+        file.set_len(OVERSIZED).unwrap();
+
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Should return an error about file being too large
+        let result = read_segment(&segment_path, LSN(1));
+        assert!(result.is_err());
+        let error_msg = format!("{}", result.unwrap_err());
+        assert!(
+            error_msg.contains("too large"),
+            "Expected 'too large' error, got: {}",
+            error_msg
+        );
     }
 }
