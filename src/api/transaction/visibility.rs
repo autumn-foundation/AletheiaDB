@@ -155,6 +155,7 @@ impl EpochRange {
 
     /// Estimate memory usage in bytes.
     #[cfg(test)]
+    #[allow(dead_code)]
     fn memory_usage(&self) -> usize {
         std::mem::size_of::<Self>()
     }
@@ -693,6 +694,57 @@ impl TxVisibilityManager {
         let committed = self.committed.read_or_recover();
         committed.get_stats()
     }
+
+    /// Check if compression should be triggered based on memory threshold.
+    ///
+    /// This is a convenience method to help decide when to call `compress_commit_log()`.
+    /// Returns `true` if the current commit log memory usage exceeds the threshold.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold_bytes` - Memory threshold in bytes
+    ///
+    /// # Returns
+    ///
+    /// `true` if compression is recommended, `false` otherwise
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Compress if commit log uses > 1MB
+    /// if db.should_compress_commit_log(1024 * 1024) {
+    ///     db.compress_commit_log();
+    /// }
+    /// ```
+    pub fn should_compress_commit_log(&self, threshold_bytes: usize) -> bool {
+        self.commit_log_memory_usage() > threshold_bytes
+    }
+
+    /// Check if compression should be triggered based on exception count.
+    ///
+    /// This is an alternative trigger mechanism that compresses when there are
+    /// many uncompressed exceptions (indicating potential for compression).
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold_exceptions` - Number of exceptions to trigger compression
+    ///
+    /// # Returns
+    ///
+    /// `true` if compression is recommended, `false` otherwise
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Compress if there are > 10K uncompressed exceptions
+    /// if db.should_compress_by_exception_count(10_000) {
+    ///     db.compress_commit_log();
+    /// }
+    /// ```
+    pub fn should_compress_by_exception_count(&self, threshold_exceptions: usize) -> bool {
+        let stats = self.get_compression_stats();
+        stats.exception_count > threshold_exceptions
+    }
 }
 
 impl Default for TxVisibilityManager {
@@ -1177,6 +1229,50 @@ mod tests {
         assert!(
             compression_stats.memory_saved_bytes > uncompressed_memory / 2,
             "Should save > 50% memory"
+        );
+    }
+
+    #[test]
+    fn test_should_compress_helpers() {
+        // Test the helper methods for determining when to compress
+        let manager = TxVisibilityManager::new();
+
+        // Add transactions until memory threshold is exceeded
+        let base_ts = 1000;
+        for i in 1..=1000 {
+            manager.register_active(TxId::new(i));
+            manager.register_commit(TxId::new(i), (base_ts + (i as i64) - 1).into());
+        }
+
+        // Should recommend compression if memory exceeds low threshold
+        assert!(
+            manager.should_compress_commit_log(100),
+            "Should recommend compression when memory > 100 bytes"
+        );
+
+        // Should not recommend compression if memory is below high threshold
+        assert!(
+            !manager.should_compress_commit_log(1_000_000),
+            "Should not recommend compression when memory < 1MB"
+        );
+
+        // Should recommend compression if exception count exceeds threshold
+        assert!(
+            manager.should_compress_by_exception_count(500),
+            "Should recommend compression when exceptions > 500"
+        );
+
+        // Should not recommend compression if exception count is below threshold
+        assert!(
+            !manager.should_compress_by_exception_count(10_000),
+            "Should not recommend compression when exceptions < 10K"
+        );
+
+        // After compression, exception count should be low
+        manager.compress_commit_log();
+        assert!(
+            !manager.should_compress_by_exception_count(10),
+            "Should not need compression immediately after compressing"
         );
     }
 }

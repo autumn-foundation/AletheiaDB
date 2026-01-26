@@ -3413,6 +3413,58 @@ impl GallifreyDB {
     pub fn get_compression_stats(&self) -> crate::api::transaction::visibility::CompressionStats {
         self.visibility_manager.get_compression_stats()
     }
+
+    /// Check if commit log compression should be triggered based on memory threshold.
+    ///
+    /// This is a convenience method to help decide when to call `compress_commit_log()`.
+    /// Returns `true` if the current commit log memory usage exceeds the threshold.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold_bytes` - Memory threshold in bytes
+    ///
+    /// # Returns
+    ///
+    /// `true` if compression is recommended, `false` otherwise
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // After bulk import, compress if using > 10MB
+    /// if db.should_compress_commit_log(10 * 1024 * 1024) {
+    ///     db.compress_commit_log();
+    /// }
+    /// ```
+    pub fn should_compress_commit_log(&self, threshold_bytes: usize) -> bool {
+        self.visibility_manager
+            .should_compress_commit_log(threshold_bytes)
+    }
+
+    /// Check if compression should be triggered based on exception count.
+    ///
+    /// This is an alternative trigger mechanism that compresses when there are
+    /// many uncompressed exceptions (indicating potential for compression).
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold_exceptions` - Number of exceptions to trigger compression
+    ///
+    /// # Returns
+    ///
+    /// `true` if compression is recommended, `false` otherwise
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Compress every 50K commits
+    /// if db.should_compress_by_exception_count(50_000) {
+    ///     db.compress_commit_log();
+    /// }
+    /// ```
+    pub fn should_compress_by_exception_count(&self, threshold_exceptions: usize) -> bool {
+        self.visibility_manager
+            .should_compress_by_exception_count(threshold_exceptions)
+    }
 }
 
 impl Drop for GallifreyDB {
