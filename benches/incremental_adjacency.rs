@@ -6,13 +6,14 @@
 //! - Read (with delta): ~20-30ns (+15ns merge overhead)
 //! - Compaction: O(E log E), <10ms for 10K edges
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use gallifreydb::core::id::{EdgeId, NodeId};
-use gallifreydb::core::interning::GLOBAL_INTERNER;
+use criterion::{criterion_group, criterion_main, Criterion};
 // Will uncomment as we implement:
+// use criterion::{BenchmarkId, Throughput, black_box};
+// use gallifreydb::core::id::{EdgeId, NodeId};
+// use gallifreydb::core::interning::GLOBAL_INTERNER;
 // use gallifreydb::index::incremental_adjacency::{IncrementalAdjacencyIndex, IncrementalConfig};
 // use gallifreydb::index::adjacency::AdjacencyIndex;
-use std::sync::Arc;
+// use std::sync::Arc;
 
 // ============================================================================
 // Benchmark: Insert Latency (Target: O(1), no cliff)

@@ -15,11 +15,11 @@ use crate::core::id::{EdgeId, NodeId};
 use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
 use arc_swap::{ArcSwap, Guard};
 use chrono::{DateTime, Utc};
-use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
+use dashmap::mapref::one::Ref;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Incremental CSR adjacency index with O(1) writes and fast reads.
@@ -49,8 +49,11 @@ pub struct IncrementalAdjacencyIndex {
 /// Tombstone record for deleted edges with temporal metadata.
 #[derive(Debug, Clone)]
 pub struct Tombstone {
+    /// The edge that was deleted
     pub edge_id: EdgeId,
+    /// When the edge was deleted (valid time)
     pub deleted_at: DateTime<Utc>,
+    /// When the deletion was recorded (transaction time)
     pub transaction_time: DateTime<Utc>,
 }
 
@@ -58,7 +61,6 @@ pub struct Tombstone {
 #[derive(Debug)]
 struct AdjacencyStats {
     delta_edge_count: AtomicUsize,
-    delta_node_count: AtomicUsize,
     tombstone_count: AtomicUsize,
     frozen_edge_count: AtomicUsize,
     last_compaction: AtomicU64, // timestamp
@@ -86,10 +88,10 @@ pub struct IncrementalConfig {
 impl Default for IncrementalConfig {
     fn default() -> Self {
         Self {
-            compaction_ratio: 0.1,       // Compact at 10% growth
-            max_delta_edges: 10_000,     // Or 10K edges
-            max_tombstones: 1_000,       // Or 1K deletions
-            smallvec_capacity: 8,        // 8 edges inline
+            compaction_ratio: 0.1,                  // Compact at 10% growth
+            max_delta_edges: 10_000,                // Or 10K edges
+            max_tombstones: 1_000,                  // Or 1K deletions
+            smallvec_capacity: 8,                   // 8 edges inline
             check_interval: Duration::from_secs(1), // Check every second
         }
     }
@@ -99,7 +101,6 @@ impl AdjacencyStats {
     fn new() -> Self {
         Self {
             delta_edge_count: AtomicUsize::new(0),
-            delta_node_count: AtomicUsize::new(0),
             tombstone_count: AtomicUsize::new(0),
             frozen_edge_count: AtomicUsize::new(0),
             last_compaction: AtomicU64::new(0),
@@ -114,7 +115,10 @@ impl AdjacencyStats {
 impl IncrementalAdjacencyIndex {
     /// Create a new empty incremental adjacency index.
     pub fn new() -> Self {
-        Self::with_config(Arc::new(AdjacencyIndex::new()), IncrementalConfig::default())
+        Self::with_config(
+            Arc::new(AdjacencyIndex::new()),
+            IncrementalConfig::default(),
+        )
     }
 
     /// Create an index from an existing frozen CSR.
@@ -158,10 +162,7 @@ impl IncrementalAdjacencyIndex {
     /// The edge is added to the mutable delta layer and will be merged into
     /// the frozen CSR during the next compaction.
     pub fn insert(&self, source: NodeId, entry: AdjacencyEntry) {
-        self.delta
-            .entry(source)
-            .or_insert_with(SmallVec::new)
-            .push(entry);
+        self.delta.entry(source).or_default().push(entry);
 
         self.stats.delta_edge_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -194,7 +195,7 @@ impl IncrementalAdjacencyIndex {
     ///
     /// Returns a guard that provides zero-copy access to the merged adjacency.
     /// Complexity: O(log n + k + d) where n=nodes with edges, k=frozen edges, d=delta edges.
-    pub fn get_adjacency(&self, node: NodeId) -> MergedAdjacencyGuard {
+    pub fn get_adjacency(&self, node: NodeId) -> MergedAdjacencyGuard<'_> {
         let frozen_guard = self.frozen.load();
         let delta_guard = self.delta.get(&node);
 
@@ -294,7 +295,6 @@ impl IncrementalAdjacencyIndex {
         // Since we can't access frozen's node_ids directly, let's use a workaround
 
         let frozen_ref = &*frozen;
-        let frozen_edge_count = frozen_ref.edge_count();
 
         // We need to extract edges from frozen somehow
         // Since AdjacencyIndex doesn't expose this, we need to either:

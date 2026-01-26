@@ -76,7 +76,7 @@ mod phase1_core_structure {
                 thread::spawn(move || {
                     for i in 0..100 {
                         let source = NodeId::new((thread_id * 100 + i) as u64).unwrap();
-                        let target = NodeId::new((source.as_u64() + 1)).unwrap();
+                        let target = NodeId::new(source.as_u64() + 1).unwrap();
                         let edge_id = EdgeId::new((thread_id * 100 + i) as u64).unwrap();
                         let entry = AdjacencyEntry::new(target, edge_id, knows);
                         index_clone.insert(source, entry);
@@ -313,9 +313,11 @@ mod phase4_compaction {
     // Step 4.1 RED: Test should_compact ratio threshold
     #[test]
     fn test_should_compact_ratio_threshold() {
-        let mut config = IncrementalConfig::default();
-        config.compaction_ratio = 0.1; // 10% threshold
-        config.max_delta_edges = 100_000; // High so ratio triggers first
+        let config = IncrementalConfig {
+            compaction_ratio: 0.1, // 10% threshold
+            max_delta_edges: 100_000, // High so ratio triggers first
+            ..Default::default()
+        };
 
         // Create frozen with 100 edges
         let frozen_edges: Vec<_> = (0..100)
@@ -457,95 +459,92 @@ mod phase4_compaction {
         assert_eq!(index.tombstone_count(), 0);
     }
 
-    // Step 4.9 RED: Test compact atomic swap
+    // Step 4.9 GREEN: Test compact atomic swap
     #[test]
-    #[ignore = "Phase 4.9 - not implemented yet"]
     fn test_compact_atomic_swap() {
-        // // This test verifies readers see consistent state during compaction
-        // use std::sync::Arc;
-        // use std::thread;
-        //
-        // let frozen_edges: Vec<_> = (0..100)
-        //     .map(|i| {
-        //         (
-        //             NodeId::new(i).unwrap(),
-        //             NodeId::new(i + 1).unwrap(),
-        //             EdgeId::new(i).unwrap(),
-        //             GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //         )
-        //     })
-        //     .collect();
-        // let frozen = AdjacencyIndex::build(frozen_edges);
-        // let index = Arc::new(IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen)));
-        //
-        // // Add delta
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        // for i in 100..110 {
-        //     index.insert(
-        //         NodeId::new(i).unwrap(),
-        //         AdjacencyEntry::new(NodeId::new(i + 1).unwrap(), EdgeId::new(i).unwrap(), knows),
-        //     );
-        // }
-        //
-        // // Spawn reader thread
-        // let index_clone = Arc::clone(&index);
-        // let reader = thread::spawn(move || {
-        //     for _ in 0..1000 {
-        //         let guard = index_clone.get_adjacency(NodeId::new(0).unwrap());
-        //         let count = guard.iter().count();
-        //         // Should always see valid state (never partial)
-        //         assert!(count == 1 || count == 1); // Before or after compact
-        //     }
-        // });
-        //
-        // // Compact in main thread
-        // index.compact();
-        //
-        // reader.join().unwrap();
-        todo!("Use ArcSwap for atomic replacement");
+        // This test verifies readers see consistent state during compaction
+        use std::sync::Arc;
+        use std::thread;
+
+        let frozen_edges: Vec<_> = (0..100)
+            .map(|i| {
+                (
+                    NodeId::new(i).unwrap(),
+                    NodeId::new(i + 1).unwrap(),
+                    EdgeId::new(i).unwrap(),
+                    GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+                )
+            })
+            .collect();
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = Arc::new(IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen)));
+
+        // Add delta
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        for i in 100..110 {
+            index.insert(
+                NodeId::new(i).unwrap(),
+                AdjacencyEntry::new(NodeId::new(i + 1).unwrap(), EdgeId::new(i).unwrap(), knows),
+            );
+        }
+
+        // Spawn reader thread
+        let index_clone = Arc::clone(&index);
+        let reader = thread::spawn(move || {
+            for _ in 0..1000 {
+                let guard = index_clone.get_adjacency(NodeId::new(0).unwrap());
+                let count = guard.iter().count();
+                // Should always see valid state (never partial)
+                // Either 1 edge (before compaction) or 1 edge (after compaction, since node 0 has 1 edge)
+                assert_eq!(count, 1);
+            }
+        });
+
+        // Compact in main thread
+        index.compact();
+
+        reader.join().unwrap();
     }
 
-    // Step 4.11 RED: Test concurrent read during compaction
+    // Step 4.11 GREEN: Test concurrent read during compaction
     #[test]
-    #[ignore = "Phase 4.11 - not implemented yet"]
     fn test_concurrent_read_during_compaction() {
-        // // Verifies lock-free reads during compaction
-        // use std::sync::Arc;
-        // use std::thread;
-        //
-        // let frozen_edges: Vec<_> = (0..1000)
-        //     .map(|i| {
-        //         (
-        //             NodeId::new(i).unwrap(),
-        //             NodeId::new(i + 1).unwrap(),
-        //             EdgeId::new(i).unwrap(),
-        //             GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //         )
-        //     })
-        //     .collect();
-        // let frozen = AdjacencyIndex::build(frozen_edges);
-        // let index = Arc::new(IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen)));
-        //
-        // // Spawn multiple reader threads
-        // let readers: Vec<_> = (0..8)
-        //     .map(|_| {
-        //         let index_clone = Arc::clone(&index);
-        //         thread::spawn(move || {
-        //             for i in 0..1000 {
-        //                 let guard = index_clone.get_adjacency(NodeId::new(i % 1000).unwrap());
-        //                 assert!(guard.iter().count() > 0);
-        //             }
-        //         })
-        //     })
-        //     .collect();
-        //
-        // // Compact while readers are running
-        // index.compact();
-        //
-        // for reader in readers {
-        //     reader.join().unwrap();
-        // }
-        todo!("Verify lock-free reads during compaction");
+        // Verifies lock-free reads during compaction
+        use std::sync::Arc;
+        use std::thread;
+
+        let frozen_edges: Vec<_> = (0..1000)
+            .map(|i| {
+                (
+                    NodeId::new(i).unwrap(),
+                    NodeId::new(i + 1).unwrap(),
+                    EdgeId::new(i).unwrap(),
+                    GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+                )
+            })
+            .collect();
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = Arc::new(IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen)));
+
+        // Spawn multiple reader threads
+        let readers: Vec<_> = (0..8)
+            .map(|_| {
+                let index_clone = Arc::clone(&index);
+                thread::spawn(move || {
+                    for i in 0..1000 {
+                        let guard = index_clone.get_adjacency(NodeId::new(i % 1000).unwrap());
+                        assert!(guard.iter().count() > 0);
+                    }
+                })
+            })
+            .collect();
+
+        // Compact while readers are running
+        index.compact();
+
+        for reader in readers {
+            reader.join().unwrap();
+        }
     }
 }
 
@@ -554,6 +553,7 @@ mod phase4_compaction {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(unused_imports)] // Used by phase 5 tests when uncommented
 mod phase5_background_compaction {
     use super::*;
 
