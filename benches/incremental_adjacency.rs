@@ -6,7 +6,7 @@
 //! - Read (with delta): ~20-30ns (+15ns merge overhead)
 //! - Compaction: O(E log E), <10ms for 10K edges
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 // Will uncomment as we implement:
 // use criterion::{BenchmarkId, Throughput, black_box};
 // use gallifreydb::core::id::{EdgeId, NodeId};

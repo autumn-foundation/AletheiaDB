@@ -398,6 +398,85 @@ impl Default for IncrementalAdjacencyIndex {
     }
 }
 
+// ============================================================================
+// Background Compaction Scheduler - Phase 5
+// ============================================================================
+
+use std::sync::atomic::AtomicBool;
+use std::thread::{self, JoinHandle};
+
+/// Background compaction scheduler for automatic threshold monitoring.
+///
+/// Spawns a background thread that periodically checks compaction thresholds
+/// and triggers compaction when needed. Supports pause/resume and graceful
+/// shutdown with in-flight compaction completion.
+pub struct CompactionScheduler {
+    index: Arc<IncrementalAdjacencyIndex>,
+    running: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+}
+
+impl CompactionScheduler {
+    /// Create a new compaction scheduler for the given index.
+    pub fn new(index: Arc<IncrementalAdjacencyIndex>) -> Self {
+        Self {
+            index,
+            running: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Start the background compaction thread.
+    ///
+    /// The thread will periodically check thresholds and compact when needed.
+    /// Returns a join handle that can be used to wait for thread termination.
+    pub fn start(&self) -> JoinHandle<()> {
+        self.running.store(true, Ordering::SeqCst);
+
+        let index = Arc::clone(&self.index);
+        let running = Arc::clone(&self.running);
+        let paused = Arc::clone(&self.paused);
+
+        thread::spawn(move || {
+            let check_interval = index.config.check_interval;
+
+            while running.load(Ordering::SeqCst) {
+                // Check if paused
+                if !paused.load(Ordering::SeqCst) {
+                    // Check if compaction needed
+                    if index.should_compact() {
+                        index.compact();
+                    }
+                }
+
+                // Sleep for check interval
+                thread::sleep(check_interval);
+            }
+        })
+    }
+
+    /// Pause background compaction.
+    ///
+    /// The background thread will continue running but will not trigger
+    /// compaction until `resume()` is called.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+    }
+
+    /// Resume background compaction after pause.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+    }
+
+    /// Shutdown the background compaction thread.
+    ///
+    /// Sets the running flag to false, which causes the background thread
+    /// to exit after completing any in-flight compaction.
+    pub fn shutdown(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
