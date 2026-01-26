@@ -1265,6 +1265,11 @@ impl GallifreyDB {
             );
         }
 
+        // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
+        db.historical
+            .write()
+            .set_temporal_indexes(Arc::clone(&db.temporal_indexes));
+
         Ok(db)
     }
 
@@ -1302,7 +1307,7 @@ impl GallifreyDB {
         let wal = ConcurrentWalSystem::new(wal_system_config)?;
         let wal = Arc::new(wal);
 
-        Ok(GallifreyDB {
+        let db = GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::with_config(anchor_config))),
             temporal_indexes: Arc::new(TemporalIndexes::new()),
@@ -1319,7 +1324,14 @@ impl GallifreyDB {
             persistence_manager: None,
             persistence_tracker: None,
             persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        })
+        };
+
+        // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
+        db.historical
+            .write()
+            .set_temporal_indexes(Arc::clone(&db.temporal_indexes));
+
+        Ok(db)
     }
 
     /// Get the default durability mode for this database.
@@ -3224,6 +3236,16 @@ impl GallifreyDB {
     #[doc(hidden)]
     pub fn __test_historical_storage(&self) -> &Arc<RwLock<HistoricalStorage>> {
         &self.historical
+    }
+
+    /// Provide test-only access to temporal indexes for performance testing.
+    ///
+    /// This allows tests to verify that temporal indexes are populated correctly
+    /// and can query them directly. This is marked as `#[doc(hidden)]` and
+    /// should only be used in tests.
+    #[doc(hidden)]
+    pub fn __test_temporal_indexes(&self) -> &Arc<TemporalIndexes> {
+        &self.temporal_indexes
     }
 
     /// Get adaptive over-fetch statistics for a label (test-only helper).
