@@ -5,10 +5,8 @@
 
 use gallifreydb::core::id::{EdgeId, NodeId};
 use gallifreydb::core::interning::GLOBAL_INTERNER;
-// Will uncomment as we implement:
-// use gallifreydb::index::incremental_adjacency::{
-//     IncrementalAdjacencyIndex, IncrementalConfig, Tombstone,
-// };
+use gallifreydb::index::adjacency::AdjacencyEntry;
+use gallifreydb::index::incremental_adjacency::IncrementalAdjacencyIndex;
 
 // ============================================================================
 // Phase 1: Core Data Structure Tests
@@ -20,86 +18,78 @@ mod phase1_core_structure {
 
     // Step 1.1 RED: Test new() creates empty index
     #[test]
-    #[ignore = "Phase 1.1 - not implemented yet"]
     fn test_new_creates_empty_index() {
-        // let index = IncrementalAdjacencyIndex::new();
-        // assert_eq!(index.frozen_edge_count(), 0);
-        // assert_eq!(index.delta_edge_count(), 0);
-        // assert_eq!(index.tombstone_count(), 0);
-        todo!("Implement IncrementalAdjacencyIndex::new()");
+        let index = IncrementalAdjacencyIndex::new();
+        assert_eq!(index.frozen_edge_count(), 0);
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.tombstone_count(), 0);
     }
 
     // Step 1.3 RED: Test insert single edge
     #[test]
-    #[ignore = "Phase 1.3 - not implemented yet"]
     fn test_insert_single_edge() {
-        // let index = IncrementalAdjacencyIndex::new();
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        //
-        // let source = NodeId::new(0).unwrap();
-        // let target = NodeId::new(1).unwrap();
-        // let edge_id = EdgeId::new(0).unwrap();
-        //
-        // let entry = AdjacencyEntry::new(target, edge_id, knows);
-        // index.insert(source, entry);
-        //
-        // assert_eq!(index.delta_edge_count(), 1);
-        // assert_eq!(index.frozen_edge_count(), 0);
-        todo!("Implement insert()");
+        let index = IncrementalAdjacencyIndex::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        let source = NodeId::new(0).unwrap();
+        let target = NodeId::new(1).unwrap();
+        let edge_id = EdgeId::new(0).unwrap();
+
+        let entry = AdjacencyEntry::new(target, edge_id, knows);
+        index.insert(source, entry);
+
+        assert_eq!(index.delta_edge_count(), 1);
+        assert_eq!(index.frozen_edge_count(), 0);
     }
 
     // Step 1.5 RED: Test insert multiple edges same node
     #[test]
-    #[ignore = "Phase 1.5 - not implemented yet"]
     fn test_insert_multiple_edges_same_node() {
-        // let index = IncrementalAdjacencyIndex::new();
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        // let source = NodeId::new(0).unwrap();
-        //
-        // // Insert 3 edges from same source
-        // for i in 1..=3 {
-        //     let target = NodeId::new(i).unwrap();
-        //     let edge_id = EdgeId::new(i - 1).unwrap();
-        //     let entry = AdjacencyEntry::new(target, edge_id, knows);
-        //     index.insert(source, entry);
-        // }
-        //
-        // assert_eq!(index.delta_edge_count(), 3);
-        todo!("Implement multi-edge insert");
+        let index = IncrementalAdjacencyIndex::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let source = NodeId::new(0).unwrap();
+
+        // Insert 3 edges from same source
+        for i in 1..=3 {
+            let target = NodeId::new(i).unwrap();
+            let edge_id = EdgeId::new(i - 1).unwrap();
+            let entry = AdjacencyEntry::new(target, edge_id, knows);
+            index.insert(source, entry);
+        }
+
+        assert_eq!(index.delta_edge_count(), 3);
     }
 
     // Step 1.7 RED: Test concurrent insert
     #[test]
-    #[ignore = "Phase 1.7 - not implemented yet"]
     fn test_insert_concurrent() {
-        // use std::sync::Arc;
-        // use std::thread;
-        //
-        // let index = Arc::new(IncrementalAdjacencyIndex::new());
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        //
-        // let handles: Vec<_> = (0..8)
-        //     .map(|thread_id| {
-        //         let index_clone = Arc::clone(&index);
-        //         thread::spawn(move || {
-        //             for i in 0..100 {
-        //                 let source = NodeId::new((thread_id * 100 + i) as u64).unwrap();
-        //                 let target = NodeId::new((source.as_u64() + 1)).unwrap();
-        //                 let edge_id = EdgeId::new((thread_id * 100 + i) as u64).unwrap();
-        //                 let entry = AdjacencyEntry::new(target, edge_id, knows);
-        //                 index_clone.insert(source, entry);
-        //             }
-        //         })
-        //     })
-        //     .collect();
-        //
-        // for handle in handles {
-        //     handle.join().unwrap();
-        // }
-        //
-        // // Should have 8 threads * 100 edges = 800 edges
-        // assert_eq!(index.delta_edge_count(), 800);
-        todo!("Verify DashMap concurrency");
+        use std::sync::Arc;
+        use std::thread;
+
+        let index = Arc::new(IncrementalAdjacencyIndex::new());
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|thread_id| {
+                let index_clone = Arc::clone(&index);
+                thread::spawn(move || {
+                    for i in 0..100 {
+                        let source = NodeId::new((thread_id * 100 + i) as u64).unwrap();
+                        let target = NodeId::new((source.as_u64() + 1)).unwrap();
+                        let edge_id = EdgeId::new((thread_id * 100 + i) as u64).unwrap();
+                        let entry = AdjacencyEntry::new(target, edge_id, knows);
+                        index_clone.insert(source, entry);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should have 8 threads * 100 edges = 800 edges
+        assert_eq!(index.delta_edge_count(), 800);
     }
 }
 
