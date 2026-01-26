@@ -17,6 +17,7 @@ use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
 use crate::storage::observer::{Observer, StorageEvent, notify_observers};
 use crate::storage::version::{
     AnchorConfig, EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData,
+    VersionMetadata,
 };
 use crate::utils::error::{Result, StorageError, TemporalError};
 use quick_cache::sync::Cache;
@@ -549,8 +550,14 @@ impl HistoricalStorage {
 
             if versions_since_anchor >= self.config.anchor_interval as usize {
                 // Create anchor with link to previous version
-                let mut anchor =
-                    NodeVersion::new_anchor(version_id, node_id, temporal, label, properties);
+                let mut anchor = NodeVersion::new_anchor(
+                    version_id,
+                    node_id,
+                    temporal,
+                    label,
+                    properties,
+                    VersionMetadata::default_for_existing(),
+                );
                 anchor.prev_version = Some(prev_id);
                 // Reset counter to 0 after creating anchor
                 self.node_versions_since_anchor.insert(node_id, 0);
@@ -569,13 +576,21 @@ impl HistoricalStorage {
                     &old_properties,
                     &properties,
                     prev_id,
+                    VersionMetadata::default_for_existing(),
                 )
             }
         } else {
             // First version is always an anchor
             // Initialize counter to 0
             self.node_versions_since_anchor.insert(node_id, 0);
-            NodeVersion::new_anchor(version_id, node_id, temporal, label, properties)
+            NodeVersion::new_anchor(
+                version_id,
+                node_id,
+                temporal,
+                label,
+                properties,
+                VersionMetadata::default_for_existing(),
+            )
         };
 
         // Handle pre-anchor hook (BEFORE storing)
@@ -730,7 +745,14 @@ impl HistoricalStorage {
             if versions_since_anchor >= self.config.anchor_interval as usize {
                 // Create anchor with link to previous version
                 let mut anchor = EdgeVersion::new_anchor(
-                    version_id, edge_id, temporal, label, source, target, properties,
+                    version_id,
+                    edge_id,
+                    temporal,
+                    label,
+                    source,
+                    target,
+                    properties,
+                    VersionMetadata::default_for_existing(),
                 );
                 anchor.prev_version = Some(prev_id);
                 // Reset counter to 0 after creating anchor
@@ -752,6 +774,7 @@ impl HistoricalStorage {
                     &old_properties,
                     &properties,
                     prev_id,
+                    VersionMetadata::default_for_existing(),
                 )
             }
         } else {
@@ -759,7 +782,14 @@ impl HistoricalStorage {
             // Initialize counter to 0
             self.edge_versions_since_anchor.insert(edge_id, 0);
             EdgeVersion::new_anchor(
-                version_id, edge_id, temporal, label, source, target, properties,
+                version_id,
+                edge_id,
+                temporal,
+                label,
+                source,
+                target,
+                properties,
+                VersionMetadata::default_for_existing(),
             )
         };
 

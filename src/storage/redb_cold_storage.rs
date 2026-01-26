@@ -40,6 +40,8 @@ use crate::storage::cold_storage::{
     decode_edge_version, decode_node_version, encode_edge_version, encode_node_version,
 };
 use crate::storage::version::{EdgeVersion, NodeVersion};
+#[cfg(test)]
+use crate::storage::version::VersionMetadata;
 use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
 use redb::ReadableTable;
@@ -871,6 +873,7 @@ mod tests {
             BiTemporalInterval::current(1000.into()),
             GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
+            VersionMetadata::default_for_existing(),
         )
     }
 
@@ -885,6 +888,7 @@ mod tests {
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
             properties,
+            VersionMetadata::default_for_existing(),
         )
     }
 
@@ -1181,6 +1185,7 @@ mod tests {
             BiTemporalInterval::current(1000.into()),
             GLOBAL_INTERNER.intern("Person").unwrap(),
             props,
+            VersionMetadata::default_for_existing(),
         );
 
         storage.store_node_version(&version).unwrap();
@@ -1266,6 +1271,7 @@ mod tests {
             BiTemporalInterval::current(2000.into()),
             GLOBAL_INTERNER.intern("Person").unwrap(),
             props2,
+            VersionMetadata::default_for_existing(),
         );
         storage.store_node_version(&version2).unwrap();
 

@@ -39,6 +39,8 @@
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::storage::cold_storage::ColdStorage;
 use crate::storage::version::{EdgeVersion, NodeVersion};
+#[cfg(test)]
+use crate::storage::version::VersionMetadata;
 use crate::storage::wal::LSN;
 use crate::storage::wal::flush_coordinator::FlushCoordinator;
 use crate::utils::error::Result;
@@ -1319,6 +1321,7 @@ mod tests {
             BiTemporalInterval::current(1000.into()),
             GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
+            VersionMetadata::default_for_existing(),
         )
     }
 
@@ -1962,6 +1965,7 @@ mod tests {
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
             properties,
+            VersionMetadata::default_for_existing(),
         )
     }
 
@@ -1980,6 +1984,7 @@ mod tests {
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
             properties,
+            VersionMetadata::default_for_existing(),
         )
     }
 

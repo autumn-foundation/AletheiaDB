@@ -46,6 +46,8 @@
 use crate::core::id::VersionId;
 use crate::storage::cold_storage::{ColdStorage, ColdStorageStats};
 use crate::storage::version::{EdgeVersion, NodeVersion};
+#[cfg(test)]
+use crate::storage::version::VersionMetadata;
 use crate::utils::error::Result;
 use parking_lot::Mutex;
 use quick_cache::sync::Cache;
@@ -547,6 +549,7 @@ mod tests {
             BiTemporalInterval::current(1000.into()),
             GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
+            VersionMetadata::default_for_existing(),
         )
     }
 
@@ -562,6 +565,7 @@ mod tests {
                 BiTemporalInterval::current(1000.into()),
                 GLOBAL_INTERNER.intern("Test").unwrap(),
                 props,
+                VersionMetadata::default_for_existing(),
             )
         };
         versions.push(v1);
@@ -579,6 +583,7 @@ mod tests {
                 &old_props,
                 &new_props,
                 VersionId::new(i - 1).unwrap(),
+                VersionMetadata::default_for_existing(),
             );
             versions.push(v);
         }

@@ -9,7 +9,11 @@ use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyValue;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
-use crate::storage::version::{EdgeVersion, NodeVersion, PropertyDelta, VersionData};
+use crate::storage::version::{
+    EdgeVersion, NodeVersion, PropertyDelta, VersionData,
+};
+#[cfg(test)]
+use crate::storage::version::VersionMetadata;
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{EdgeVersionEntry, NodeVersionEntry, PersistedVersionType, TemporalIndexData};
@@ -257,6 +261,7 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
         data,
         next_version: None,
         prev_version: None,
+        metadata: crate::storage::version::VersionMetadata::default_for_existing(),
     })
 }
 
@@ -353,6 +358,7 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
         data,
         next_version: None,
         prev_version: None,
+        metadata: crate::storage::version::VersionMetadata::default_for_existing(),
     })
 }
 
@@ -569,6 +575,7 @@ mod tests {
             },
             next_version: None,
             prev_version: None,
+            metadata: VersionMetadata::default_for_existing(),
         };
 
         let entry = convert_node_version(&version).unwrap();
@@ -614,6 +621,7 @@ mod tests {
             data: VersionData::Delta { delta },
             next_version: None,
             prev_version: Some(VersionId::new(1).unwrap()),
+            metadata: VersionMetadata::default_for_existing(),
         };
 
         let entry = convert_node_version(&version).unwrap();
@@ -657,6 +665,7 @@ mod tests {
             },
             next_version: None,
             prev_version: None,
+            metadata: VersionMetadata::default_for_existing(),
         };
 
         let entry = convert_edge_version(&version).unwrap();
@@ -897,6 +906,7 @@ mod tests {
             data: VersionData::Delta { delta },
             next_version: None,
             prev_version: Some(VersionId::new(1).unwrap()),
+            metadata: VersionMetadata::default_for_existing(),
         };
 
         // Should succeed - Full deltas can be persisted
@@ -935,6 +945,7 @@ mod tests {
             data: VersionData::Delta { delta },
             next_version: None,
             prev_version: Some(VersionId::new(1).unwrap()),
+            metadata: VersionMetadata::default_for_existing(),
         };
 
         // Should FAIL - Sparse deltas cannot be persisted without materialization
@@ -1074,6 +1085,7 @@ mod tests {
             data: VersionData::Delta { delta },
             next_version: None,
             prev_version: Some(VersionId::new(1).unwrap()),
+            metadata: VersionMetadata::default_for_existing(),
         };
 
         // Should succeed - delta is now materialized

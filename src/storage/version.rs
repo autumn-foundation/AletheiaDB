@@ -673,6 +673,11 @@ pub struct NodeVersion {
     pub next_version: Option<VersionId>,
     /// Link to the previous version (for reverse traversal)
     pub prev_version: Option<VersionId>,
+    /// Transaction metadata for Snapshot Isolation (Issue #238)
+    ///
+    /// This embeds the commit timestamp directly in the version, following
+    /// the HyPer/TiDB approach to eliminate the unbounded TxVisibilityManager.committed map.
+    pub metadata: VersionMetadata,
 }
 
 impl NodeVersion {
@@ -683,6 +688,7 @@ impl NodeVersion {
         temporal: BiTemporalInterval,
         label: InternedString,
         properties: PropertyMap,
+        metadata: VersionMetadata,
     ) -> Self {
         NodeVersion {
             id,
@@ -692,10 +698,12 @@ impl NodeVersion {
             data: VersionData::anchor(properties),
             next_version: None,
             prev_version: None,
+            metadata,
         }
     }
 
     /// Create a new delta version (incremental change).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_delta(
         id: VersionId,
         node_id: NodeId,
@@ -704,6 +712,7 @@ impl NodeVersion {
         old_properties: &PropertyMap,
         new_properties: &PropertyMap,
         prev_version: VersionId,
+        metadata: VersionMetadata,
     ) -> Self {
         NodeVersion {
             id,
@@ -713,6 +722,7 @@ impl NodeVersion {
             data: VersionData::delta_from_diff(old_properties, new_properties),
             next_version: None,
             prev_version: Some(prev_version),
+            metadata,
         }
     }
 
@@ -768,10 +778,16 @@ pub struct EdgeVersion {
     pub next_version: Option<VersionId>,
     /// Link to the previous version
     pub prev_version: Option<VersionId>,
+    /// Transaction metadata for Snapshot Isolation (Issue #238)
+    ///
+    /// This embeds the commit timestamp directly in the version, following
+    /// the HyPer/TiDB approach to eliminate the unbounded TxVisibilityManager.committed map.
+    pub metadata: VersionMetadata,
 }
 
 impl EdgeVersion {
     /// Create a new anchor version (full snapshot).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_anchor(
         id: VersionId,
         edge_id: EdgeId,
@@ -780,6 +796,7 @@ impl EdgeVersion {
         source: NodeId,
         target: NodeId,
         properties: PropertyMap,
+        metadata: VersionMetadata,
     ) -> Self {
         EdgeVersion {
             id,
@@ -791,6 +808,7 @@ impl EdgeVersion {
             data: VersionData::anchor(properties),
             next_version: None,
             prev_version: None,
+            metadata,
         }
     }
 
@@ -806,6 +824,7 @@ impl EdgeVersion {
         old_properties: &PropertyMap,
         new_properties: &PropertyMap,
         prev_version: VersionId,
+        metadata: VersionMetadata,
     ) -> Self {
         EdgeVersion {
             id,
@@ -817,6 +836,7 @@ impl EdgeVersion {
             data: VersionData::delta_from_diff(old_properties, new_properties),
             next_version: None,
             prev_version: Some(prev_version),
+            metadata,
         }
     }
 
@@ -1051,6 +1071,7 @@ mod tests {
                 .intern("Person")
                 .unwrap(),
             props,
+            VersionMetadata::default_for_existing(),
         );
 
         assert!(version.is_anchor());
@@ -1078,6 +1099,7 @@ mod tests {
             &old_props,
             &new_props,
             VersionId::new(1).unwrap(),
+            VersionMetadata::default_for_existing(),
         );
 
         assert!(!version.is_anchor());
@@ -1158,6 +1180,7 @@ mod tests {
             temporal,
             GLOBAL_INTERNER.intern("Person").unwrap(),
             props,
+            VersionMetadata::default_for_existing(),
         );
 
         let size = version.estimated_size();
@@ -1184,6 +1207,7 @@ mod tests {
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
             props,
+            VersionMetadata::default_for_existing(),
         );
 
         let size = version.estimated_size();
@@ -1208,6 +1232,7 @@ mod tests {
             &old_props,
             &new_props,
             VersionId::new(1).unwrap(),
+            VersionMetadata::default_for_existing(),
         );
 
         let size = version.estimated_size();
@@ -1913,5 +1938,152 @@ mod tests {
                 final_arc.as_ref() as *const [f32]
             ));
         }
+    }
+
+    // ========================================================================
+    // RED Phase Tests: Version Metadata Embedding (Issue #238)
+    // ========================================================================
+    //
+    // These tests verify that NodeVersion and EdgeVersion have embedded
+    // VersionMetadata, aligning with Issue #238's goal of eliminating the
+    // unbounded TxVisibilityManager.committed map.
+
+    #[test]
+    fn test_node_version_has_metadata() {
+        use crate::api::transaction::types::TxId;
+
+        let metadata = VersionMetadata::new(TxId::new(42), 1000.into());
+        let temporal = BiTemporalInterval::current(1000.into());
+
+        let version = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            NodeId::new(10).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            PropertyMapBuilder::new().insert("name", "Alice").build(),
+            metadata,
+        );
+
+        // Verify metadata is stored
+        assert_eq!(version.metadata.created_by_tx, TxId::new(42));
+        assert_eq!(version.metadata.commit_timestamp, Some(1000.into()));
+    }
+
+    #[test]
+    fn test_node_version_uncommitted_metadata() {
+        use crate::api::transaction::types::TxId;
+
+        let metadata = VersionMetadata::uncommitted(TxId::new(99));
+        let temporal = BiTemporalInterval::current(2000.into());
+
+        let version = NodeVersion::new_anchor(
+            VersionId::new(2).unwrap(),
+            NodeId::new(20).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("Product").unwrap(),
+            PropertyMapBuilder::new().insert("price", 42i64).build(),
+            metadata,
+        );
+
+        // Verify uncommitted metadata
+        assert_eq!(version.metadata.created_by_tx, TxId::new(99));
+        assert_eq!(version.metadata.commit_timestamp, None);
+    }
+
+    #[test]
+    fn test_edge_version_has_metadata() {
+        use crate::api::transaction::types::TxId;
+
+        let metadata = VersionMetadata::new(TxId::new(123), 5000.into());
+        let temporal = BiTemporalInterval::current(5000.into());
+
+        let version = EdgeVersion::new_anchor(
+            VersionId::new(3).unwrap(),
+            EdgeId::new(30).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+            metadata,
+        );
+
+        // Verify metadata is stored
+        assert_eq!(version.metadata.created_by_tx, TxId::new(123));
+        assert_eq!(version.metadata.commit_timestamp, Some(5000.into()));
+    }
+
+    #[test]
+    fn test_node_version_delta_with_metadata() {
+        use crate::api::transaction::types::TxId;
+
+        let old_props = PropertyMapBuilder::new().insert("version", 1i64).build();
+        let new_props = PropertyMapBuilder::new().insert("version", 2i64).build();
+        let metadata = VersionMetadata::new(TxId::new(55), 3000.into());
+        let temporal = BiTemporalInterval::current(3000.into());
+
+        let version = NodeVersion::new_delta(
+            VersionId::new(4).unwrap(),
+            NodeId::new(40).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("Counter").unwrap(),
+            &old_props,
+            &new_props,
+            VersionId::new(3).unwrap(),
+            metadata,
+        );
+
+        // Verify delta version has metadata
+        assert_eq!(version.metadata.created_by_tx, TxId::new(55));
+        assert_eq!(version.metadata.commit_timestamp, Some(3000.into()));
+        assert!(version.is_delta());
+    }
+
+    #[test]
+    fn test_edge_version_delta_with_metadata() {
+        use crate::api::transaction::types::TxId;
+
+        let old_props = PropertyMapBuilder::new().insert("weight", 1.0f64).build();
+        let new_props = PropertyMapBuilder::new().insert("weight", 2.0f64).build();
+        let metadata = VersionMetadata::new(TxId::new(77), 4000.into());
+        let temporal = BiTemporalInterval::current(4000.into());
+
+        let version = EdgeVersion::new_delta(
+            VersionId::new(5).unwrap(),
+            EdgeId::new(50).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("RELATED_TO").unwrap(),
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            &old_props,
+            &new_props,
+            VersionId::new(4).unwrap(),
+            metadata,
+        );
+
+        // Verify delta version has metadata
+        assert_eq!(version.metadata.created_by_tx, TxId::new(77));
+        assert_eq!(version.metadata.commit_timestamp, Some(4000.into()));
+        assert!(version.is_delta());
+    }
+
+    #[test]
+    fn test_version_metadata_default_migration() {
+        // Test that default metadata works for migration scenarios
+        let metadata = VersionMetadata::default_for_existing();
+        let temporal = BiTemporalInterval::current(0.into());
+
+        let version = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            NodeId::new(1).unwrap(),
+            temporal,
+            GLOBAL_INTERNER.intern("Legacy").unwrap(),
+            PropertyMapBuilder::new().build(),
+            metadata,
+        );
+
+        // Default metadata should have TxId(0) and commit_timestamp Some(0)
+        assert_eq!(version.metadata.created_by_tx.as_u64(), 0);
+        assert_eq!(version.metadata.commit_timestamp.unwrap().wallclock(), 0);
     }
 }

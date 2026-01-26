@@ -40,6 +40,8 @@
 
 use crate::core::id::VersionId;
 use crate::storage::version::{EdgeVersion, NodeVersion};
+#[cfg(test)]
+use crate::storage::version::VersionMetadata;
 use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
 use std::path::{Path, PathBuf};
@@ -1092,6 +1094,7 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
             .map(VersionId::new)
             .transpose()
             .map_err(|e| StorageError::corruption(format!("Invalid prev version ID: {}", e)))?,
+        metadata: crate::storage::version::VersionMetadata::default_for_existing(),
     })
 }
 
@@ -1169,6 +1172,7 @@ pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
             .map(VersionId::new)
             .transpose()
             .map_err(|e| StorageError::corruption(format!("Invalid prev version ID: {}", e)))?,
+        metadata: crate::storage::version::VersionMetadata::default_for_existing(),
     })
 }
 
@@ -1368,6 +1372,7 @@ mod tests {
             BiTemporalInterval::current(1000.into()),
             GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
+            VersionMetadata::default_for_existing(),
         )
     }
 
@@ -1382,6 +1387,7 @@ mod tests {
             NodeId::new(1).unwrap(),
             NodeId::new(2).unwrap(),
             properties,
+            VersionMetadata::default_for_existing(),
         )
     }
 
@@ -1510,6 +1516,7 @@ mod tests {
             BiTemporalInterval::current(1000.into()),
             GLOBAL_INTERNER.intern("Person").unwrap(),
             props,
+            VersionMetadata::default_for_existing(),
         );
 
         storage.store_node_version(&version).unwrap();
@@ -1645,6 +1652,7 @@ mod tests {
             BiTemporalInterval::current(2000.into()),
             GLOBAL_INTERNER.intern("Person").unwrap(),
             props2,
+            VersionMetadata::default_for_existing(),
         );
         storage.store_node_version(&version2).unwrap();
 
@@ -1703,6 +1711,7 @@ mod tests {
             &old_props,
             &new_props,
             VersionId::new(1).unwrap(),
+            VersionMetadata::default_for_existing(),
         );
 
         let encoded = encode_node_version(&version);
@@ -1726,6 +1735,7 @@ mod tests {
             BiTemporalInterval::current(1000.into()),
             GLOBAL_INTERNER.intern("Document").unwrap(),
             props,
+            VersionMetadata::default_for_existing(),
         );
 
         let encoded = encode_node_version(&version);

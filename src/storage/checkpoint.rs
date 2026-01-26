@@ -980,6 +980,7 @@ impl CheckpointManager {
                     data,
                     next_version: None,
                     prev_version: None,
+                    metadata: crate::storage::version::VersionMetadata::default_for_existing(),
                 };
 
                 historical.insert_restored_node_version(version)?;
@@ -1050,6 +1051,7 @@ impl CheckpointManager {
                     data,
                     next_version: None,
                     prev_version: None,
+                    metadata: crate::storage::version::VersionMetadata::default_for_existing(),
                 };
 
                 historical.insert_restored_edge_version(version)?;
@@ -3029,6 +3031,7 @@ mod tests {
             BiTemporalInterval::current(time::now()),
             GLOBAL_INTERNER.intern("Test").unwrap(),
             PropertyMapBuilder::new().build(),
+            crate::storage::version::VersionMetadata::default_for_existing(),
         );
         cold_storage.store_batch_with_lsn(&[node], &[], LSN(50))?;
 
@@ -3097,6 +3100,7 @@ mod tests {
             BiTemporalInterval::current(time::now()),
             GLOBAL_INTERNER.intern("Test").unwrap(),
             PropertyMapBuilder::new().build(),
+            crate::storage::version::VersionMetadata::default_for_existing(),
         );
         cold_storage.store_batch_with_lsn(&[node], &[], LSN(100))?;
 
@@ -3146,6 +3150,7 @@ mod tests {
             BiTemporalInterval::current(time::now()),
             GLOBAL_INTERNER.intern("Test").unwrap(),
             PropertyMapBuilder::new().build(),
+            crate::storage::version::VersionMetadata::default_for_existing(),
         );
         cold_storage.store_batch_with_lsn(&[node], &[], LSN(75))?;
 
@@ -3209,6 +3214,7 @@ mod tests {
             BiTemporalInterval::current(time::now()),
             GLOBAL_INTERNER.intern("Test").unwrap(),
             PropertyMapBuilder::new().build(),
+            crate::storage::version::VersionMetadata::default_for_existing(),
         );
         cold_storage.store_batch_with_lsn(&[node], &[], LSN(1000))?;
 
