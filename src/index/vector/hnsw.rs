@@ -588,10 +588,25 @@ impl VectorIndex for HnswIndex {
         // Use entry API for atomic check-and-update to prevent race conditions
         let key = match self.id_mapping.entry(id) {
             dashmap::mapref::entry::Entry::Occupied(entry) => {
-                // Re-adding existing node: remove old vector from usearch
+                // Re-adding existing node: remove old vector from usearch if it exists
+                // Optimization (Issue #207): Only call remove() if key actually exists in usearch.
+                // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
                 let existing_key = *entry.get();
                 let index = self.inner.write();
-                let _ = index.remove(existing_key); // Ignore if not found
+
+                // Check if key exists before removing to avoid wasteful FFI call
+                if index.contains(existing_key) {
+                    // Key exists in usearch - remove it before re-adding
+                    // (usearch requires explicit remove before add with same key)
+                    index.remove(existing_key).map_err(|e| {
+                        Error::Vector(VectorError::IndexError(format!(
+                            "Failed to remove existing vector: {}",
+                            e
+                        )))
+                    })?;
+                }
+                // Note: If key doesn't exist, we skip remove() and proceed directly to add()
+                // This is safe because add() with a non-existent key will succeed
                 drop(index);
                 existing_key
             }

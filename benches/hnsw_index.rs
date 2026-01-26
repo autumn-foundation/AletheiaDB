@@ -418,12 +418,62 @@ fn bench_filter_vs_index_size(c: &mut Criterion) {
 // Benchmark Groups
 // ============================================================================
 
+// ============================================================================
+// Benchmark: Vector Updates (Issue #207)
+// ============================================================================
+
+/// Benchmark vector updates to validate Issue #207 optimization.
+///
+/// This benchmark measures the performance of updating existing vectors,
+/// which exercises the optimized path that checks if a key exists before
+/// calling remove().
+fn bench_vector_updates(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vector_updates");
+
+    for &update_count in &[10, 50, 100, 500] {
+        let dimensions = 384;
+        let config = HnswConfig::new(dimensions, DistanceMetric::Cosine).with_capacity(1000);
+        let index = HnswIndex::new(config).expect("Failed to create index");
+
+        // Pre-populate with initial vectors
+        for i in 0..update_count {
+            let node_id = NodeId::new(i as u64).expect("Valid node ID");
+            let vector = generate_random_vector(dimensions);
+            index
+                .add(node_id, &vector)
+                .expect("Failed to add initial vector");
+        }
+
+        // Generate update vectors
+        let update_vectors = generate_random_vectors(update_count, dimensions);
+
+        group.throughput(Throughput::Elements(update_count as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("update_count", update_count),
+            &update_count,
+            |b, &count| {
+                b.iter(|| {
+                    // Update all vectors
+                    for (i, vector) in update_vectors.iter().enumerate().take(count) {
+                        let node_id = NodeId::new(i as u64).expect("Valid node ID");
+                        index.add(black_box(node_id), black_box(vector)).ok();
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     name = index_ops;
     config = common::configure_criterion();
     targets = bench_index_creation,
     bench_vector_addition_single,
     bench_vector_addition_batch,
+    bench_vector_updates,
 );
 
 criterion_group!(
