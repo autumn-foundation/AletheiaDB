@@ -4,6 +4,7 @@ mod common;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::{
+    interning::GLOBAL_INTERNER,
     property::PropertyMapBuilder,
     temporal::{BiTemporalInterval, time},
 };
@@ -30,7 +31,7 @@ fn bench_checkpoint_creation(c: &mut Criterion) {
             for i in 0..*node_count {
                 current
                     .create_node(
-                        "Person",
+                        GLOBAL_INTERNER.intern("Person").unwrap(),
                         PropertyMapBuilder::new().insert("id", i as i64).build(),
                     )
                     .unwrap();
@@ -122,7 +123,7 @@ fn bench_recovery(c: &mut Criterion) {
             for i in 0..*wal_entries {
                 let operation = WalOperation::CreateNode {
                     node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
-                    label: "Person".to_string(),
+                    label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
@@ -152,7 +153,7 @@ fn bench_recovery(c: &mut Criterion) {
             for i in *wal_entries..(*wal_entries + 100) {
                 let operation = WalOperation::CreateNode {
                     node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
-                    label: "Person".to_string(),
+                    label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };

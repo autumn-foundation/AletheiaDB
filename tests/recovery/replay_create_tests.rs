@@ -39,7 +39,7 @@ fn test_replay_create_node_basic() -> Result<()> {
 
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(timestamp),
     })?;
@@ -84,7 +84,7 @@ fn test_replay_create_node_with_properties() -> Result<()> {
 
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "User".to_string(),
+        label: GLOBAL_INTERNER.intern("User").unwrap(),
         properties: properties.clone(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -134,7 +134,7 @@ fn test_replay_create_node_with_vector() -> Result<()> {
 
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Document".to_string(),
+        label: GLOBAL_INTERNER.intern("Document").unwrap(),
         properties: properties.clone(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -177,14 +177,14 @@ fn test_replay_create_edge_basic() -> Result<()> {
     // Create source and target nodes
     wal.append(WalOperation::CreateNode {
         node_id: source_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: target_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -238,14 +238,14 @@ fn test_replay_create_edge_with_properties() -> Result<()> {
     // Create nodes first
     wal.append(WalOperation::CreateNode {
         node_id: source_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: target_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;

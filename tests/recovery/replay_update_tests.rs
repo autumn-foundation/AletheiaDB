@@ -40,7 +40,7 @@ fn test_replay_update_node_basic() -> Result<()> {
     // Create node
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
         temporal: BiTemporalInterval::current(timestamp1),
     })?;
@@ -49,7 +49,7 @@ fn test_replay_update_node_basic() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(2).unwrap(),
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new()
             .insert("name", "Alice")
             .insert("age", 30_i64)
@@ -100,7 +100,7 @@ fn test_replay_update_node_label_change() -> Result<()> {
     // Create node with "Person" label
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -109,7 +109,7 @@ fn test_replay_update_node_label_change() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(2).unwrap(),
-        label: "User".to_string(),
+        label: GLOBAL_INTERNER.intern("User").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -146,7 +146,7 @@ fn test_replay_update_node_with_vector() -> Result<()> {
     // Create node with initial embedding
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Document".to_string(),
+        label: GLOBAL_INTERNER.intern("Document").unwrap(),
         properties: PropertyMapBuilder::new()
             .insert_vector("embedding", &embedding_v1)
             .build(),
@@ -157,7 +157,7 @@ fn test_replay_update_node_with_vector() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(2).unwrap(),
-        label: "Document".to_string(),
+        label: GLOBAL_INTERNER.intern("Document").unwrap(),
         properties: PropertyMapBuilder::new()
             .insert_vector("embedding", &embedding_v2)
             .build(),
@@ -256,14 +256,14 @@ fn test_replay_update_edge_basic() -> Result<()> {
     // Create nodes
     wal.append(WalOperation::CreateNode {
         node_id: source_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: target_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -333,14 +333,14 @@ fn test_replay_update_edge_label_change() -> Result<()> {
     // Create nodes
     wal.append(WalOperation::CreateNode {
         node_id: source_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: target_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;

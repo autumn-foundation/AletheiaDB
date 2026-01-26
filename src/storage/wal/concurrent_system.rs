@@ -700,6 +700,7 @@ impl Drop for ConcurrentWalSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GLOBAL_INTERNER;
     use crate::core::id::NodeId;
     use crate::core::property::PropertyMap;
     use crate::core::temporal::{BiTemporalInterval, time};
@@ -708,7 +709,7 @@ mod tests {
     fn create_test_operation(id: u64) -> WalOperation {
         WalOperation::CreateNode {
             node_id: NodeId::new(id).unwrap(),
-            label: format!("Node{}", id),
+            label: GLOBAL_INTERNER.intern(&format!("Node{}", id)).unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         }

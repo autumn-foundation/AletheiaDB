@@ -16,6 +16,7 @@ use gallifreydb::{
     core::{
         PropertyMapBuilder,
         id::NodeId,
+        interning::GLOBAL_INTERNER,
         temporal::{BiTemporalInterval, time},
     },
     storage::wal::{
@@ -44,7 +45,7 @@ fn create_test_operations(count: usize) -> Vec<WalOperation> {
     (0..count)
         .map(|i| WalOperation::CreateNode {
             node_id: NodeId::new(i as u64 + 1).unwrap(),
-            label: format!("Node{}", i),
+            label: GLOBAL_INTERNER.intern(&format!("Node{}", i)).unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("id", i as i64)
                 .insert("name", format!("Node {}", i))
@@ -59,7 +60,7 @@ fn create_minimal_operations(count: usize) -> Vec<WalOperation> {
     (0..count)
         .map(|i| WalOperation::CreateNode {
             node_id: NodeId::new(i as u64 + 1).unwrap(),
-            label: "N".to_string(),
+            label: GLOBAL_INTERNER.intern("N").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             temporal: BiTemporalInterval::current(time::now()),
         })

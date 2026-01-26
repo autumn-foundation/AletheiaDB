@@ -523,6 +523,7 @@ impl ConcurrentWal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GLOBAL_INTERNER;
     use crate::core::id::NodeId;
     use crate::core::property::PropertyMap;
     use crate::core::temporal::{BiTemporalInterval, time};
@@ -533,7 +534,7 @@ mod tests {
     fn test_operation() -> WalOperation {
         WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         }
@@ -817,7 +818,7 @@ mod tests {
         let ops: Vec<WalOperation> = (0..100)
             .map(|i| WalOperation::CreateNode {
                 node_id: NodeId::new(i + 1).unwrap(),
-                label: format!("Node{}", i),
+                label: GLOBAL_INTERNER.intern(&format!("Node{}", i)).unwrap(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             })

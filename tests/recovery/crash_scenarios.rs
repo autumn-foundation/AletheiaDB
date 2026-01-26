@@ -138,7 +138,7 @@ fn test_crash_before_checkpoint_nodes_and_edges() -> Result<()> {
     for i in 1..=50 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Person".to_string(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("name", format!("Person{}", i))
                 .build(),
@@ -152,7 +152,7 @@ fn test_crash_before_checkpoint_nodes_and_edges() -> Result<()> {
             edge_id: EdgeId::new(i).unwrap(),
             source: NodeId::new(i).unwrap(),
             target: NodeId::new(i + 1).unwrap(),
-            label: "KNOWS".to_string(),
+            label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("order", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -162,7 +162,7 @@ fn test_crash_before_checkpoint_nodes_and_edges() -> Result<()> {
         edge_id: EdgeId::new(50).unwrap(),
         source: NodeId::new(50).unwrap(),
         target: NodeId::new(1).unwrap(),
-        label: "KNOWS".to_string(),
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMapBuilder::new().insert("order", 50_i64).build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -213,7 +213,7 @@ fn test_crash_after_checkpoint_recovery() -> Result<()> {
     for i in 1..=50 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Phase1".to_string(),
+            label: GLOBAL_INTERNER.intern("Phase1").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("phase", 1_i64)
                 .insert("index", i as i64)
@@ -236,7 +236,7 @@ fn test_crash_after_checkpoint_recovery() -> Result<()> {
     for i in 51..=100 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Phase2".to_string(),
+            label: GLOBAL_INTERNER.intern("Phase2").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("phase", 2_i64)
                 .insert("index", i as i64)
@@ -296,7 +296,7 @@ fn test_checkpoint_with_mixed_operations() -> Result<()> {
     for i in 1..=20 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMapBuilder::new().insert("value", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -307,7 +307,7 @@ fn test_checkpoint_with_mixed_operations() -> Result<()> {
         wal.append(WalOperation::UpdateNode {
             node_id: NodeId::new(i).unwrap(),
             version_id: VersionId::new(20 + i).unwrap(),
-            label: "UpdatedNode".to_string(),
+            label: GLOBAL_INTERNER.intern("UpdatedNode").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("value", (i * 100) as i64)
                 .build(),
@@ -327,7 +327,7 @@ fn test_checkpoint_with_mixed_operations() -> Result<()> {
     for i in 21..=30 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "NewNode".to_string(),
+            label: GLOBAL_INTERNER.intern("NewNode").unwrap(),
             properties: PropertyMapBuilder::new().insert("value", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -388,7 +388,7 @@ fn test_crash_with_truncated_wal() -> Result<()> {
     for i in 1..=10 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "SafeNode".to_string(),
+            label: GLOBAL_INTERNER.intern("SafeNode").unwrap(),
             properties: PropertyMapBuilder::new().insert("index", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -406,7 +406,7 @@ fn test_crash_with_truncated_wal() -> Result<()> {
     // Add one more operation that we'll truncate
     wal.append(WalOperation::CreateNode {
         node_id: NodeId::new(11).unwrap(),
-        label: "TruncatedNode".to_string(),
+        label: GLOBAL_INTERNER.intern("TruncatedNode").unwrap(),
         properties: PropertyMapBuilder::new()
             .insert("index", 11_i64)
             .insert("will_be", "truncated")
@@ -473,7 +473,7 @@ fn test_crash_with_corrupted_wal_header() -> Result<()> {
     for i in 1..=5 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -541,7 +541,7 @@ fn test_multiple_crash_recovery_cycles() -> Result<()> {
         for i in 1..=20 {
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i).unwrap(),
-                label: "Cycle1".to_string(),
+                label: GLOBAL_INTERNER.intern("Cycle1").unwrap(),
                 properties: PropertyMapBuilder::new().insert("cycle", 1_i64).build(),
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -566,7 +566,7 @@ fn test_multiple_crash_recovery_cycles() -> Result<()> {
         for i in 21..=40 {
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i).unwrap(),
-                label: "Cycle2".to_string(),
+                label: GLOBAL_INTERNER.intern("Cycle2").unwrap(),
                 properties: PropertyMapBuilder::new().insert("cycle", 2_i64).build(),
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -591,7 +591,7 @@ fn test_multiple_crash_recovery_cycles() -> Result<()> {
         for i in 41..=60 {
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i).unwrap(),
-                label: "Cycle3".to_string(),
+                label: GLOBAL_INTERNER.intern("Cycle3").unwrap(),
                 properties: PropertyMapBuilder::new().insert("cycle", 3_i64).build(),
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -602,7 +602,7 @@ fn test_multiple_crash_recovery_cycles() -> Result<()> {
             wal.append(WalOperation::UpdateNode {
                 node_id: NodeId::new(i).unwrap(),
                 version_id: VersionId::new(60 + i).unwrap(),
-                label: "UpdatedCycle1".to_string(),
+                label: GLOBAL_INTERNER.intern("UpdatedCycle1").unwrap(),
                 properties: PropertyMapBuilder::new()
                     .insert("cycle", 1_i64)
                     .insert("updated", true)
@@ -664,7 +664,7 @@ fn test_crash_recovery_with_deletions_across_cycles() -> Result<()> {
         for i in 1..=10 {
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i).unwrap(),
-                label: "Node".to_string(),
+                label: GLOBAL_INTERNER.intern("Node").unwrap(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -699,7 +699,7 @@ fn test_crash_recovery_with_deletions_across_cycles() -> Result<()> {
         for i in 11..=15 {
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i).unwrap(),
-                label: "NewNode".to_string(),
+                label: GLOBAL_INTERNER.intern("NewNode").unwrap(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -755,7 +755,7 @@ fn test_complex_workflow_create_update_delete() -> Result<()> {
     for i in 1..=10 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Person".to_string(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("name", format!("Person{}", i))
                 .insert("age", (20 + i) as i64)
@@ -770,7 +770,7 @@ fn test_complex_workflow_create_update_delete() -> Result<()> {
         wal.append(WalOperation::UpdateNode {
             node_id: NodeId::new(i).unwrap(),
             version_id: VersionId::new(next_version_id).unwrap(),
-            label: "Person".to_string(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("name", format!("Person{}", i))
                 .insert("age", (30 + i) as i64)
@@ -793,7 +793,7 @@ fn test_complex_workflow_create_update_delete() -> Result<()> {
     for i in 11..=15 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Employee".to_string(),
+            label: GLOBAL_INTERNER.intern("Employee").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("name", format!("Employee{}", i))
                 .insert("department", "Engineering")
@@ -907,7 +907,7 @@ fn test_complex_workflow_with_edges_and_updates() -> Result<()> {
         edge_id: EdgeId::new(1).unwrap(),
         source: NodeId::new(1).unwrap(),
         target: NodeId::new(2).unwrap(),
-        label: "KNOWS".to_string(),
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMapBuilder::new().insert("since", 2020_i64).build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -916,7 +916,7 @@ fn test_complex_workflow_with_edges_and_updates() -> Result<()> {
         edge_id: EdgeId::new(2).unwrap(),
         source: NodeId::new(2).unwrap(),
         target: NodeId::new(3).unwrap(),
-        label: "KNOWS".to_string(),
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMapBuilder::new().insert("since", 2021_i64).build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;

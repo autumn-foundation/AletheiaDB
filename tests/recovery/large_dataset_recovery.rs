@@ -51,7 +51,7 @@ fn test_large_dataset_recovery_10k_nodes() -> Result<()> {
     for i in 1..=LARGE_DATASET_NODE_COUNT {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "LargeNode".to_string(),
+            label: GLOBAL_INTERNER.intern("LargeNode").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("index", i as i64)
                 .insert("batch", (i / 1000) as i64)
@@ -143,7 +143,7 @@ fn test_large_dataset_recovery_50k_edges() -> Result<()> {
     for i in 1..=node_count {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -161,7 +161,7 @@ fn test_large_dataset_recovery_50k_edges() -> Result<()> {
             edge_id: EdgeId::new(i).unwrap(),
             source: NodeId::new(source).unwrap(),
             target: NodeId::new(target).unwrap(),
-            label: "CONNECTS".to_string(),
+            label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMapBuilder::new().insert("index", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -257,7 +257,7 @@ fn test_large_dataset_full_recovery() -> Result<()> {
     for i in 1..=LARGE_DATASET_NODE_COUNT {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Entity".to_string(),
+            label: GLOBAL_INTERNER.intern("Entity").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("id", i as i64)
                 .insert("type", "node")
@@ -285,7 +285,7 @@ fn test_large_dataset_full_recovery() -> Result<()> {
             edge_id: EdgeId::new(i).unwrap(),
             source: NodeId::new(source).unwrap(),
             target: NodeId::new(target).unwrap(),
-            label: "RELATES_TO".to_string(),
+            label: GLOBAL_INTERNER.intern("RELATES_TO").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("weight", (i % 100) as i64)
                 .build(),
@@ -402,7 +402,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
     for i in 1..=node_count {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "VersionedNode".to_string(),
+            label: GLOBAL_INTERNER.intern("VersionedNode").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("version", 0_i64)
                 .insert("value", (i * 10) as i64)
@@ -418,7 +418,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
             wal.append(WalOperation::UpdateNode {
                 node_id: NodeId::new(i).unwrap(),
                 version_id: gallifreydb::core::id::VersionId::new(version_id).unwrap(),
-                label: "VersionedNode".to_string(),
+                label: GLOBAL_INTERNER.intern("VersionedNode").unwrap(),
                 properties: PropertyMapBuilder::new()
                     .insert("version", update_round as i64)
                     .insert("value", (i * 10 + update_round) as i64)
@@ -505,7 +505,7 @@ fn test_large_dataset_with_deletions() -> Result<()> {
     for i in 1..=node_count {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMapBuilder::new().insert("index", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -607,7 +607,7 @@ fn bench_recovery_throughput() -> Result<()> {
         for i in 1..=size {
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i as u64).unwrap(),
-                label: "BenchNode".to_string(),
+                label: GLOBAL_INTERNER.intern("BenchNode").unwrap(),
                 properties: PropertyMapBuilder::new().insert("i", i as i64).build(),
                 temporal: BiTemporalInterval::current(time::now()),
             })?;

@@ -40,7 +40,7 @@ fn test_replay_delete_node_basic() -> Result<()> {
     // Create node
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
         temporal: BiTemporalInterval::current(timestamp1),
     })?;
@@ -85,7 +85,7 @@ fn test_replay_delete_node_after_update() -> Result<()> {
     // Create node
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -94,7 +94,7 @@ fn test_replay_delete_node_after_update() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(2).unwrap(),
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new()
             .insert("name", "Alice")
             .insert("age", 30_i64)
@@ -143,14 +143,14 @@ fn test_replay_delete_edge_basic() -> Result<()> {
     // Create nodes
     wal.append(WalOperation::CreateNode {
         node_id: source_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: target_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;

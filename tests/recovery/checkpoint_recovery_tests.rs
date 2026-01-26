@@ -49,7 +49,7 @@ fn test_checkpoint_recovery_basic() -> Result<()> {
             .build();
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i)?,
-            label: "Person".to_string(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: props,
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -91,7 +91,7 @@ fn test_checkpoint_with_persisted_state_and_wal_replay() -> Result<()> {
         let props = PropertyMapBuilder::new().insert("value", i as i64).build();
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i)?,
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: props,
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -122,7 +122,7 @@ fn test_checkpoint_with_persisted_state_and_wal_replay() -> Result<()> {
         let props = PropertyMapBuilder::new().insert("value", i as i64).build();
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i)?,
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: props,
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -321,7 +321,7 @@ fn test_checkpoint_recovery_with_updates() -> Result<()> {
     // Create node
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -330,7 +330,7 @@ fn test_checkpoint_recovery_with_updates() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(2)?,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new()
             .insert("name", "Alice Updated")
             .build(),
@@ -374,7 +374,7 @@ fn test_checkpoint_recovery_with_deletes() -> Result<()> {
     for i in 1..=3 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i)?,
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;

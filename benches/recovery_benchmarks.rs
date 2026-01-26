@@ -22,6 +22,7 @@ mod common;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::id::NodeId;
+use gallifreydb::core::interning::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::temporal::{BiTemporalInterval, time};
 use gallifreydb::index::vector::DistanceMetric;
@@ -76,7 +77,9 @@ fn create_checkpointed_database(
             .insert("name", format!("Node{}", name_id))
             .build();
 
-        current.create_node("TestNode", props).unwrap();
+        current
+            .create_node(GLOBAL_INTERNER.intern("TestNode").unwrap(), props)
+            .unwrap();
     }
 
     // Create edges (exactly edge_count edges)
@@ -92,7 +95,7 @@ fn create_checkpointed_database(
             .create_edge(
                 source_id,
                 target_id,
-                "CONNECTS",
+                GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
                 PropertyMapBuilder::new().insert("weight", i as i64).build(),
             )
             .unwrap();
@@ -149,7 +152,9 @@ fn create_vector_checkpointed_database(
             .insert_vector("embedding", &embedding)
             .build();
 
-        current.create_node("VectorNode", props).unwrap();
+        current
+            .create_node(GLOBAL_INTERNER.intern("VectorNode").unwrap(), props)
+            .unwrap();
     }
 
     let historical = HistoricalStorage::new();
@@ -181,7 +186,7 @@ fn create_wal_only_database(operation_count: usize) -> (TempDir, ConcurrentWalSy
             // Create node operation
             WalOperation::CreateNode {
                 node_id: NodeId::new(i as u64).unwrap(),
-                label: "WalNode".to_string(),
+                label: GLOBAL_INTERNER.intern("WalNode").unwrap(),
                 properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
                 temporal: BiTemporalInterval::current(time::now()),
             }
@@ -194,7 +199,7 @@ fn create_wal_only_database(operation_count: usize) -> (TempDir, ConcurrentWalSy
                 node_id: NodeId::new(node_id).unwrap(),
                 version_id: gallifreydb::core::id::VersionId::new((update_count + 1) as u64)
                     .unwrap(),
-                label: "WalNode".to_string(),
+                label: GLOBAL_INTERNER.intern("WalNode").unwrap(),
                 properties: PropertyMapBuilder::new()
                     .insert("id", node_id as i64)
                     .insert("updated", true)

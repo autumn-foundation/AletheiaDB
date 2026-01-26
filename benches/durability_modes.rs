@@ -20,6 +20,7 @@ use gallifreydb::{
     GallifreyDB, WalConfigBuilder, WriteOps, WriteOptions,
     core::{
         PropertyMapBuilder,
+        interning::GLOBAL_INTERNER,
         temporal::{BiTemporalInterval, time},
     },
     storage::wal::{
@@ -650,7 +651,7 @@ fn bench_wal_append(c: &mut Criterion) {
                 let operation = match *op_type {
                     "create_node" => WalOperation::CreateNode {
                         node_id: black_box(gallifreydb::core::id::NodeId::new(1).unwrap()),
-                        label: "Person".to_string(),
+                        label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         temporal: BiTemporalInterval::current(time::now()),
                     },
@@ -658,14 +659,14 @@ fn bench_wal_append(c: &mut Criterion) {
                         edge_id: black_box(gallifreydb::core::id::EdgeId::new(1).unwrap()),
                         source: gallifreydb::core::id::NodeId::new(1).unwrap(),
                         target: gallifreydb::core::id::NodeId::new(2).unwrap(),
-                        label: "KNOWS".to_string(),
+                        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         temporal: BiTemporalInterval::current(time::now()),
                     },
                     _ => WalOperation::UpdateNode {
                         node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
                         version_id: gallifreydb::core::id::VersionId::new(2).unwrap(),
-                        label: "Person".to_string(),
+                        label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         temporal: BiTemporalInterval::current(time::now()),
                     },
@@ -699,7 +700,7 @@ fn bench_wal_throughput(c: &mut Criterion) {
                 for i in 0..1000 {
                     let operation = WalOperation::CreateNode {
                         node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
-                        label: "Person".to_string(),
+                        label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
                         temporal: BiTemporalInterval::current(time::now()),
                     };
@@ -745,7 +746,7 @@ fn bench_wal_with_sync(c: &mut Criterion) {
             b.iter(|| {
                 let operation = WalOperation::CreateNode {
                     node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
-                    label: "Person".to_string(),
+                    label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };

@@ -231,7 +231,7 @@ impl RecoveryTestHarness {
                         wal.append(WalOperation::UpdateNode {
                             node_id: NodeId::new(*id)?,
                             version_id,
-                            label: "Updated".to_string(),
+                            label: GLOBAL_INTERNER.intern("Updated").unwrap(),
                             properties: PropertyMapBuilder::new()
                                 .insert("value", *new_value)
                                 .build(),
@@ -276,7 +276,7 @@ impl RecoveryTestHarness {
                         wal.append(WalOperation::UpdateEdge {
                             edge_id: EdgeId::new(*id)?,
                             version_id,
-                            label: "Updated".to_string(),
+                            label: GLOBAL_INTERNER.intern("Updated").unwrap(),
                             properties: PropertyMapBuilder::new()
                                 .insert("value", *new_value)
                                 .build(),
