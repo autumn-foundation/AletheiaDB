@@ -873,12 +873,12 @@ fn test_remove_on_nonexistent_node() -> Result<()> {
 
     // Add a vector
     let node1 = NodeId::new(1).unwrap();
-    index.add(node1, &vec![1.0, 0.0, 0.0, 0.0], 1000.into())?;
+    index.add(node1, &[1.0, 0.0, 0.0, 0.0], 1000.into())?;
     assert_eq!(index.current_index().len(), 1);
 
     // Try to remove a non-existent node
     let node2 = NodeId::new(2).unwrap();
-    let result = index.remove(node2, 2000.into());
+    let _result = index.remove(node2, 2000.into());
 
     // Remove should fail (or succeed silently depending on implementation)
     // The important thing is: node1 should still be in both HNSW and current_state
