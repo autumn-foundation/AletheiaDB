@@ -5,7 +5,7 @@
 //! WAL files or missing checkpoint data.
 
 use gallifreydb::core::id::NodeId;
-use gallifreydb::core::interning::{InternedString, GLOBAL_INTERNER};
+use gallifreydb::core::interning::{GLOBAL_INTERNER, InternedString};
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::temporal::{BiTemporalInterval, time};
 use gallifreydb::storage::persistence::{CheckpointConfig, PersistenceManager};
@@ -63,7 +63,9 @@ fn test_wal_replay_rejects_invalid_interned_string() {
             );
         }
         Err(other) => panic!("Expected StorageError::CorruptedData, got: {:?}", other),
-        Ok(_) => panic!("Expected recovery to fail with corrupted InternedString ID, but it succeeded"),
+        Ok(_) => {
+            panic!("Expected recovery to fail with corrupted InternedString ID, but it succeeded")
+        }
     }
 }
 
