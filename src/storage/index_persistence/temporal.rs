@@ -9,11 +9,9 @@ use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyValue;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
-use crate::storage::version::{
-    EdgeVersion, NodeVersion, PropertyDelta, VersionData,
-};
 #[cfg(test)]
 use crate::storage::version::VersionMetadata;
+use crate::storage::version::{EdgeVersion, NodeVersion, PropertyDelta, VersionData};
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{EdgeVersionEntry, NodeVersionEntry, PersistedVersionType, TemporalIndexData};

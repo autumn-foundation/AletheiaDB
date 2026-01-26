@@ -45,9 +45,9 @@
 
 use crate::core::id::VersionId;
 use crate::storage::cold_storage::{ColdStorage, ColdStorageStats};
-use crate::storage::version::{EdgeVersion, NodeVersion};
 #[cfg(test)]
 use crate::storage::version::VersionMetadata;
+use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::utils::error::Result;
 use parking_lot::Mutex;
 use quick_cache::sync::Cache;

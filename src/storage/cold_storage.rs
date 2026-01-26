@@ -39,9 +39,9 @@
 //! ```
 
 use crate::core::id::VersionId;
-use crate::storage::version::{EdgeVersion, NodeVersion};
 #[cfg(test)]
 use crate::storage::version::VersionMetadata;
+use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
 use std::path::{Path, PathBuf};

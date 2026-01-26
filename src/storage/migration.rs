@@ -38,9 +38,9 @@
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::storage::cold_storage::ColdStorage;
-use crate::storage::version::{EdgeVersion, NodeVersion};
 #[cfg(test)]
 use crate::storage::version::VersionMetadata;
+use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use crate::storage::wal::flush_coordinator::FlushCoordinator;
 use crate::utils::error::Result;

@@ -1272,10 +1272,9 @@ impl ReadOps for WriteTransaction {
         let node = self.current.get_node(id)?;
 
         // Check if this version is visible in our snapshot
-        if !self
-            .visibility_manager
-            .is_visible(&self.snapshot, node.metadata.created_by_tx)
-        {
+        // Use embedded metadata for visibility check (Issue #238 Phase 2)
+        // This eliminates the need to query TxVisibilityManager.committed map
+        if !self.snapshot.is_visible_from_metadata(&node.metadata) {
             // Version not visible - return NodeNotFound
             return Err(StorageError::NodeNotFound(id).into());
         }
@@ -1345,10 +1344,9 @@ impl ReadOps for WriteTransaction {
         let edge = self.current.get_edge(id)?;
 
         // Check if this version is visible in our snapshot
-        if !self
-            .visibility_manager
-            .is_visible(&self.snapshot, edge.metadata.created_by_tx)
-        {
+        // Use embedded metadata for visibility check (Issue #238 Phase 2)
+        // This eliminates the need to query TxVisibilityManager.committed map
+        if !self.snapshot.is_visible_from_metadata(&edge.metadata) {
             // Version not visible - return EdgeNotFound
             return Err(StorageError::EdgeNotFound(id).into());
         }

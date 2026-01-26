@@ -135,8 +135,9 @@ impl ReadTransaction {
             .filter(|&edge_id| {
                 // Check if edge is visible in our snapshot
                 if let Ok(edge) = self.current.get_edge(edge_id) {
-                    self.visibility_manager
-                        .is_visible(&self.snapshot, edge.metadata.created_by_tx)
+                    // Use embedded metadata for visibility check (Issue #238 Phase 2)
+                    // This eliminates the need to query TxVisibilityManager.committed map
+                    self.snapshot.is_visible_from_metadata(&edge.metadata)
                 } else {
                     // Edge doesn't exist or was deleted - not visible
                     false
@@ -202,9 +203,11 @@ impl ReadOps for ReadTransaction {
         // Note: Use if-let to handle deletion case (when node was deleted after snapshot)
         if let Ok(current_node) = self.current.get_node(id) {
             // Check if current version is visible in our snapshot
+            // Use embedded metadata for visibility check (Issue #238 Phase 2)
+            // This eliminates the need to query TxVisibilityManager.committed map
             if self
-                .visibility_manager
-                .is_visible(&self.snapshot, current_node.metadata.created_by_tx)
+                .snapshot
+                .is_visible_from_metadata(&current_node.metadata)
             {
                 return Ok(current_node);
             }
@@ -222,9 +225,11 @@ impl ReadOps for ReadTransaction {
         // Note: Use if-let to handle deletion case (when edge was deleted after snapshot)
         if let Ok(current_edge) = self.current.get_edge(id) {
             // Check if current version is visible in our snapshot
+            // Use embedded metadata for visibility check (Issue #238 Phase 2)
+            // This eliminates the need to query TxVisibilityManager.committed map
             if self
-                .visibility_manager
-                .is_visible(&self.snapshot, current_edge.metadata.created_by_tx)
+                .snapshot
+                .is_visible_from_metadata(&current_edge.metadata)
             {
                 return Ok(current_edge);
             }

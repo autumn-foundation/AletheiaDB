@@ -58,6 +58,51 @@ impl TransactionSnapshot {
             }
         }
     }
+
+    /// Check if a version is visible using embedded metadata (Issue #238 Phase 2).
+    ///
+    /// This method eliminates the need to query `TxVisibilityManager.committed` map
+    /// by using the commit timestamp embedded directly in the version's metadata.
+    ///
+    /// This is the key enabler for removing the unbounded `committed` map, as versions
+    /// become self-contained for visibility checks.
+    ///
+    /// # Arguments
+    /// * `metadata` - The version's embedded metadata containing TxId and commit timestamp
+    ///
+    /// # Returns
+    /// `true` if the version is visible in this snapshot, `false` otherwise
+    ///
+    /// # Special Cases
+    /// - **TxId(0)**: Always visible for backward compatibility (legacy/migrated data)
+    /// - **Uncommitted**: Never visible (`commit_timestamp` is `None`)
+    ///
+    /// # Example
+    /// ```ignore
+    /// use gallifreydb::api::transaction::{TransactionSnapshot, TxId};
+    /// use gallifreydb::storage::version::VersionMetadata;
+    ///
+    /// let snapshot = TransactionSnapshot { ... };
+    /// let version = NodeVersion { metadata: VersionMetadata::new(tx_id, commit_ts), ... };
+    ///
+    /// // Direct visibility check without querying TxVisibilityManager
+    /// if snapshot.is_visible_from_metadata(&version.metadata) {
+    ///     // Version is visible
+    /// }
+    /// ```
+    pub fn is_visible_from_metadata(
+        &self,
+        metadata: &crate::storage::version::VersionMetadata,
+    ) -> bool {
+        // Special case: TxId(0) is for pre-existing data (migrations, test fixtures)
+        // Always treat it as visible for backward compatibility
+        if metadata.created_by_tx.as_u64() == 0 {
+            return true;
+        }
+
+        // Delegate to existing is_visible logic
+        self.is_visible(metadata.created_by_tx, metadata.commit_timestamp)
+    }
 }
 
 /// Manages transaction visibility for Snapshot Isolation.
@@ -530,5 +575,152 @@ mod tests {
 
         // Verify the manager is still in a valid state
         assert_eq!(manager.committed_count(), 10);
+    }
+
+    // ========================================================================
+    // RED Phase Tests: Visibility from Embedded Metadata (Issue #238 Phase 2)
+    // ========================================================================
+    //
+    // These tests verify that TransactionSnapshot can check visibility directly
+    // from embedded VersionMetadata, eliminating the need to query the
+    // TxVisibilityManager.committed map.
+
+    #[test]
+    fn test_is_visible_from_metadata_committed_before() {
+        use crate::storage::version::VersionMetadata;
+
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: 100.into(),
+            active_transactions: Arc::new(HashSet::new()),
+        };
+
+        // Metadata: tx1 committed at timestamp 50
+        let metadata = VersionMetadata::new(TxId::new(1), 50.into());
+
+        // Committed before snapshot, not active -> visible
+        assert!(snapshot.is_visible_from_metadata(&metadata));
+    }
+
+    #[test]
+    fn test_is_visible_from_metadata_committed_after() {
+        use crate::storage::version::VersionMetadata;
+
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: 100.into(),
+            active_transactions: Arc::new(HashSet::new()),
+        };
+
+        // Metadata: tx1 committed at timestamp 150
+        let metadata = VersionMetadata::new(TxId::new(1), 150.into());
+
+        // Committed after snapshot -> not visible
+        assert!(!snapshot.is_visible_from_metadata(&metadata));
+    }
+
+    #[test]
+    fn test_is_visible_from_metadata_uncommitted() {
+        use crate::storage::version::VersionMetadata;
+
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: 100.into(),
+            active_transactions: Arc::new(HashSet::new()),
+        };
+
+        // Metadata: tx1 uncommitted
+        let metadata = VersionMetadata::uncommitted(TxId::new(1));
+
+        // Uncommitted -> not visible
+        assert!(!snapshot.is_visible_from_metadata(&metadata));
+    }
+
+    #[test]
+    fn test_is_visible_from_metadata_active_transaction() {
+        use crate::storage::version::VersionMetadata;
+
+        let mut active = HashSet::new();
+        active.insert(TxId::new(1));
+
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: 100.into(),
+            active_transactions: Arc::new(active),
+        };
+
+        // Metadata: tx1 committed at 50 (before snapshot)
+        let metadata = VersionMetadata::new(TxId::new(1), 50.into());
+
+        // Even though committed before snapshot, tx1 was active at snapshot time -> not visible
+        assert!(!snapshot.is_visible_from_metadata(&metadata));
+    }
+
+    #[test]
+    fn test_is_visible_from_metadata_committed_at_snapshot() {
+        use crate::storage::version::VersionMetadata;
+
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: 100.into(),
+            active_transactions: Arc::new(HashSet::new()),
+        };
+
+        // Metadata: tx1 committed at exactly snapshot timestamp
+        let metadata = VersionMetadata::new(TxId::new(1), 100.into());
+
+        // Committed at same time as snapshot -> not visible (strict <, not <=)
+        assert!(!snapshot.is_visible_from_metadata(&metadata));
+    }
+
+    #[test]
+    fn test_is_visible_from_metadata_txid_zero() {
+        use crate::storage::version::VersionMetadata;
+
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: 100.into(),
+            active_transactions: Arc::new(HashSet::new()),
+        };
+
+        // Metadata with TxId(0) - migration/legacy data
+        let metadata = VersionMetadata::default_for_existing();
+
+        // TxId(0) should be visible for backward compatibility
+        assert!(snapshot.is_visible_from_metadata(&metadata));
+    }
+
+    #[test]
+    fn test_is_visible_from_metadata_matches_is_visible() {
+        use crate::storage::version::VersionMetadata;
+
+        // Test that is_visible_from_metadata produces the same results as is_visible
+        let mut active = HashSet::new();
+        active.insert(TxId::new(2));
+
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: 100.into(),
+            active_transactions: Arc::new(active),
+        };
+
+        // Test various scenarios
+        let test_cases = vec![
+            (TxId::new(1), Some(50.into())),  // committed before, not active
+            (TxId::new(1), Some(150.into())), // committed after
+            (TxId::new(1), None),             // uncommitted
+            (TxId::new(2), Some(50.into())),  // active transaction
+            (TxId::new(0), Some(0.into())),   // TxId(0) special case
+        ];
+
+        for (tx_id, commit_ts) in test_cases {
+            let via_is_visible = snapshot.is_visible(tx_id, commit_ts);
+
+            let metadata = match commit_ts {
+                Some(ts) => VersionMetadata::new(tx_id, ts),
+                None => VersionMetadata::uncommitted(tx_id),
+            };
+
+            let via_metadata = snapshot.is_visible_from_metadata(&metadata);
+
+            assert_eq!(
+                via_is_visible, via_metadata,
+                "Mismatch for tx_id={:?}, commit_ts={:?}",
+                tx_id, commit_ts
+            );
+        }
     }
 }

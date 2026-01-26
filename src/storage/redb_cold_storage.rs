@@ -39,9 +39,9 @@ use crate::storage::cold_storage::{
     AtomicColdStorageStats, ColdStorage, ColdStorageConfig, ColdStorageStats, CompressionAlgorithm,
     decode_edge_version, decode_node_version, encode_edge_version, encode_node_version,
 };
-use crate::storage::version::{EdgeVersion, NodeVersion};
 #[cfg(test)]
 use crate::storage::version::VersionMetadata;
+use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
 use redb::ReadableTable;
