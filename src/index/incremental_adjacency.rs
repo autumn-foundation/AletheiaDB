@@ -166,6 +166,30 @@ impl IncrementalAdjacencyIndex {
         self.stats.delta_edge_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Mark an edge as deleted. O(1).
+    ///
+    /// The edge is added to the tombstone set and will be filtered from reads
+    /// until the next compaction. The tombstone includes temporal metadata
+    /// for bi-temporal tracking and future GDPR compliance.
+    pub fn delete(&self, edge_id: EdgeId) {
+        let tombstone = Tombstone {
+            edge_id,
+            deleted_at: Utc::now(),
+            transaction_time: Utc::now(),
+        };
+
+        self.tombstones.insert(edge_id, tombstone);
+        self.stats.tombstone_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get tombstone metadata for a deleted edge.
+    ///
+    /// Returns `Some(Tombstone)` if the edge is marked as deleted,
+    /// `None` if the edge is not tombstoned.
+    pub fn get_tombstone(&self, edge_id: EdgeId) -> Option<Tombstone> {
+        self.tombstones.get(&edge_id).map(|t| t.clone())
+    }
+
     /// Get adjacency list for a node, merging frozen + delta - tombstones.
     ///
     /// Returns a guard that provides zero-copy access to the merged adjacency.

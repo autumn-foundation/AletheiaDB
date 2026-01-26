@@ -216,93 +216,89 @@ mod phase3_tombstones {
 
     // Step 3.1 RED: Test delete marks tombstone
     #[test]
-    #[ignore = "Phase 3.1 - not implemented yet"]
     fn test_delete_marks_tombstone() {
-        // let index = IncrementalAdjacencyIndex::new();
-        // let edge_id = EdgeId::new(42).unwrap();
-        //
-        // index.delete(edge_id);
-        //
-        // assert_eq!(index.tombstone_count(), 1);
-        todo!("Implement delete()");
+        let index = IncrementalAdjacencyIndex::new();
+        let edge_id = EdgeId::new(42).unwrap();
+
+        index.delete(edge_id);
+
+        assert_eq!(index.tombstone_count(), 1);
     }
 
     // Step 3.3 RED: Test read filters tombstones from frozen
     #[test]
-    #[ignore = "Phase 3.3 - not implemented yet"]
     fn test_read_filters_tombstones_from_frozen() {
-        // // Create frozen with 2 edges
-        // let frozen_edges = vec![
-        //     (
-        //         NodeId::new(0).unwrap(),
-        //         NodeId::new(1).unwrap(),
-        //         EdgeId::new(0).unwrap(),
-        //         GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //     ),
-        //     (
-        //         NodeId::new(0).unwrap(),
-        //         NodeId::new(2).unwrap(),
-        //         EdgeId::new(1).unwrap(),
-        //         GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //     ),
-        // ];
-        // let frozen = AdjacencyIndex::build(frozen_edges);
-        // let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
-        //
-        // // Delete one edge
-        // index.delete(EdgeId::new(0).unwrap());
-        //
-        // // Should only see 1 edge
-        // let guard = index.get_adjacency(NodeId::new(0).unwrap());
-        // let edges: Vec<_> = guard.iter().collect();
-        // assert_eq!(edges.len(), 1);
-        // assert_eq!(edges[0].edge_id, EdgeId::new(1).unwrap());
-        todo!("Filter tombstones in frozen iteration");
+        // Create frozen with 2 edges
+        let frozen_edges = vec![
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(1).unwrap(),
+                EdgeId::new(0).unwrap(),
+                GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            ),
+        ];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // Delete one edge
+        index.delete(EdgeId::new(0).unwrap());
+
+        // Should only see 1 edge
+        let guard = index.get_adjacency(NodeId::new(0).unwrap());
+        let edges: Vec<_> = guard.iter().collect();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].edge_id, EdgeId::new(1).unwrap());
     }
 
     // Step 3.5 RED: Test read filters tombstones from delta
     #[test]
-    #[ignore = "Phase 3.5 - not implemented yet"]
     fn test_read_filters_tombstones_from_delta() {
-        // let index = IncrementalAdjacencyIndex::new();
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        // let source = NodeId::new(0).unwrap();
-        //
-        // // Insert 2 edges into delta
-        // index.insert(
-        //     source,
-        //     AdjacencyEntry::new(NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
-        // );
-        // index.insert(
-        //     source,
-        //     AdjacencyEntry::new(NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
-        // );
-        //
-        // // Delete one
-        // index.delete(EdgeId::new(0).unwrap());
-        //
-        // // Should only see 1 edge
-        // let guard = index.get_adjacency(source);
-        // let edges: Vec<_> = guard.iter().collect();
-        // assert_eq!(edges.len(), 1);
-        // assert_eq!(edges[0].edge_id, EdgeId::new(1).unwrap());
-        todo!("Filter tombstones in delta iteration");
+        let index = IncrementalAdjacencyIndex::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let source = NodeId::new(0).unwrap();
+
+        // Insert 2 edges into delta
+        index.insert(
+            source,
+            AdjacencyEntry::new(NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
+        );
+        index.insert(
+            source,
+            AdjacencyEntry::new(NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
+        );
+
+        // Delete one
+        index.delete(EdgeId::new(0).unwrap());
+
+        // Should only see 1 edge
+        let guard = index.get_adjacency(source);
+        let edges: Vec<_> = guard.iter().collect();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].edge_id, EdgeId::new(1).unwrap());
     }
 
     // Step 3.7 RED: Test tombstone tracks metadata
     #[test]
-    #[ignore = "Phase 3.7 - not implemented yet"]
     fn test_tombstone_tracks_metadata() {
-        // let index = IncrementalAdjacencyIndex::new();
-        // let edge_id = EdgeId::new(42).unwrap();
-        //
-        // index.delete(edge_id);
-        //
-        // let tombstone = index.get_tombstone(edge_id).unwrap();
-        // assert_eq!(tombstone.edge_id, edge_id);
-        // assert!(tombstone.deleted_at <= chrono::Utc::now());
-        // assert!(tombstone.transaction_time <= chrono::Utc::now());
-        todo!("Add Tombstone struct with timestamp");
+        let index = IncrementalAdjacencyIndex::new();
+        let edge_id = EdgeId::new(42).unwrap();
+
+        let before_delete = chrono::Utc::now();
+        index.delete(edge_id);
+        let after_delete = chrono::Utc::now();
+
+        let tombstone = index.get_tombstone(edge_id).unwrap();
+        assert_eq!(tombstone.edge_id, edge_id);
+        assert!(tombstone.deleted_at >= before_delete);
+        assert!(tombstone.deleted_at <= after_delete);
+        assert!(tombstone.transaction_time >= before_delete);
+        assert!(tombstone.transaction_time <= after_delete);
     }
 }
 
