@@ -707,18 +707,68 @@ mod phase5_background_compaction {
         assert_eq!(index.delta_edge_count(), 0);
     }
 
-    // Step 5.9 STUB: Test compaction thread panic recovery
+    // Step 5.9 GREEN: Test compaction thread panic recovery
     #[test]
-    #[ignore = "Future enhancement - panic catching with fallback"]
     fn test_compaction_thread_panic_recovery() {
-        // This test verifies system continues if background thread panics
-        // (Future enhancement - may add panic catching with fallback)
-        //
-        // Potential implementation:
-        // - Wrap compaction in catch_unwind()
-        // - Log panic and continue monitoring
-        // - Optionally restart thread after panic
-        // - Track panic count for circuit breaking
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let config = IncrementalConfig {
+            max_delta_edges: 5, // Low threshold for quick testing
+            check_interval: Duration::from_millis(50),
+            ..Default::default()
+        };
+
+        let index = Arc::new(IncrementalAdjacencyIndex::with_config(
+            Arc::new(AdjacencyIndex::new()),
+            config,
+        ));
+
+        // Inject panic for first compaction
+        index.test_inject_panic_on_compact();
+
+        let scheduler = CompactionScheduler::new(Arc::clone(&index));
+        let handle = scheduler.start();
+
+        // Add edges to trigger compaction (should panic on first attempt)
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        for i in 0..7 {
+            index.insert(
+                NodeId::new(i).unwrap(),
+                AdjacencyEntry::new(NodeId::new(i + 1).unwrap(), EdgeId::new(i).unwrap(), knows),
+            );
+        }
+
+        // Wait for panic to occur
+        thread::sleep(Duration::from_millis(150));
+
+        // Verify panic was caught and counted
+        assert_eq!(scheduler.panic_count(), 1);
+
+        // Thread should still be running (panic recovered)
+        assert!(!handle.is_finished());
+
+        // Add more edges to trigger another compaction (should succeed this time)
+        for i in 7..12 {
+            index.insert(
+                NodeId::new(i).unwrap(),
+                AdjacencyEntry::new(NodeId::new(i + 1).unwrap(), EdgeId::new(i).unwrap(), knows),
+            );
+        }
+
+        // Wait for successful compaction
+        thread::sleep(Duration::from_millis(150));
+
+        // Verify normal compaction worked after panic
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 12);
+
+        // Panic count should still be 1 (no new panics)
+        assert_eq!(scheduler.panic_count(), 1);
+
+        scheduler.shutdown();
+        handle.join().unwrap();
     }
 }
 

@@ -44,6 +44,10 @@ pub struct IncrementalAdjacencyIndex {
 
     /// Configuration
     config: IncrementalConfig,
+
+    /// Test-only: Force panic during next compaction (hidden from public API)
+    #[doc(hidden)]
+    test_panic_on_compact: AtomicBool,
 }
 
 /// Tombstone record for deleted edges with temporal metadata.
@@ -139,7 +143,20 @@ impl IncrementalAdjacencyIndex {
                 ..AdjacencyStats::new()
             },
             config,
+            test_panic_on_compact: AtomicBool::new(false),
         }
+    }
+
+    /// Test-only: Enable panic injection during next compaction.
+    ///
+    /// Used to test panic recovery in CompactionScheduler.
+    ///
+    /// # Safety
+    /// This method will cause the next compaction to panic.
+    /// DO NOT use in production code. Hidden from public API docs.
+    #[doc(hidden)]
+    pub fn test_inject_panic_on_compact(&self) {
+        self.test_panic_on_compact.store(true, Ordering::Relaxed);
     }
 
     /// Get frozen edge count.
@@ -245,6 +262,11 @@ impl IncrementalAdjacencyIndex {
     /// Readers can continue accessing the old frozen CSR during compaction
     /// thanks to ArcSwap's lock-free design.
     pub fn compact(&self) {
+        // Test-only panic injection for testing panic recovery (hidden from public API)
+        if self.test_panic_on_compact.swap(false, Ordering::Relaxed) {
+            panic!("Test-injected panic during compaction");
+        }
+
         let frozen = self.frozen.load();
 
         // Estimate capacity: frozen + delta - tombstones
@@ -410,10 +432,14 @@ use std::thread::{self, JoinHandle};
 /// Spawns a background thread that periodically checks compaction thresholds
 /// and triggers compaction when needed. Supports pause/resume and graceful
 /// shutdown with in-flight compaction completion.
+///
+/// Includes panic recovery: if compaction panics, the thread logs the panic,
+/// increments a counter, and continues monitoring.
 pub struct CompactionScheduler {
     index: Arc<IncrementalAdjacencyIndex>,
     running: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    panic_count: Arc<AtomicUsize>,
 }
 
 impl CompactionScheduler {
@@ -423,12 +449,25 @@ impl CompactionScheduler {
             index,
             running: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
+            panic_count: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Get the number of panics that have occurred during compaction.
+    ///
+    /// Useful for monitoring and debugging. A non-zero count indicates
+    /// that compaction has panicked at least once, but the scheduler
+    /// recovered and continued operating.
+    pub fn panic_count(&self) -> usize {
+        self.panic_count.load(Ordering::Relaxed)
     }
 
     /// Start the background compaction thread.
     ///
     /// The thread will periodically check thresholds and compact when needed.
+    /// If compaction panics, the panic is caught, logged to stderr, and the
+    /// thread continues monitoring. Panic count is incremented for observability.
+    ///
     /// Returns a join handle that can be used to wait for thread termination.
     pub fn start(&self) -> JoinHandle<()> {
         self.running.store(true, Ordering::SeqCst);
@@ -436,6 +475,7 @@ impl CompactionScheduler {
         let index = Arc::clone(&self.index);
         let running = Arc::clone(&self.running);
         let paused = Arc::clone(&self.paused);
+        let panic_count = Arc::clone(&self.panic_count);
 
         thread::spawn(move || {
             let check_interval = index.config.check_interval;
@@ -445,7 +485,24 @@ impl CompactionScheduler {
                 if !paused.load(Ordering::SeqCst) {
                     // Check if compaction needed
                     if index.should_compact() {
-                        index.compact();
+                        // Wrap compact() in catch_unwind for panic recovery
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            index.compact();
+                        }));
+
+                        if let Err(panic_payload) = result {
+                            // Increment panic counter
+                            panic_count.fetch_add(1, Ordering::Relaxed);
+
+                            // Log panic to stderr
+                            eprintln!(
+                                "[CompactionScheduler] Panic during compaction (count: {}): {:?}",
+                                panic_count.load(Ordering::Relaxed),
+                                panic_payload
+                            );
+
+                            // Continue monitoring - don't let one panic kill the scheduler
+                        }
                     }
                 }
 
