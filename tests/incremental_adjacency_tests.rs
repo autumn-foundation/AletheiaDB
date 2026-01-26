@@ -6,7 +6,7 @@
 use gallifreydb::core::id::{EdgeId, NodeId};
 use gallifreydb::core::interning::GLOBAL_INTERNER;
 use gallifreydb::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
-use gallifreydb::index::incremental_adjacency::IncrementalAdjacencyIndex;
+use gallifreydb::index::incremental_adjacency::{IncrementalAdjacencyIndex, IncrementalConfig};
 use std::sync::Arc;
 
 // ============================================================================
@@ -312,157 +312,149 @@ mod phase4_compaction {
 
     // Step 4.1 RED: Test should_compact ratio threshold
     #[test]
-    #[ignore = "Phase 4.1 - not implemented yet"]
     fn test_should_compact_ratio_threshold() {
-        // let mut config = IncrementalConfig::default();
-        // config.compaction_ratio = 0.1; // 10% threshold
-        // config.max_delta_edges = 100_000; // High so ratio triggers first
-        //
-        // // Create frozen with 100 edges
-        // let frozen_edges: Vec<_> = (0..100)
-        //     .map(|i| {
-        //         (
-        //             NodeId::new(i).unwrap(),
-        //             NodeId::new(i + 1).unwrap(),
-        //             EdgeId::new(i).unwrap(),
-        //             GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //         )
-        //     })
-        //     .collect();
-        // let frozen = AdjacencyIndex::build(frozen_edges);
-        // let index = IncrementalAdjacencyIndex::with_config(Arc::new(frozen), config);
-        //
-        // // Add 9 edges to delta (9% of frozen)
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        // for i in 100..109 {
-        //     index.insert(
-        //         NodeId::new(i).unwrap(),
-        //         AdjacencyEntry::new(NodeId::new(i + 1).unwrap(), EdgeId::new(i).unwrap(), knows),
-        //     );
-        // }
-        // assert!(!index.should_compact()); // Below threshold
-        //
-        // // Add 1 more edge (10% threshold hit)
-        // index.insert(
-        //     NodeId::new(109).unwrap(),
-        //     AdjacencyEntry::new(NodeId::new(110).unwrap(), EdgeId::new(109).unwrap(), knows),
-        // );
-        // assert!(index.should_compact()); // Should trigger
-        todo!("Implement should_compact()");
+        let mut config = IncrementalConfig::default();
+        config.compaction_ratio = 0.1; // 10% threshold
+        config.max_delta_edges = 100_000; // High so ratio triggers first
+
+        // Create frozen with 100 edges
+        let frozen_edges: Vec<_> = (0..100)
+            .map(|i| {
+                (
+                    NodeId::new(i).unwrap(),
+                    NodeId::new(i + 1).unwrap(),
+                    EdgeId::new(i).unwrap(),
+                    GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+                )
+            })
+            .collect();
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::with_config(Arc::new(frozen), config);
+
+        // Add 9 edges to delta (9% of frozen)
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        for i in 100..109 {
+            index.insert(
+                NodeId::new(i).unwrap(),
+                AdjacencyEntry::new(NodeId::new(i + 1).unwrap(), EdgeId::new(i).unwrap(), knows),
+            );
+        }
+        assert!(!index.should_compact()); // Below threshold
+
+        // Add 1 more edge (10% threshold hit)
+        index.insert(
+            NodeId::new(109).unwrap(),
+            AdjacencyEntry::new(NodeId::new(110).unwrap(), EdgeId::new(109).unwrap(), knows),
+        );
+        assert!(index.should_compact()); // Should trigger
     }
 
     // Step 4.3 RED: Test compact merges delta into frozen
     #[test]
-    #[ignore = "Phase 4.3 - not implemented yet"]
     fn test_compact_merges_delta_into_frozen() {
-        // // Create frozen with 2 edges
-        // let frozen_edges = vec![
-        //     (
-        //         NodeId::new(0).unwrap(),
-        //         NodeId::new(1).unwrap(),
-        //         EdgeId::new(0).unwrap(),
-        //         GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //     ),
-        //     (
-        //         NodeId::new(1).unwrap(),
-        //         NodeId::new(2).unwrap(),
-        //         EdgeId::new(1).unwrap(),
-        //         GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //     ),
-        // ];
-        // let frozen = AdjacencyIndex::build(frozen_edges);
-        // let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
-        //
-        // // Add 1 edge to delta
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        // index.insert(
-        //     NodeId::new(2).unwrap(),
-        //     AdjacencyEntry::new(NodeId::new(3).unwrap(), EdgeId::new(2).unwrap(), knows),
-        // );
-        //
-        // // Before compaction
-        // assert_eq!(index.frozen_edge_count(), 2);
-        // assert_eq!(index.delta_edge_count(), 1);
-        //
-        // // Compact
-        // index.compact();
-        //
-        // // After compaction
-        // assert_eq!(index.frozen_edge_count(), 3);
-        // assert_eq!(index.delta_edge_count(), 0);
-        todo!("Implement compact()");
+        // Create frozen with 2 edges
+        let frozen_edges = vec![
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(1).unwrap(),
+                EdgeId::new(0).unwrap(),
+                GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            ),
+            (
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            ),
+        ];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // Add 1 edge to delta
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        index.insert(
+            NodeId::new(2).unwrap(),
+            AdjacencyEntry::new(NodeId::new(3).unwrap(), EdgeId::new(2).unwrap(), knows),
+        );
+
+        // Before compaction
+        assert_eq!(index.frozen_edge_count(), 2);
+        assert_eq!(index.delta_edge_count(), 1);
+
+        // Compact
+        index.compact();
+
+        // After compaction
+        assert_eq!(index.frozen_edge_count(), 3);
+        assert_eq!(index.delta_edge_count(), 0);
     }
 
     // Step 4.5 RED: Test compact removes tombstoned edges
     #[test]
-    #[ignore = "Phase 4.5 - not implemented yet"]
     fn test_compact_removes_tombstoned_edges() {
-        // // Create frozen with 3 edges
-        // let frozen_edges = vec![
-        //     (
-        //         NodeId::new(0).unwrap(),
-        //         NodeId::new(1).unwrap(),
-        //         EdgeId::new(0).unwrap(),
-        //         GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //     ),
-        //     (
-        //         NodeId::new(0).unwrap(),
-        //         NodeId::new(2).unwrap(),
-        //         EdgeId::new(1).unwrap(),
-        //         GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //     ),
-        //     (
-        //         NodeId::new(0).unwrap(),
-        //         NodeId::new(3).unwrap(),
-        //         EdgeId::new(2).unwrap(),
-        //         GLOBAL_INTERNER.intern("KNOWS").unwrap(),
-        //     ),
-        // ];
-        // let frozen = AdjacencyIndex::build(frozen_edges);
-        // let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
-        //
-        // // Delete 1 edge
-        // index.delete(EdgeId::new(1).unwrap());
-        //
-        // // Compact
-        // index.compact();
-        //
-        // // Should have 2 edges after compaction (tombstoned edge removed)
-        // assert_eq!(index.frozen_edge_count(), 2);
-        // assert_eq!(index.tombstone_count(), 0); // Tombstones cleared
-        todo!("Filter tombstones during compaction");
+        // Create frozen with 3 edges
+        let frozen_edges = vec![
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(1).unwrap(),
+                EdgeId::new(0).unwrap(),
+                GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(3).unwrap(),
+                EdgeId::new(2).unwrap(),
+                GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            ),
+        ];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // Delete 1 edge
+        index.delete(EdgeId::new(1).unwrap());
+
+        // Compact
+        index.compact();
+
+        // Should have 2 edges after compaction (tombstoned edge removed)
+        assert_eq!(index.frozen_edge_count(), 2);
+        assert_eq!(index.tombstone_count(), 0); // Tombstones cleared
     }
 
     // Step 4.7 RED: Test compact clears delta and tombstones
     #[test]
-    #[ignore = "Phase 4.7 - not implemented yet"]
     fn test_compact_clears_delta_and_tombstones() {
-        // let index = IncrementalAdjacencyIndex::new();
-        // let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        //
-        // // Add edges to delta
-        // index.insert(
-        //     NodeId::new(0).unwrap(),
-        //     AdjacencyEntry::new(NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
-        // );
-        // index.insert(
-        //     NodeId::new(0).unwrap(),
-        //     AdjacencyEntry::new(NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
-        // );
-        //
-        // // Add tombstone
-        // index.delete(EdgeId::new(0).unwrap());
-        //
-        // assert_eq!(index.delta_edge_count(), 2);
-        // assert_eq!(index.tombstone_count(), 1);
-        //
-        // // Compact
-        // index.compact();
-        //
-        // // Transient state cleared
-        // assert_eq!(index.delta_edge_count(), 0);
-        // assert_eq!(index.tombstone_count(), 0);
-        todo!("Clear transient state after compaction");
+        let index = IncrementalAdjacencyIndex::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Add edges to delta
+        index.insert(
+            NodeId::new(0).unwrap(),
+            AdjacencyEntry::new(NodeId::new(1).unwrap(), EdgeId::new(0).unwrap(), knows),
+        );
+        index.insert(
+            NodeId::new(0).unwrap(),
+            AdjacencyEntry::new(NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
+        );
+
+        // Add tombstone
+        index.delete(EdgeId::new(0).unwrap());
+
+        assert_eq!(index.delta_edge_count(), 2);
+        assert_eq!(index.tombstone_count(), 1);
+
+        // Compact
+        index.compact();
+
+        // Transient state cleared
+        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.tombstone_count(), 0);
     }
 
     // Step 4.9 RED: Test compact atomic swap
