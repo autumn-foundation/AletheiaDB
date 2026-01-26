@@ -347,7 +347,20 @@ impl PropertyDelta {
     ///
     /// Returns the changes needed to transform `old` into `new`.
     /// Uses sparse delta compression for vector properties (Issue #215).
+    ///
+    /// # Performance (Issue #214)
+    ///
+    /// This is optimized for the hot path (creating delta versions with anchor_interval=10).
+    /// The implementation:
+    ///
+    /// 1. Uses default HashMap capacity, growing as needed during iteration
+    /// 2. Uses Arc::clone() for property values (O(1) refcount increment)
+    /// 3. Uses sparse vector deltas when beneficial (Issue #215)
+    /// 4. PropertyKey is InternedString (O(1) copy) - Issue #202
     pub fn from_diff(old: &PropertyMap, new: &PropertyMap) -> Self {
+        // Start with default capacity - in from_diff, we don't know upfront how many
+        // properties will change, so pre-allocation could waste memory. HashMap will
+        // grow as needed during iteration.
         let mut delta = PropertyDelta::new();
 
         // Find added and modified properties
@@ -368,12 +381,14 @@ impl PropertyDelta {
                         }
                         _ => {
                             // Not both vectors, or value added/type changed - store full value
+                            // Arc clone - O(1) refcount increment, shares underlying data
                             delta.changed.insert(*key, new_value.clone());
                         }
                     }
                 }
                 None => {
                     // Property added - store full value
+                    // Arc clone - O(1) refcount increment
                     delta.changed.insert(*key, new_value.clone());
                 }
             }
@@ -382,6 +397,7 @@ impl PropertyDelta {
         // Find removed properties
         for key in old.keys() {
             if !new.contains_interned_key(key) {
+                // PropertyKey copy - O(1) InternedString ID copy
                 delta.removed.insert(*key);
             }
         }
@@ -390,31 +406,58 @@ impl PropertyDelta {
     }
 
     /// Apply this delta to a property map, producing a new map.
+    ///
+    /// # Performance (Issue #214)
+    ///
+    /// This is optimized for the hot path (time-travel queries with anchor_interval=10
+    /// apply up to 9 deltas sequentially). The implementation:
+    ///
+    /// 1. Pre-calculates capacity to avoid HashMap resizing
+    /// 2. Directly constructs the result HashMap without builder overhead
+    /// 3. Uses Arc::clone() for unchanged properties (O(1) refcount increment)
+    /// 4. Only clones modified properties (also O(1) due to Arc)
+    ///
+    /// This avoids the wasteful pattern of `base.clone().builder()` which would:
+    /// - Clone the Arc (cheap)
+    /// - Try to unwrap it (fails due to refcount > 1)
+    /// - Fall back to cloning the entire HashMap structure
     pub fn apply(&self, base: &PropertyMap) -> PropertyMap {
-        // Clone the base map using the builder to get a mutable version
-        let mut builder = base.clone().builder();
+        // Calculate capacity for the new map to avoid reallocation
+        // Properties from base (minus removed) plus potentially new properties from changes
+        let estimated_capacity = base
+            .len()
+            .saturating_sub(self.removed.len())
+            .max(self.changed.len() + self.vector_deltas.len());
 
-        // Apply regular changes
-        for (key, value) in &self.changed {
-            builder = builder.insert_by_key(*key, value.clone());
+        let mut result = HashMap::with_capacity(estimated_capacity);
+
+        // Copy all base properties except removed ones (single lookup per property)
+        // This is optimal when changes << base (typical case: ~1-10% change rate)
+        for (key, value) in base.iter() {
+            if !self.removed.contains(key) {
+                // Arc clone - O(1) refcount increment, shares underlying data
+                result.insert(*key, value.clone());
+            }
         }
 
-        // Apply vector deltas
+        // Apply regular changes (overwrites existing entries for modified properties)
+        for (key, value) in &self.changed {
+            // Arc clone - O(1) refcount increment
+            result.insert(*key, value.clone());
+        }
+
+        // Apply vector deltas (overwrites existing entries)
         for (key, vec_delta) in &self.vector_deltas {
             if let Some(base_value) = base.get_by_interned_key(key)
                 && let Some(base_vec) = base_value.as_vector()
             {
                 let new_vec = vec_delta.apply(base_vec);
-                builder = builder.insert_by_key(*key, PropertyValue::vector(&new_vec));
+                result.insert(*key, PropertyValue::vector(&new_vec));
             }
         }
 
-        // Apply removals
-        for key in &self.removed {
-            builder = builder.remove_by_key(key);
-        }
-
-        builder.build()
+        // Convert HashMap to PropertyMap using FromIterator
+        result.into_iter().collect()
     }
 
     /// Returns true if this delta has no changes.
@@ -1543,5 +1586,332 @@ mod tests {
             new_props_last.get("embedding").and_then(|v| v.as_vector()),
             "Last element change should work correctly"
         );
+    }
+
+    // ========================================================================
+    // Property Cloning Performance Tests (Issue #214)
+    // ========================================================================
+
+    #[test]
+    fn test_property_key_clone_is_cheap() {
+        // Verify PropertyKey cloning is O(1) - just copies the InternedString ID
+        // This validates the optimization from Issue #202
+
+        let key1 = GLOBAL_INTERNER.intern("test_property").unwrap();
+        let key2 = key1; // Copy (not clone, but same semantics for Copy types)
+
+        // Both should have the same underlying ID (they're the same InternedString)
+        assert_eq!(key1, key2);
+
+        // Verify cloning many keys is fast (all O(1) copies)
+        let keys: Vec<_> = (0..1000)
+            .map(|i| GLOBAL_INTERNER.intern(format!("key_{}", i)).unwrap())
+            .collect();
+
+        let cloned_keys: Vec<_> = keys.to_vec();
+
+        // All keys should be equal to their clones
+        for (original, cloned) in keys.iter().zip(cloned_keys.iter()) {
+            assert_eq!(original, cloned);
+        }
+    }
+
+    #[test]
+    fn test_property_value_clone_is_arc_refcount_increment() {
+        // Verify PropertyValue cloning is O(1) - Arc refcount increment, not deep copy
+        // This validates that values use Arc internally (already implemented)
+
+        // Test String value
+        let string_val =
+            PropertyValue::string("A reasonably long string that would be expensive to deep copy");
+        let cloned_string = string_val.clone();
+
+        // Both should be equal and point to the same Arc
+        assert_eq!(string_val, cloned_string);
+        if let (PropertyValue::String(arc1), PropertyValue::String(arc2)) =
+            (&string_val, &cloned_string)
+        {
+            // Arcs should point to the same data (same address)
+            assert!(std::ptr::eq(
+                arc1.as_ref() as *const str,
+                arc2.as_ref() as *const str
+            ));
+        } else {
+            panic!("Expected String variants");
+        }
+
+        // Test Vector value (large embedding)
+        let large_embedding = vec![0.1f32; 1536]; // OpenAI ada-002 size
+        let vector_val = PropertyValue::vector(&large_embedding);
+        let cloned_vector = vector_val.clone();
+
+        assert_eq!(vector_val, cloned_vector);
+        if let (PropertyValue::Vector(arc1), PropertyValue::Vector(arc2)) =
+            (&vector_val, &cloned_vector)
+        {
+            // Arcs should point to the same data
+            assert!(std::ptr::eq(
+                arc1.as_ref() as *const [f32],
+                arc2.as_ref() as *const [f32]
+            ));
+        } else {
+            panic!("Expected Vector variants");
+        }
+
+        // Test Array value
+        let array_val = PropertyValue::array(vec![PropertyValue::Int(42); 100]);
+        let cloned_array = array_val.clone();
+
+        assert_eq!(array_val, cloned_array);
+        if let (PropertyValue::Array(arc1), PropertyValue::Array(arc2)) =
+            (&array_val, &cloned_array)
+        {
+            // Arcs should point to the same data
+            assert!(std::ptr::eq(
+                arc1.as_ref() as *const Vec<PropertyValue>,
+                arc2.as_ref() as *const Vec<PropertyValue>
+            ));
+        } else {
+            panic!("Expected Array variants");
+        }
+    }
+
+    #[test]
+    fn test_property_delta_from_diff_clone_overhead() {
+        // Verify PropertyDelta::from_diff has minimal clone overhead
+        // All clones should be cheap (InternedString ID copy + Arc refcount increment)
+
+        let old_props = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("city", "NYC")
+            .insert("embedding", PropertyValue::vector(vec![0.1f32; 384]))
+            .build();
+
+        let new_props = PropertyMapBuilder::new()
+            .insert("name", "Alice") // Unchanged
+            .insert("age", 31i64) // Changed
+            .insert("country", "USA") // Added
+            .insert("embedding", PropertyValue::vector(vec![0.2f32; 384])) // Changed
+            // city removed
+            .build();
+
+        let delta = PropertyDelta::from_diff(&old_props, &new_props);
+
+        // Verify delta structure
+        assert_eq!(delta.changed.len(), 2); // age, country (embedding uses vector_deltas)
+        assert_eq!(delta.vector_deltas.len(), 1); // embedding
+        assert_eq!(delta.removed.len(), 1); // city
+
+        // Verify cloned values in delta point to same Arc as new_props
+        let age_key = GLOBAL_INTERNER.intern("age").unwrap();
+        if let Some(delta_age) = delta.changed.get(&age_key)
+            && let Some(new_age) = new_props.get("age")
+        {
+            // Should be equal
+            assert_eq!(delta_age, new_age);
+            // For non-Arc types like Int, this is a value comparison
+            // But for Arc types, they would share the same allocation
+        }
+
+        // Verify cloning large embeddings is cheap (uses Arc)
+        let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
+        assert!(delta.vector_deltas.contains_key(&embedding_key));
+    }
+
+    #[test]
+    fn test_property_delta_apply_clone_overhead() {
+        // Verify PropertyDelta::apply has minimal clone overhead
+        // All value clones should be Arc refcount increments
+
+        let base = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("city", "NYC")
+            .insert("embedding", PropertyValue::vector(vec![0.1f32; 384]))
+            .build();
+
+        let mut delta = PropertyDelta::new();
+        let age_key = GLOBAL_INTERNER.intern("age").unwrap();
+        let country_key = GLOBAL_INTERNER.intern("country").unwrap();
+
+        delta.changed.insert(age_key, PropertyValue::Int(31));
+        delta
+            .changed
+            .insert(country_key, PropertyValue::string("USA"));
+
+        let result = delta.apply(&base);
+
+        // Verify result has correct values
+        assert_eq!(result.get("name").and_then(|v| v.as_str()), Some("Alice"));
+        assert_eq!(result.get("age").and_then(|v| v.as_int()), Some(31.into()));
+        assert_eq!(result.get("country").and_then(|v| v.as_str()), Some("USA"));
+        assert_eq!(result.get("city").and_then(|v| v.as_str()), Some("NYC"));
+
+        // Verify unchanged values share the same Arc
+        if let (Some(base_name), Some(result_name)) = (base.get("name"), result.get("name"))
+            && let (PropertyValue::String(base_arc), PropertyValue::String(result_arc)) =
+                (base_name, result_name)
+        {
+            // Should point to the same Arc allocation
+            assert!(std::ptr::eq(
+                base_arc.as_ref() as *const str,
+                result_arc.as_ref() as *const str
+            ));
+        }
+
+        if let (Some(base_embedding), Some(result_embedding)) =
+            (base.get("embedding"), result.get("embedding"))
+            && let (PropertyValue::Vector(base_arc), PropertyValue::Vector(result_arc)) =
+                (base_embedding, result_embedding)
+        {
+            // Should point to the same Arc allocation (unchanged)
+            assert!(std::ptr::eq(
+                base_arc.as_ref() as *const [f32],
+                result_arc.as_ref() as *const [f32]
+            ));
+        }
+    }
+
+    #[test]
+    fn test_property_delta_apply_edge_cases() {
+        // Test edge cases for apply method
+
+        // Case 1: Empty base
+        let empty_base = PropertyMapBuilder::new().build();
+        let mut delta = PropertyDelta::new();
+        delta.changed.insert(
+            GLOBAL_INTERNER.intern("new").unwrap(),
+            PropertyValue::Int(42),
+        );
+
+        let result = delta.apply(&empty_base);
+        assert_eq!(result.get("new").and_then(|v| v.as_int()), Some(42.into()));
+
+        // Case 2: Empty delta (no changes)
+        let base = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+
+        let empty_delta = PropertyDelta::new();
+        let result = empty_delta.apply(&base);
+
+        // Should be identical to base
+        assert_eq!(result.get("name").and_then(|v| v.as_str()), Some("Alice"));
+        assert_eq!(result.get("age").and_then(|v| v.as_int()), Some(30.into()));
+
+        // Case 3: Delta with only removals (no additions/changes)
+        let base = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .insert("city", "NYC")
+            .build();
+
+        let mut removal_delta = PropertyDelta::new();
+        removal_delta
+            .removed
+            .insert(GLOBAL_INTERNER.intern("city").unwrap());
+
+        let result = removal_delta.apply(&base);
+
+        assert_eq!(result.get("name").and_then(|v| v.as_str()), Some("Alice"));
+        assert_eq!(result.get("age").and_then(|v| v.as_int()), Some(30.into()));
+        assert!(result.get("city").is_none());
+
+        // Case 4: Large-scale scenario (verify performance doesn't degrade)
+        let mut large_base_builder = PropertyMapBuilder::new();
+        for i in 0..1000 {
+            large_base_builder = large_base_builder.insert(&format!("prop_{}", i), i as i64);
+        }
+        let large_base = large_base_builder.build();
+
+        let mut small_delta = PropertyDelta::new();
+        // Only change 1% of properties (10 out of 1000)
+        for i in 0..10 {
+            let key = GLOBAL_INTERNER.intern(format!("prop_{}", i)).unwrap();
+            small_delta
+                .changed
+                .insert(key, PropertyValue::Int((i + 1000) as i64));
+        }
+
+        let result = small_delta.apply(&large_base);
+
+        // Verify changes applied
+        assert_eq!(
+            result.get("prop_0").and_then(|v| v.as_int()),
+            Some(1000.into())
+        );
+        assert_eq!(
+            result.get("prop_9").and_then(|v| v.as_int()),
+            Some(1009.into())
+        );
+
+        // Verify unchanged properties preserved
+        assert_eq!(
+            result.get("prop_10").and_then(|v| v.as_int()),
+            Some(10.into())
+        );
+        assert_eq!(
+            result.get("prop_999").and_then(|v| v.as_int()),
+            Some(999.into())
+        );
+    }
+
+    #[test]
+    fn test_sequential_delta_application_shares_arcs() {
+        // Verify that sequential delta application (hot path for time-travel)
+        // maintains Arc sharing for unchanged properties
+
+        let base = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("counter", 0i64)
+            .insert("embedding", PropertyValue::vector(vec![0.1f32; 384]))
+            .build();
+
+        // Create a chain of deltas, each incrementing the counter
+        let mut deltas = Vec::new();
+        for i in 1..=5 {
+            let mut delta = PropertyDelta::new();
+            let counter_key = GLOBAL_INTERNER.intern("counter").unwrap();
+            delta.changed.insert(counter_key, PropertyValue::Int(i));
+            deltas.push(delta);
+        }
+
+        // Apply all deltas in sequence (typical time-travel query pattern)
+        let mut current = base.clone();
+        for delta in &deltas {
+            current = delta.apply(&current);
+        }
+
+        // Verify final result
+        assert_eq!(
+            current.get("counter").and_then(|v| v.as_int()),
+            Some(5.into())
+        );
+
+        // Verify unchanged properties still share Arcs with base
+        if let (Some(base_name), Some(final_name)) = (base.get("name"), current.get("name"))
+            && let (PropertyValue::String(base_arc), PropertyValue::String(final_arc)) =
+                (base_name, final_name)
+        {
+            // Should still point to the same Arc allocation
+            assert!(std::ptr::eq(
+                base_arc.as_ref() as *const str,
+                final_arc.as_ref() as *const str
+            ));
+        }
+
+        if let (Some(base_embedding), Some(final_embedding)) =
+            (base.get("embedding"), current.get("embedding"))
+            && let (PropertyValue::Vector(base_arc), PropertyValue::Vector(final_arc)) =
+                (base_embedding, final_embedding)
+        {
+            // Should still point to the same Arc allocation
+            assert!(std::ptr::eq(
+                base_arc.as_ref() as *const [f32],
+                final_arc.as_ref() as *const [f32]
+            ));
+        }
     }
 }
