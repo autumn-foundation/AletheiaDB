@@ -14,6 +14,7 @@
 
 use crate::api::transaction::types::TxId;
 use crate::core::{
+    GLOBAL_INTERNER,
     graph::{Edge, Node},
     id::{EdgeId, NodeId, VersionId},
     interning::InternedString,
@@ -710,7 +711,18 @@ impl PersistenceManager {
         temporal: BiTemporalInterval,
         next_version_id: &mut u64,
     ) -> Result<()> {
-        // WAL now stores InternedString directly (no allocation needed!)
+        // Validate that the InternedString ID exists in the interner
+        // This protects against corrupted WAL files or missing checkpoint data
+        GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
+            StorageError::CorruptedData(format!(
+                "InternedString ID {} for node_id={} not found in interner. \
+                 This indicates corrupted WAL or missing checkpoint data.",
+                label.as_u32(),
+                node_id
+            ))
+        })?;
+
+        // ID is valid, use it directly (no allocation!)
         let interned_label = label;
 
         // Extract commit timestamp from temporal interval
@@ -755,7 +767,17 @@ impl PersistenceManager {
         temporal: BiTemporalInterval,
         next_version_id: &mut u64,
     ) -> Result<()> {
-        // WAL now stores InternedString directly (no allocation needed!)
+        // Validate that the InternedString ID exists in the interner
+        GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
+            StorageError::CorruptedData(format!(
+                "InternedString ID {} for edge_id={} not found in interner. \
+                 This indicates corrupted WAL or missing checkpoint data.",
+                label.as_u32(),
+                edge_id
+            ))
+        })?;
+
+        // ID is valid, use it directly (no allocation!)
         let interned_label = label;
 
         // Extract commit timestamp from temporal interval
@@ -808,7 +830,18 @@ impl PersistenceManager {
         properties: PropertyMap,
         temporal: BiTemporalInterval,
     ) -> Result<()> {
-        // WAL now stores InternedString directly (no allocation needed!)
+        // Validate that the InternedString ID exists in the interner
+        GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
+            StorageError::CorruptedData(format!(
+                "InternedString ID {} for node_id={} version_id={} not found in interner. \
+                 This indicates corrupted WAL or missing checkpoint data.",
+                label.as_u32(),
+                node_id,
+                version_id
+            ))
+        })?;
+
+        // ID is valid, use it directly (no allocation!)
         let interned_label = label;
 
         // Extract commit timestamp from temporal interval
@@ -855,7 +888,18 @@ impl PersistenceManager {
         properties: PropertyMap,
         temporal: BiTemporalInterval,
     ) -> Result<()> {
-        // WAL now stores InternedString directly (no allocation needed!)
+        // Validate that the InternedString ID exists in the interner
+        GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
+            StorageError::CorruptedData(format!(
+                "InternedString ID {} for edge_id={} version_id={} not found in interner. \
+                 This indicates corrupted WAL or missing checkpoint data.",
+                label.as_u32(),
+                edge_id,
+                version_id
+            ))
+        })?;
+
+        // ID is valid, use it directly (no allocation!)
         let interned_label = label;
 
         // Extract commit timestamp from temporal interval
