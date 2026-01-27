@@ -44,6 +44,11 @@ rmcp = { version = "0.13", features = ["server", "transport-io"], optional = tru
 base64 = { version = "0.22", optional = true }
 chrono = { version = "0.4", optional = true }
 
+# HTTP server support (optional)
+actix-web = { version = "4.9", optional = true }
+actix-cors = { version = "0.7", optional = true }
+actix-rt = { version = "2.10", optional = true }
+
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
@@ -119,6 +124,9 @@ sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 
 # SQL:2011 temporal syntax support
 sql = ["dep:sqlparser"]
+
+# HTTP server support (Issue #465)
+http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde", "dep:serde_json"]
 
 # MVCC snapshot TDD tests (not yet implemented)
 mvcc-snapshots-tdd = []
@@ -312,4 +320,10 @@ path = "benches/vector_serialization.rs"
 name = "gallifrey-mcp"
 path = "src/bin/mcp_server.rs"
 required-features = ["mcp-server"]
+
+# HTTP server binary (Issue #465)
+[[bin]]
+name = "gallifrey-server"
+path = "src/bin/server.rs"
+required-features = ["http-server"]
 
