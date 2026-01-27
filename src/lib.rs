@@ -72,6 +72,9 @@ pub mod honeycomb;
 // Optional SQL:2011 temporal syntax support
 #[cfg(feature = "sql")]
 pub mod sql;
+// Optional HTTP server module
+#[cfg(feature = "http-server")]
+pub mod http;
 
 // Re-export commonly used types at the crate root
 pub use config::{
