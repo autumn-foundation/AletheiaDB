@@ -586,12 +586,17 @@ impl VectorIndex for HnswIndex {
 
         // Get or create key for this NodeId
         // Use entry API for atomic check-and-update to prevent race conditions
-        let key = match self.id_mapping.entry(id) {
+        match self.id_mapping.entry(id) {
             dashmap::mapref::entry::Entry::Occupied(entry) => {
                 // Re-adding existing node: remove old vector from usearch if it exists
                 // Optimization (Issue #207): Only call remove() if key actually exists in usearch.
                 // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
                 let existing_key = *entry.get();
+
+                // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
+                // where multiple threads try to update the same node concurrently (issue #567).
+                // Without this, thread A could remove, thread B could remove (fail), then both try to add,
+                // causing "Duplicate keys not allowed" error.
                 let index = self.inner.write();
 
                 // Check if key exists before removing to avoid wasteful FFI call
@@ -607,14 +612,35 @@ impl VectorIndex for HnswIndex {
                 }
                 // Note: If key doesn't exist, we skip remove() and proceed directly to add()
                 // This is safe because add() with a non-existent key will succeed
-                drop(index);
-                existing_key
+
+                // Keep lock held - check if we need to expand capacity
+                if index.size() >= index.capacity() {
+                    // Double capacity, minimum 1024
+                    let new_capacity = (index.capacity() * 2).max(1024);
+                    index.reserve(new_capacity).map_err(|e| {
+                        Error::Vector(VectorError::IndexError(format!(
+                            "Failed to expand capacity: {}",
+                            e
+                        )))
+                    })?;
+                }
+
+                // Add the new vector while still holding the lock
+                index.add(existing_key, vector).map_err(|e| {
+                    Error::Vector(VectorError::IndexError(format!(
+                        "Failed to add vector: {}",
+                        e
+                    )))
+                })?;
+
+                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+                Ok(())
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 // New node: allocate key with overflow protection
                 // Check BEFORE incrementing to avoid leaving next_key in invalid state
                 const MAX_VALID_KEY: u64 = u64::MAX - 1000;
-                loop {
+                let key = loop {
                     let current = self.next_key.load(Ordering::SeqCst);
                     if current > MAX_VALID_KEY {
                         return Err(Error::Vector(VectorError::IndexError(
@@ -636,34 +662,34 @@ impl VectorIndex for HnswIndex {
                         }
                         Err(_) => continue, // Retry with new current value
                     }
+                };
+
+                // Insert into usearch index (auto-expand capacity if needed)
+                let index = self.inner.write();
+
+                // Check if we need to expand capacity
+                if index.size() >= index.capacity() {
+                    // Double capacity, minimum 1024
+                    let new_capacity = (index.capacity() * 2).max(1024);
+                    index.reserve(new_capacity).map_err(|e| {
+                        Error::Vector(VectorError::IndexError(format!(
+                            "Failed to expand capacity: {}",
+                            e
+                        )))
+                    })?;
                 }
+
+                index.add(key, vector).map_err(|e| {
+                    Error::Vector(VectorError::IndexError(format!(
+                        "Failed to add vector: {}",
+                        e
+                    )))
+                })?;
+
+                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+                Ok(())
             }
-        };
-
-        // Insert into usearch index (auto-expand capacity if needed)
-        let index = self.inner.write();
-
-        // Check if we need to expand capacity
-        if index.size() >= index.capacity() {
-            // Double capacity, minimum 1024
-            let new_capacity = (index.capacity() * 2).max(1024);
-            index.reserve(new_capacity).map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Failed to expand capacity: {}",
-                    e
-                )))
-            })?;
         }
-
-        index.add(key, vector).map_err(|e| {
-            Error::Vector(VectorError::IndexError(format!(
-                "Failed to add vector: {}",
-                e
-            )))
-        })?;
-
-        self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }
 
     fn remove(&self, id: NodeId) -> Result<()> {
@@ -1384,6 +1410,294 @@ mod tests {
 
         assert_eq!(results[2].0, n3);
         assert!(results[2].1 < 0.1 && results[2].1 > -0.1); // Orthogonal: similarity ~= 0.0
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_existing_node() -> Result<()> {
+        // Test the Occupied entry path in add() - updating an existing node
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        let node1 = NodeId::new(1).unwrap();
+
+        // Add initial vector
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
+        assert_eq!(index.len(), 1);
+
+        // Update with new vector (this exercises the Occupied entry path)
+        index.add(node1, &[0.0, 1.0, 0.0, 0.0])?;
+        assert_eq!(index.len(), 1); // Still only one node
+
+        // Verify the vector was updated, not duplicated
+        let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node1);
+        assert!(results[0].1 > 0.99); // Should match the new vector
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_capacity_expansion_on_add() -> Result<()> {
+        // Test capacity expansion during initial adds (Vacant entry path)
+        // Start with small initial capacity to force expansion
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .initial_capacity(2) // Start with small capacity
+            .build()?;
+
+        // Add first two nodes - should fit in initial capacity
+        let node1 = NodeId::new(1).unwrap();
+        let node2 = NodeId::new(2).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
+        index.add(node2, &[0.0, 1.0, 0.0, 0.0])?;
+        assert_eq!(index.len(), 2);
+
+        // Add third node - should trigger capacity expansion code path
+        let node3 = NodeId::new(3).unwrap();
+        index.add(node3, &[0.0, 0.0, 1.0, 0.0])?;
+        assert_eq!(index.len(), 3);
+
+        // Add more nodes to verify expansion worked
+        let node4 = NodeId::new(4).unwrap();
+        let node5 = NodeId::new(5).unwrap();
+        index.add(node4, &[0.0, 0.0, 0.0, 1.0])?;
+        index.add(node5, &[0.5, 0.5, 0.0, 0.0])?;
+        assert_eq!(index.len(), 5);
+
+        // Verify all nodes are searchable
+        let results = index.search(&[1.0, 0.0, 0.0, 0.0], 5)?;
+        assert_eq!(results.len(), 5);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_capacity_expansion_on_update() -> Result<()> {
+        // Test capacity expansion during updates (Occupied entry path with expansion)
+        // Start with small capacity to test expansion in update path
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .initial_capacity(2)
+            .build()?;
+
+        let node1 = NodeId::new(1).unwrap();
+        let node2 = NodeId::new(2).unwrap();
+
+        // Fill to initial capacity
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
+        index.add(node2, &[0.0, 1.0, 0.0, 0.0])?;
+        assert_eq!(index.len(), 2);
+
+        // Update node1 multiple times (exercises Occupied path)
+        index.add(node1, &[0.5, 0.5, 0.0, 0.0])?;
+        assert_eq!(index.len(), 2); // Still 2 nodes
+
+        // Add new nodes to trigger and test expansion
+        let node3 = NodeId::new(3).unwrap();
+        index.add(node3, &[0.0, 0.0, 1.0, 0.0])?;
+        assert_eq!(index.len(), 3);
+
+        let node4 = NodeId::new(4).unwrap();
+        index.add(node4, &[0.0, 0.0, 0.0, 1.0])?;
+        assert_eq!(index.len(), 4);
+
+        // Update again after expansion to test Occupied path with larger capacity
+        index.add(node2, &[0.2, 0.8, 0.0, 0.0])?;
+        assert_eq!(index.len(), 4); // Still 4 nodes
+
+        // Verify updates worked correctly
+        let results = index.search(&[0.5, 0.5, 0.0, 0.0], 1)?;
+        assert_eq!(results[0].0, node1);
+
+        let results2 = index.search(&[0.2, 0.8, 0.0, 0.0], 1)?;
+        assert_eq!(results2[0].0, node2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_concurrent_update_same_node() -> Result<()> {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Test the race condition fix - multiple threads updating the same node
+        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?);
+        let node1 = NodeId::new(1).unwrap();
+
+        // Add initial vector
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
+
+        let num_threads = 10;
+        let updates_per_thread = 10;
+
+        let mut handles = vec![];
+
+        for thread_id in 0..num_threads {
+            let index_clone = Arc::clone(&index);
+            let handle = thread::spawn(move || {
+                for i in 0..updates_per_thread {
+                    // Each thread updates the same node with different vectors
+                    let val = (thread_id * updates_per_thread + i) as f32 / 100.0;
+                    let vector = vec![val, 1.0 - val, 0.0, 0.0];
+                    index_clone.add(node1, &vector).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should still be exactly one node, not duplicates
+        assert_eq!(index.len(), 1);
+
+        // Verify the node is still searchable
+        let results = index.search(&[0.5, 0.5, 0.0, 0.0], 1)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_concurrent_mixed_operations() -> Result<()> {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Test concurrent adds and updates to different nodes
+        let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?);
+
+        let num_threads = 8;
+        let mut handles = vec![];
+
+        for thread_id in 0..num_threads {
+            let index_clone = Arc::clone(&index);
+            let handle = thread::spawn(move || {
+                // Each thread works with its own node
+                let node = NodeId::new(thread_id as u64 + 1).unwrap();
+
+                // Add the node
+                let vector = vec![thread_id as f32 / num_threads as f32, 0.0, 0.0, 0.0];
+                index_clone.add(node, &vector).unwrap();
+
+                // Update it multiple times
+                for i in 0..5 {
+                    let val = (thread_id as f32 + i as f32) / (num_threads as f32 * 5.0);
+                    let updated_vector = vec![val, 1.0 - val, 0.0, 0.0];
+                    index_clone.add(node, &updated_vector).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should have exactly num_threads nodes
+        assert_eq!(index.len(), num_threads);
+
+        // All nodes should be searchable
+        let results = index.search(&[0.5, 0.5, 0.0, 0.0], num_threads)?;
+        assert_eq!(results.len(), num_threads);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_max_key_overflow_protection() -> Result<()> {
+        // Test that we reject IDs that would exceed MAX_VALID_KEY
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        // Manually set next_key to exactly at the limit
+        // The check is: if current > MAX_VALID_KEY, so:
+        // - Setting to MAX_VALID_KEY: next add uses this key (passes), increments to MAX_VALID_KEY+1
+        // - Then the following add has current=MAX_VALID_KEY+1 (> MAX_VALID_KEY), so it fails
+        const MAX_VALID_KEY: u64 = u64::MAX - 1000;
+        index
+            .next_key
+            .store(MAX_VALID_KEY, std::sync::atomic::Ordering::SeqCst);
+
+        // This should succeed (uses MAX_VALID_KEY, then increments to MAX_VALID_KEY+1)
+        let node1 = NodeId::new(1).unwrap();
+        assert!(index.add(node1, &[1.0, 0.0, 0.0, 0.0]).is_ok());
+
+        // Now next_key = MAX_VALID_KEY+1, which is > MAX_VALID_KEY, so this should fail
+        let node2 = NodeId::new(2).unwrap();
+        let result = index.add(node2, &[0.0, 1.0, 0.0, 0.0]);
+        assert!(result.is_err());
+
+        if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
+            assert!(msg.contains("overflow") || msg.contains("exceeded"));
+        } else {
+            panic!(
+                "Expected IndexError with overflow/exceeded message, got: {:?}",
+                result
+            );
+        }
+
+        // Updating existing node should still work (doesn't allocate new key)
+        assert!(index.add(node1, &[0.5, 0.5, 0.0, 0.0]).is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_nonexistent_then_exists() -> Result<()> {
+        // Test edge case: try to "update" a node that doesn't exist, then add it properly
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        let node1 = NodeId::new(1).unwrap();
+
+        // First add creates the node
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
+        assert_eq!(index.len(), 1);
+
+        // Second add updates it
+        index.add(node1, &[0.0, 1.0, 0.0, 0.0])?;
+        assert_eq!(index.len(), 1);
+
+        // Verify it has the updated vector
+        let results = index.search(&[0.0, 1.0, 0.0, 0.0], 1)?;
+        assert_eq!(results[0].0, node1);
+        assert!(results[0].1 > 0.99);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_stats_tracking() -> Result<()> {
+        // Test that statistics are correctly tracked for adds and updates
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        let node1 = NodeId::new(1).unwrap();
+        let node2 = NodeId::new(2).unwrap();
+
+        let initial_adds = index
+            .stats
+            .vectors_added
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        // Add two nodes
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0])?;
+        index.add(node2, &[0.0, 1.0, 0.0, 0.0])?;
+
+        let after_adds = index
+            .stats
+            .vectors_added
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after_adds - initial_adds, 2);
+
+        // Update node1 - should still increment vectors_added counter
+        index.add(node1, &[0.5, 0.5, 0.0, 0.0])?;
+
+        let after_update = index
+            .stats
+            .vectors_added
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after_update - initial_adds, 3);
 
         Ok(())
     }
