@@ -586,12 +586,17 @@ impl VectorIndex for HnswIndex {
 
         // Get or create key for this NodeId
         // Use entry API for atomic check-and-update to prevent race conditions
-        let key = match self.id_mapping.entry(id) {
+        match self.id_mapping.entry(id) {
             dashmap::mapref::entry::Entry::Occupied(entry) => {
                 // Re-adding existing node: remove old vector from usearch if it exists
                 // Optimization (Issue #207): Only call remove() if key actually exists in usearch.
                 // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
                 let existing_key = *entry.get();
+
+                // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
+                // where multiple threads try to update the same node concurrently (issue #567).
+                // Without this, thread A could remove, thread B could remove (fail), then both try to add,
+                // causing "Duplicate keys not allowed" error.
                 let index = self.inner.write();
 
                 // Check if key exists before removing to avoid wasteful FFI call
@@ -607,14 +612,35 @@ impl VectorIndex for HnswIndex {
                 }
                 // Note: If key doesn't exist, we skip remove() and proceed directly to add()
                 // This is safe because add() with a non-existent key will succeed
-                drop(index);
-                existing_key
+
+                // Keep lock held - check if we need to expand capacity
+                if index.size() >= index.capacity() {
+                    // Double capacity, minimum 1024
+                    let new_capacity = (index.capacity() * 2).max(1024);
+                    index.reserve(new_capacity).map_err(|e| {
+                        Error::Vector(VectorError::IndexError(format!(
+                            "Failed to expand capacity: {}",
+                            e
+                        )))
+                    })?;
+                }
+
+                // Add the new vector while still holding the lock
+                index.add(existing_key, vector).map_err(|e| {
+                    Error::Vector(VectorError::IndexError(format!(
+                        "Failed to add vector: {}",
+                        e
+                    )))
+                })?;
+
+                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+                Ok(())
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 // New node: allocate key with overflow protection
                 // Check BEFORE incrementing to avoid leaving next_key in invalid state
                 const MAX_VALID_KEY: u64 = u64::MAX - 1000;
-                loop {
+                let key = loop {
                     let current = self.next_key.load(Ordering::SeqCst);
                     if current > MAX_VALID_KEY {
                         return Err(Error::Vector(VectorError::IndexError(
@@ -636,34 +662,34 @@ impl VectorIndex for HnswIndex {
                         }
                         Err(_) => continue, // Retry with new current value
                     }
+                };
+
+                // Insert into usearch index (auto-expand capacity if needed)
+                let index = self.inner.write();
+
+                // Check if we need to expand capacity
+                if index.size() >= index.capacity() {
+                    // Double capacity, minimum 1024
+                    let new_capacity = (index.capacity() * 2).max(1024);
+                    index.reserve(new_capacity).map_err(|e| {
+                        Error::Vector(VectorError::IndexError(format!(
+                            "Failed to expand capacity: {}",
+                            e
+                        )))
+                    })?;
                 }
+
+                index.add(key, vector).map_err(|e| {
+                    Error::Vector(VectorError::IndexError(format!(
+                        "Failed to add vector: {}",
+                        e
+                    )))
+                })?;
+
+                self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
+                Ok(())
             }
-        };
-
-        // Insert into usearch index (auto-expand capacity if needed)
-        let index = self.inner.write();
-
-        // Check if we need to expand capacity
-        if index.size() >= index.capacity() {
-            // Double capacity, minimum 1024
-            let new_capacity = (index.capacity() * 2).max(1024);
-            index.reserve(new_capacity).map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Failed to expand capacity: {}",
-                    e
-                )))
-            })?;
         }
-
-        index.add(key, vector).map_err(|e| {
-            Error::Vector(VectorError::IndexError(format!(
-                "Failed to add vector: {}",
-                e
-            )))
-        })?;
-
-        self.stats.vectors_added.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }
 
     fn remove(&self, id: NodeId) -> Result<()> {
