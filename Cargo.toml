@@ -308,6 +308,12 @@ name = "vector_serialization"
 harness = false
 path = "benches/vector_serialization.rs"
 
+# Incremental CSR Adjacency (ADR-0026)
+[[bench]]
+name = "incremental_adjacency"
+harness = false
+path = "benches/incremental_adjacency.rs"
+
 # MCP server binary
 [[bin]]
 name = "gallifrey-mcp"
