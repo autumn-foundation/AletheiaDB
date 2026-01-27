@@ -480,11 +480,11 @@ struct CurrentIndexes {
 **Phase 4**: Compaction logic ✓
 **Phase 5**: Background compaction thread ✓
 **Phase 6**: CurrentIndexes integration ✓
-**Phase 7**: Persistence integration (future)
+**Phase 7**: Persistence integration ✓
 **Phase 8**: Benchmarks & validation (future)
 
-**Test Results (Phase 6 Complete):**
-- 29 incremental adjacency tests passing
+**Test Results (Phase 7 Complete):**
+- 33 incremental adjacency tests passing (29 + 4 Phase 7)
 - 48 index::current tests passing
 - 64 recovery tests passing
 - 23 index persistence tests passing
