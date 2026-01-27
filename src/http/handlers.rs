@@ -56,7 +56,8 @@ mod tests {
         let resp = test::call_service(&app, req).await;
 
         let body = test::read_body(resp).await;
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("Response body should be valid JSON");
 
         assert_eq!(json["status"], "healthy");
     }

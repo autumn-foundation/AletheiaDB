@@ -1,20 +1,125 @@
 //! HTTP server configuration.
 
+/// CORS (Cross-Origin Resource Sharing) configuration.
+#[derive(Debug, Clone)]
+pub struct CorsConfig {
+    /// Allowed origins. Empty means allow any origin (development mode only).
+    allowed_origins: Vec<String>,
+    /// Allowed HTTP methods.
+    allowed_methods: Vec<String>,
+    /// Allowed HTTP headers.
+    allowed_headers: Vec<String>,
+    /// Max age for preflight cache in seconds.
+    max_age: u32,
+}
+
+impl CorsConfig {
+    /// Create a permissive CORS config for development.
+    ///
+    /// # Security Warning
+    ///
+    /// This allows any origin and should NOT be used in production.
+    /// Use [`CorsConfig::restrictive`] or configure specific origins instead.
+    pub fn permissive() -> Self {
+        Self {
+            allowed_origins: vec![],
+            allowed_methods: vec![
+                "GET".to_string(),
+                "POST".to_string(),
+                "PUT".to_string(),
+                "DELETE".to_string(),
+                "OPTIONS".to_string(),
+            ],
+            allowed_headers: vec!["Content-Type".to_string(), "Authorization".to_string()],
+            max_age: 3600,
+        }
+    }
+
+    /// Create a restrictive CORS config with no allowed origins.
+    ///
+    /// You must explicitly add allowed origins using [`CorsConfig::allow_origin`].
+    pub fn restrictive() -> Self {
+        Self {
+            allowed_origins: vec!["http://localhost:3000".to_string()],
+            allowed_methods: vec!["GET".to_string(), "POST".to_string(), "OPTIONS".to_string()],
+            allowed_headers: vec!["Content-Type".to_string()],
+            max_age: 3600,
+        }
+    }
+
+    /// Add an allowed origin.
+    pub fn allow_origin(mut self, origin: impl Into<String>) -> Self {
+        self.allowed_origins.push(origin.into());
+        self
+    }
+
+    /// Set allowed HTTP methods.
+    pub fn allowed_methods(mut self, methods: Vec<String>) -> Self {
+        self.allowed_methods = methods;
+        self
+    }
+
+    /// Set allowed HTTP headers.
+    pub fn allowed_headers(mut self, headers: Vec<String>) -> Self {
+        self.allowed_headers = headers;
+        self
+    }
+
+    /// Set max age for preflight cache.
+    pub fn max_age(mut self, seconds: u32) -> Self {
+        self.max_age = seconds;
+        self
+    }
+
+    /// Check if any origin is allowed (permissive mode).
+    pub fn is_permissive(&self) -> bool {
+        self.allowed_origins.is_empty()
+    }
+
+    /// Get allowed origins.
+    pub fn allowed_origins(&self) -> &[String] {
+        &self.allowed_origins
+    }
+
+    /// Get allowed methods.
+    pub fn get_allowed_methods(&self) -> &[String] {
+        &self.allowed_methods
+    }
+
+    /// Get allowed headers.
+    pub fn get_allowed_headers(&self) -> &[String] {
+        &self.allowed_headers
+    }
+
+    /// Get max age in seconds.
+    pub fn get_max_age(&self) -> u32 {
+        self.max_age
+    }
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self::restrictive()
+    }
+}
+
 /// Configuration for the HTTP server.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     port: u16,
     host: String,
+    cors: CorsConfig,
 }
 
 impl ServerConfig {
     /// Create a new server config with the specified port.
     ///
-    /// Uses default host of "0.0.0.0" (all interfaces).
+    /// Uses default host of "0.0.0.0" (all interfaces) and restrictive CORS.
     pub fn new(port: u16) -> Self {
         Self {
             port,
             host: "0.0.0.0".to_string(),
+            cors: CorsConfig::default(),
         }
     }
 
@@ -26,6 +131,11 @@ impl ServerConfig {
     /// Get the configured host.
     pub fn host(&self) -> &str {
         &self.host
+    }
+
+    /// Get the CORS configuration.
+    pub fn cors(&self) -> &CorsConfig {
+        &self.cors
     }
 
     /// Get the bind address as "host:port".
@@ -44,6 +154,7 @@ impl Default for ServerConfig {
         Self {
             port: 8080,
             host: "0.0.0.0".to_string(),
+            cors: CorsConfig::default(),
         }
     }
 }
@@ -53,6 +164,7 @@ impl Default for ServerConfig {
 pub struct ServerConfigBuilder {
     port: Option<u16>,
     host: Option<String>,
+    cors: Option<CorsConfig>,
 }
 
 impl ServerConfigBuilder {
@@ -63,8 +175,33 @@ impl ServerConfigBuilder {
     }
 
     /// Set the host to bind to.
+    ///
+    /// # Valid Values
+    ///
+    /// - IPv4 addresses: "0.0.0.0", "127.0.0.1", etc.
+    /// - IPv6 addresses: "::", "::1", etc.
+    /// - Hostnames: "localhost", etc.
+    ///
+    /// The host is validated at bind time by the underlying server.
     pub fn host(mut self, host: impl Into<String>) -> Self {
         self.host = Some(host.into());
+        self
+    }
+
+    /// Set the CORS configuration.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::http::{ServerConfig, CorsConfig};
+    ///
+    /// let config = ServerConfig::builder()
+    ///     .port(8080)
+    ///     .cors(CorsConfig::restrictive().allow_origin("https://myapp.com"))
+    ///     .build();
+    /// ```
+    pub fn cors(mut self, cors: CorsConfig) -> Self {
+        self.cors = Some(cors);
         self
     }
 
@@ -73,6 +210,7 @@ impl ServerConfigBuilder {
         ServerConfig {
             port: self.port.unwrap_or(8080),
             host: self.host.unwrap_or_else(|| "0.0.0.0".to_string()),
+            cors: self.cors.unwrap_or_default(),
         }
     }
 }
@@ -86,6 +224,7 @@ mod tests {
         let config = ServerConfig::default();
         assert_eq!(config.port(), 8080);
         assert_eq!(config.host(), "0.0.0.0");
+        assert!(!config.cors().is_permissive());
     }
 
     #[test]
@@ -106,5 +245,37 @@ mod tests {
     fn test_bind_address() {
         let config = ServerConfig::builder().port(8080).host("localhost").build();
         assert_eq!(config.bind_address(), "localhost:8080");
+    }
+
+    #[test]
+    fn test_cors_permissive() {
+        let cors = CorsConfig::permissive();
+        assert!(cors.is_permissive());
+        assert!(cors.allowed_origins().is_empty());
+    }
+
+    #[test]
+    fn test_cors_restrictive() {
+        let cors = CorsConfig::restrictive();
+        assert!(!cors.is_permissive());
+        assert!(!cors.allowed_origins().is_empty());
+    }
+
+    #[test]
+    fn test_cors_allow_origin() {
+        let cors = CorsConfig::restrictive().allow_origin("https://example.com");
+        assert!(
+            cors.allowed_origins()
+                .contains(&"https://example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_builder_with_cors() {
+        let config = ServerConfig::builder()
+            .port(8080)
+            .cors(CorsConfig::permissive())
+            .build();
+        assert!(config.cors().is_permissive());
     }
 }

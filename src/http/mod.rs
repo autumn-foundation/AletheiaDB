@@ -31,6 +31,6 @@ mod config;
 mod handlers;
 mod server;
 
-pub use config::{ServerConfig, ServerConfigBuilder};
+pub use config::{CorsConfig, ServerConfig, ServerConfigBuilder};
 pub use handlers::health_check;
 pub use server::{ShutdownHandle, configure_app, create_app, create_server, run_server};

@@ -4,7 +4,7 @@ use actix_cors::Cors;
 use actix_web::{App, HttpServer, dev::Server, middleware::Logger, web};
 use tokio::sync::oneshot;
 
-use super::config::ServerConfig;
+use super::config::{CorsConfig, ServerConfig};
 use super::handlers::configure_health_routes;
 
 /// Handle for gracefully shutting down the server.
@@ -33,12 +33,13 @@ impl ShutdownHandle {
     }
 }
 
-/// Configure the Actix-web application with all routes and middleware.
+/// Configure the Actix-web application routes.
 ///
-/// This function sets up:
+/// This function sets up the HTTP routes:
 /// - Health check endpoint at `/status`
-/// - CORS middleware for cross-origin requests
-/// - Request logging middleware
+///
+/// Note: This function only configures routes, not middleware.
+/// Middleware (CORS, logging) is configured in [`create_app`] or [`create_app_with_config`].
 ///
 /// # Example
 ///
@@ -52,12 +53,53 @@ pub fn configure_app(cfg: &mut web::ServiceConfig) {
     configure_health_routes(cfg);
 }
 
+/// Build CORS middleware from configuration.
+fn build_cors(cors_config: &CorsConfig) -> Cors {
+    let mut cors = Cors::default();
+
+    if cors_config.is_permissive() {
+        // Development mode: allow any origin
+        cors = cors.allow_any_origin();
+    } else {
+        // Production mode: allow only configured origins
+        for origin in cors_config.allowed_origins() {
+            cors = cors.allowed_origin(origin);
+        }
+    }
+
+    // Configure allowed methods
+    let methods: Vec<actix_web::http::Method> = cors_config
+        .get_allowed_methods()
+        .iter()
+        .filter_map(|m| m.parse().ok())
+        .collect();
+    cors = cors.allowed_methods(methods);
+
+    // Configure allowed headers
+    let headers: Vec<actix_web::http::header::HeaderName> = cors_config
+        .get_allowed_headers()
+        .iter()
+        .filter_map(|h| h.parse().ok())
+        .collect();
+    cors = cors.allowed_headers(headers);
+
+    cors.max_age(cors_config.get_max_age() as usize)
+}
+
 /// Create a configured Actix-web application factory with all middleware.
 ///
+/// This creates an app with **permissive CORS** suitable for development/testing.
+/// For production use, prefer [`create_app_with_config`] with proper CORS settings.
+///
 /// This includes:
-/// - Request logging
-/// - CORS support
+/// - Request logging middleware
+/// - Permissive CORS support (allows any origin)
 /// - All configured routes
+///
+/// # Security Warning
+///
+/// This function uses permissive CORS settings. For production deployments,
+/// use [`create_app_with_config`] with a properly configured [`ServerConfig`].
 pub fn create_app() -> App<
     impl actix_web::dev::ServiceFactory<
         actix_web::dev::ServiceRequest,
@@ -67,17 +109,10 @@ pub fn create_app() -> App<
         InitError = (),
     >,
 > {
+    let cors_config = CorsConfig::permissive();
     App::new()
-        // Enable request logging
         .wrap(Logger::default())
-        // Enable CORS
-        .wrap(
-            Cors::default()
-                .allow_any_origin()
-                .allow_any_method()
-                .allow_any_header()
-                .max_age(3600),
-        )
+        .wrap(build_cors(&cors_config))
         .configure(configure_app)
 }
 
@@ -88,7 +123,7 @@ pub fn create_app() -> App<
 ///
 /// # Arguments
 ///
-/// * `config` - Server configuration including port and host
+/// * `config` - Server configuration including port, host, and CORS settings
 ///
 /// # Returns
 ///
@@ -99,9 +134,12 @@ pub fn create_app() -> App<
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::http::{ServerConfig, create_server};
+/// use gallifreydb::http::{ServerConfig, CorsConfig, create_server};
 ///
-/// let config = ServerConfig::new(8080);
+/// let config = ServerConfig::builder()
+///     .port(8080)
+///     .cors(CorsConfig::restrictive().allow_origin("https://myapp.com"))
+///     .build();
 /// let (server, shutdown) = create_server(config).await?;
 ///
 /// // Later, to shut down:
@@ -112,15 +150,21 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
     let shutdown_handle = ShutdownHandle::new(shutdown_tx);
 
     let bind_address = config.bind_address();
+    let cors_config = config.cors().clone();
 
-    let server = HttpServer::new(create_app)
-        .bind(&bind_address)?
-        .disable_signals() // We handle signals ourselves
-        .run();
+    let server = HttpServer::new(move || {
+        App::new()
+            .wrap(Logger::default())
+            .wrap(build_cors(&cors_config))
+            .configure(configure_app)
+    })
+    .bind(&bind_address)?
+    .disable_signals() // We handle signals ourselves
+    .run();
 
-    // Spawn a task that waits for shutdown signal
+    // Spawn a task that waits for shutdown signal using actix runtime
     let server_handle = server.handle();
-    tokio::spawn(async move {
+    actix_rt::spawn(async move {
         let _ = shutdown_rx.await;
         server_handle.stop(true).await;
     });
@@ -134,25 +178,43 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
 ///
 /// # Arguments
 ///
-/// * `config` - Server configuration including port and host
+/// * `config` - Server configuration including port, host, and CORS settings
 ///
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::http::{ServerConfig, run_server};
+/// use gallifreydb::http::{ServerConfig, CorsConfig, run_server};
 ///
 /// #[actix_web::main]
 /// async fn main() -> std::io::Result<()> {
-///     let config = ServerConfig::new(8080);
+///     let config = ServerConfig::builder()
+///         .port(8080)
+///         .cors(CorsConfig::restrictive().allow_origin("https://myapp.com"))
+///         .build();
 ///     run_server(config).await
 /// }
 /// ```
 pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     let bind_address = config.bind_address();
+    let cors_config = config.cors().clone();
 
     eprintln!("Starting GallifreyDB HTTP server on {}", bind_address);
+    if cors_config.is_permissive() {
+        eprintln!(
+            "WARNING: CORS is configured in permissive mode (any origin allowed). \
+             This is not recommended for production."
+        );
+    }
 
-    HttpServer::new(create_app).bind(&bind_address)?.run().await
+    HttpServer::new(move || {
+        App::new()
+            .wrap(Logger::default())
+            .wrap(build_cors(&cors_config))
+            .configure(configure_app)
+    })
+    .bind(&bind_address)?
+    .run()
+    .await
 }
 
 #[cfg(test)]
@@ -195,5 +257,19 @@ mod tests {
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    #[actix_rt::test]
+    async fn test_build_cors_permissive() {
+        let cors_config = CorsConfig::permissive();
+        let _cors = build_cors(&cors_config);
+        // If we get here without panic, CORS middleware was created successfully
+    }
+
+    #[actix_rt::test]
+    async fn test_build_cors_restrictive() {
+        let cors_config = CorsConfig::restrictive();
+        let _cors = build_cors(&cors_config);
+        // If we get here without panic, CORS middleware was created successfully
     }
 }
