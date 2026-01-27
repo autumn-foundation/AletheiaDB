@@ -1150,7 +1150,7 @@ mod tests {
 
             let operation = WalOperation::CreateNode {
                 node_id: NodeId::new(i + 1).unwrap(),
-                label: format!("Node_{}", i),
+                label: GLOBAL_INTERNER.intern(format!("Node_{}", i)).unwrap(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             };
@@ -1202,7 +1202,9 @@ mod tests {
 
                 let operation = WalOperation::CreateNode {
                     node_id: NodeId::new(lsn.0).unwrap(),
-                    label: format!("Node_seg{}_entry{}", seg_id, i),
+                    label: GLOBAL_INTERNER
+                        .intern(format!("Node_seg{}_entry{}", seg_id, i))
+                        .unwrap(),
                     properties: PropertyMap::new(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
@@ -1250,7 +1252,7 @@ mod tests {
             let lsn = LSN(i);
             let operation = WalOperation::CreateNode {
                 node_id: NodeId::new(i).unwrap(),
-                label: format!("Node_{}", i),
+                label: GLOBAL_INTERNER.intern(format!("Node_{}", i)).unwrap(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             };
@@ -1316,7 +1318,7 @@ mod tests {
         // Write one complete entry
         let operation = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
-            label: "Node_1".to_string(),
+            label: GLOBAL_INTERNER.intern("Node_1").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         };
