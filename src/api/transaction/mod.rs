@@ -123,7 +123,7 @@ pub trait WriteOps: ReadOps {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let mut tx = db.begin_write();
+    /// let mut tx = db.write_transaction()?;
     /// let node_id = tx.create_node("Person", properties)?;
     /// // ... create edges ...
     /// tx.delete_node_cascade(node_id)?; // Deletes node and all connected edges

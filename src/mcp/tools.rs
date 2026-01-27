@@ -51,6 +51,16 @@ pub struct DeleteNodeRequest {
     pub node_id: u64,
 }
 
+/// Request to delete a node and all its connected edges (cascade delete).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteNodeCascadeRequest {
+    /// The unique identifier of the node to delete.
+    #[schemars(
+        description = "The unique identifier of the node to delete along with all its connected edges"
+    )]
+    pub node_id: u64,
+}
+
 /// Request to list nodes with optional filtering.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ListNodesRequest {
