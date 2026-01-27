@@ -3247,65 +3247,126 @@ mod conflict_detection_tests {
     ///
     /// Scenario:
     /// - tx1 deletes a node
-    /// - tx2 attempts to create a node (potentially with same ID if reused)
+    /// - tx2 creates a new node concurrently
     /// - Both transactions try to commit concurrently
     ///
+    /// Note: The API doesn't allow explicit ID specification, so this tests
+    /// concurrent delete/create operations on different nodes rather than
+    /// true ID reuse.
+    ///
     /// Expected behavior:
-    /// - If tx1 commits first, tx2 should succeed (creating new node)
-    /// - If tx2 commits first, tx1 should fail (can't delete non-existent node in snapshot)
+    /// - Test Case A: If delete commits first, concurrent create should succeed
+    /// - Test Case B: If create commits first, concurrent delete should succeed
+    ///   (operations on different entities don't conflict)
     #[test]
     fn test_delete_then_recreate_race() {
         let harness = TestHarness::new();
 
-        // Create initial node
-        let node_id = {
-            let mut tx = harness.create_tx();
-            let id = tx
+        // Test Case A: Delete commits first, then create
+        {
+            // Create initial node
+            let node_id = {
+                let mut tx = harness.create_tx();
+                let id = tx
+                    .create_node(
+                        "Person",
+                        PropertyMapBuilder::new().insert("name", "Alice").build(),
+                    )
+                    .unwrap();
+                tx.commit().unwrap();
+                id
+            };
+
+            // tx1 starts and deletes the node
+            let mut tx1 = harness.create_tx();
+            tx1.delete_node(node_id).unwrap();
+
+            // tx2 starts and creates a new node (different entity, no conflict expected)
+            let mut tx2 = harness.create_tx();
+            let new_node_id = tx2
                 .create_node(
                     "Person",
-                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                    PropertyMapBuilder::new().insert("name", "Bob").build(),
                 )
                 .unwrap();
-            tx.commit().unwrap();
-            id
-        };
 
-        // tx1 starts and deletes the node
-        let mut tx1 = harness.create_tx();
-        tx1.delete_node(node_id).unwrap();
+            // tx1 commits first (deletes original node)
+            tx1.commit().unwrap();
 
-        // tx2 starts and creates a new node (different ID, but tests concurrent creation)
-        let mut tx2 = harness.create_tx();
-        let new_node_id = tx2
-            .create_node(
-                "Person",
-                PropertyMapBuilder::new().insert("name", "Bob").build(),
-            )
-            .unwrap();
+            // Verify node was deleted
+            assert!(
+                harness.current.get_node(node_id).is_err(),
+                "Original node should be deleted"
+            );
 
-        // tx1 commits first (deletes original node)
-        tx1.commit().unwrap();
+            // tx2 should succeed - creating new nodes doesn't conflict with deletes
+            tx2.commit().unwrap();
 
-        // Verify node was deleted
-        assert!(
-            harness.current.get_node(node_id).is_err(),
-            "Original node should be deleted"
-        );
+            // New node should exist
+            assert!(
+                harness.current.get_node(new_node_id).is_ok(),
+                "New node should be created successfully"
+            );
 
-        // tx2 should succeed - creating new nodes doesn't conflict with deletes
-        tx2.commit().unwrap();
+            // Original node should still be deleted
+            assert!(
+                harness.current.get_node(node_id).is_err(),
+                "Original node should remain deleted"
+            );
+        }
 
-        // New node should exist
-        assert!(
-            harness.current.get_node(new_node_id).is_ok(),
-            "New node should be created successfully"
-        );
+        // Test Case B: Create commits first, then delete (on different node)
+        {
+            // Create initial node to be deleted
+            let node_to_delete = {
+                let mut tx = harness.create_tx();
+                let id = tx
+                    .create_node(
+                        "Person",
+                        PropertyMapBuilder::new().insert("name", "Charlie").build(),
+                    )
+                    .unwrap();
+                tx.commit().unwrap();
+                id
+            };
 
-        // Original node should still be deleted
-        assert!(
-            harness.current.get_node(node_id).is_err(),
-            "Original node should remain deleted"
-        );
+            // tx3 starts and creates a new node
+            let mut tx3 = harness.create_tx();
+            let created_node_id = tx3
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Dave").build(),
+                )
+                .unwrap();
+
+            // tx4 starts and deletes a different node
+            let mut tx4 = harness.create_tx();
+            tx4.delete_node(node_to_delete).unwrap();
+
+            // tx3 commits first (creates new node)
+            tx3.commit().unwrap();
+
+            // Verify new node was created
+            assert!(
+                harness.current.get_node(created_node_id).is_ok(),
+                "New node should be created"
+            );
+
+            // tx4 should also succeed - operations on different entities don't conflict
+            tx4.commit().unwrap();
+
+            // Verify original node was deleted
+            assert!(
+                harness.current.get_node(node_to_delete).is_err(),
+                "Original node should be deleted"
+            );
+
+            // Created node should still exist
+            assert!(
+                harness.current.get_node(created_node_id).is_ok(),
+                "Created node should still exist"
+            );
+        }
     }
 
     /// Test: Update-delete conflict (Issue #357, Scenario 2).
@@ -3316,8 +3377,8 @@ mod conflict_detection_tests {
     /// - Both transactions have overlapping execution
     ///
     /// Expected behavior:
-    /// - First committer wins
-    /// - If tx1 commits first (update), tx2's delete should succeed (deletes updated version)
+    /// - First committer wins (MVCC conflict detection)
+    /// - If tx1 commits first (update), tx2's delete should fail due to write-write conflict
     /// - If tx2 commits first (delete), tx1's update should fail (can't update deleted node)
     #[test]
     fn test_update_delete_conflict() {
@@ -3378,29 +3439,53 @@ mod conflict_detection_tests {
         }
 
         // Test Case B: Delete commits first, then update
+        // Create a fresh node for this test case
+        let node_id_b = {
+            let mut tx = harness.create_tx();
+            let id = tx
+                .create_node(
+                    "Person",
+                    PropertyMapBuilder::new().insert("age", 50i64).build(),
+                )
+                .unwrap();
+            tx.commit().unwrap();
+            id
+        };
+
         {
             // tx3 wants to update
             let mut tx3 = harness.create_tx();
             tx3.update_node(
-                node_id,
-                PropertyMapBuilder::new().insert("age", 40i64).build(),
+                node_id_b,
+                PropertyMapBuilder::new().insert("age", 55i64).build(),
             )
             .unwrap();
 
             // tx4 deletes first
             let mut tx4 = harness.create_tx();
-            tx4.delete_node(node_id).unwrap();
+            tx4.delete_node(node_id_b).unwrap();
             tx4.commit().unwrap();
 
             // Node should be deleted
             assert!(
-                harness.current.get_node(node_id).is_err(),
+                harness.current.get_node(node_id_b).is_err(),
                 "Node should be deleted by tx4"
             );
 
             // tx3 tries to commit update - should fail
             let result = tx3.commit();
             assert!(result.is_err(), "tx3 should fail - node was deleted by tx4");
+
+            // Verify error message contains useful information
+            let err = result.unwrap_err();
+            let err_str = format!("{:?}", err);
+            assert!(
+                err_str.contains("NodeId")
+                    || err_str.contains("deleted")
+                    || err_str.contains("not found"),
+                "Error should explain the conflict: {}",
+                err_str
+            );
         }
     }
 
@@ -3411,10 +3496,12 @@ mod conflict_detection_tests {
     /// - tx2 deletes one of the endpoint nodes
     /// - Both transactions try to commit concurrently
     ///
-    /// Expected behavior:
-    /// - First committer wins
-    /// - If edge creation commits first, node deletion should fail (can't delete node with edges)
-    /// - If node deletion commits first, edge creation should fail (referential integrity)
+    /// Expected behavior (documents actual MVCC implementation):
+    /// - Test Case A: If edge creation commits first, node deletion succeeds because
+    ///   edge addition doesn't modify the node's version (no conflict detected).
+    ///   This creates an orphaned edge, which is acceptable if traversals handle it.
+    /// - Test Case B: If node deletion commits first, edge creation fails on commit
+    ///   due to referential integrity (endpoint node was deleted after snapshot).
     #[test]
     fn test_edge_creation_with_concurrent_node_deletion() {
         let harness = TestHarness::new();
@@ -3453,43 +3540,35 @@ mod conflict_detection_tests {
                 "Edge should be created"
             );
 
-            // tx2 tries to delete node2 - depending on implementation, this may
-            // succeed (if MVCC doesn't track edge addition) or fail (if it does).
-            // Test documents actual behavior: tx2 succeeds because edge addition
-            // doesn't modify node2's version, so no conflict is detected.
+            // tx2 tries to delete node2. According to the current MVCC implementation,
+            // edge addition doesn't modify node2's version, so no conflict is detected
+            // and the deletion succeeds.
             let result = tx2.commit();
-            if result.is_ok() {
-                // Deletion succeeded. Check for referential integrity:
-                // Node should be deleted
-                assert!(
-                    harness.current.get_node(node2).is_err(),
-                    "Node should be deleted"
-                );
-                // Edge handling varies by implementation:
-                // - Some systems cascade delete edges (edge removed)
-                // - Some systems leave orphaned edges (edge exists but invalid)
-                // We accept both behaviors as long as the system is consistent.
-                // Current implementation: edge becomes orphaned but still exists in storage
-                let edge_exists = harness.current.get_edge(edge_id).is_ok();
-                if edge_exists {
-                    // Edge exists but references deleted node - verify it's marked invalid
-                    // or will fail referential integrity checks on access
-                    let edge = harness.current.get_edge(edge_id).unwrap();
-                    // The edge exists but one of its endpoints is deleted
-                    // This is acceptable as long as traversals handle this gracefully
-                    let _ = edge; // Use edge to avoid unused warning
-                }
-            } else {
-                // Deletion failed due to conflict - both node and edge should still exist
-                assert!(
-                    harness.current.get_node(node2).is_ok(),
-                    "Node should still exist if deletion failed"
-                );
-                assert!(
-                    harness.current.get_edge(edge_id).is_ok(),
-                    "Edge should still exist if node deletion failed"
-                );
-            }
+            assert!(
+                result.is_ok(),
+                "tx2 commit should succeed - edge addition doesn't create version conflict on node2"
+            );
+
+            // Verify node was deleted
+            assert!(
+                harness.current.get_node(node2).is_err(),
+                "Node should be deleted after successful tx2 commit"
+            );
+
+            // Current implementation: edge becomes orphaned but still exists in storage.
+            // This documents a limitation: the system allows orphaned edges.
+            // TODO(issue): Consider adding cascade delete or stricter referential integrity
+            assert!(
+                harness.current.get_edge(edge_id).is_ok(),
+                "Edge still exists as orphan (documents current behavior)"
+            );
+
+            // Verify the edge references the deleted node (orphaned edge)
+            let edge = harness.current.get_edge(edge_id).unwrap();
+            assert_eq!(
+                edge.target, node2,
+                "Edge still references deleted node (orphaned)"
+            );
         }
 
         // Create a fresh pair of nodes for Test Case B
@@ -3521,25 +3600,30 @@ mod conflict_detection_tests {
                 "Node should be deleted"
             );
 
-            // tx3 tries to create edge with deleted node
-            // In tx3's snapshot, node4 still exists (snapshot isolation),
-            // so edge creation succeeds at operation time
-            let edge_result = tx3.create_edge(node3, node4, "KNOWS", PropertyMapBuilder::new().build());
+            // tx3 tries to create edge with deleted node.
+            // Under snapshot isolation, tx3's snapshot was taken before tx4's deletion,
+            // so node4 exists in tx3's view and edge creation succeeds at operation time.
+            let edge_result =
+                tx3.create_edge(node3, node4, "KNOWS", PropertyMapBuilder::new().build());
+            assert!(
+                edge_result.is_ok(),
+                "Edge creation should succeed - node4 exists in tx3's snapshot"
+            );
+            let edge_id = edge_result.unwrap();
 
-            // Depending on when the snapshot was taken:
-            // - If snapshot was before deletion: edge creation succeeds, commit should fail
-            // - If snapshot isolation is strict: edge creation might fail immediately
-            if edge_result.is_ok() {
-                // Edge created in tx3's view, but commit should fail due to node4 being deleted
-                let commit_result = tx3.commit();
-                assert!(
-                    commit_result.is_err(),
-                    "tx3 commit should fail - node4 was deleted by tx4"
-                );
-            } else {
-                // Edge creation failed because node doesn't exist in current storage
-                // This is also acceptable behavior
-            }
+            // However, commit should detect the conflict: node4 was deleted after tx3's snapshot,
+            // violating referential integrity for the edge.
+            let commit_result = tx3.commit();
+            assert!(
+                commit_result.is_err(),
+                "tx3 commit should fail - node4 was deleted by tx4, breaking referential integrity"
+            );
+
+            // Verify edge was not persisted (rollback worked correctly)
+            assert!(
+                harness.current.get_edge(edge_id).is_err(),
+                "Edge should not exist after failed commit"
+            );
         }
     }
 
@@ -3626,18 +3710,17 @@ mod conflict_detection_tests {
             "tx3's update should be visible"
         );
 
-        // Verify visibility consistency: create a new read transaction
-        // and ensure it sees the committed state
-        let read_tx = harness.create_tx();
-        let node_from_read = harness.current.get_node(node_id).unwrap();
+        // Verify visibility consistency: ensure storage reflects latest committed state
+        // (Reading directly from storage is appropriate since WriteTransaction doesn't
+        // provide read methods - it's write-only)
+        let node_final_check = harness.current.get_node(node_id).unwrap();
         assert_eq!(
-            node_from_read.get_property("age").and_then(|v| v.as_int()),
+            node_final_check
+                .get_property("age")
+                .and_then(|v| v.as_int()),
             Some(45),
-            "Read transaction should see latest committed state"
+            "Storage should consistently show latest committed state"
         );
-
-        // Suppress unused variable warnings
-        let _ = read_tx;
     }
 }
 
