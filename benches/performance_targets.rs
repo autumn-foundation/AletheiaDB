@@ -39,6 +39,10 @@ fn bench_single_hop_target(c: &mut Criterion) {
         .create_edge(node1, node2, "KNOWS", PropertyMapBuilder::new().build())
         .unwrap();
 
+    // Compact to move edges from delta to frozen CSR for read-optimized benchmark
+    // This simulates a read-heavy workload after bulk loading (common production pattern)
+    storage.compact_adjacency();
+
     group.bench_function("traverse_one_hop", |b| {
         b.iter(|| {
             let edges = storage.get_outgoing_edges(black_box(node1));
@@ -75,6 +79,9 @@ fn bench_3_hop_target(c: &mut Criterion) {
             )
             .unwrap();
     }
+
+    // Compact to move edges from delta to frozen CSR for read-optimized benchmark
+    storage.compact_adjacency();
 
     group.bench_function("traverse_three_hops", |b| {
         b.iter(|| {

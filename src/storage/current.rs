@@ -1143,8 +1143,19 @@ impl CurrentStorage {
     /// Get all outgoing edges from a node.
     ///
     /// This is the critical "hot path" operation that must be fast.
+    /// Uses frozen view (~8-14ns) when available, falls back to merged guard (~16-17ns).
     #[inline]
     pub fn get_outgoing_edges(&self, source: NodeId) -> Vec<EdgeId> {
+        // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
+        if let Some(frozen) = self.indexes.frozen_outgoing_view() {
+            return frozen
+                .get_adjacency(source)
+                .iter()
+                .map(|entry| entry.edge_id)
+                .collect();
+        }
+
+        // SLOW PATH: Use merged guard when delta/tombstones exist
         self.indexes
             .get_outgoing(source)
             .iter()
@@ -1153,8 +1164,20 @@ impl CurrentStorage {
     }
 
     /// Get all incoming edges to a node.
+    ///
+    /// Uses frozen view (~8-14ns) when available, falls back to merged guard (~16-17ns).
     #[inline]
     pub fn get_incoming_edges(&self, target: NodeId) -> Vec<EdgeId> {
+        // HOT PATH: Use frozen view for direct slice access when no delta/tombstones
+        if let Some(frozen) = self.indexes.frozen_incoming_view() {
+            return frozen
+                .get_adjacency(target)
+                .iter()
+                .map(|entry| entry.edge_id)
+                .collect();
+        }
+
+        // SLOW PATH: Use merged guard when delta/tombstones exist
         self.indexes
             .get_incoming(target)
             .iter()

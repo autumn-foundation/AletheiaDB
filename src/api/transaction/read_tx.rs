@@ -240,37 +240,14 @@ impl ReadOps for ReadTransaction {
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         // Filter edges to only return those visible in our snapshot
         // This prevents phantom reads where we see edges created after our snapshot
-
-        // HOT PATH: Try frozen view first for read-only transactions (~8-14ns vs ~16-17ns)
-        // Frozen view is available when no delta edges or tombstones exist
-        if let Some(frozen) = self.current.frozen_outgoing_view() {
-            let edge_ids: Vec<EdgeId> = frozen
-                .get_adjacency(node_id)
-                .iter()
-                .map(|entry| entry.edge_id)
-                .collect();
-            return self.filter_visible_edges(edge_ids);
-        }
-
-        // SLOW PATH: Use merged guard when delta/tombstones exist
+        // Note: CurrentStorage::get_outgoing_edges() uses frozen view when available
         let edge_ids = self.current.get_outgoing_edges(node_id);
         self.filter_visible_edges(edge_ids)
     }
 
     fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         // Filter edges to only return those visible in our snapshot
-
-        // HOT PATH: Try frozen view first for read-only transactions
-        if let Some(frozen) = self.current.frozen_incoming_view() {
-            let edge_ids: Vec<EdgeId> = frozen
-                .get_adjacency(node_id)
-                .iter()
-                .map(|entry| entry.edge_id)
-                .collect();
-            return self.filter_visible_edges(edge_ids);
-        }
-
-        // SLOW PATH: Use merged guard when delta/tombstones exist
+        // Note: CurrentStorage::get_incoming_edges() uses frozen view when available
         let edge_ids = self.current.get_incoming_edges(node_id);
         self.filter_visible_edges(edge_ids)
     }
