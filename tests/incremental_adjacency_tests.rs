@@ -945,11 +945,20 @@ mod phase5_background_compaction {
             );
         }
 
-        // Wait for panic to occur
-        thread::sleep(Duration::from_millis(150));
+        // Wait for panic to occur (poll instead of fixed sleep for CI reliability)
+        let mut attempts = 0;
+        while scheduler.panic_count() == 0 && attempts < 50 {
+            thread::sleep(Duration::from_millis(50));
+            attempts += 1;
+        }
 
         // Verify panic was caught and counted
-        assert_eq!(scheduler.panic_count(), 1);
+        assert_eq!(
+            scheduler.panic_count(),
+            1,
+            "Expected panic to be caught after {} attempts",
+            attempts
+        );
 
         // Thread should still be running (panic recovered)
         assert!(!handle.is_finished());
