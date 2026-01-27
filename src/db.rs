@@ -3344,6 +3344,127 @@ impl GallifreyDB {
     pub fn invalidate_statistics(&self) {
         self.stats.invalidate();
     }
+
+    /// Compress the MVCC commit log to reduce memory usage (Issue #237).
+    ///
+    /// This applies epoch-based compression to the transaction visibility manager's
+    /// commit log, converting sequential transaction ranges into compressed epochs.
+    /// Achieves 10-100x memory reduction for typical workloads with sequential
+    /// transaction patterns.
+    ///
+    /// # When to Call
+    ///
+    /// - Periodically during bulk imports (e.g., every 10K commits)
+    /// - During idle periods
+    /// - Before checkpointing
+    ///
+    /// # Performance
+    ///
+    /// O(N log N) where N is the number of uncompressed transactions.
+    /// Relatively expensive, so should not be called on every commit.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // After bulk import
+    /// for i in 0..100000 {
+    ///     db.create_node("Node", props)?;
+    /// }
+    ///
+    /// // Compress commit log to free memory
+    /// db.compress_commit_log();
+    /// ```
+    pub fn compress_commit_log(&self) {
+        self.visibility_manager.compress_commit_log();
+    }
+
+    /// Get memory usage of the MVCC commit log in bytes.
+    ///
+    /// This reports the current memory footprint of the transaction commit log
+    /// in the visibility manager. Useful for monitoring and triggering compression.
+    ///
+    /// # Returns
+    ///
+    /// Memory usage in bytes
+    pub fn commit_log_memory_usage(&self) -> usize {
+        self.visibility_manager.commit_log_memory_usage()
+    }
+
+    /// Get detailed compression statistics for the MVCC commit log (Issue #237).
+    ///
+    /// Returns statistics about:
+    /// - Total transactions tracked
+    /// - Number of compressed epochs
+    /// - Number of exception entries
+    /// - Compression ratio
+    /// - Memory usage and savings
+    ///
+    /// # Returns
+    ///
+    /// Compression statistics
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let stats = db.get_compression_stats();
+    /// println!("Compression ratio: {}x", stats.compression_ratio);
+    /// println!("Memory saved: {} bytes", stats.memory_saved_bytes);
+    /// ```
+    pub fn get_compression_stats(&self) -> crate::api::transaction::visibility::CompressionStats {
+        self.visibility_manager.get_compression_stats()
+    }
+
+    /// Check if commit log compression should be triggered based on memory threshold.
+    ///
+    /// This is a convenience method to help decide when to call `compress_commit_log()`.
+    /// Returns `true` if the current commit log memory usage exceeds the threshold.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold_bytes` - Memory threshold in bytes
+    ///
+    /// # Returns
+    ///
+    /// `true` if compression is recommended, `false` otherwise
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // After bulk import, compress if using > 10MB
+    /// if db.should_compress_commit_log(10 * 1024 * 1024) {
+    ///     db.compress_commit_log();
+    /// }
+    /// ```
+    pub fn should_compress_commit_log(&self, threshold_bytes: usize) -> bool {
+        self.visibility_manager
+            .should_compress_commit_log(threshold_bytes)
+    }
+
+    /// Check if compression should be triggered based on exception count.
+    ///
+    /// This is an alternative trigger mechanism that compresses when there are
+    /// many uncompressed exceptions (indicating potential for compression).
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold_exceptions` - Number of exceptions to trigger compression
+    ///
+    /// # Returns
+    ///
+    /// `true` if compression is recommended, `false` otherwise
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Compress every 50K commits
+    /// if db.should_compress_by_exception_count(50_000) {
+    ///     db.compress_commit_log();
+    /// }
+    /// ```
+    pub fn should_compress_by_exception_count(&self, threshold_exceptions: usize) -> bool {
+        self.visibility_manager
+            .should_compress_by_exception_count(threshold_exceptions)
+    }
 }
 
 impl Drop for GallifreyDB {
