@@ -365,6 +365,9 @@ impl ShardClient for HttpShardClient {
         struct PrepareResponseDto {
             ready: bool,
             reason: Option<String>,
+            // HLC timestamp from shard (Phase 3)
+            // TODO: Make this required once all shards support HLC
+            timestamp: Option<i64>,
         }
 
         self.execute_with_retry("prepare", || {
@@ -375,9 +378,21 @@ impl ShardClient for HttpShardClient {
 
             let resp: PrepareResponseDto = self.post_json("/api/v1/2pc/prepare", &req)?;
 
+            // Get timestamp from response, or use current time as fallback
+            let timestamp = if let Some(ts_micros) = resp.timestamp {
+                crate::core::temporal::Timestamp::from(ts_micros)
+            } else {
+                // Fallback: use current time if remote shard doesn't send timestamp
+                // This maintains backward compatibility during Phase 3 rollout
+                crate::core::temporal::time::now_safe().map_err(|e| NetworkError::Other {
+                    message: format!("Failed to get current time: {}", e),
+                })?
+            };
+
             Ok(PrepareResponse {
                 ready: resp.ready,
                 reason: resp.reason,
+                timestamp,
             })
         })
     }
@@ -400,6 +415,9 @@ impl ShardClient for HttpShardClient {
         #[derive(serde::Deserialize)]
         struct CommitResponseDto {
             success: bool,
+            // HLC timestamp from shard (Phase 3)
+            // TODO: Make this required once all shards support HLC
+            timestamp: Option<i64>,
         }
 
         self.execute_with_retry("commit", || {
@@ -409,8 +427,20 @@ impl ShardClient for HttpShardClient {
 
             let resp: CommitResponseDto = self.post_json("/api/v1/2pc/commit", &req)?;
 
+            // Get timestamp from response, or use current time as fallback
+            let timestamp = if let Some(ts_micros) = resp.timestamp {
+                crate::core::temporal::Timestamp::from(ts_micros)
+            } else {
+                // Fallback: use current time if remote shard doesn't send timestamp
+                // This maintains backward compatibility during Phase 3 rollout
+                crate::core::temporal::time::now_safe().map_err(|e| NetworkError::Other {
+                    message: format!("Failed to get current time: {}", e),
+                })?
+            };
+
             Ok(CommitResponse {
                 success: resp.success,
+                timestamp,
             })
         })
     }

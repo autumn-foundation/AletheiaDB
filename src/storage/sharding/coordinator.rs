@@ -364,7 +364,13 @@ impl ShardCoordinator {
                 .map_err(|_| DistributedTxError::Aborted {
                     reason: "Lock poisoned".to_string(),
                 })?;
-            let _ = log.log_commit(tx_id, transaction.participant_shards());
+
+            // Log the commit decision with HLC timestamp
+            // If clock fails, we must abort the transaction to maintain consistency
+            log.log_commit(tx_id, transaction.participant_shards())
+                .map_err(|e| DistributedTxError::Aborted {
+                    reason: format!("Failed to log commit decision: {}", e),
+                })?;
         }
         transaction.commit_decision_logged = true;
 
@@ -471,7 +477,7 @@ impl ShardCoordinator {
                 })?
         };
 
-        // Log the abort decision
+        // Log the abort decision with HLC timestamp
         {
             let mut log = self
                 .commit_log
@@ -479,7 +485,17 @@ impl ShardCoordinator {
                 .map_err(|_| DistributedTxError::Aborted {
                     reason: "Lock poisoned".to_string(),
                 })?;
-            let _ = log.log_abort(tx_id, transaction.participant_shards());
+
+            // If clock fails during abort, we still need to proceed with abort
+            // but log the error since 2PC log may be inconsistent
+            if let Err(e) = log.log_abort(tx_id, transaction.participant_shards()) {
+                // Use eprintln since we don't have tracing available
+                eprintln!(
+                    "WARNING: Failed to log abort decision for tx {}: {}. \
+                     Transaction will still be aborted but may not be in 2PC log.",
+                    tx_id, e
+                );
+            }
         }
 
         // Send abort to all participants

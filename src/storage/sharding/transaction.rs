@@ -445,7 +445,19 @@ impl DistributedTransaction {
         // Advance HLC using send() semantics
         self.current_timestamp = self.current_timestamp.send(physical_wallclock)?;
 
-        // If all committed, record final commit timestamp
+        // DESIGN DECISION: Set commit timestamp only when ALL shards have committed
+        //
+        // This ensures the commit_timestamp reflects the actual completion time of the
+        // distributed transaction across all shards, not just when we started committing.
+        //
+        // Alternatives considered:
+        // 1. Set at begin_commit() - Would not reflect distributed nature
+        // 2. Set at first shard commit - Would not capture full commit latency
+        // 3. Use max of all shard timestamps - Current approach (implicit via HLC send)
+        //
+        // Current approach uses HLC send() for each shard commit, so commit_timestamp
+        // automatically reflects the maximum of all shard response times through HLC's
+        // monotonic advancement property.
         if self.all_committed() && self.commit_timestamp.is_none() {
             self.commit_timestamp = Some(self.current_timestamp);
         }
@@ -535,6 +547,25 @@ pub struct TwoPhaseCommitLog {
 }
 
 /// A commit decision recorded in the log.
+///
+/// # Dual Time Tracking
+///
+/// This struct maintains two separate time representations:
+///
+/// 1. **`timestamp` (HLC)**: Logical timestamp for ordering and recovery
+///    - Used for: Causality tracking, transaction ordering, temporal queries
+///    - Properties: Monotonic, synchronized across shards, serializable
+///    - Format: HybridTimestamp (wallclock_micros + logical_counter)
+///
+/// 2. **`instant` (Instant)**: Wall-clock time for operational concerns
+///    - Used for: Timeout detection, recovery age checks, metrics
+///    - Properties: Not monotonic across restarts, not serializable
+///    - Format: std::time::Instant (opaque system-specific)
+///
+/// **Why Both?**
+/// - HLC timestamp provides distributed consistency but can't measure elapsed time
+/// - Instant provides accurate elapsed time but is meaningless across processes
+/// - We need both for complete recovery and timeout logic
 #[derive(Debug, Clone)]
 pub struct CommitDecision {
     /// Transaction ID.
@@ -545,10 +576,16 @@ pub struct CommitDecision {
     pub participants: Vec<ShardId>,
     /// Decision: true = commit, false = abort.
     pub decision: bool,
-    /// HLC timestamp when the decision was made.
+    /// HLC timestamp when the decision was made (for ordering and causality).
     pub timestamp: Timestamp,
-    /// Wall-clock time for timeout tracking (kept separate from HLC).
-    pub instant: Instant,
+    /// Wall-clock instant when logged (for timeout tracking and metrics).
+    ///
+    /// Note: This is NOT serialized and is reset on process restart.
+    /// Use `timestamp` for any cross-process or persistent time tracking.
+    ///
+    /// Currently unused but reserved for future timeout/metrics implementation.
+    #[allow(dead_code)]
+    instant: Instant,
 }
 
 impl TwoPhaseCommitLog {
