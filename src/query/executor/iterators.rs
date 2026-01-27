@@ -379,6 +379,17 @@ impl ResultIterator for BatchTemporalNodeIterator {
 /// 3. Makes each component independently testable
 /// 4. Improves readability and maintainability
 ///
+/// ## Lock Duration Trade-off
+///
+/// The `next()` method holds the historical read lock for the entire iteration
+/// loop until a matching node is found. This is intentional:
+/// - **Advantage**: Avoids lock thrashing (acquiring/releasing on every node)
+/// - **Trade-off**: For large result sets with many filtered-out nodes, the lock
+///   may be held longer, potentially increasing writer latency
+///
+/// For bulk queries where this is a concern, consider using `BatchTemporalNodeIterator`
+/// which processes all nodes upfront and releases the lock immediately.
+///
 /// ## Example
 ///
 /// ```ignore
@@ -401,6 +412,9 @@ pub struct TemporalNodeScanIterator {
     historical: Arc<RwLock<HistoricalStorage>>,
     /// Optional label filter - if Some, only nodes with matching label are returned
     label_filter: Option<String>,
+    /// Pre-computed interned ID of the label filter for efficient comparison.
+    /// Avoids repeated hashmap lookups in apply_label_filter().
+    interned_label_filter: Option<crate::core::interning::InternedString>,
 }
 
 impl TemporalNodeScanIterator {
@@ -420,12 +434,19 @@ impl TemporalNodeScanIterator {
         historical: Arc<RwLock<HistoricalStorage>>,
         label_filter: Option<String>,
     ) -> Self {
+        // Pre-compute the interned label ID once during construction
+        // to avoid repeated hashmap lookups during iteration
+        let interned_label_filter = label_filter
+            .as_ref()
+            .and_then(|label| GLOBAL_INTERNER.get_id(label));
+
         TemporalNodeScanIterator {
             node_ids: node_ids.into_iter(),
             valid_time,
             transaction_time,
             historical,
             label_filter,
+            interned_label_filter,
         }
     }
 
@@ -443,7 +464,7 @@ impl TemporalNodeScanIterator {
     /// - No version exists at the specified time point
     /// - Version metadata is missing (data inconsistency)
     /// - Property reconstruction fails
-    pub fn get_temporal_version(
+    pub(crate) fn get_temporal_version(
         &self,
         node_id: NodeId,
         guard: &parking_lot::RwLockReadGuard<'_, HistoricalStorage>,
@@ -484,15 +505,17 @@ impl TemporalNodeScanIterator {
     /// - No label filter is configured (all nodes pass)
     /// - The node's label matches the filter
     ///
-    /// Returns `false` if the node's label doesn't match the filter.
+    /// Returns `false` if:
+    /// - The node's label doesn't match the filter
+    /// - The filter label doesn't exist in the interner (no nodes can match)
+    ///
+    /// Uses the pre-computed interned label ID for O(1) comparison.
     #[inline]
-    pub fn apply_label_filter(&self, node: &Node) -> bool {
-        match &self.label_filter {
-            None => true, // No filter, all nodes pass
-            Some(filter_label) => {
-                let filter_id = GLOBAL_INTERNER.get_id(filter_label);
-                filter_id == Some(node.label)
-            }
+    pub(crate) fn apply_label_filter(&self, node: &Node) -> bool {
+        match (&self.label_filter, self.interned_label_filter) {
+            (None, _) => true,        // No filter, all nodes pass
+            (Some(_), None) => false, // Filter label doesn't exist, no nodes match
+            (Some(_), Some(filter_id)) => filter_id == node.label,
         }
     }
 
@@ -506,7 +529,7 @@ impl TemporalNodeScanIterator {
     /// - `Some(Ok(QueryRow))` - Node exists at time point and passes label filter
     /// - `Some(Err(...))` - Node lookup failed (error should be propagated)
     /// - `None` - Node exists but doesn't pass label filter (skip to next)
-    pub fn filter_node(
+    pub(crate) fn filter_node(
         &self,
         node_id: NodeId,
         guard: &parking_lot::RwLockReadGuard<'_, HistoricalStorage>,
@@ -545,7 +568,17 @@ impl ResultIterator for TemporalNodeScanIterator {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.node_ids.size_hint()
+        let (_lower, upper) = self.node_ids.size_hint();
+        // When a label filter is active, this iterator may skip node IDs,
+        // so we cannot safely use the underlying lower bound.
+        // Upper bound remains valid as we can't return more than remaining IDs.
+        if self.label_filter.is_some() {
+            (0, upper)
+        } else {
+            // No label filtering: all remaining node_ids will be yielded
+            // (assuming they exist in storage at the requested time point).
+            self.node_ids.size_hint()
+        }
     }
 }
 
@@ -2492,6 +2525,10 @@ mod tests {
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let timestamp: Timestamp = 1000.into();
 
+        // Intern label BEFORE creating iterator (simulates real-world usage
+        // where labels are interned when nodes are created in storage)
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
         // Create iterator with "Person" label filter
         let iter = TemporalNodeScanIterator::new(
             vec![],
@@ -2501,7 +2538,6 @@ mod tests {
             Some("Person".to_string()),
         );
 
-        let label = GLOBAL_INTERNER.intern("Person").unwrap();
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
         let node = Node::new(
             NodeId::new(1).unwrap(),
@@ -2521,6 +2557,10 @@ mod tests {
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let timestamp: Timestamp = 1000.into();
 
+        // Intern both labels BEFORE creating iterator
+        let _company_label = GLOBAL_INTERNER.intern("Company").unwrap();
+        let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+
         // Create iterator with "Company" label filter
         let iter = TemporalNodeScanIterator::new(
             vec![],
@@ -2530,16 +2570,15 @@ mod tests {
             Some("Company".to_string()),
         );
 
-        let label = GLOBAL_INTERNER.intern("Person").unwrap();
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
         let node = Node::new(
             NodeId::new(1).unwrap(),
-            label,
+            person_label,
             props,
             VersionId::new(1).unwrap(),
         );
 
-        // Label doesn't match, should return false
+        // Label doesn't match (Company != Person), should return false
         assert!(!iter.apply_label_filter(&node));
     }
 
@@ -2616,7 +2655,9 @@ mod tests {
         let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
-        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        // Intern both labels before use
+        let _company_label = GLOBAL_INTERNER.intern("Company").unwrap();
+        let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
         let timestamp: Timestamp = 1000.into();
 
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
@@ -2627,7 +2668,7 @@ mod tests {
                 node_id,
                 version_id,
                 crate::core::temporal::BiTemporalInterval::current(timestamp),
-                label,
+                person_label,
                 props,
             )
             .unwrap();
