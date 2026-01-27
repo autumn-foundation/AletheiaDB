@@ -48,28 +48,70 @@ We implement a **layered encryption-at-rest architecture** with pluggable key pr
                            │         (256-bit, from provider)        │
                            └─────────────────┬───────────────────────┘
                                              │
-                           ┌─────────────────┼─────────────────┐
-                           │ HKDF-SHA256     │                 │
-                           ▼                 ▼                 ▼
-                    ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-                    │   WAL DEK   │   │  Index DEK  │   │  Cold DEK   │
-                    │  (256-bit)  │   │  (256-bit)  │   │  (256-bit)  │
-                    └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
-                           │                 │                 │
-                           ▼                 ▼                 ▼
-                    ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-                    │ WAL Segments│   │ Index Files │   │ Redb Tables │
-                    │ (*.log)     │   │ (*.idx)     │   │ (*.redb)    │
-                    └─────────────┘   └─────────────┘   └─────────────┘
+               ┌─────────────────────────────┼─────────────────────────────┐
+               │ HKDF-SHA256                 │                             │
+               ▼                             ▼                             ▼
+        ┌─────────────┐               ┌─────────────┐               ┌─────────────┐
+        │   WAL DEK   │               │  Index DEK  │               │  Cold DEK   │
+        │  (256-bit)  │               │  (256-bit)  │               │  (256-bit)  │
+        └──────┬──────┘               └──────┬──────┘               └──────┬──────┘
+               │                             │                             │
+               ▼                             ▼                             ▼
+        ┌─────────────┐               ┌─────────────┐               ┌─────────────┐
+        │ WAL Segments│               │ Index Files │               │ Redb Tables │
+        │ (*.log)     │               │ (*.idx)     │               │ (*.redb)    │
+        └─────────────┘               └─────────────┘               └─────────────┘
+
+                                             │
+                                             │ HKDF-SHA256
+                                             ▼
+                                      ┌─────────────┐
+                                      │Checkpoint   │
+                                      │DEK (256-bit)│
+                                      └──────┬──────┘
+                                             │
+                                             ▼
+                                      ┌─────────────┐
+                                      │ Checkpoints │
+                                      │ (*.ckpt)    │
+                                      └─────────────┘
 ```
 
 ### Encryption Algorithm Selection
+
+**Common Cipher Trait:**
+
+```rust
+use zeroize::Zeroizing;
+
+/// Common trait for all encryption ciphers
+pub trait Cipher: Send + Sync {
+    /// Encrypt plaintext with random nonce
+    /// Output format: [nonce:12][ciphertext:N][tag:16]
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, EncryptionError>;
+
+    /// Decrypt ciphertext and verify authentication tag
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, EncryptionError>;
+
+    /// Algorithm name for logging/diagnostics
+    fn algorithm_name(&self) -> &'static str;
+}
+
+/// Key format for file/env providers
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum KeyFormat {
+    /// 64 hex characters (256 bits)
+    Hex,
+    /// 32 raw bytes
+    Binary,
+}
+```
 
 **Primary: AES-256-GCM**
 
 ```rust
 pub struct Aes256GcmCipher {
-    key: [u8; 32],
+    key: Zeroizing<[u8; 32]>,
 }
 
 impl Aes256GcmCipher {
@@ -92,7 +134,7 @@ impl Aes256GcmCipher {
 
 ```rust
 pub struct ChaCha20Poly1305Cipher {
-    key: [u8; 32],
+    key: Zeroizing<[u8; 32]>,
 }
 
 impl ChaCha20Poly1305Cipher {
@@ -114,18 +156,35 @@ impl ChaCha20Poly1305Cipher {
 **Algorithm Selection Logic:**
 
 ```rust
-pub fn select_cipher(config: &EncryptionConfig) -> Box<dyn Cipher> {
-    match config.algorithm {
-        Algorithm::Aes256Gcm => Box::new(Aes256GcmCipher::new(config.key)),
-        Algorithm::ChaCha20Poly1305 => Box::new(ChaCha20Poly1305Cipher::new(config.key)),
+/// Create a cipher from configuration and DEK
+/// Note: The key is obtained from the KeyProvider and derived via HKDF,
+/// not stored directly in EncryptionConfig.
+pub fn select_cipher(
+    algorithm: Algorithm,
+    dek: Zeroizing<[u8; 32]>,
+) -> Box<dyn Cipher> {
+    match algorithm {
+        Algorithm::Aes256Gcm => Box::new(Aes256GcmCipher::new(dek)),
+        Algorithm::ChaCha20Poly1305 => Box::new(ChaCha20Poly1305Cipher::new(dek)),
         Algorithm::Auto => {
             if cpu_has_aes_ni() {
-                Box::new(Aes256GcmCipher::new(config.key))
+                Box::new(Aes256GcmCipher::new(dek))
             } else {
-                Box::new(ChaCha20Poly1305Cipher::new(config.key))
+                Box::new(ChaCha20Poly1305Cipher::new(dek))
             }
         }
     }
+}
+
+/// Check for AES-NI hardware support
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn cpu_has_aes_ni() -> bool {
+    std::arch::is_x86_feature_detected!("aes")
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn cpu_has_aes_ni() -> bool {
+    false
 }
 ```
 
@@ -142,18 +201,24 @@ DEKs are derived using HKDF-SHA256 with unique context strings:
 ```rust
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::{Zeroize, Zeroizing};
 
 pub struct KeyDerivation {
-    mek: [u8; 32],
+    mek: Zeroizing<[u8; 32]>,
 }
 
 impl KeyDerivation {
+    /// Create from MEK obtained from KeyProvider
+    pub fn new(mek: Zeroizing<[u8; 32]>) -> Self {
+        Self { mek }
+    }
+
     /// Derive a component-specific DEK
-    pub fn derive_dek(&self, component: &str) -> [u8; 32] {
-        let hk = Hkdf::<Sha256>::new(None, &self.mek);
+    pub fn derive_dek(&self, component: &str) -> Zeroizing<[u8; 32]> {
+        let hk = Hkdf::<Sha256>::new(None, self.mek.as_ref());
         let info = format!("gallifreydb-{}-dek-v1", component);
-        let mut dek = [0u8; 32];
-        hk.expand(info.as_bytes(), &mut dek)
+        let mut dek = Zeroizing::new([0u8; 32]);
+        hk.expand(info.as_bytes(), dek.as_mut())
             .expect("32 bytes is valid output length");
         dek
     }
@@ -281,14 +346,16 @@ pub struct AwsKmsConfig {
 }
 ```
 
-**How It Works:**
-1. Generate random 32-byte DEK locally
-2. Encrypt DEK with KMS key (envelope encryption)
-3. Store encrypted DEK in database metadata
-4. On startup, call KMS Decrypt to recover DEK
+**How It Works (Envelope Encryption):**
+1. Generate random 32-byte MEK locally (one-time setup)
+2. Encrypt MEK with KMS key (envelope encryption)
+3. Store encrypted MEK in database metadata file (`encryption_metadata.bin`)
+4. On startup, call KMS Decrypt to recover MEK
+5. Derive component-specific DEKs from MEK using HKDF
 
 **Benefits:**
-- MEK never leaves AWS KMS (hardware security boundary)
+- KMS key never leaves AWS KMS (hardware security boundary)
+- MEK encrypted at rest, only decrypted in memory
 - Automatic key rotation via KMS policies
 - CloudTrail audit logging of key access
 - IAM-based access control
@@ -298,6 +365,7 @@ pub struct AwsKmsConfig {
 ```rust
 /// Retrieves MEK from HashiCorp Vault
 pub struct VaultKeyProvider {
+    /// Vault HTTP client (TLS configuration consumed during creation)
     client: VaultClient,
     mount_path: String,
     secret_path: String,
@@ -305,6 +373,8 @@ pub struct VaultKeyProvider {
 }
 
 impl VaultKeyProvider {
+    /// Create provider from configuration
+    /// Note: tls_config is consumed during VaultClient initialization
     pub async fn new(config: VaultConfig) -> Result<Self, KeyProviderError>;
 }
 
@@ -314,7 +384,20 @@ pub struct VaultConfig {
     pub mount_path: String,           // e.g., "secret" or "transit"
     pub secret_path: String,          // path within mount
     pub key_name: String,             // key field name
+    /// TLS configuration (consumed during client creation)
     pub tls_config: Option<TlsConfig>,
+}
+
+/// TLS configuration for Vault connection
+pub struct TlsConfig {
+    /// Path to CA certificate bundle
+    pub ca_cert: Option<PathBuf>,
+    /// Skip TLS verification (DANGEROUS - only for testing)
+    pub skip_verify: bool,
+    /// Client certificate for mTLS
+    pub client_cert: Option<PathBuf>,
+    /// Client key for mTLS
+    pub client_key: Option<PathBuf>,
 }
 ```
 
@@ -434,11 +517,32 @@ pub struct EncryptionHeader {
     /// Algorithm identifier
     pub algorithm: u8,        // 0 = None, 1 = AES-256-GCM, 2 = ChaCha20-Poly1305
 
-    /// Key provider identifier (for key rotation)
-    pub key_id: [u8; 16],     // UUID of key version
+    /// Key version identifier (UUID v4 raw bytes)
+    /// Used to identify which MEK version was used for encryption.
+    /// On key rotation, a new UUID is generated for the new MEK.
+    /// During decryption, this ID determines which key to use from
+    /// the key version cache (supports reading data encrypted with
+    /// previous key versions during rotation).
+    pub key_version_id: [u8; 16],
 
-    /// Additional flags
-    pub flags: u8,            // Reserved for future use
+    /// Additional flags (reserved for future use)
+    /// Bit 0: Compressed before encryption
+    /// Bits 1-7: Reserved
+    pub flags: u8,
+}
+
+impl EncryptionHeader {
+    /// Size of the encryption header in bytes
+    pub const SIZE: usize = 1 + 16 + 1; // 18 bytes
+
+    /// Create header for new encryption
+    pub fn new(algorithm: u8, key_version_id: [u8; 16]) -> Self {
+        Self {
+            algorithm,
+            key_version_id,
+            flags: 0,
+        }
+    }
 }
 ```
 
@@ -505,7 +609,7 @@ Same pattern as index files.
 | **Root/admin access** | MEK accessible to admin | Use HSM/KMS with access controls |
 | **Denial of service** | Encryption doesn't prevent DoS | Use existing DoS protections |
 | **Traffic analysis** | File sizes/access patterns visible | Out of scope |
-| **Quantum attacks** | AES-256 considered quantum-safe | Monitor PQC developments |
+| **Quantum attacks** | AES-256 reduced to 128-bit effective security by Grover's algorithm | Monitor PQC standardization; plan migration path |
 
 #### Key Security Requirements
 
@@ -654,6 +758,67 @@ checkpoints = true
 - Index load time: <10% overhead
 - Memory usage: <5% increase (for encryption buffers)
 
+**Required Benchmarks:**
+- Encrypted vs unencrypted WAL throughput (single entry, batch 10, batch 100, batch 1000)
+- CPU profiling with and without AES-NI
+- Latency percentiles (p50, p95, p99) for encrypted operations
+- Memory pressure under high encryption load
+
+### Metrics and Observability
+
+**Encryption Metrics (exposed via Prometheus):**
+
+```rust
+/// Metrics for encryption operations
+pub struct EncryptionMetrics {
+    /// Total encryption operations
+    pub encrypt_total: Counter,
+    /// Total decryption operations
+    pub decrypt_total: Counter,
+    /// Encryption errors
+    pub encrypt_errors: Counter,
+    /// Decryption errors (including auth failures)
+    pub decrypt_errors: Counter,
+    /// Encryption latency histogram
+    pub encrypt_duration: Histogram,
+    /// Decryption latency histogram
+    pub decrypt_duration: Histogram,
+    /// Bytes encrypted
+    pub bytes_encrypted: Counter,
+    /// Bytes decrypted
+    pub bytes_decrypted: Counter,
+    /// Key provider health status (1 = healthy, 0 = unhealthy)
+    pub key_provider_healthy: Gauge,
+    /// Current key version age in seconds
+    pub key_version_age_seconds: Gauge,
+}
+```
+
+**Key Metrics to Monitor:**
+
+| Metric | Alert Threshold | Description |
+|--------|----------------|-------------|
+| `encrypt_errors` | >0 | Any encryption failure is critical |
+| `decrypt_errors` | >0 | Auth failures may indicate tampering |
+| `key_provider_healthy` | =0 | KMS connectivity issues |
+| `key_version_age_seconds` | >7776000 (90 days) | Key rotation overdue |
+| `encrypt_duration_p99` | >1ms | Performance degradation |
+
+**Audit Logging:**
+
+All key access operations are logged:
+```json
+{
+  "event": "mek_access",
+  "timestamp": "2026-01-27T10:00:00Z",
+  "provider": "aws_kms",
+  "key_version_id": "550e8400-e29b-41d4-a716-446655440000",
+  "operation": "decrypt",
+  "success": true,
+  "latency_ms": 45
+}
+```
+
 ## Consequences
 
 ### Positive
@@ -754,7 +919,8 @@ checkpoints = true
 
 ### Phase 1: Core Infrastructure
 
-- [ ] Add `ring` crate for AES-256-GCM and ChaCha20-Poly1305
+- [ ] Add `aes-gcm` crate for AES-256-GCM
+- [ ] Add `chacha20poly1305` crate for ChaCha20-Poly1305
 - [ ] Add `hkdf` and `sha2` crates for key derivation
 - [ ] Add `zeroize` crate for secure memory handling
 - [ ] Implement `Cipher` trait and algorithm implementations
@@ -796,10 +962,16 @@ checkpoints = true
 
 ### Phase 6: Key Rotation
 
-- [ ] Implement key versioning in encryption headers
-- [ ] Implement background re-encryption service
-- [ ] Add key rotation commands to CLI
+- [ ] Leverage existing `key_version_id` field in encryption headers for version tracking
+- [ ] Implement key version cache for reading data encrypted with previous MEKs
+- [ ] Implement background re-encryption service for migrating to new keys
+- [ ] Add key rotation commands to CLI (`gallifreydb key rotate`, `gallifreydb key status`)
 - [ ] Document key rotation procedures
+
+**Key Rotation Triggers:**
+- **Time-based**: Recommended every 90 days (configurable)
+- **Operation-based**: After 2^32 encryptions with same DEK (GCM nonce safety margin)
+- **Incident-based**: Immediately upon suspected key compromise
 
 ### Phase 7: Documentation & Security Review
 
@@ -808,15 +980,36 @@ checkpoints = true
 - [ ] Security review by external party
 - [ ] Penetration testing of encrypted storage
 
+### Phase 8: Testing
+
+- [ ] Unit tests for cipher implementations (encrypt/decrypt round-trip)
+- [ ] Property-based tests using `proptest` (arbitrary data encryption)
+- [ ] Fault injection tests (corrupted ciphertext, truncated files)
+- [ ] KMS mocking with LocalStack (AWS) and Vault dev mode
+- [ ] Crash recovery tests with encrypted WAL/indexes
+- [ ] Nonce uniqueness verification tests (statistical analysis)
+- [ ] Key rotation integration tests
+- [ ] Performance regression tests (encrypted vs unencrypted)
+
 ## References
 
+**Standards:**
 - [NIST SP 800-38D: GCM Mode](https://csrc.nist.gov/publications/detail/sp/800-38d/final)
 - [RFC 8439: ChaCha20 and Poly1305](https://datatracker.ietf.org/doc/html/rfc8439)
 - [RFC 5869: HKDF](https://datatracker.ietf.org/doc/html/rfc5869)
-- [Ring Cryptography Library](https://briansmith.org/rustdoc/ring/)
+
+**Rust Crates:**
+- [aes-gcm](https://docs.rs/aes-gcm/) - AES-256-GCM implementation
+- [chacha20poly1305](https://docs.rs/chacha20poly1305/) - ChaCha20-Poly1305 implementation
+- [hkdf](https://docs.rs/hkdf/) - HMAC-based Key Derivation Function
+- [zeroize](https://docs.rs/zeroize/) - Securely zero memory
+
+**Key Management:**
 - [AWS KMS Developer Guide](https://docs.aws.amazon.com/kms/latest/developerguide/)
 - [HashiCorp Vault Transit Secrets Engine](https://developer.hashicorp.com/vault/docs/secrets/transit)
 - [OWASP Cryptographic Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html)
+
+**Related ADRs:**
 - ADR-0007: WAL Durability
 - ADR-0023: Index Persistence Layer
 - ADR-0025: Redb Cold Storage
