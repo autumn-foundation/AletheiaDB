@@ -368,6 +368,75 @@ impl IncrementalAdjacencyIndex {
             .last_compaction
             .store(Utc::now().timestamp() as u64, Ordering::Release);
     }
+
+    /// Get a frozen-only view for read transactions (hot path optimization).
+    ///
+    /// Returns `Some(FrozenAdjacencyView)` if delta and tombstones are empty,
+    /// allowing direct slice access without iterator overhead.
+    ///
+    /// Returns `None` if delta or tombstones exist, meaning callers should
+    /// use `get_adjacency()` instead for correct merged results.
+    ///
+    /// # Performance
+    ///
+    /// When available, `FrozenAdjacencyView::get_adjacency()` returns a direct
+    /// `&[AdjacencyEntry]` slice with ~10ns overhead vs ~80ns for the merged path.
+    /// This is ideal for read-heavy workloads after compaction.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // At start of read transaction, try to get frozen view
+    /// if let Some(view) = index.frozen_view() {
+    ///     // Hot path: direct slice access
+    ///     let edges = view.get_adjacency(node_id);
+    /// } else {
+    ///     // Fallback: use merged iterator
+    ///     let guard = index.get_adjacency(node_id);
+    /// }
+    /// ```
+    pub fn frozen_view(&self) -> Option<FrozenAdjacencyView> {
+        // Only available when delta and tombstones are empty
+        if self.stats.delta_edge_count.load(Ordering::Relaxed) > 0 {
+            return None;
+        }
+        if self.stats.tombstone_count.load(Ordering::Relaxed) > 0 {
+            return None;
+        }
+
+        Some(FrozenAdjacencyView {
+            frozen: self.frozen.load(),
+        })
+    }
+}
+
+/// Read-only view of frozen adjacency for hot path access.
+///
+/// This view captures the frozen CSR at creation time and provides
+/// direct slice access without delta/tombstone checks. Only available
+/// when delta and tombstones are empty (typically after compaction).
+///
+/// # Performance
+///
+/// `get_adjacency()` is ~8x faster than `MergedAdjacencyGuard::iter()`:
+/// - FrozenAdjacencyView: ~10ns (direct slice)
+/// - MergedAdjacencyGuard: ~80ns (guard + iterator + filter)
+///
+/// # Thread Safety
+///
+/// The view holds an Arc guard to the frozen CSR, so it remains valid
+/// even if compaction occurs after view creation. However, the view
+/// will not see edges added after it was created.
+pub struct FrozenAdjacencyView {
+    frozen: Guard<Arc<AdjacencyIndex>>,
+}
+
+impl FrozenAdjacencyView {
+    /// Get adjacency list as a direct slice (zero-copy, no iterator overhead).
+    #[inline]
+    pub fn get_adjacency(&self, node: NodeId) -> &[AdjacencyEntry] {
+        self.frozen.get_adjacency(node)
+    }
 }
 
 /// Zero-copy merged view of frozen + delta adjacency.

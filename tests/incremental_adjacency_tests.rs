@@ -1488,6 +1488,149 @@ mod phase7_persistence_integration {
 }
 
 // ============================================================================
+// Phase 9: FrozenAdjacencyView for Read Transactions (Hot Path)
+// ============================================================================
+
+#[cfg(test)]
+mod phase9_frozen_view {
+    use super::*;
+
+    // Step 9.1 RED: Test FrozenAdjacencyView creation when delta/tombstones empty
+    #[test]
+    fn test_frozen_view_available_when_clean() {
+        // Create frozen with edges
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let frozen_edges = vec![
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(1).unwrap(),
+                EdgeId::new(0).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                knows,
+            ),
+        ];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // No delta, no tombstones - should get view
+        let view = index.frozen_view();
+        assert!(view.is_some(), "Should get frozen view when clean");
+
+        // View should provide direct slice access
+        let view = view.unwrap();
+        let slice = view.get_adjacency(NodeId::new(0).unwrap());
+        assert_eq!(slice.len(), 2);
+    }
+
+    // Step 9.2 RED: Test FrozenAdjacencyView unavailable when delta exists
+    #[test]
+    fn test_frozen_view_unavailable_with_delta() {
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let frozen_edges = vec![(
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            EdgeId::new(0).unwrap(),
+            knows,
+        )];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // Add edge to delta
+        index.insert(
+            NodeId::new(1).unwrap(),
+            AdjacencyEntry::new(NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
+        );
+
+        // Should NOT get view when delta has edges
+        let view = index.frozen_view();
+        assert!(view.is_none(), "Should NOT get frozen view with delta");
+    }
+
+    // Step 9.3 RED: Test FrozenAdjacencyView unavailable when tombstones exist
+    #[test]
+    fn test_frozen_view_unavailable_with_tombstones() {
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let frozen_edges = vec![(
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            EdgeId::new(0).unwrap(),
+            knows,
+        )];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // Add tombstone
+        index.delete(EdgeId::new(0).unwrap());
+
+        // Should NOT get view when tombstones exist
+        let view = index.frozen_view();
+        assert!(view.is_none(), "Should NOT get frozen view with tombstones");
+    }
+
+    // Step 9.4 RED: Test FrozenAdjacencyView available after compaction
+    #[test]
+    fn test_frozen_view_available_after_compaction() {
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let index = IncrementalAdjacencyIndex::new();
+
+        // Add edges to delta
+        for i in 0..5 {
+            index.insert(
+                NodeId::new(0).unwrap(),
+                AdjacencyEntry::new(NodeId::new(i + 1).unwrap(), EdgeId::new(i).unwrap(), knows),
+            );
+        }
+
+        // Before compaction - delta has edges
+        assert!(index.frozen_view().is_none());
+
+        // Compact moves delta to frozen
+        index.compact();
+
+        // After compaction - should get view
+        let view = index.frozen_view();
+        assert!(view.is_some(), "Should get frozen view after compaction");
+
+        let view = view.unwrap();
+        let slice = view.get_adjacency(NodeId::new(0).unwrap());
+        assert_eq!(slice.len(), 5);
+    }
+
+    // Step 9.5 RED: Test FrozenAdjacencyView provides direct slice (no iterator overhead)
+    #[test]
+    fn test_frozen_view_returns_slice_not_iterator() {
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let frozen_edges: Vec<_> = (0..100)
+            .map(|i| {
+                (
+                    NodeId::new(0).unwrap(),
+                    NodeId::new(i + 1).unwrap(),
+                    EdgeId::new(i).unwrap(),
+                    knows,
+                )
+            })
+            .collect();
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        let view = index.frozen_view().expect("should get view");
+
+        // get_adjacency returns &[AdjacencyEntry], not an iterator
+        let slice: &[AdjacencyEntry] = view.get_adjacency(NodeId::new(0).unwrap());
+        assert_eq!(slice.len(), 100);
+
+        // Can index directly like a slice
+        assert_eq!(slice[0].edge_id, EdgeId::new(0).unwrap());
+        assert_eq!(slice[99].edge_id, EdgeId::new(99).unwrap());
+    }
+}
+
+// ============================================================================
 // Test Utilities
 // ============================================================================
 

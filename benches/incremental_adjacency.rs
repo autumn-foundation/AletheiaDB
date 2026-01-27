@@ -281,6 +281,78 @@ fn bench_concurrent_read_write(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Benchmark: FrozenAdjacencyView Hot Path (Target: ~10ns)
+// ============================================================================
+
+fn bench_frozen_view(c: &mut Criterion) {
+    let mut group = c.benchmark_group("frozen_view_hot_path");
+
+    for num_edges in [1_000, 10_000, 100_000] {
+        group.throughput(Throughput::Elements(1));
+
+        // Benchmark FrozenAdjacencyView (direct slice access)
+        group.bench_with_input(
+            BenchmarkId::new("frozen_view", format!("{}edges", num_edges)),
+            &num_edges,
+            |b, &num_edges| {
+                let knows = GLOBAL_INTERNER.intern("KNOWS").expect("intern KNOWS");
+                let frozen_edges: Vec<_> = (0..num_edges)
+                    .map(|i| {
+                        (
+                            NodeId::new(i as u64).expect("valid node id"),
+                            NodeId::new((i + 1) as u64).expect("valid node id"),
+                            EdgeId::new(i as u64).expect("valid edge id"),
+                            knows,
+                        )
+                    })
+                    .collect();
+                let frozen = AdjacencyIndex::build(frozen_edges);
+                let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+                // Get frozen view (should be available since no delta/tombstones)
+                let view = index.frozen_view().expect("frozen view available");
+                let node = NodeId::new((num_edges / 2) as u64).expect("valid node id");
+
+                b.iter(|| {
+                    let slice = view.get_adjacency(black_box(node));
+                    black_box(slice)
+                });
+            },
+        );
+
+        // Compare with get_adjacency (MergedAdjacencyGuard)
+        group.bench_with_input(
+            BenchmarkId::new("merged_guard", format!("{}edges", num_edges)),
+            &num_edges,
+            |b, &num_edges| {
+                let knows = GLOBAL_INTERNER.intern("KNOWS").expect("intern KNOWS");
+                let frozen_edges: Vec<_> = (0..num_edges)
+                    .map(|i| {
+                        (
+                            NodeId::new(i as u64).expect("valid node id"),
+                            NodeId::new((i + 1) as u64).expect("valid node id"),
+                            EdgeId::new(i as u64).expect("valid edge id"),
+                            knows,
+                        )
+                    })
+                    .collect();
+                let frozen = AdjacencyIndex::build(frozen_edges);
+                let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+                let node = NodeId::new((num_edges / 2) as u64).expect("valid node id");
+
+                b.iter(|| {
+                    let guard = index.get_adjacency(black_box(node));
+                    black_box(guard)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Benchmark: Comparison with Current CSR (rebuild cliff)
 // ============================================================================
 
@@ -403,6 +475,7 @@ criterion_group!(
     bench_insert_latency,
     bench_read_no_delta,
     bench_read_with_delta,
+    bench_frozen_view,
     bench_compaction_throughput,
     bench_concurrent_read_write,
     bench_comparison_current_csr,

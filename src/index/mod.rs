@@ -16,7 +16,8 @@ pub mod vector;
 pub use adjacency::{AdjacencyEntry, AdjacencyIndex};
 pub use current::CurrentIndexes;
 pub use incremental_adjacency::{
-    CompactionScheduler, IncrementalAdjacencyIndex, IncrementalConfig, Tombstone,
+    CompactionScheduler, FrozenAdjacencyView, IncrementalAdjacencyIndex, IncrementalConfig,
+    Tombstone,
 };
 pub use temporal::TemporalIndexes;
 pub use vector::{DistanceMetric, VectorIndex};
