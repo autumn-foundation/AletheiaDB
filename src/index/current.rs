@@ -731,6 +731,16 @@ impl CurrentIndexes {
     /// requiring explicit delta persistence.
     ///
     /// This implements the "implicit delta reconstruction" strategy from ADR-0026.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are uncommitted tombstones (pending edge deletions).
+    /// Tombstones cannot be reconstructed from the CSR import, so importing
+    /// would cause deleted edges to reappear. This is a correctness invariant.
+    ///
+    /// In normal startup flow, tombstones should be empty. If you hit this panic,
+    /// either compact first to apply tombstones, or ensure import is only called
+    /// on a fresh index during startup.
     pub fn import_csr(
         &self,
         outgoing_node_ids: Vec<u64>,
@@ -741,6 +751,19 @@ impl CurrentIndexes {
         incoming_edge_ids: Vec<u64>,
     ) {
         use std::collections::{HashMap, HashSet};
+
+        // Safety check: tombstones cannot be reconstructed from CSR import.
+        // If we have tombstones, importing would cause deleted edges to reappear.
+        let outgoing_tombstones = self.outgoing.tombstone_count();
+        let incoming_tombstones = self.incoming.tombstone_count();
+        assert!(
+            outgoing_tombstones == 0 && incoming_tombstones == 0,
+            "Cannot import CSR with uncommitted tombstones: {} outgoing, {} incoming. \
+             Deleted edges would reappear! Call compact() first or ensure import is \
+             only called on a fresh index during startup.",
+            outgoing_tombstones,
+            incoming_tombstones
+        );
 
         // Build edges map for CSR reconstruction
         let mut edges_map = HashMap::new();
