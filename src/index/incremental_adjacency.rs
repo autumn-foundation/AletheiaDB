@@ -176,6 +176,15 @@ impl IncrementalAdjacencyIndex {
     ///
     /// This replaces the frozen layer with the imported CSR, clearing delta and tombstones.
     /// Used when loading persisted indexes to avoid rebuilding from scratch.
+    ///
+    /// # Warning
+    ///
+    /// This method will clear any existing delta edges and tombstones. This is intentional
+    /// when used as part of the full import flow (e.g., `CurrentIndexes::import_csr_data`)
+    /// which reconstructs the delta after importing.
+    ///
+    /// If you need to preserve existing data, use `try_import_frozen_csr` instead which
+    /// returns an error if data would be lost.
     pub fn import_frozen_csr(&self, frozen_csr: Arc<AdjacencyIndex>) {
         // Replace frozen CSR
         self.frozen.store(frozen_csr);
@@ -191,6 +200,31 @@ impl IncrementalAdjacencyIndex {
             .store(frozen_count, Ordering::Relaxed);
         self.stats.delta_edge_count.store(0, Ordering::Relaxed);
         self.stats.tombstone_count.store(0, Ordering::Relaxed);
+    }
+
+    /// Safely import frozen CSR data, returning an error if data would be lost.
+    ///
+    /// Unlike `import_frozen_csr`, this method will not clear non-empty delta or
+    /// tombstones. Returns an error describing what would be lost.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if import succeeded (delta and tombstones were empty)
+    /// - `Err(String)` describing uncommitted data that would be lost
+    pub fn try_import_frozen_csr(&self, frozen_csr: Arc<AdjacencyIndex>) -> Result<(), String> {
+        let delta_count = self.delta.len();
+        let tombstone_count = self.tombstones.len();
+
+        if delta_count > 0 || tombstone_count > 0 {
+            return Err(format!(
+                "Cannot import: {} uncommitted delta edges and {} tombstones would be lost. \
+                 Call compact() first or use import_frozen_csr() to force.",
+                delta_count, tombstone_count
+            ));
+        }
+
+        self.import_frozen_csr(frozen_csr);
+        Ok(())
     }
 
     /// Get delta edge count.
