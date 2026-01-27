@@ -342,6 +342,12 @@ fn tokenize_temporal_keywords(sql: &str) -> Vec<(usize, Token)> {
 /// Extract temporal clause from tokenized SQL.
 ///
 /// Returns (clause, start_byte, end_byte) if found, None otherwise.
+///
+/// # Errors
+///
+/// Returns explicit errors for malformed temporal clauses:
+/// - Missing TIMESTAMP keyword or quoted value
+/// - Incomplete BETWEEN clause (missing AND or second timestamp)
 fn extract_temporal_clause_from_tokens(
     tokens: &[(usize, Token)],
     time_type_token: Token,
@@ -351,19 +357,49 @@ fn extract_temporal_clause_from_tokens(
     while i < tokens.len() {
         if tokens[i].1 == Token::For && i + 1 < tokens.len() && tokens[i + 1].1 == time_type_token {
             let start_byte = tokens[i].0;
+            let time_name = match time_type_token {
+                Token::SystemTime => "SYSTEM_TIME",
+                Token::ValidTime => "VALID_TIME",
+                _ => unreachable!(),
+            };
 
             // Check for AS OF or BETWEEN
             if i + 2 < tokens.len() && tokens[i + 2].1 == Token::AsOf {
-                // AS OF case
-                if i + 3 < tokens.len()
-                    && tokens[i + 3].1 == Token::Timestamp
-                    && i + 4 < tokens.len()
-                    && let Token::QuotedValue(ref ts_str) = tokens[i + 4].1
-                {
+                // AS OF case - require TIMESTAMP keyword
+                if i + 3 >= tokens.len() {
+                    return Err(SqlError::InvalidTemporalClause(format!(
+                        "FOR {} AS OF requires TIMESTAMP keyword",
+                        time_name
+                    )));
+                }
+
+                if tokens[i + 3].1 != Token::Timestamp {
+                    return Err(SqlError::InvalidTemporalClause(format!(
+                        "FOR {} AS OF requires TIMESTAMP keyword, found {:?}",
+                        time_name, tokens[i + 3].1
+                    )));
+                }
+
+                // Require quoted timestamp value
+                if i + 4 >= tokens.len() {
+                    return Err(SqlError::InvalidTemporalClause(format!(
+                        "FOR {} AS OF TIMESTAMP requires a quoted timestamp value",
+                        time_name
+                    )));
+                }
+
+                if let Token::QuotedValue(ref ts_str) = tokens[i + 4].1 {
                     let ts = TemporalClause::parse_timestamp(ts_str)?;
 
-                    // Calculate end byte (after the quoted value)
-                    let end_byte = tokens[i + 4].0 + ts_str.len() + 2; // +2 for quotes
+                    // Calculate end byte: look for next token after this temporal clause
+                    // to include trailing whitespace in the removal range
+                    let end_byte = if i + 5 < tokens.len() {
+                        // Use next token's start position
+                        tokens[i + 5].0
+                    } else {
+                        // No more tokens, use position after closing quote
+                        tokens[i + 4].0 + ts_str.len() + 2 // +2 for quotes
+                    };
 
                     let clause = match time_type_token {
                         Token::SystemTime => TemporalClause::SystemTimeAsOf(ts),
@@ -372,34 +408,117 @@ fn extract_temporal_clause_from_tokens(
                     };
 
                     return Ok(Some((clause, start_byte, end_byte)));
+                } else {
+                    return Err(SqlError::InvalidTemporalClause(format!(
+                        "FOR {} AS OF TIMESTAMP requires a quoted timestamp value, found {:?}",
+                        time_name, tokens[i + 4].1
+                    )));
                 }
             } else if i + 2 < tokens.len() && tokens[i + 2].1 == Token::Between {
-                // BETWEEN case
-                if i + 3 < tokens.len()
-                    && tokens[i + 3].1 == Token::Timestamp
-                    && i + 4 < tokens.len()
-                    && let Token::QuotedValue(ref start_str) = tokens[i + 4].1
-                    && i + 5 < tokens.len()
-                    && tokens[i + 5].1 == Token::And
-                    && i + 6 < tokens.len()
-                    && tokens[i + 6].1 == Token::Timestamp
-                    && i + 7 < tokens.len()
-                    && let Token::QuotedValue(ref end_str) = tokens[i + 7].1
-                {
-                    let start_ts = TemporalClause::parse_timestamp(start_str)?;
-                    let end_ts = TemporalClause::parse_timestamp(end_str)?;
-
-                    // Calculate end byte (after the second quoted value)
-                    let end_byte = tokens[i + 7].0 + end_str.len() + 2; // +2 for quotes
-
-                    let clause = match time_type_token {
-                        Token::SystemTime => TemporalClause::system_time_between(start_ts, end_ts)?,
-                        Token::ValidTime => TemporalClause::valid_time_between(start_ts, end_ts)?,
-                        _ => unreachable!(),
-                    };
-
-                    return Ok(Some((clause, start_byte, end_byte)));
+                // BETWEEN case - require first TIMESTAMP
+                if i + 3 >= tokens.len() {
+                    return Err(SqlError::InvalidTemporalClause(format!(
+                        "FOR {} BETWEEN requires TIMESTAMP keyword",
+                        time_name
+                    )));
                 }
+
+                if tokens[i + 3].1 != Token::Timestamp {
+                    return Err(SqlError::InvalidTemporalClause(format!(
+                        "FOR {} BETWEEN requires TIMESTAMP keyword, found {:?}",
+                        time_name, tokens[i + 3].1
+                    )));
+                }
+
+                // Require first timestamp value
+                if i + 4 >= tokens.len() {
+                    return Err(SqlError::InvalidTemporalClause(format!(
+                        "FOR {} BETWEEN TIMESTAMP requires a quoted timestamp value",
+                        time_name
+                    )));
+                }
+
+                if let Token::QuotedValue(ref start_str) = tokens[i + 4].1 {
+                    // Require AND keyword
+                    if i + 5 >= tokens.len() {
+                        return Err(SqlError::InvalidTemporalClause(format!(
+                            "FOR {} BETWEEN requires AND keyword",
+                            time_name
+                        )));
+                    }
+
+                    if tokens[i + 5].1 != Token::And {
+                        return Err(SqlError::InvalidTemporalClause(format!(
+                            "FOR {} BETWEEN requires AND keyword, found {:?}",
+                            time_name, tokens[i + 5].1
+                        )));
+                    }
+
+                    // Require second TIMESTAMP keyword
+                    if i + 6 >= tokens.len() {
+                        return Err(SqlError::InvalidTemporalClause(format!(
+                            "FOR {} BETWEEN ... AND requires TIMESTAMP keyword",
+                            time_name
+                        )));
+                    }
+
+                    if tokens[i + 6].1 != Token::Timestamp {
+                        return Err(SqlError::InvalidTemporalClause(format!(
+                            "FOR {} BETWEEN ... AND requires TIMESTAMP keyword, found {:?}",
+                            time_name, tokens[i + 6].1
+                        )));
+                    }
+
+                    // Require second timestamp value
+                    if i + 7 >= tokens.len() {
+                        return Err(SqlError::InvalidTemporalClause(format!(
+                            "FOR {} BETWEEN ... AND TIMESTAMP requires a quoted timestamp value",
+                            time_name
+                        )));
+                    }
+
+                    if let Token::QuotedValue(ref end_str) = tokens[i + 7].1 {
+                        let start_ts = TemporalClause::parse_timestamp(start_str)?;
+                        let end_ts = TemporalClause::parse_timestamp(end_str)?;
+
+                        // Calculate end byte: use next token's position or end of last token
+                        let end_byte = if i + 8 < tokens.len() {
+                            tokens[i + 8].0
+                        } else {
+                            tokens[i + 7].0 + end_str.len() + 2 // +2 for quotes
+                        };
+
+                        let clause = match time_type_token {
+                            Token::SystemTime => TemporalClause::system_time_between(start_ts, end_ts)?,
+                            Token::ValidTime => TemporalClause::valid_time_between(start_ts, end_ts)?,
+                            _ => unreachable!(),
+                        };
+
+                        return Ok(Some((clause, start_byte, end_byte)));
+                    } else {
+                        return Err(SqlError::InvalidTemporalClause(format!(
+                            "FOR {} BETWEEN ... AND TIMESTAMP requires a quoted timestamp value, found {:?}",
+                            time_name, tokens[i + 7].1
+                        )));
+                    }
+                } else {
+                    return Err(SqlError::InvalidTemporalClause(format!(
+                        "FOR {} BETWEEN TIMESTAMP requires a quoted timestamp value, found {:?}",
+                        time_name, tokens[i + 4].1
+                    )));
+                }
+            } else if i + 2 < tokens.len() {
+                // Found FOR SYSTEM_TIME/VALID_TIME but not followed by AS OF or BETWEEN
+                return Err(SqlError::InvalidTemporalClause(format!(
+                    "FOR {} must be followed by AS OF or BETWEEN, found {:?}",
+                    time_name, tokens[i + 2].1
+                )));
+            } else {
+                // Found FOR SYSTEM_TIME/VALID_TIME at end of tokens
+                return Err(SqlError::InvalidTemporalClause(format!(
+                    "FOR {} must be followed by AS OF or BETWEEN",
+                    time_name
+                )));
             }
         }
         i += 1;
@@ -746,5 +865,113 @@ mod tests {
         let (vt, tt) = ctx.as_of.unwrap();
         assert_eq!(tt.wallclock(), 1000); // System time from clause
         assert!(vt.wallclock() > 0); // Valid time is "now"
+    }
+
+    // ========================================================================
+    // Malformed Input Tests (Error Handling)
+    // ========================================================================
+
+    #[test]
+    fn test_error_missing_timestamp_keyword() {
+        // FOR SYSTEM_TIME AS OF without TIMESTAMP keyword
+        let sql = "SELECT * FROM nodes FOR SYSTEM_TIME AS OF '1000'";
+        let result = extract_temporal_clauses(sql);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SqlError::InvalidTemporalClause(_))));
+    }
+
+    #[test]
+    fn test_error_missing_timestamp_value() {
+        // FOR SYSTEM_TIME AS OF TIMESTAMP without quoted value
+        let sql = "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP";
+        let result = extract_temporal_clauses(sql);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SqlError::InvalidTemporalClause(_))));
+        if let Err(SqlError::InvalidTemporalClause(msg)) = result {
+            assert!(msg.contains("requires a quoted timestamp value"));
+        }
+    }
+
+    #[test]
+    fn test_error_between_missing_and() {
+        // FOR SYSTEM_TIME BETWEEN without AND keyword
+        let sql = "SELECT * FROM nodes FOR SYSTEM_TIME BETWEEN TIMESTAMP '1000'";
+        let result = extract_temporal_clauses(sql);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SqlError::InvalidTemporalClause(_))));
+        if let Err(SqlError::InvalidTemporalClause(msg)) = result {
+            assert!(msg.contains("requires AND keyword"));
+        }
+    }
+
+    #[test]
+    fn test_error_between_missing_second_timestamp() {
+        // FOR SYSTEM_TIME BETWEEN ... AND without second TIMESTAMP keyword
+        let sql = "SELECT * FROM nodes FOR SYSTEM_TIME BETWEEN TIMESTAMP '1000' AND";
+        let result = extract_temporal_clauses(sql);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SqlError::InvalidTemporalClause(_))));
+        if let Err(SqlError::InvalidTemporalClause(msg)) = result {
+            assert!(msg.contains("requires TIMESTAMP keyword"));
+        }
+    }
+
+    #[test]
+    fn test_error_between_missing_second_value() {
+        // FOR SYSTEM_TIME BETWEEN ... AND TIMESTAMP without second quoted value
+        let sql = "SELECT * FROM nodes FOR SYSTEM_TIME BETWEEN TIMESTAMP '1000' AND TIMESTAMP";
+        let result = extract_temporal_clauses(sql);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SqlError::InvalidTemporalClause(_))));
+        if let Err(SqlError::InvalidTemporalClause(msg)) = result {
+            assert!(msg.contains("requires a quoted timestamp value"));
+        }
+    }
+
+    #[test]
+    fn test_error_for_system_time_without_as_of_or_between() {
+        // FOR SYSTEM_TIME followed by unexpected token
+        let sql = "SELECT * FROM nodes FOR SYSTEM_TIME WHERE age > 21";
+        let result = extract_temporal_clauses(sql);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SqlError::InvalidTemporalClause(_))));
+        if let Err(SqlError::InvalidTemporalClause(msg)) = result {
+            assert!(msg.contains("must be followed by AS OF or BETWEEN"));
+        }
+    }
+
+    #[test]
+    fn test_error_for_valid_time_incomplete() {
+        // FOR VALID_TIME at end of SQL without AS OF or BETWEEN
+        let sql = "SELECT * FROM nodes FOR VALID_TIME";
+        let result = extract_temporal_clauses(sql);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SqlError::InvalidTemporalClause(_))));
+        if let Err(SqlError::InvalidTemporalClause(msg)) = result {
+            assert!(msg.contains("must be followed by AS OF or BETWEEN"));
+        }
+    }
+
+    #[test]
+    fn test_whitespace_preserved_after_temporal_removal() {
+        // Test that whitespace is correctly handled when removing temporal clauses
+        let sql = "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '1000' WHERE age > 21";
+        let result = extract_temporal_clauses(sql).unwrap();
+
+        // Should have proper spacing (not "nodesWHERE")
+        assert_eq!(result.cleaned_sql, "SELECT * FROM nodes WHERE age > 21");
+        assert!(!result.cleaned_sql.contains("nodesWHERE"));
+    }
+
+    #[test]
+    fn test_multiple_temporal_clauses_whitespace() {
+        // Test whitespace handling with both SYSTEM_TIME and VALID_TIME
+        let sql = "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '2000' FOR VALID_TIME AS OF TIMESTAMP '1500' WHERE age > 21";
+        let result = extract_temporal_clauses(sql).unwrap();
+
+        assert_eq!(result.cleaned_sql, "SELECT * FROM nodes WHERE age > 21");
+        assert!(!result.cleaned_sql.contains("nodesWHERE"));
+        assert!(result.system_time.is_some());
+        assert!(result.valid_time.is_some());
     }
 }
