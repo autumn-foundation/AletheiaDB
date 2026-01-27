@@ -551,8 +551,13 @@ impl<'a> std::ops::Index<usize> for MergedAdjacencyGuard<'a> {
     type Output = AdjacencyEntry;
 
     fn index(&self, index: usize) -> &Self::Output {
-        self.get(index)
-            .expect("index out of bounds for MergedAdjacencyGuard")
+        self.get(index).unwrap_or_else(|| {
+            panic!(
+                "index {} out of bounds for MergedAdjacencyGuard (len: {})",
+                index,
+                self.len()
+            )
+        })
     }
 }
 
