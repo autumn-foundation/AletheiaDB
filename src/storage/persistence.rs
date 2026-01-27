@@ -2128,4 +2128,113 @@ mod tests {
 
         Ok(())
     }
+
+    // ========================================================================
+    // Phase 2: Additional Quick Win Tests
+    // ========================================================================
+
+    #[test]
+    fn test_checkpoint_config_default() {
+        let config = CheckpointConfig::default();
+
+        // Verify all default values
+        assert_eq!(
+            config.checkpoint_dir,
+            PathBuf::from("gallifreydb/checkpoints")
+        );
+        assert_eq!(config.checkpoint_interval, Duration::from_secs(300));
+        assert_eq!(config.min_wal_entries, 1000);
+        assert_eq!(config.checkpoints_to_retain, 5);
+    }
+
+    #[test]
+    fn test_find_latest_checkpoint_empty_directory() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let config = CheckpointConfig {
+            checkpoint_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let manager = PersistenceManager::new(config)?;
+        let latest = manager.find_latest_checkpoint()?;
+
+        // Should return None when no checkpoints exist
+        assert!(
+            latest.is_none(),
+            "Should return None when no checkpoints exist"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_latest_checkpoint_selects_highest_lsn() -> Result<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let checkpoint_dir = temp_dir.path();
+
+        // Create multiple checkpoints with different LSNs
+        let current = CurrentStorage::new();
+        let historical = HistoricalStorage::new();
+
+        let checkpoint1 = Checkpoint::new(LSN(100), &current, &historical);
+        checkpoint1.save(&checkpoint_dir.join("checkpoint_000100.dat"))?;
+
+        let checkpoint2 = Checkpoint::new(LSN(500), &current, &historical);
+        checkpoint2.save(&checkpoint_dir.join("checkpoint_000500.dat"))?;
+
+        let checkpoint3 = Checkpoint::new(LSN(300), &current, &historical);
+        checkpoint3.save(&checkpoint_dir.join("checkpoint_000300.dat"))?;
+
+        // Create manager and find latest
+        let config = CheckpointConfig {
+            checkpoint_dir: checkpoint_dir.to_path_buf(),
+            ..Default::default()
+        };
+        let manager = PersistenceManager::new(config)?;
+        let latest = manager.find_latest_checkpoint()?.unwrap();
+
+        // Should select the checkpoint with highest LSN (500)
+        assert_eq!(
+            latest.metadata.lsn,
+            LSN(500),
+            "Should select checkpoint with highest LSN"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_vector_index_checkpoint_data_serialize_deserialize() -> Result<()> {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use std::io::Cursor;
+
+        // Test disabled case
+        let disabled = VectorIndexCheckpointData::disabled();
+        let mut buffer = Vec::new();
+        disabled.serialize_into(&mut buffer)?;
+
+        let mut cursor = Cursor::new(buffer);
+        let loaded = VectorIndexCheckpointData::deserialize_from(&mut cursor)?;
+        assert!(!loaded.enabled);
+
+        // Test enabled case
+        let config = HnswConfig::new(512, DistanceMetric::DotProduct)
+            .with_m(24)
+            .with_ef_construction(150);
+        let enabled = VectorIndexCheckpointData::enabled("vec".to_string(), config);
+
+        let mut buffer = Vec::new();
+        enabled.serialize_into(&mut buffer)?;
+
+        let mut cursor = Cursor::new(buffer);
+        let loaded = VectorIndexCheckpointData::deserialize_from(&mut cursor)?;
+        assert!(loaded.enabled);
+        assert_eq!(loaded.property_name, "vec");
+        assert_eq!(loaded.config.dimensions, 512);
+        assert_eq!(loaded.config.metric, DistanceMetric::DotProduct);
+        assert_eq!(loaded.config.m, 24);
+        assert_eq!(loaded.config.ef_construction, 150);
+
+        Ok(())
+    }
 }

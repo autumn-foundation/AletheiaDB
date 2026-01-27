@@ -1457,4 +1457,58 @@ mod tests {
             );
         }
     }
+
+    // ========================================================================
+    // Quick Win Tests for Function Coverage (Phase 1)
+    // ========================================================================
+
+    #[test]
+    fn test_path_getter() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        assert_eq!(storage.path(), db_path.as_path());
+    }
+
+    #[test]
+    fn test_flush() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Store some data
+        let version = create_test_node_version(1);
+        storage.store_node_version(&version).unwrap();
+
+        // Flush should succeed (no-op for Redb)
+        assert!(storage.flush().is_ok());
+
+        // Data should still be retrievable
+        let retrieved = storage.get_node_version(version.id).unwrap();
+        assert!(retrieved.is_some());
+    }
+
+    #[test]
+    fn test_close() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let version_id = {
+            let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+            // Store some data
+            let version = create_test_node_version(1);
+            storage.store_node_version(&version).unwrap();
+
+            // Close should succeed
+            assert!(storage.close().is_ok());
+
+            version.id
+        }; // storage drops here, releasing the lock
+
+        // Data should persist after close (verify by reopening)
+        let storage2 = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let retrieved = storage2.get_node_version(version_id).unwrap();
+        assert!(retrieved.is_some());
+    }
 }
