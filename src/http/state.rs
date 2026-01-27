@@ -7,7 +7,7 @@
 //! # Thread Safety
 //!
 //! GallifreyDB is designed for concurrent access:
-//! - All internal collections use DashMap (lock-free concurrent HashMap)
+//! - Core collections use DashMap (lock-free concurrent HashMap)
 //! - Indexes use RwLock for read-heavy workloads
 //! - WAL uses striped locking for write throughput
 //!
@@ -21,7 +21,11 @@
 //! use actix_web::{web, App, HttpServer, HttpResponse};
 //! use std::sync::Arc;
 //!
-//! async fn create_node(state: web::Data<AppState>) -> HttpResponse {
+//! async fn create_node(
+//!     state: web::Data<AppState>,
+//!     /* body: web::Json<CreateNodeRequest> */
+//! ) -> HttpResponse {
+//!     // properties: PropertyMap from request
 //!     let node_id = state.db().create_node("Person", properties).unwrap();
 //!     HttpResponse::Ok().json(node_id)
 //! }
@@ -76,7 +80,14 @@ impl AppState {
     /// Get a reference to the database
     ///
     /// Returns a reference to the GallifreyDB instance, dereferencing the Arc
-    /// for convenient method calls.
+    /// for convenient method calls in HTTP handlers.
+    ///
+    /// # Design Note
+    ///
+    /// This returns `&GallifreyDB` rather than `&Arc<GallifreyDB>` (unlike
+    /// `GallifreyMcpServer::db()`). Both approaches work due to `Deref` coercion,
+    /// but this design is more ergonomic for HTTP handlers where direct method
+    /// calls are common. Use `db_arc()` if you need the `Arc` itself.
     pub fn db(&self) -> &GallifreyDB {
         &self.db
     }
