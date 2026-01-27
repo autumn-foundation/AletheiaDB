@@ -30,7 +30,9 @@
 mod config;
 mod handlers;
 mod server;
+mod state;
 
 pub use config::{CorsConfig, ServerConfig, ServerConfigBuilder};
 pub use handlers::health_check;
 pub use server::{ShutdownHandle, configure_app, create_app, create_server, run_server};
+pub use state::AppState;
