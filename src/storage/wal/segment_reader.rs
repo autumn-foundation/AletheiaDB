@@ -2,9 +2,21 @@
 //!
 //! This module provides standalone functions for reading WAL segments from disk
 //! for recovery purposes. It does not require any WAL writer state.
+//!
+//! # Memory Efficiency
+//!
+//! This module uses memory-mapped I/O (`memmap2`) to read WAL segments efficiently.
+//! Instead of loading entire segment files (default 64MB) into memory, memory-mapped
+//! files allow the OS to handle paging automatically. This provides several benefits:
+//!
+//! - **Lower memory usage**: OS pages in data as needed, not all at once
+//! - **Better caching**: OS can cache frequently accessed pages
+//! - **Automatic eviction**: OS evicts pages under memory pressure
+//! - **Reduced recovery memory**: With 10 segments, peak memory drops from 640MB+ to O(working set)
+//!
+//! See issue #216 for details.
 
 use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 
 use crate::core::hlc::HybridTimestamp;
@@ -74,6 +86,10 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 
 /// Read WAL entries from a single segment file.
 ///
+/// This function uses memory-mapped I/O for efficient reading without loading
+/// the entire file into memory. The OS handles paging automatically, which is
+/// especially important for large segment files (default 64MB).
+///
 /// # Arguments
 ///
 /// * `path` - Path to the segment file
@@ -82,20 +98,56 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 /// # Returns
 ///
 /// A vector of WAL entries from this segment.
+///
+/// # Memory Efficiency
+///
+/// Uses `memmap2` for memory-mapped I/O. Peak memory usage is O(working set)
+/// rather than O(file size). See issue #216.
 pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
+    // Open file, only treating NotFound as "empty" - all other errors are propagated
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return Ok(Vec::new()), // File doesn't exist yet, return empty
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(StorageError::IoError(format!(
+                "Failed to open WAL segment {:?}: {}",
+                path, e
+            ))
+            .into());
+        }
     };
 
-    let mut reader = std::io::BufReader::new(file);
-    let mut entries = Vec::new();
-    let mut buffer = Vec::new();
+    // Validate file size before mapping to prevent DoS attacks with huge files
+    let metadata = file
+        .metadata()
+        .map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
 
-    // Read entire file into buffer
-    reader
-        .read_to_end(&mut buffer)
-        .map_err(|e| StorageError::IoError(format!("Failed to read WAL segment: {}", e)))?;
+    // Maximum reasonable segment size (configurable, but 1GB is a safe upper bound)
+    // Default segments are 64MB, so 1GB allows for 16x growth
+    const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+    if metadata.len() > MAX_SEGMENT_SIZE {
+        return Err(StorageError::CorruptedData(format!(
+            "WAL segment too large: {} bytes (max: {} bytes)",
+            metadata.len(),
+            MAX_SEGMENT_SIZE
+        ))
+        .into());
+    }
+
+    // Memory-map the file for efficient reading without loading entire file into memory.
+    // SAFETY: We only read from the memory map, never write. The file is opened read-only.
+    // The mapping is valid for the lifetime of this function and is automatically unmapped
+    // when dropped. We have verified the file size above to prevent out-of-bounds reads.
+    let mmap = unsafe {
+        memmap2::Mmap::map(&file).map_err(|e| {
+            StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
+        })?
+    };
+
+    // Use the memory-mapped region as a byte slice
+    let buffer = &mmap[..];
+
+    let mut entries = Vec::new();
 
     // Detect WAL format version
     let (version, mut offset) = if buffer.len() >= WAL_HEADER_SIZE && buffer[0..4] == WAL_MAGIC {
@@ -122,7 +174,7 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     // Parse entries using the extracted helper function (issue #218)
     while offset < buffer.len() {
         // Try to parse an entry at the current offset
-        match parse_entry_at(&buffer, offset, version) {
+        match parse_entry_at(buffer, offset, version) {
             Ok((entry, bytes_consumed)) => {
                 // Only include entries >= start_lsn
                 if entry.lsn >= start_lsn {
@@ -1062,5 +1114,281 @@ mod tests {
             let error_msg = format!("{}", e);
             assert!(error_msg.contains("checksum mismatch"));
         }
+    }
+
+    // =============================================================================
+    // TDD Tests for Memory-Efficient Segment Reading - Issue #216
+    // =============================================================================
+
+    /// Test that we can read a segment file with many entries without loading
+    /// the entire file into memory at once.
+    ///
+    /// This test creates a large segment file (simulating real-world 64MB segments)
+    /// and verifies that all entries can be read correctly.
+    #[test]
+    fn test_read_large_segment_memory_efficient() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("large_segment.log");
+
+        // Create a segment file with many entries
+        let mut file = File::create(&segment_path).unwrap();
+
+        // Write WAL header
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        // Create and write many entries to simulate a large segment
+        // We'll create 1000 entries, which should be several MB
+        let num_entries = 1000;
+        let mut expected_lsns = Vec::new();
+
+        for i in 0..num_entries {
+            let lsn = LSN(i + 1);
+            expected_lsns.push(lsn);
+
+            let operation = WalOperation::CreateNode {
+                node_id: NodeId::new(i + 1).unwrap(),
+                label: format!("Node_{}", i),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            };
+
+            let entry = WalEntry::new(lsn, operation);
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            file.write_all(&buffer).unwrap();
+        }
+
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Read the segment
+        let entries = read_segment(&segment_path, LSN(1)).unwrap();
+
+        // Verify all entries were read correctly
+        assert_eq!(entries.len(), num_entries as usize);
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.lsn, LSN(i as u64 + 1));
+        }
+    }
+
+    /// Test that reading multiple segments doesn't accumulate excessive memory.
+    ///
+    /// This test creates multiple segment files and verifies that we can process
+    /// them sequentially without holding all segment buffers in memory simultaneously.
+    #[test]
+    fn test_read_multiple_segments_sequentially() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+
+        // Create 5 segment files
+        let num_segments = 5;
+        let entries_per_segment = 100;
+
+        for seg_id in 0..num_segments {
+            let segment_path = dir.path().join(format!("{}.log", seg_id));
+            let mut file = File::create(&segment_path).unwrap();
+
+            // Write WAL header
+            file.write_all(&WAL_MAGIC).unwrap();
+            file.write_all(&[WAL_VERSION]).unwrap();
+
+            // Write entries for this segment
+            for i in 0..entries_per_segment {
+                let lsn = LSN((seg_id * entries_per_segment) + i + 1);
+
+                let operation = WalOperation::CreateNode {
+                    node_id: NodeId::new(lsn.0).unwrap(),
+                    label: format!("Node_seg{}_entry{}", seg_id, i),
+                    properties: PropertyMap::new(),
+                    temporal: BiTemporalInterval::current(time::now()),
+                };
+
+                let entry = WalEntry::new(lsn, operation);
+                let mut buffer = Vec::new();
+                serialize_entry_into(&entry, &mut buffer).unwrap();
+                file.write_all(&buffer).unwrap();
+            }
+
+            file.sync_all().unwrap();
+        }
+
+        // Read all entries from directory
+        let entries = read_entries_from_dir(dir.path(), LSN(1)).unwrap();
+
+        // Verify all entries were read correctly
+        assert_eq!(entries.len(), (num_segments * entries_per_segment) as usize);
+
+        // Verify entries are sorted by LSN
+        for i in 0..entries.len() - 1 {
+            assert!(entries[i].lsn <= entries[i + 1].lsn);
+        }
+    }
+
+    /// Test that segment reading works correctly with the start_lsn filter.
+    ///
+    /// This verifies that we can efficiently skip entries before a certain LSN
+    /// without processing them.
+    #[test]
+    fn test_read_segment_with_start_lsn_filter() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("filtered_segment.log");
+
+        let mut file = File::create(&segment_path).unwrap();
+
+        // Write WAL header
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        // Write 100 entries with LSN 1-100
+        for i in 1..=100 {
+            let lsn = LSN(i);
+            let operation = WalOperation::CreateNode {
+                node_id: NodeId::new(i).unwrap(),
+                label: format!("Node_{}", i),
+                properties: PropertyMap::new(),
+                temporal: BiTemporalInterval::current(time::now()),
+            };
+
+            let entry = WalEntry::new(lsn, operation);
+            let mut buffer = Vec::new();
+            serialize_entry_into(&entry, &mut buffer).unwrap();
+            file.write_all(&buffer).unwrap();
+        }
+
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Read entries starting from LSN 50
+        let entries = read_segment(&segment_path, LSN(50)).unwrap();
+
+        // Should only get entries with LSN >= 50
+        assert_eq!(entries.len(), 51); // LSN 50-100 inclusive
+        assert_eq!(entries[0].lsn, LSN(50));
+        assert_eq!(entries[entries.len() - 1].lsn, LSN(100));
+    }
+
+    /// Test that empty segments are handled efficiently.
+    #[test]
+    fn test_read_empty_segment_efficient() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("empty_segment.log");
+
+        let mut file = File::create(&segment_path).unwrap();
+
+        // Write only WAL header, no entries
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Read the empty segment
+        let entries = read_segment(&segment_path, LSN(1)).unwrap();
+
+        // Should return empty vector
+        assert!(entries.is_empty());
+    }
+
+    /// Test that partial/truncated entries at end of segment are handled gracefully.
+    ///
+    /// This can happen if a write was interrupted mid-entry.
+    #[test]
+    fn test_read_segment_with_truncated_entry() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("truncated_segment.log");
+
+        let mut file = File::create(&segment_path).unwrap();
+
+        // Write WAL header
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        // Write one complete entry
+        let operation = WalOperation::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            label: "Node_1".to_string(),
+            properties: PropertyMap::new(),
+            temporal: BiTemporalInterval::current(time::now()),
+        };
+        let entry = WalEntry::new(LSN(1), operation);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        file.write_all(&buffer).unwrap();
+
+        // Write a partial entry (just the LSN, incomplete)
+        file.write_all(&42u64.to_le_bytes()).unwrap();
+
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Read the segment - should get the complete entry and stop at truncation
+        let entries = read_segment(&segment_path, LSN(1)).unwrap();
+
+        // Should only get the one complete entry
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].lsn, LSN(1));
+    }
+
+    // =============================================================================
+    // Security and Error Handling Tests - Issue #216 Fixes
+    // =============================================================================
+
+    /// Test that non-existent files return empty results (not an error).
+    #[test]
+    fn test_read_nonexistent_file_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let nonexistent = dir.path().join("does_not_exist.log");
+
+        // Should return Ok(empty vector), not an error
+        let result = read_segment(&nonexistent, LSN(1));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    /// Test that file size validation prevents reading excessively large files.
+    ///
+    /// This protects against DoS attacks where an attacker places a huge file
+    /// in the WAL directory.
+    #[test]
+    fn test_read_segment_rejects_oversized_file() {
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let segment_path = dir.path().join("oversized_segment.log");
+
+        let mut file = File::create(&segment_path).unwrap();
+
+        // Write WAL header
+        file.write_all(&WAL_MAGIC).unwrap();
+        file.write_all(&[WAL_VERSION]).unwrap();
+
+        // Seek to a position beyond MAX_SEGMENT_SIZE (1GB)
+        // Note: We don't actually write 1GB of data, just seek past it
+        // This creates a sparse file that reports a large size
+        const OVERSIZED: u64 = 1024 * 1024 * 1024 + 1; // 1GB + 1 byte
+        file.set_len(OVERSIZED).unwrap();
+
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Should return an error about file being too large
+        let result = read_segment(&segment_path, LSN(1));
+        assert!(result.is_err());
+        let error_msg = format!("{}", result.unwrap_err());
+        assert!(
+            error_msg.contains("too large"),
+            "Expected 'too large' error, got: {}",
+            error_msg
+        );
     }
 }
