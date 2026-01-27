@@ -38,7 +38,7 @@ tracing-tracy = { version = "0.11", optional = true }
 
 # Prometheus metrics (optional)
 metrics = { version = "0.24", optional = true }
-metrics-exporter-prometheus = { version = "0.17", optional = true }
+metrics-exporter-prometheus = { version = "0.18", optional = true }
 
 # MCP server support (optional)
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
