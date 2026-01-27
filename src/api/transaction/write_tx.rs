@@ -1547,6 +1547,44 @@ impl WriteOps for WriteTransaction {
         Ok(())
     }
 
+    fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()> {
+        // Check transaction state
+        if self.state != TxState::Active {
+            return Err(TransactionError::InvalidState {
+                current: format!("{:?}", self.state),
+                expected: "Active".to_string(),
+            }
+            .into());
+        }
+
+        // Verify node exists before attempting deletion
+        let _node = self.current.get_node(node_id)?;
+
+        // Collect all edges connected to this node (both outgoing and incoming)
+        // We do this before any deletions to avoid borrowing issues
+        //
+        // LIMITATION: This uses ReadOps methods which currently don't support
+        // read-your-writes semantics for edge traversal. This means edges created
+        // in the same transaction (but not yet committed) won't be found and deleted.
+        // This is consistent with the existing ReadOps behavior but may leave orphaned
+        // edges in same-transaction scenarios. See issue for future improvement.
+        let outgoing_edges = self.get_outgoing_edges(node_id);
+        let incoming_edges = self.get_incoming_edges(node_id);
+
+        // Delete all connected edges first to maintain referential integrity
+        // This prevents orphaned edges that reference a deleted node
+        // Performance: O(degree) where degree is the number of connected edges
+        for edge_id in outgoing_edges.into_iter().chain(incoming_edges) {
+            self.delete_edge(edge_id)?;
+        }
+
+        // Finally, delete the node itself
+        // This is safe now because all edges referencing this node have been removed
+        self.delete_node(node_id)?;
+
+        Ok(())
+    }
+
     fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
         // Check transaction state
         if self.state != TxState::Active {
@@ -2788,6 +2826,290 @@ mod tests {
                 result.err()
             );
         }
+    }
+    // ===================================================================
+    // Cascade Delete Tests (Issue #364)
+    // ===================================================================
+
+    #[test]
+    fn test_delete_node_cascade_removes_edges() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a central node with multiple connections
+        let props = PropertyMapBuilder::new().build();
+        let central_node = tx.create_node("Person", props.clone()).unwrap();
+        let node1 = tx.create_node("Person", props.clone()).unwrap();
+        let node2 = tx.create_node("Person", props.clone()).unwrap();
+        let node3 = tx.create_node("Person", props).unwrap();
+
+        // Create edges: central node has 2 outgoing and 1 incoming edge
+        let edge1 = tx
+            .create_edge(
+                central_node,
+                node1,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+        let edge2 = tx
+            .create_edge(
+                central_node,
+                node2,
+                "FOLLOWS",
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+        let edge3 = tx
+            .create_edge(
+                node3,
+                central_node,
+                "LIKES",
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        tx.commit().unwrap();
+
+        // Verify all edges exist
+        assert!(current.get_edge(edge1).is_ok());
+        assert!(current.get_edge(edge2).is_ok());
+        assert!(current.get_edge(edge3).is_ok());
+
+        // Delete the central node with cascade
+        let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
+        tx2.delete_node_cascade(central_node).unwrap();
+        tx2.commit().unwrap();
+
+        // Verify the node was deleted
+        assert!(current.get_node(central_node).is_err());
+
+        // Verify all connected edges were deleted (CASCADE)
+        assert!(
+            current.get_edge(edge1).is_err(),
+            "Outgoing edge should be deleted with cascade"
+        );
+        assert!(
+            current.get_edge(edge2).is_err(),
+            "Outgoing edge should be deleted with cascade"
+        );
+        assert!(
+            current.get_edge(edge3).is_err(),
+            "Incoming edge should be deleted with cascade"
+        );
+
+        // Verify other nodes still exist
+        assert!(current.get_node(node1).is_ok());
+        assert!(current.get_node(node2).is_ok());
+        assert!(current.get_node(node3).is_ok());
+    }
+
+    #[test]
+    fn test_delete_node_no_cascade_keeps_edges() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a central node with connections
+        let props = PropertyMapBuilder::new().build();
+        let central_node = tx.create_node("Person", props.clone()).unwrap();
+        let node1 = tx.create_node("Person", props).unwrap();
+
+        // Create edge
+        let edge1 = tx
+            .create_edge(
+                central_node,
+                node1,
+                "KNOWS",
+                PropertyMapBuilder::new().build(),
+            )
+            .unwrap();
+
+        tx.commit().unwrap();
+
+        // Verify edge exists
+        assert!(current.get_edge(edge1).is_ok());
+
+        // Delete the node WITHOUT cascade (default behavior)
+        let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
+        tx2.delete_node(central_node).unwrap();
+        tx2.commit().unwrap();
+
+        // Verify the node was deleted
+        assert!(current.get_node(central_node).is_err());
+
+        // Verify edge still exists (NO CASCADE - current behavior)
+        // Note: This creates an orphaned edge, which is the problem issue #364 addresses
+        assert!(
+            current.get_edge(edge1).is_ok(),
+            "Edge should remain when cascade is not enabled (current behavior)"
+        );
+    }
+
+    #[test]
+    fn test_delete_node_cascade_with_bidirectional_edges() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create nodes with bidirectional relationships
+        let props = PropertyMapBuilder::new().build();
+        let node_a = tx.create_node("Person", props.clone()).unwrap();
+        let node_b = tx.create_node("Person", props).unwrap();
+
+        // Create bidirectional edges
+        let edge_a_to_b = tx
+            .create_edge(node_a, node_b, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+        let edge_b_to_a = tx
+            .create_edge(node_b, node_a, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        tx.commit().unwrap();
+
+        // Delete node_a with cascade
+        let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
+        tx2.delete_node_cascade(node_a).unwrap();
+        tx2.commit().unwrap();
+
+        // Both edges should be deleted
+        assert!(current.get_edge(edge_a_to_b).is_err());
+        assert!(current.get_edge(edge_b_to_a).is_err());
+
+        // node_b should still exist
+        assert!(current.get_node(node_b).is_ok());
+    }
+
+    #[test]
+    fn test_delete_node_cascade_performance_many_edges() {
+        let (mut tx, _temp_dir) = create_test_write_tx();
+        let current = Arc::clone(&tx.current);
+
+        // Create a central node
+        let props = PropertyMapBuilder::new().build();
+        let central_node = tx.create_node("Hub", props.clone()).unwrap();
+
+        // Create many connected nodes (100 outgoing, 100 incoming)
+        let mut outgoing_edges = Vec::new();
+        let mut incoming_edges = Vec::new();
+
+        for i in 0..100 {
+            let target = tx
+                .create_node(
+                    "Target",
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                )
+                .unwrap();
+            let edge = tx
+                .create_edge(
+                    central_node,
+                    target,
+                    "OUT",
+                    PropertyMapBuilder::new().build(),
+                )
+                .unwrap();
+            outgoing_edges.push(edge);
+        }
+
+        for i in 0..100 {
+            let source = tx
+                .create_node(
+                    "Source",
+                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                )
+                .unwrap();
+            let edge = tx
+                .create_edge(
+                    source,
+                    central_node,
+                    "IN",
+                    PropertyMapBuilder::new().build(),
+                )
+                .unwrap();
+            incoming_edges.push(edge);
+        }
+
+        tx.commit().unwrap();
+
+        // Verify all edges exist
+        for edge in &outgoing_edges {
+            assert!(current.get_edge(*edge).is_ok());
+        }
+        for edge in &incoming_edges {
+            assert!(current.get_edge(*edge).is_ok());
+        }
+
+        // Delete the central node with cascade - should be performant
+        let (mut tx2, _temp_dir2) = create_test_write_tx_from_existing(Arc::clone(&current));
+        let start = std::time::Instant::now();
+        tx2.delete_node_cascade(central_node).unwrap();
+        tx2.commit().unwrap();
+        let elapsed = start.elapsed();
+
+        // Performance assertion: should complete in reasonable time (< 500ms)
+        // This threshold is generous to avoid flakiness on slow CI systems
+        // while still catching significant performance regressions
+        assert!(
+            elapsed.as_millis() < 500,
+            "Cascade delete of 200 edges took too long: {:?}",
+            elapsed
+        );
+
+        // Verify the node was deleted
+        assert!(current.get_node(central_node).is_err());
+
+        // Verify all 200 edges were deleted
+        for edge in &outgoing_edges {
+            assert!(current.get_edge(*edge).is_err());
+        }
+        for edge in &incoming_edges {
+            assert!(current.get_edge(*edge).is_err());
+        }
+    }
+
+    /// Helper function to create a write transaction from existing storage
+    fn create_test_write_tx_from_existing(
+        current: Arc<CurrentStorage>,
+    ) -> (WriteTransaction, TempDir) {
+        use crate::api::transaction::TxIdGenerator;
+        use crate::core::temporal::time;
+        use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+        use tempfile::TempDir;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let temporal_indexes = Arc::new(TemporalIndexes::new());
+
+        // Create WAL with temp directory for tests
+        let temp_dir = TempDir::new().unwrap();
+        let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+        let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+
+        let current_timestamp = Arc::new(Mutex::new(time::now()));
+        let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+        let tx_id_gen = TxIdGenerator::new();
+
+        // Create snapshot and visibility manager for testing
+        let visibility_manager = Arc::new(TxVisibilityManager::new());
+        let snapshot = TransactionSnapshot {
+            snapshot_timestamp: time::now(),
+            active_transactions: Arc::new(std::collections::HashSet::new()),
+        };
+
+        let tx = WriteTransaction::new(
+            tx_id_gen.next(),
+            snapshot,
+            current,
+            historical,
+            temporal_indexes,
+            wal,
+            current_timestamp,
+            visibility_manager,
+            node_id_gen,
+            edge_id_gen,
+            version_id_gen,
+        );
+
+        (tx, temp_dir)
     }
 }
 

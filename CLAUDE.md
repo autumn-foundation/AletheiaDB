@@ -268,7 +268,7 @@ cargo run --bin gallifrey-mcp --features mcp-server
 **Available Tools:**
 | Category | Tools |
 |----------|-------|
-| **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `list_nodes`, `count_nodes` |
+| **Nodes** | `get_node`, `create_node`, `update_node`, `delete_node`, `delete_node_cascade`, `list_nodes`, `count_nodes` |
 | **Edges** | `get_edge`, `create_edge`, `update_edge`, `delete_edge`, `get_outgoing_edges`, `get_incoming_edges` |
 | **Traversal** | `traverse` (multi-hop graph traversal) |
 | **Vector** | `find_similar`, `enable_vector_index`, `list_vector_indexes` |

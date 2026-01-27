@@ -117,6 +117,13 @@ impl GallifreyMcpServer {
         ))
     }
 
+    /// Delete a node and all its connected edges (cascade delete).
+    pub fn delete_node_cascade(&self, req: DeleteNodeCascadeRequest) -> String {
+        Self::extract_text(self.handle_delete_node_cascade(
+            serde_json::to_value(req).expect("request serialization should not fail"),
+        ))
+    }
+
     /// List nodes with optional filtering.
     pub fn list_nodes(&self, req: ListNodesRequest) -> String {
         Self::extract_text(self.handle_list_nodes(
@@ -519,6 +526,27 @@ impl GallifreyMcpServer {
             Ok(()) => self.success_json(json!({
                 "success": true,
                 "deleted_node_id": req.node_id
+            })),
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn handle_delete_node_cascade(&self, args: serde_json::Value) -> CallToolResult {
+        let req: DeleteNodeCascadeRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        match self.db.write(|tx| tx.delete_node_cascade(node_id)) {
+            Ok(()) => self.success_json(json!({
+                "success": true,
+                "deleted_node_id": req.node_id,
+                "cascade": true
             })),
             Err(e) => self.error_json(&e.to_string()),
         }
@@ -1335,6 +1363,12 @@ impl ServerHandler for GallifreyMcpServer {
                     make_input_schema::<DeleteNodeRequest>(),
                 ),
                 Tool::new(
+                    "delete_node_cascade",
+                    "Delete a node and all its connected edges (cascade delete). \
+                     This maintains referential integrity by removing orphaned edges.",
+                    make_input_schema::<DeleteNodeCascadeRequest>(),
+                ),
+                Tool::new(
                     "list_nodes",
                     "List nodes with optional label filter and pagination.",
                     make_input_schema::<ListNodesRequest>(),
@@ -1440,6 +1474,7 @@ impl ServerHandler for GallifreyMcpServer {
             "create_node" => self.handle_create_node(args),
             "update_node" => self.handle_update_node(args),
             "delete_node" => self.handle_delete_node(args),
+            "delete_node_cascade" => self.handle_delete_node_cascade(args),
             "list_nodes" => self.handle_list_nodes(args),
             "count_nodes" => self.handle_count_nodes(args),
             "get_edge" => self.handle_get_edge(args),

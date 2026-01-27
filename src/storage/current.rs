@@ -957,8 +957,15 @@ impl CurrentStorage {
 
     /// Delete a node.
     ///
-    /// Note: This does not delete edges connected to the node.
-    /// See issue #364 for cascade delete option.
+    /// # Important
+    ///
+    /// This method does NOT delete edges connected to the node. This may leave
+    /// orphaned edges in the graph. For most use cases, prefer using
+    /// [`WriteTransaction::delete_node_cascade`] which automatically removes
+    /// all connected edges to maintain referential integrity.
+    ///
+    /// Only use this method if you explicitly need to preserve edges for some
+    /// specialized use case (e.g., maintaining edge history for audit purposes).
     pub fn delete_node(&self, id: NodeId) -> Result<Node> {
         let node = self
             .indexes
