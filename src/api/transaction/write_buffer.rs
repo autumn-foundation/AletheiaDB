@@ -118,7 +118,7 @@ pub struct WriteBuffer {
 
     /// Track whether any edge structure changes occurred in this transaction.
     /// This flag is used to optimize the commit path by only calling
-    /// rebuild_adjacency() when the graph topology was modified.
+    /// compact_adjacency() when the graph topology was modified.
     /// Only CreateEdge and DeleteEdge set this flag; UpdateEdge does not,
     /// since property-only updates don't affect adjacency structure.
     has_edge_operations: bool,
@@ -296,7 +296,7 @@ impl WriteBuffer {
 
     /// Check whether any edge structure changes occurred in this transaction.
     ///
-    /// This is used to optimize the commit path by only calling rebuild_adjacency()
+    /// This is used to optimize the commit path by only calling compact_adjacency()
     /// when the graph topology was modified. Returns true only for CreateEdge and
     /// DeleteEdge operations; UpdateEdge (property-only changes) returns false.
     pub fn has_edge_operations(&self) -> bool {

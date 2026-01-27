@@ -1193,12 +1193,11 @@ impl WriteTransaction {
         drop(historical);
 
         // Rebuild adjacency indexes only if edge structure changed
-        // This optimization avoids expensive rebuilds for:
-        // - Node-only transactions
-        // - Transactions that only update edge properties (UpdateEdge)
-        // Only CreateEdge and DeleteEdge modify topology and trigger rebuild
+        // With incremental adjacency, edges are immediately visible (no rebuild needed).
+        // However, we compact after transactions with edge operations to maintain
+        // read performance by moving delta edges to frozen CSR.
         if self.buffer.has_edge_operations() {
-            self.current.rebuild_adjacency();
+            self.current.compact_adjacency();
         }
 
         Ok(())

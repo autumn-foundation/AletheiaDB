@@ -164,6 +164,35 @@ impl IncrementalAdjacencyIndex {
         self.stats.frozen_edge_count.load(Ordering::Relaxed)
     }
 
+    /// Export frozen CSR data for persistence.
+    ///
+    /// This exports only the immutable frozen layer, not the delta buffer or tombstones.
+    /// Call `compact()` first to include recent changes.
+    pub fn export_frozen_csr(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
+        self.frozen.load().export_csr()
+    }
+
+    /// Import frozen CSR data from persistence.
+    ///
+    /// This replaces the frozen layer with the imported CSR, clearing delta and tombstones.
+    /// Used when loading persisted indexes to avoid rebuilding from scratch.
+    pub fn import_frozen_csr(&self, frozen_csr: Arc<AdjacencyIndex>) {
+        // Replace frozen CSR
+        self.frozen.store(frozen_csr);
+
+        // Clear delta and tombstones
+        self.delta.clear();
+        self.tombstones.clear();
+
+        // Update stats
+        let frozen_count = self.frozen.load().edge_count();
+        self.stats
+            .frozen_edge_count
+            .store(frozen_count, Ordering::Relaxed);
+        self.stats.delta_edge_count.store(0, Ordering::Relaxed);
+        self.stats.tombstone_count.store(0, Ordering::Relaxed);
+    }
+
     /// Get delta edge count.
     pub fn delta_edge_count(&self) -> usize {
         self.stats.delta_edge_count.load(Ordering::Relaxed)
@@ -404,6 +433,24 @@ impl<'a> MergedAdjacencyGuard<'a> {
         frozen_iter.chain(delta_iter)
     }
 
+    /// Get the number of adjacency entries (frozen + delta, excluding tombstones).
+    ///
+    /// This counts all entries by iterating, which is O(n) where n is the degree.
+    /// For high-degree nodes, this may be slower than the old CSR approach.
+    pub fn len(&self) -> usize {
+        self.iter().count()
+    }
+
+    /// Check if the adjacency list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Get entry at index (for compatibility with slice-like indexing).
+    pub fn get(&self, index: usize) -> Option<&AdjacencyEntry> {
+        self.iter().nth(index)
+    }
+
     /// Fast path: if no delta and no tombstones, return frozen slice directly.
     pub fn as_slice(&self) -> Option<&[AdjacencyEntry]> {
         if self.delta.is_none() && self.tombstones.is_empty() {
@@ -413,6 +460,35 @@ impl<'a> MergedAdjacencyGuard<'a> {
         }
     }
 }
+
+impl<'a> std::ops::Index<usize> for MergedAdjacencyGuard<'a> {
+    type Output = AdjacencyEntry;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index)
+            .expect("index out of bounds for MergedAdjacencyGuard")
+    }
+}
+
+impl<'a> std::fmt::Debug for MergedAdjacencyGuard<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MergedAdjacencyGuard")
+            .field("node", &self.node)
+            .field("entry_count", &self.len())
+            .finish()
+    }
+}
+
+impl<'a> PartialEq for MergedAdjacencyGuard<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare by iterating over all entries
+        let self_entries: Vec<_> = self.iter().collect();
+        let other_entries: Vec<_> = other.iter().collect();
+        self_entries == other_entries
+    }
+}
+
+impl<'a> Eq for MergedAdjacencyGuard<'a> {}
 
 impl Default for IncrementalAdjacencyIndex {
     fn default() -> Self {

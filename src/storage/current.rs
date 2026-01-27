@@ -9,7 +9,8 @@ use crate::core::id::{EdgeId, IdGenerator, NodeId, VersionId};
 use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
-use crate::index::current::{AdjacencyGuard, CurrentIndexes};
+use crate::index::current::CurrentIndexes;
+use crate::index::incremental_adjacency::MergedAdjacencyGuard;
 use crate::index::vector::hnsw::{HnswConfig, HnswIndex};
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
 use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
@@ -250,7 +251,7 @@ macro_rules! impl_edge_iter {
             "\n\nThis iterator provides zero-allocation traversal of ", $direction, " edges,",
             "\navoiding the `Vec` allocation overhead of [`", $method_link, "`](Self::", $method_link, ").",
             "\n\n# Performance",
-            "\n\n- **Zero allocation**: Holds an `AdjacencyGuard` (just an `Arc` clone, ~5-10ns)",
+            "\n\n- **Zero allocation**: Holds a `MergedAdjacencyGuard` (merges frozen + delta)",
             "\n- **Lazy evaluation**: Only computes results as you iterate",
             "\n- **Cache-friendly**: Sequential access to CSR adjacency data",
             "\n\n# Issue #187",
@@ -258,20 +259,20 @@ macro_rules! impl_edge_iter {
             "\nunnecessarily allocated a new `Vec<EdgeId>` on every call, adding 100-500ns",
             "\noverhead per traversal."
         )]
-        pub struct $name {
-            guard: AdjacencyGuard,
+        pub struct $name<'a> {
+            guard: MergedAdjacencyGuard<'a>,
             index: usize,
         }
 
-        impl $name {
+        impl<'a> $name<'a> {
             #[doc = concat!("Create a new iterator over ", $direction, " edges.")]
             #[inline]
-            fn new(guard: AdjacencyGuard) -> Self {
+            fn new(guard: MergedAdjacencyGuard<'a>) -> Self {
                 Self { guard, index: 0 }
             }
         }
 
-        impl Iterator for $name {
+        impl<'a> Iterator for $name<'a> {
             type Item = EdgeId;
 
             #[inline]
@@ -288,14 +289,14 @@ macro_rules! impl_edge_iter {
             }
         }
 
-        impl ExactSizeIterator for $name {
+        impl<'a> ExactSizeIterator for $name<'a> {
             #[inline]
             fn len(&self) -> usize {
                 self.guard.len().saturating_sub(self.index)
             }
         }
 
-        impl std::iter::FusedIterator for $name {}
+        impl<'a> std::iter::FusedIterator for $name<'a> {}
     };
 }
 
@@ -313,21 +314,21 @@ macro_rules! impl_edge_iter_with_label {
             "\nthat match a specific label, avoiding the `Vec` allocation overhead of",
             "\n[`", $method_link, "`](Self::", $method_link, ").",
             "\n\n# Performance",
-            "\n\n- **Zero allocation**: Holds an `AdjacencyGuard` and pre-resolved label ID",
+            "\n\n- **Zero allocation**: Holds a `MergedAdjacencyGuard` and pre-resolved label ID",
             "\n- **Lazy evaluation**: Filters as you iterate",
             "\n- **O(n) complexity**: Single linear scan regardless of match distribution",
             "\n- **Early termination**: If label doesn't exist, returns empty iterator"
         )]
-        pub struct $name {
-            guard: AdjacencyGuard,
+        pub struct $name<'a> {
+            guard: MergedAdjacencyGuard<'a>,
             index: usize,
             label_id: Option<InternedString>,
         }
 
-        impl $name {
+        impl<'a> $name<'a> {
             #[doc = concat!("Create a new iterator over ", $direction, " edges with a specific label.")]
             #[inline]
-            fn new(guard: AdjacencyGuard, label_id: Option<InternedString>) -> Self {
+            fn new(guard: MergedAdjacencyGuard<'a>, label_id: Option<InternedString>) -> Self {
                 Self {
                     guard,
                     index: 0,
@@ -336,7 +337,7 @@ macro_rules! impl_edge_iter_with_label {
             }
         }
 
-        impl Iterator for $name {
+        impl<'a> Iterator for $name<'a> {
             type Item = EdgeId;
 
             #[inline]
@@ -365,7 +366,7 @@ macro_rules! impl_edge_iter_with_label {
             }
         }
 
-        impl std::iter::FusedIterator for $name {}
+        impl<'a> std::iter::FusedIterator for $name<'a> {}
     };
 }
 
@@ -1084,14 +1085,32 @@ impl CurrentStorage {
     /// However, concurrent writes should be serialized at a higher level
     /// (e.g., through transaction isolation) to prevent race conditions.
     ///
+    /// Compact adjacency indexes to merge delta buffer into frozen CSR.
+    ///
+    /// With incremental adjacency, edges are immediately visible without compaction.
+    /// This method improves read performance by moving delta edges to frozen CSR.
+    ///
+    /// # When to Call
+    ///
+    /// - After bulk inserts (to move many edges from delta to frozen)
+    /// - To reduce delta size before persistence
+    /// - Usually not needed if background compaction is enabled
+    ///
     /// # Performance
     ///
-    /// Complexity: O(E log E) where E is the total number of edges.
-    /// This operation acquires a write lock, which will block concurrent
-    /// readers for the duration of the rebuild (~microseconds for small graphs,
-    /// ~milliseconds for graphs with 10K+ edges).
+    /// Complexity: O(D log D) where D is the number of delta edges.
+    /// Typically much faster than the old O(E log E) rebuild where E is total edges.
+    pub fn compact_adjacency(&self) {
+        self.indexes.compact_adjacency();
+    }
+
+    /// Rebuild adjacency indexes (deprecated - use `compact_adjacency` instead).
+    ///
+    /// This method is kept for backward compatibility and simply calls `compact_adjacency`.
+    /// Edges are always immediately visible without calling this method.
+    #[deprecated(since = "0.1.0", note = "Use compact_adjacency() instead")]
     pub fn rebuild_adjacency(&self) {
-        self.indexes.rebuild_adjacency();
+        self.compact_adjacency();
     }
 
     /// Get all outgoing edges from a node.
@@ -1168,7 +1187,7 @@ impl CurrentStorage {
     /// let count = storage.get_outgoing_edges_iter(node).count();
     /// ```
     #[inline]
-    pub fn get_outgoing_edges_iter(&self, source: NodeId) -> OutgoingEdgesIter {
+    pub fn get_outgoing_edges_iter(&self, source: NodeId) -> OutgoingEdgesIter<'_> {
         OutgoingEdgesIter::new(self.indexes.get_outgoing(source))
     }
 
@@ -1179,7 +1198,7 @@ impl CurrentStorage {
     ///
     /// See [`Self::get_outgoing_edges_iter`] for performance details and usage examples.
     #[inline]
-    pub fn get_incoming_edges_iter(&self, target: NodeId) -> IncomingEdgesIter {
+    pub fn get_incoming_edges_iter(&self, target: NodeId) -> IncomingEdgesIter<'_> {
         IncomingEdgesIter::new(self.indexes.get_incoming(target))
     }
 
@@ -1193,7 +1212,7 @@ impl CurrentStorage {
         &self,
         source: NodeId,
         label: &str,
-    ) -> OutgoingEdgesWithLabelIter {
+    ) -> OutgoingEdgesWithLabelIter<'_> {
         let label_id = GLOBAL_INTERNER.get_id(label);
         OutgoingEdgesWithLabelIter::new(self.indexes.get_outgoing(source), label_id)
     }
@@ -1208,7 +1227,7 @@ impl CurrentStorage {
         &self,
         target: NodeId,
         label: &str,
-    ) -> IncomingEdgesWithLabelIter {
+    ) -> IncomingEdgesWithLabelIter<'_> {
         let label_id = GLOBAL_INTERNER.get_id(label);
         IncomingEdgesWithLabelIter::new(self.indexes.get_incoming(target), label_id)
     }

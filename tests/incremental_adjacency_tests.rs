@@ -773,6 +773,216 @@ mod phase5_background_compaction {
 }
 
 // ============================================================================
+// Phase 6: CurrentIndexes Integration Tests
+// ============================================================================
+
+#[cfg(test)]
+mod phase6_current_indexes_integration {
+    use super::*;
+    use gallifreydb::PropertyMapBuilder;
+    use gallifreydb::core::graph::Edge;
+    use gallifreydb::core::id::VersionId;
+    use gallifreydb::index::current::CurrentIndexes;
+
+    // Step 6.1: Test insert_edge updates adjacency incrementally (no rebuild)
+    #[test]
+    fn test_incremental_edge_insertion() {
+        let indexes = CurrentIndexes::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Insert first edge
+        let edge1 = Edge::new(
+            EdgeId::new(1).unwrap(),
+            knows,
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+        indexes.insert_edge(edge1);
+
+        // Get adjacency - should NOT trigger rebuild, should use incremental
+        {
+            let guard = indexes.get_outgoing(NodeId::new(0).unwrap());
+            assert_eq!(guard.len(), 1);
+            assert_eq!(guard[0].target, NodeId::new(1).unwrap());
+        } // Guard dropped here
+
+        // Insert second edge
+        let edge2 = Edge::new(
+            EdgeId::new(2).unwrap(),
+            knows,
+            NodeId::new(0).unwrap(),
+            NodeId::new(2).unwrap(),
+            PropertyMapBuilder::new().build(),
+            VersionId::new(1).unwrap(),
+        );
+        indexes.insert_edge(edge2);
+
+        // Get adjacency again - should see both edges WITHOUT rebuild
+        {
+            let guard = indexes.get_outgoing(NodeId::new(0).unwrap());
+            assert_eq!(guard.len(), 2);
+        } // Guard dropped here
+    }
+
+    // Step 6.3 RED: Test get_outgoing returns merged frozen + delta
+    #[test]
+    fn test_get_outgoing_merges_frozen_and_delta() {
+        let indexes = CurrentIndexes::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Add 100 edges to build up frozen
+        for i in 0..100 {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                NodeId::new(0).unwrap(),
+                NodeId::new(i + 1).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+
+        // Trigger compaction manually (or wait for background)
+        // This moves edges to frozen
+        indexes.compact_adjacency(); // Will need to add this method
+
+        // Add 10 more edges (these go to delta)
+        for i in 100..110 {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                NodeId::new(0).unwrap(),
+                NodeId::new(i + 1).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+
+        // Get adjacency - should see all 110 edges (frozen + delta)
+        let guard = indexes.get_outgoing(NodeId::new(0).unwrap());
+        assert_eq!(guard.len(), 110);
+    }
+
+    // Step 6.5 RED: Test concurrent insert + read works correctly
+    #[test]
+    fn test_concurrent_insert_and_read() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let indexes = Arc::new(CurrentIndexes::new());
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Spawn writer thread
+        let indexes_writer = Arc::clone(&indexes);
+        let writer = thread::spawn(move || {
+            for i in 0..1000 {
+                let edge = Edge::new(
+                    EdgeId::new(i).unwrap(),
+                    knows,
+                    NodeId::new(0).unwrap(),
+                    NodeId::new(i + 1).unwrap(),
+                    PropertyMapBuilder::new().build(),
+                    VersionId::new(1).unwrap(),
+                );
+                indexes_writer.insert_edge(edge);
+            }
+        });
+
+        // Spawn reader threads
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let indexes_reader = Arc::clone(&indexes);
+                thread::spawn(move || {
+                    for _ in 0..1000 {
+                        let guard = indexes_reader.get_outgoing(NodeId::new(0).unwrap());
+                        // Should always see valid state (never partial)
+                        let _count = guard.len();
+                    }
+                })
+            })
+            .collect();
+
+        writer.join().unwrap();
+        for reader in readers {
+            reader.join().unwrap();
+        }
+
+        // Final check - all edges present
+        let guard = indexes.get_outgoing(NodeId::new(0).unwrap());
+        assert_eq!(guard.len(), 1000);
+    }
+
+    // Step 6.7 RED: Test background compaction works with CurrentIndexes
+    #[test]
+    fn test_background_compaction_with_current_indexes() {
+        use std::thread;
+        use std::time::Duration;
+
+        let mut indexes = CurrentIndexes::new_with_background_compaction();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Add enough edges to trigger background compaction (default threshold is 10,000)
+        for i in 0..10_500 {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                NodeId::new(0).unwrap(),
+                NodeId::new(i + 1).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+
+        // Wait for background compaction to trigger (check interval is 1 second)
+        thread::sleep(Duration::from_millis(1500));
+
+        // Check that edges are in frozen (compaction happened)
+        // Should have moved edges from delta to frozen
+        assert!(indexes.frozen_edge_count() > 0);
+
+        // Cleanup
+        indexes.shutdown_background_compaction();
+    }
+
+    // Step 6.9 RED: Test remove_edge with tombstones
+    #[test]
+    fn test_remove_edge_with_tombstones() {
+        let indexes = CurrentIndexes::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Insert edges
+        for i in 0..10 {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                NodeId::new(0).unwrap(),
+                NodeId::new(i + 1).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+
+        // Remove edge 5
+        indexes.remove_edge(EdgeId::new(5).unwrap());
+
+        // Get adjacency - should see 9 edges (tombstone filters out edge 5)
+        let guard = indexes.get_outgoing(NodeId::new(0).unwrap());
+        assert_eq!(guard.len(), 9);
+
+        // Verify edge 5 is not in the list
+        for entry in guard.iter() {
+            assert_ne!(entry.edge_id, EdgeId::new(5).unwrap());
+        }
+    }
+}
+
+// ============================================================================
 // Test Utilities
 // ============================================================================
 
