@@ -583,6 +583,41 @@ impl CurrentIndexes {
             .collect()
     }
 
+    /// Get a frozen view for outgoing adjacency (read transaction hot path).
+    ///
+    /// Returns `Some(FrozenAdjacencyView)` if the index is in a clean state
+    /// (no delta edges or tombstones), allowing direct slice access at ~8-14ns.
+    /// Returns `None` if there are pending delta operations, in which case
+    /// callers should fall back to `get_outgoing()` for merged access.
+    ///
+    /// # Performance
+    ///
+    /// - FrozenView access: ~8-14ns (direct slice)
+    /// - MergedGuard access: ~16-17ns (iterator with fast path)
+    ///
+    /// # Use Case
+    ///
+    /// Read transactions that don't modify the graph can use this for
+    /// maximum performance. The view remains valid for the lifetime of
+    /// the borrow, and provides `&[AdjacencyEntry]` directly.
+    #[inline]
+    pub fn frozen_outgoing_view(
+        &self,
+    ) -> Option<crate::index::incremental_adjacency::FrozenAdjacencyView> {
+        self.outgoing.frozen_view()
+    }
+
+    /// Get a frozen view for incoming adjacency (read transaction hot path).
+    ///
+    /// Same as `frozen_outgoing_view()` but for incoming edges.
+    /// Returns `None` if there are pending delta operations.
+    #[inline]
+    pub fn frozen_incoming_view(
+        &self,
+    ) -> Option<crate::index::incremental_adjacency::FrozenAdjacencyView> {
+        self.incoming.frozen_view()
+    }
+
     /// Get the out-degree of a node (number of outgoing edges).
     ///
     /// **Lock-free**: Uses incremental adjacency with merge-on-read.

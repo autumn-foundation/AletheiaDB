@@ -1113,6 +1113,33 @@ impl CurrentStorage {
         self.compact_adjacency();
     }
 
+    /// Get a frozen view for outgoing adjacency (read transaction hot path).
+    ///
+    /// Returns `Some(FrozenAdjacencyView)` if the index is in a clean state
+    /// (no pending delta edges or tombstones), allowing direct slice access.
+    /// Returns `None` if there are pending delta operations.
+    ///
+    /// # Performance
+    ///
+    /// When available, frozen view provides ~8-14ns access vs ~16-17ns for
+    /// the merged path. Use this for read-only workloads.
+    #[inline]
+    pub fn frozen_outgoing_view(
+        &self,
+    ) -> Option<crate::index::incremental_adjacency::FrozenAdjacencyView> {
+        self.indexes.frozen_outgoing_view()
+    }
+
+    /// Get a frozen view for incoming adjacency (read transaction hot path).
+    ///
+    /// Same as `frozen_outgoing_view()` but for incoming edges.
+    #[inline]
+    pub fn frozen_incoming_view(
+        &self,
+    ) -> Option<crate::index::incremental_adjacency::FrozenAdjacencyView> {
+        self.indexes.frozen_incoming_view()
+    }
+
     /// Get all outgoing edges from a node.
     ///
     /// This is the critical "hot path" operation that must be fast.
