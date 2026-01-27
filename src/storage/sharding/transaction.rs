@@ -206,13 +206,8 @@ pub struct DistributedTransaction {
 impl DistributedTransaction {
     /// Create a new distributed transaction with current time.
     pub fn new(tx_id: TxId, participants: Vec<ShardId>, timeout: Duration) -> Self {
-        // Get current time from system
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-
-        let start_ts = Timestamp::from(now);
+        // Get current time safely (never panics)
+        let start_ts = crate::core::temporal::time::now_safe();
 
         Self::new_with_timestamp(tx_id, participants, timeout, start_ts)
     }
@@ -556,12 +551,8 @@ impl TwoPhaseCommitLog {
     ///
     /// This MUST be called before sending commit messages to participants.
     pub fn log_commit(&mut self, tx_id: TxId, participants: Vec<ShardId>) -> u64 {
-        // Get current time
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-        let timestamp = Timestamp::from(now);
+        // Get current time safely (never panics)
+        let timestamp = crate::core::temporal::time::now_safe();
 
         self.log_commit_with_timestamp(tx_id, participants, timestamp)
     }
@@ -591,12 +582,8 @@ impl TwoPhaseCommitLog {
 
     /// Log an abort decision.
     pub fn log_abort(&mut self, tx_id: TxId, participants: Vec<ShardId>) -> u64 {
-        // Get current time
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-        let timestamp = Timestamp::from(now);
+        // Get current time safely (never panics)
+        let timestamp = crate::core::temporal::time::now_safe();
 
         self.log_abort_with_timestamp(tx_id, participants, timestamp)
     }

@@ -428,6 +428,31 @@ pub mod time {
         HybridTimestamp::new_unchecked(wallclock, 0)
     }
 
+    /// Returns current HybridTimestamp without panicking.
+    ///
+    /// This is the safe version of `now()` that should be used in production code
+    /// where panics are unacceptable. Falls back to epoch (0) if system clock
+    /// is unavailable or before Unix epoch.
+    ///
+    /// For monotonic HLC generation with causality, use HLC's send() method on
+    /// the returned timestamp.
+    ///
+    /// # Fallback Behavior
+    /// If system time is unavailable or invalid, returns HybridTimestamp(0, 0).
+    /// This ensures the function never panics, at the cost of potentially using
+    /// a zero timestamp in rare clock failure scenarios.
+    pub fn now_safe() -> Timestamp {
+        let wallclock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_micros() as i64)
+            .unwrap_or(0); // Fallback to epoch on clock error
+
+        // Return HybridTimestamp with logical counter = 0
+        // Use new_unchecked since we control the wallclock value
+        HybridTimestamp::new_unchecked(wallclock, 0)
+    }
+
     /// Convert a Timestamp to a human-readable ISO 8601 string (UTC).
     ///
     /// Returns "current" for TIMESTAMP_MAX.

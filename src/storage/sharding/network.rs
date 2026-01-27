@@ -655,12 +655,14 @@ pub struct MockShardClient {
 impl MockShardClient {
     /// Create a new mock client.
     pub fn new(shard_id: ShardId) -> Self {
-        // Get current time for mock responses
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-        let timestamp = Timestamp::from(now);
+        // Get current time safely for mock responses (never panics)
+        let prepare_timestamp = crate::core::temporal::time::now_safe();
+
+        // For realism, advance the commit timestamp slightly
+        // Commit logically happens after prepare in 2PC flow
+        let commit_timestamp = prepare_timestamp
+            .send(prepare_timestamp.wallclock() + 1)
+            .unwrap_or(prepare_timestamp); // Fallback if send fails
 
         Self {
             shard_id,
@@ -668,11 +670,11 @@ impl MockShardClient {
             prepare_response: RwLock::new(Some(PrepareResponse {
                 ready: true,
                 reason: None,
-                timestamp,
+                timestamp: prepare_timestamp,
             })),
             commit_response: RwLock::new(Some(CommitResponse {
                 success: true,
-                timestamp,
+                timestamp: commit_timestamp,
             })),
             abort_response: RwLock::new(Some(AbortResponse { acknowledged: true })),
             state: RwLock::new(ShardState::new(shard_id)),
