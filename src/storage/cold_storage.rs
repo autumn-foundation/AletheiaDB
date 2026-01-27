@@ -1812,4 +1812,62 @@ mod tests {
         // Ratio = 10000 / 2000 = 5.0 (5x compression)
         assert_eq!(stats.compression_ratio(), 5.0);
     }
+
+    // ========================================================================
+    // AtomicColdStorageStats tests
+    // ========================================================================
+
+    #[test]
+    fn test_atomic_cold_storage_stats_new() {
+        let stats = AtomicColdStorageStats::new();
+        let snapshot = stats.snapshot();
+
+        // All values should be zero initially
+        assert_eq!(snapshot.node_versions_stored, 0);
+        assert_eq!(snapshot.edge_versions_stored, 0);
+        assert_eq!(snapshot.node_version_reads, 0);
+        assert_eq!(snapshot.edge_version_reads, 0);
+        assert_eq!(snapshot.bytes_written_raw, 0);
+        assert_eq!(snapshot.bytes_written_compressed, 0);
+        assert_eq!(snapshot.bytes_read_compressed, 0);
+        assert_eq!(snapshot.bytes_read_decompressed, 0);
+        assert_eq!(snapshot.read_errors, 0);
+        assert_eq!(snapshot.write_errors, 0);
+    }
+
+    #[test]
+    fn test_atomic_cold_storage_stats_snapshot() {
+        let stats = AtomicColdStorageStats::new();
+
+        // Update some values
+        stats.node_versions_stored.store(10, Ordering::Relaxed);
+        stats.edge_versions_stored.store(20, Ordering::Relaxed);
+        stats.node_version_reads.store(100, Ordering::Relaxed);
+        stats.edge_version_reads.store(200, Ordering::Relaxed);
+        stats.bytes_written_raw.store(1000, Ordering::Relaxed);
+        stats.bytes_written_compressed.store(500, Ordering::Relaxed);
+        stats.bytes_read_compressed.store(600, Ordering::Relaxed);
+        stats.bytes_read_decompressed.store(1200, Ordering::Relaxed);
+        stats.read_errors.store(2, Ordering::Relaxed);
+        stats.write_errors.store(1, Ordering::Relaxed);
+
+        // Take snapshot
+        let snapshot = stats.snapshot();
+
+        // Verify all values were captured correctly
+        assert_eq!(snapshot.node_versions_stored, 10);
+        assert_eq!(snapshot.edge_versions_stored, 20);
+        assert_eq!(snapshot.node_version_reads, 100);
+        assert_eq!(snapshot.edge_version_reads, 200);
+        assert_eq!(snapshot.bytes_written_raw, 1000);
+        assert_eq!(snapshot.bytes_written_compressed, 500);
+        assert_eq!(snapshot.bytes_read_compressed, 600);
+        assert_eq!(snapshot.bytes_read_decompressed, 1200);
+        assert_eq!(snapshot.read_errors, 2);
+        assert_eq!(snapshot.write_errors, 1);
+
+        // Snapshot is non-atomic, so changes after snapshot don't affect it
+        stats.node_versions_stored.store(99, Ordering::Relaxed);
+        assert_eq!(snapshot.node_versions_stored, 10); // Still the old value
+    }
 }

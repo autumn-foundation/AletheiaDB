@@ -6306,4 +6306,73 @@ mod tests {
             "Error message should mention the maximum limit"
         );
     }
+
+    // ========================================================================
+    // Phase 3: Simple Accessor and Getter Tests
+    // ========================================================================
+
+    #[test]
+    fn test_gallifreydb_is_vector_index_enabled_for() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new().unwrap();
+
+        // Initially no index should be enabled
+        assert!(!db.is_vector_index_enabled());
+        assert!(!db.is_vector_index_enabled_for("embedding"));
+        assert!(!db.is_vector_index_enabled_for("vector"));
+
+        // Enable index for "embedding"
+        let config = HnswConfig::new(128, DistanceMetric::Cosine);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Now should be enabled
+        assert!(db.is_vector_index_enabled());
+        assert!(db.is_vector_index_enabled_for("embedding"));
+        assert!(!db.is_vector_index_enabled_for("vector")); // Still false for other property
+
+        // Enable another index
+        let config2 = HnswConfig::new(256, DistanceMetric::Euclidean);
+        db.enable_vector_index("vector", config2).unwrap();
+
+        assert!(db.is_vector_index_enabled_for("vector"));
+    }
+
+    #[test]
+    fn test_gallifreydb_default_durability() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Default durability should exist and be valid
+        let _durability = db.default_durability();
+        // Just verify we can call it without error
+    }
+
+    #[test]
+    fn test_get_edge_source_and_target() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create nodes
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+
+        let bob = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+
+        // Create edge from alice to bob
+        let knows_edge = db
+            .create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Verify get_edge_source and get_edge_target
+        assert_eq!(db.get_edge_source(knows_edge).unwrap(), alice);
+        assert_eq!(db.get_edge_target(knows_edge).unwrap(), bob);
+    }
 }
