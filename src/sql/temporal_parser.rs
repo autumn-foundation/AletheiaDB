@@ -19,11 +19,11 @@
 //! - `FOR SYSTEM_TIME BETWEEN TIMESTAMP 'start' AND TIMESTAMP 'end'`
 //! - `FOR VALID_TIME AS OF TIMESTAMP 'value'`
 //! - `FOR VALID_TIME BETWEEN TIMESTAMP 'start' AND TIMESTAMP 'end'`
-//! - Combined bi-temporal queries (both SYSTEM_TIME and VALID_TIME)
+//! - Combined bi-temporal AS OF queries (both SYSTEM_TIME and VALID_TIME)
 
 use super::error::SqlError;
 use super::temporal::TemporalClause;
-use crate::core::temporal::Timestamp;
+use crate::core::temporal::time;
 use crate::query::plan::TemporalContext;
 
 /// Extracted temporal information from SQL.
@@ -39,190 +39,261 @@ pub struct ExtractedTemporal {
 
 impl ExtractedTemporal {
     /// Convert extracted temporal clauses to TemporalContext.
-    pub fn to_temporal_context(&self) -> Option<TemporalContext> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `SqlError::UnsupportedFeature` for unsupported bi-temporal combinations
+    /// like mixing AS OF with BETWEEN clauses.
+    pub fn to_temporal_context(&self) -> Result<Option<TemporalContext>, SqlError> {
         match (&self.system_time, &self.valid_time) {
-            (None, None) => None,
+            (None, None) => Ok(None),
 
-            // System time only (use epoch for valid time since it's not specified)
+            // System time only: Query transaction time with current valid time
             (Some(TemporalClause::SystemTimeAsOf(ts)), None) => {
-                Some(TemporalContext::as_of(Timestamp::from(0), *ts))
+                Ok(Some(TemporalContext::as_of(time::now(), *ts)))
             }
             (Some(TemporalClause::SystemTimeBetween(range)), None) => {
-                Some(TemporalContext::between(*range))
+                Ok(Some(TemporalContext::between(*range)))
             }
 
-            // Valid time only (use i64::MAX for transaction time to represent "current")
+            // Valid time only: Query valid time with current transaction time
             (None, Some(TemporalClause::ValidTimeAsOf(ts))) => {
-                Some(TemporalContext::as_of(*ts, Timestamp::from(i64::MAX)))
+                Ok(Some(TemporalContext::as_of(*ts, time::now())))
             }
             (None, Some(TemporalClause::ValidTimeBetween(range))) => {
-                Some(TemporalContext::between(*range))
+                Ok(Some(TemporalContext::between(*range)))
             }
 
-            // Bi-temporal: both system and valid time
+            // Bi-temporal: both system and valid time AS OF (fully supported)
             (
                 Some(TemporalClause::SystemTimeAsOf(tx_ts)),
                 Some(TemporalClause::ValidTimeAsOf(vt_ts)),
-            ) => Some(TemporalContext::as_of(*vt_ts, *tx_ts)),
+            ) => Ok(Some(TemporalContext::as_of(*vt_ts, *tx_ts))),
             (
                 Some(TemporalClause::ValidTimeAsOf(vt_ts)),
                 Some(TemporalClause::SystemTimeAsOf(tx_ts)),
             ) => {
                 // Support either order
-                Some(TemporalContext::as_of(*vt_ts, *tx_ts))
+                Ok(Some(TemporalContext::as_of(*vt_ts, *tx_ts)))
             }
 
-            // If both are BETWEEN, use system time range (valid time ranges not yet supported in TemporalContext)
-            (Some(TemporalClause::SystemTimeBetween(range)), Some(_)) => {
-                Some(TemporalContext::between(*range))
-            }
-            (Some(_), Some(TemporalClause::ValidTimeBetween(range))) => {
-                Some(TemporalContext::between(*range))
-            }
+            // Unsupported: Mixing AS OF with BETWEEN or both BETWEEN
+            (
+                Some(TemporalClause::SystemTimeBetween(_)),
+                Some(TemporalClause::ValidTimeAsOf(_)),
+            )
+            | (
+                Some(TemporalClause::SystemTimeAsOf(_)),
+                Some(TemporalClause::ValidTimeBetween(_)),
+            )
+            | (
+                Some(TemporalClause::ValidTimeBetween(_)),
+                Some(TemporalClause::SystemTimeAsOf(_)),
+            )
+            | (
+                Some(TemporalClause::ValidTimeAsOf(_)),
+                Some(TemporalClause::SystemTimeBetween(_)),
+            )
+            | (
+                Some(TemporalClause::SystemTimeBetween(_)),
+                Some(TemporalClause::ValidTimeBetween(_)),
+            )
+            | (
+                Some(TemporalClause::ValidTimeBetween(_)),
+                Some(TemporalClause::SystemTimeBetween(_)),
+            ) => Err(SqlError::UnsupportedFeature(
+                "Bi-temporal queries mixing AS OF and BETWEEN clauses are not yet supported"
+                    .to_string(),
+            )),
 
-            // Other combinations not yet supported
-            _ => None,
+            // BiTemporal variant (not produced by current parser, but included for exhaustiveness)
+            (Some(TemporalClause::BiTemporal { .. }), _)
+            | (_, Some(TemporalClause::BiTemporal { .. })) => Err(SqlError::UnsupportedFeature(
+                "BiTemporal clause variant is not supported in this context".to_string(),
+            )),
+
+            // Catch-all for any invalid or impossible combinations
+            // (e.g., SYSTEM_TIME clauses in valid_time field)
+            _ => Err(SqlError::InvalidTemporalClause(
+                "Invalid temporal clause combination".to_string(),
+            )),
         }
     }
 }
 
-/// Extract a timestamp value from a TIMESTAMP 'value' pattern.
-///
-/// Expects input like "TIMESTAMP '1000000'" and returns "1000000".
-fn extract_timestamp_value(s: &str) -> Option<&str> {
-    let s = s.trim();
-    let upper = s.to_uppercase();
+/// Token types for safer SQL parsing
+#[derive(Debug, PartialEq)]
+enum Token {
+    For,
+    SystemTime,
+    ValidTime,
+    AsOf,
+    Between,
+    And,
+    Timestamp,
+    QuotedValue(String),
+    Other(String),
+}
 
-    if !upper.starts_with("TIMESTAMP") {
-        return None;
+/// Simple tokenizer for temporal clause extraction.
+///
+/// This skips string literals and only tokenizes SQL keywords and quoted values.
+fn tokenize_temporal_keywords(sql: &str) -> Vec<(usize, Token)> {
+    let mut tokens = Vec::new();
+    let chars: Vec<(usize, char)> = sql.char_indices().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let (byte_idx, ch) = chars[i];
+
+        // Skip whitespace
+        if ch.is_whitespace() {
+            i += 1;
+            continue;
+        }
+
+        // Handle single-quoted strings (SQL string literals)
+        if ch == '\'' {
+            i += 1;
+            let mut value = String::new();
+            while i < chars.len() {
+                let (_, current_ch) = chars[i];
+                if current_ch == '\'' {
+                    // Check for escaped quote ''
+                    if i + 1 < chars.len() && chars[i + 1].1 == '\'' {
+                        value.push('\'');
+                        i += 2;
+                    } else {
+                        // End of string
+                        break;
+                    }
+                } else {
+                    value.push(current_ch);
+                    i += 1;
+                }
+            }
+            tokens.push((byte_idx, Token::QuotedValue(value)));
+            i += 1; // Skip closing quote
+            continue;
+        }
+
+        // Collect alphanumeric/underscore sequences
+        if ch.is_alphanumeric() || ch == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].1.is_alphanumeric() || chars[i].1 == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().map(|(_, c)| c).collect();
+            let token = match word.to_uppercase().as_str() {
+                "FOR" => Token::For,
+                "SYSTEM_TIME" => Token::SystemTime,
+                "VALID_TIME" => Token::ValidTime,
+                "AS" => {
+                    // Check if next token is "OF"
+                    let mut j = i;
+                    while j < chars.len() && chars[j].1.is_whitespace() {
+                        j += 1;
+                    }
+                    if j < chars.len() {
+                        let mut k = j;
+                        while k < chars.len() && (chars[k].1.is_alphanumeric() || chars[k].1 == '_')
+                        {
+                            k += 1;
+                        }
+                        let next_word: String = chars[j..k].iter().map(|(_, c)| c).collect();
+                        if next_word.to_uppercase() == "OF" {
+                            i = k; // Skip "OF"
+                            Token::AsOf
+                        } else {
+                            Token::Other(word)
+                        }
+                    } else {
+                        Token::Other(word)
+                    }
+                }
+                "BETWEEN" => Token::Between,
+                "AND" => Token::And,
+                "TIMESTAMP" => Token::Timestamp,
+                _ => Token::Other(word),
+            };
+            tokens.push((byte_idx, token));
+            continue;
+        }
+
+        // Skip other characters
+        i += 1;
     }
 
-    // Find the quoted value after TIMESTAMP
-    let after_timestamp = s[9..].trim(); // Skip "TIMESTAMP"
-
-    // Find opening quote
-    let start = after_timestamp.find('\'')?;
-    // Find closing quote
-    let end = after_timestamp[start + 1..].find('\'')?;
-
-    Some(&after_timestamp[start + 1..start + 1 + end])
+    tokens
 }
 
-/// Find the position of a pattern in SQL (case-insensitive).
-fn find_pattern_ignore_case(sql: &str, pattern: &str) -> Option<usize> {
-    let sql_upper = sql.to_uppercase();
-    let pattern_upper = pattern.to_uppercase();
-    sql_upper.find(&pattern_upper)
-}
-
-/// Extract temporal clause from SQL string.
+/// Extract temporal clause from tokenized SQL.
 ///
-/// Returns (clause, remaining_sql) if found, None otherwise.
-fn extract_temporal_clause(
-    sql: &str,
-    time_type: &str, // "SYSTEM_TIME" or "VALID_TIME"
-) -> Result<Option<(TemporalClause, String)>, SqlError> {
-    let for_pattern = format!("FOR {} ", time_type);
-
+/// Returns (clause, start_byte, end_byte) if found, None otherwise.
+fn extract_temporal_clause_from_tokens(
+    tokens: &[(usize, Token)],
+    time_type_token: Token,
+) -> Result<Option<(TemporalClause, usize, usize)>, SqlError> {
     // Find "FOR SYSTEM_TIME" or "FOR VALID_TIME"
-    let start_pos = match find_pattern_ignore_case(sql, &for_pattern) {
-        Some(pos) => pos,
-        None => return Ok(None),
-    };
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].1 == Token::For && i + 1 < tokens.len() && tokens[i + 1].1 == time_type_token {
+            let start_byte = tokens[i].0;
 
-    let after_for = &sql[start_pos + for_pattern.len()..];
+            // Check for AS OF or BETWEEN
+            if i + 2 < tokens.len() && tokens[i + 2].1 == Token::AsOf {
+                // AS OF case
+                if i + 3 < tokens.len()
+                    && tokens[i + 3].1 == Token::Timestamp
+                    && i + 4 < tokens.len()
+                    && let Token::QuotedValue(ref ts_str) = tokens[i + 4].1
+                {
+                    let ts = TemporalClause::parse_timestamp(ts_str)?;
 
-    // Check if it's AS OF or BETWEEN
-    if find_pattern_ignore_case(after_for, "AS OF TIMESTAMP") == Some(0) {
-        // Extract AS OF clause
-        let after_as_of = &after_for[15..]; // Skip "AS OF TIMESTAMP"
+                    // Calculate end byte (after the quoted value)
+                    let end_byte = tokens[i + 4].0 + ts_str.len() + 2; // +2 for quotes
 
-        // Find the timestamp value
-        let temp_str = format!("TIMESTAMP {}", after_as_of);
-        let timestamp_str = extract_timestamp_value(&temp_str).ok_or_else(|| {
-            SqlError::InvalidTemporalClause("Invalid timestamp format".to_string())
-        })?;
+                    let clause = match time_type_token {
+                        Token::SystemTime => TemporalClause::SystemTimeAsOf(ts),
+                        Token::ValidTime => TemporalClause::ValidTimeAsOf(ts),
+                        _ => unreachable!(),
+                    };
 
-        let ts = TemporalClause::parse_timestamp(timestamp_str)?;
+                    return Ok(Some((clause, start_byte, end_byte)));
+                }
+            } else if i + 2 < tokens.len() && tokens[i + 2].1 == Token::Between {
+                // BETWEEN case
+                if i + 3 < tokens.len()
+                    && tokens[i + 3].1 == Token::Timestamp
+                    && i + 4 < tokens.len()
+                    && let Token::QuotedValue(ref start_str) = tokens[i + 4].1
+                    && i + 5 < tokens.len()
+                    && tokens[i + 5].1 == Token::And
+                    && i + 6 < tokens.len()
+                    && tokens[i + 6].1 == Token::Timestamp
+                    && i + 7 < tokens.len()
+                    && let Token::QuotedValue(ref end_str) = tokens[i + 7].1
+                {
+                    let start_ts = TemporalClause::parse_timestamp(start_str)?;
+                    let end_ts = TemporalClause::parse_timestamp(end_str)?;
 
-        // Find the end of this clause (the closing quote)
-        let quote_pos = after_as_of
-            .find('\'')
-            .ok_or_else(|| SqlError::InvalidTemporalClause("Missing opening quote".to_string()))?;
-        let end_quote_pos = after_as_of[quote_pos + 1..]
-            .find('\'')
-            .ok_or_else(|| SqlError::InvalidTemporalClause("Missing closing quote".to_string()))?;
-        let clause_end = start_pos + for_pattern.len() + 15 + quote_pos + 1 + end_quote_pos + 1;
+                    // Calculate end byte (after the second quoted value)
+                    let end_byte = tokens[i + 7].0 + end_str.len() + 2; // +2 for quotes
 
-        // Create the clause
-        let clause = if time_type == "SYSTEM_TIME" {
-            TemporalClause::SystemTimeAsOf(ts)
-        } else {
-            TemporalClause::ValidTimeAsOf(ts)
-        };
+                    let clause = match time_type_token {
+                        Token::SystemTime => TemporalClause::system_time_between(start_ts, end_ts)?,
+                        Token::ValidTime => TemporalClause::valid_time_between(start_ts, end_ts)?,
+                        _ => unreachable!(),
+                    };
 
-        // Remove the clause from SQL
-        let cleaned = format!("{} {}", &sql[..start_pos], &sql[clause_end..])
-            .trim()
-            .to_string();
-
-        Ok(Some((clause, cleaned)))
-    } else if find_pattern_ignore_case(after_for, "BETWEEN TIMESTAMP") == Some(0) {
-        // Extract BETWEEN clause
-        let after_between = &after_for[17..]; // Skip "BETWEEN TIMESTAMP"
-
-        // Find first timestamp
-        let temp_str = format!("TIMESTAMP {}", after_between);
-        let start_timestamp_str = extract_timestamp_value(&temp_str).ok_or_else(|| {
-            SqlError::InvalidTemporalClause("Invalid start timestamp format".to_string())
-        })?;
-
-        let start_ts = TemporalClause::parse_timestamp(start_timestamp_str)?;
-
-        // Find "AND TIMESTAMP"
-        let and_pos =
-            find_pattern_ignore_case(after_between, "AND TIMESTAMP").ok_or_else(|| {
-                SqlError::InvalidTemporalClause("BETWEEN requires AND TIMESTAMP".to_string())
-            })?;
-
-        let after_and = &after_between[and_pos + 13..]; // Skip "AND TIMESTAMP"
-
-        // Find second timestamp
-        let temp_str2 = format!("TIMESTAMP {}", after_and);
-        let end_timestamp_str = extract_timestamp_value(&temp_str2).ok_or_else(|| {
-            SqlError::InvalidTemporalClause("Invalid end timestamp format".to_string())
-        })?;
-
-        let end_ts = TemporalClause::parse_timestamp(end_timestamp_str)?;
-
-        // Find the end of this clause (the closing quote of second timestamp)
-        let quote_pos = after_and.find('\'').ok_or_else(|| {
-            SqlError::InvalidTemporalClause("Missing opening quote in end timestamp".to_string())
-        })?;
-        let end_quote_pos = after_and[quote_pos + 1..].find('\'').ok_or_else(|| {
-            SqlError::InvalidTemporalClause("Missing closing quote in end timestamp".to_string())
-        })?;
-        let clause_end =
-            start_pos + for_pattern.len() + 17 + and_pos + 13 + quote_pos + 1 + end_quote_pos + 1;
-
-        // Create the clause
-        let clause = if time_type == "SYSTEM_TIME" {
-            TemporalClause::system_time_between(start_ts, end_ts)?
-        } else {
-            TemporalClause::valid_time_between(start_ts, end_ts)?
-        };
-
-        // Remove the clause from SQL
-        let cleaned = format!("{} {}", &sql[..start_pos], &sql[clause_end..])
-            .trim()
-            .to_string();
-
-        Ok(Some((clause, cleaned)))
-    } else {
-        Err(SqlError::InvalidTemporalClause(
-            "Expected AS OF or BETWEEN after FOR TIME_TYPE".to_string(),
-        ))
+                    return Ok(Some((clause, start_byte, end_byte)));
+                }
+            }
+        }
+        i += 1;
     }
+
+    Ok(None)
 }
 
 /// Parse and extract temporal clauses from SQL.
@@ -241,20 +312,36 @@ fn extract_temporal_clause(
 /// assert!(result.system_time.is_some());
 /// ```
 pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError> {
+    let tokens = tokenize_temporal_keywords(sql);
     let mut cleaned = sql.to_string();
     let mut system_time: Option<TemporalClause> = None;
     let mut valid_time: Option<TemporalClause> = None;
 
+    // Track byte ranges to remove (in reverse order to avoid offset issues)
+    let mut removals: Vec<(usize, usize)> = Vec::new();
+
     // Extract SYSTEM_TIME clause
-    if let Some((clause, new_sql)) = extract_temporal_clause(&cleaned, "SYSTEM_TIME")? {
+    if let Some((clause, start, end)) =
+        extract_temporal_clause_from_tokens(&tokens, Token::SystemTime)?
+    {
         system_time = Some(clause);
-        cleaned = new_sql;
+        removals.push((start, end));
     }
 
     // Extract VALID_TIME clause
-    if let Some((clause, new_sql)) = extract_temporal_clause(&cleaned, "VALID_TIME")? {
+    if let Some((clause, start, end)) =
+        extract_temporal_clause_from_tokens(&tokens, Token::ValidTime)?
+    {
         valid_time = Some(clause);
-        cleaned = new_sql;
+        removals.push((start, end));
+    }
+
+    // Sort removals by start position (descending) to remove from end to start
+    removals.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Remove temporal clauses from SQL
+    for (start, end) in removals {
+        cleaned.replace_range(start..end, "");
     }
 
     // Clean up extra whitespace
@@ -270,15 +357,22 @@ pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::temporal::Timestamp;
 
     #[test]
-    fn test_extract_timestamp_value() {
-        assert_eq!(
-            extract_timestamp_value("TIMESTAMP '1000000'"),
-            Some("1000000")
+    fn test_tokenize_keywords() {
+        let sql = "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '1000'";
+        let tokens = tokenize_temporal_keywords(sql);
+
+        assert!(tokens.iter().any(|(_, t)| t == &Token::For));
+        assert!(tokens.iter().any(|(_, t)| t == &Token::SystemTime));
+        assert!(tokens.iter().any(|(_, t)| t == &Token::AsOf));
+        assert!(tokens.iter().any(|(_, t)| t == &Token::Timestamp));
+        assert!(
+            tokens
+                .iter()
+                .any(|(_, t)| matches!(t, Token::QuotedValue(v) if v == "1000"))
         );
-        assert_eq!(extract_timestamp_value("timestamp '123'"), Some("123"));
-        assert_eq!(extract_timestamp_value("TIMESTAMP  '456'"), Some("456"));
     }
 
     #[test]
@@ -332,6 +426,15 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_with_extra_whitespace() {
+        let sql = "SELECT * FROM nodes   FOR   SYSTEM_TIME   AS OF   TIMESTAMP  '1000'";
+        let result = extract_temporal_clauses(sql).unwrap();
+
+        assert_eq!(result.cleaned_sql, "SELECT * FROM nodes");
+        assert!(result.system_time.is_some());
+    }
+
+    #[test]
     fn test_to_temporal_context_system_time_only() {
         let extracted = ExtractedTemporal {
             cleaned_sql: "SELECT * FROM nodes".to_string(),
@@ -339,7 +442,7 @@ mod tests {
             valid_time: None,
         };
 
-        let ctx = extracted.to_temporal_context();
+        let ctx = extracted.to_temporal_context().unwrap();
         assert!(ctx.is_some());
         let ctx = ctx.unwrap();
         assert!(ctx.as_of.is_some());
@@ -353,7 +456,7 @@ mod tests {
             valid_time: Some(TemporalClause::ValidTimeAsOf(Timestamp::from(1500))),
         };
 
-        let ctx = extracted.to_temporal_context();
+        let ctx = extracted.to_temporal_context().unwrap();
         assert!(ctx.is_some());
         let ctx = ctx.unwrap();
         assert!(ctx.as_of.is_some());
@@ -361,5 +464,21 @@ mod tests {
         let (vt, tt) = ctx.as_of.unwrap();
         assert_eq!(vt.wallclock(), 1500);
         assert_eq!(tt.wallclock(), 2000);
+    }
+
+    #[test]
+    fn test_unsupported_mixed_between_and_as_of() {
+        let extracted = ExtractedTemporal {
+            cleaned_sql: "SELECT * FROM nodes".to_string(),
+            system_time: Some(TemporalClause::SystemTimeBetween(
+                crate::core::temporal::TimeRange::new(Timestamp::from(1000), Timestamp::from(2000))
+                    .unwrap(),
+            )),
+            valid_time: Some(TemporalClause::ValidTimeAsOf(Timestamp::from(1500))),
+        };
+
+        let result = extracted.to_temporal_context();
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SqlError::UnsupportedFeature(_))));
     }
 }

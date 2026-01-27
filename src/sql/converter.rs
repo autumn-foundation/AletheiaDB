@@ -72,7 +72,7 @@ impl SqlConverter {
 
         // Convert to Query and add temporal context
         let mut query = self.convert(&stmt)?;
-        query.temporal_context = extracted.to_temporal_context();
+        query.temporal_context = extracted.to_temporal_context()?;
 
         Ok(query)
     }
