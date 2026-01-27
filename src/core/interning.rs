@@ -372,6 +372,14 @@ impl Default for StringInterner {
 /// ```
 use std::sync::LazyLock;
 
+/// Environment variable to configure the maximum number of interned strings.
+///
+/// Set `GALLIFREYDB_MAX_INTERNED_STRINGS` to override the default limit of 100,000.
+/// This is useful for large knowledge graphs with many unique labels or property keys.
+///
+/// Example: `GALLIFREYDB_MAX_INTERNED_STRINGS=1000000`
+pub const MAX_INTERNED_STRINGS_ENV: &str = "GALLIFREYDB_MAX_INTERNED_STRINGS";
+
 /// Global string interner for sharing common strings across the database.
 ///
 /// This static provides a single, thread-safe string interner that can be used
@@ -380,8 +388,18 @@ use std::sync::LazyLock;
 /// The global interner is automatically warmed at initialization with common strings
 /// such as "name", "id", "type", "label", "created_at", "updated_at", "valid_from",
 /// "valid_to", "tx_from", and "tx_to" to provide predictable startup performance.
+///
+/// ## Configuration
+///
+/// The maximum capacity can be configured via the `GALLIFREYDB_MAX_INTERNED_STRINGS`
+/// environment variable. If not set, defaults to 100,000.
 pub static GLOBAL_INTERNER: LazyLock<StringInterner> = LazyLock::new(|| {
-    let interner = StringInterner::new();
+    let max_capacity = std::env::var(MAX_INTERNED_STRINGS_ENV)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_INTERNED_STRINGS);
+
+    let interner = StringInterner::with_max_capacity(max_capacity);
     interner.warm_common_strings();
     interner
 });
