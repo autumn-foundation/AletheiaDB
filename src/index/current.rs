@@ -49,8 +49,10 @@ pub struct CurrentIndexes {
     outgoing: Arc<IncrementalAdjacencyIndex>,
     /// Incoming edges: target node → adjacency list (incremental with O(1) inserts)
     incoming: Arc<IncrementalAdjacencyIndex>,
-    /// Optional background compaction scheduler
-    compaction_scheduler: Option<(CompactionScheduler, JoinHandle<()>)>,
+    /// Optional background compaction scheduler for outgoing index
+    outgoing_compaction: Option<(CompactionScheduler, JoinHandle<()>)>,
+    /// Optional background compaction scheduler for incoming index
+    incoming_compaction: Option<(CompactionScheduler, JoinHandle<()>)>,
 }
 
 impl CurrentIndexes {
@@ -64,7 +66,8 @@ impl CurrentIndexes {
             edges: DashMap::new(),
             outgoing: Arc::new(IncrementalAdjacencyIndex::new()),
             incoming: Arc::new(IncrementalAdjacencyIndex::new()),
-            compaction_scheduler: None,
+            outgoing_compaction: None,
+            incoming_compaction: None,
         }
     }
 
@@ -77,16 +80,20 @@ impl CurrentIndexes {
         let outgoing = Arc::new(IncrementalAdjacencyIndex::new());
         let incoming = Arc::new(IncrementalAdjacencyIndex::new());
 
-        // Start background compaction for outgoing (incoming can share config)
-        let scheduler = CompactionScheduler::new(Arc::clone(&outgoing));
-        let handle = scheduler.start();
+        // Start background compaction for both outgoing and incoming indexes
+        let outgoing_scheduler = CompactionScheduler::new(Arc::clone(&outgoing));
+        let outgoing_handle = outgoing_scheduler.start();
+
+        let incoming_scheduler = CompactionScheduler::new(Arc::clone(&incoming));
+        let incoming_handle = incoming_scheduler.start();
 
         CurrentIndexes {
             nodes: DashMap::new(),
             edges: DashMap::new(),
             outgoing,
             incoming,
-            compaction_scheduler: Some((scheduler, handle)),
+            outgoing_compaction: Some((outgoing_scheduler, outgoing_handle)),
+            incoming_compaction: Some((incoming_scheduler, incoming_handle)),
         }
     }
 
@@ -100,11 +107,19 @@ impl CurrentIndexes {
     /// - `Ok(())` if shutdown was successful or no scheduler was running
     /// - `Err(String)` if the background thread panicked during shutdown
     pub fn shutdown_background_compaction(&mut self) -> Result<(), String> {
-        if let Some((scheduler, handle)) = self.compaction_scheduler.take() {
+        // Shutdown outgoing compaction
+        if let Some((scheduler, handle)) = self.outgoing_compaction.take() {
             scheduler.shutdown();
             handle
                 .join()
-                .map_err(|e| format!("Background compaction thread panicked: {:?}", e))?;
+                .map_err(|e| format!("Outgoing compaction thread panicked: {:?}", e))?;
+        }
+        // Shutdown incoming compaction
+        if let Some((scheduler, handle)) = self.incoming_compaction.take() {
+            scheduler.shutdown();
+            handle
+                .join()
+                .map_err(|e| format!("Incoming compaction thread panicked: {:?}", e))?;
         }
         Ok(())
     }
@@ -147,19 +162,24 @@ impl CurrentIndexes {
         let target = edge.target;
         let label = edge.label;
 
-        // Check if this is an update (edge already exists) vs new insertion
+        // Use entry API to atomically check+insert, avoiding TOCTOU race condition
         // For updates, the adjacency doesn't change (source/target stay the same)
         // so we skip adjacency insertion to avoid duplicates
-        let is_update = self.edges.contains_key(&edge_id);
+        use dashmap::mapref::entry::Entry;
 
-        self.edges.insert(edge_id, edge);
-
-        // Only insert into adjacency indexes for NEW edges, not updates
-        if !is_update {
-            self.outgoing
-                .insert(source, AdjacencyEntry::new(target, edge_id, label));
-            self.incoming
-                .insert(target, AdjacencyEntry::new(source, edge_id, label));
+        match self.edges.entry(edge_id) {
+            Entry::Occupied(mut e) => {
+                // Update: just replace edge data, don't modify adjacency
+                e.insert(edge);
+            }
+            Entry::Vacant(e) => {
+                // New edge: insert into both edge map and adjacency
+                e.insert(edge);
+                self.outgoing
+                    .insert(source, AdjacencyEntry::new(target, edge_id, label));
+                self.incoming
+                    .insert(target, AdjacencyEntry::new(source, edge_id, label));
+            }
         }
     }
 
@@ -792,12 +812,16 @@ impl Default for CurrentIndexes {
 
 impl Drop for CurrentIndexes {
     fn drop(&mut self) {
-        // Ensure background compaction thread is shut down gracefully
+        // Ensure background compaction threads are shut down gracefully
         // to prevent thread leaks when CurrentIndexes is dropped.
-        if let Some((scheduler, handle)) = self.compaction_scheduler.take() {
+        if let Some((scheduler, handle)) = self.outgoing_compaction.take() {
             scheduler.shutdown();
             // Give thread a moment to finish, but don't block indefinitely
             // on drop since that could cause deadlocks.
+            let _ = handle.join();
+        }
+        if let Some((scheduler, handle)) = self.incoming_compaction.take() {
+            scheduler.shutdown();
             let _ = handle.join();
         }
     }

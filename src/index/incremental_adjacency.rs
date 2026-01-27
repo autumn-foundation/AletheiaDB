@@ -458,6 +458,7 @@ impl<'a> MergedAdjacencyGuard<'a> {
     ///
     /// **Fast Path**: When `fast_path` is true (delta and tombstones globally empty),
     /// skips per-edge tombstone DashMap lookups, providing near-zero overhead iteration.
+    #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &AdjacencyEntry> + '_ {
         let frozen_slice = self.frozen.get_adjacency(self.node);
         let fast_path = self.fast_path;
@@ -483,22 +484,26 @@ impl<'a> MergedAdjacencyGuard<'a> {
     ///
     /// This counts all entries by iterating, which is O(n) where n is the degree.
     /// For high-degree nodes, this may be slower than the old CSR approach.
+    #[inline]
     pub fn len(&self) -> usize {
         self.iter().count()
     }
 
     /// Check if the adjacency list is empty.
     /// O(1) - uses early-return iterator pattern instead of counting all entries.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.iter().next().is_none()
     }
 
     /// Get entry at index (for compatibility with slice-like indexing).
+    #[inline]
     pub fn get(&self, index: usize) -> Option<&AdjacencyEntry> {
         self.iter().nth(index)
     }
 
     /// Fast path: if no delta and no tombstones, return frozen slice directly.
+    #[inline]
     pub fn as_slice(&self) -> Option<&[AdjacencyEntry]> {
         if self.delta.is_none() && self.tombstones.is_empty() {
             Some(self.frozen.get_adjacency(self.node))
