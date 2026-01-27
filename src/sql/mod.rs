@@ -57,6 +57,7 @@ mod converter;
 mod error;
 mod parser;
 mod temporal;
+mod temporal_parser;
 
 pub use converter::{SqlConverter, parse_sql, parse_sql_with_params};
 pub use error::SqlError;

@@ -279,39 +279,225 @@ mod phase1_basic_sql {
 mod phase2_temporal {
     use super::*;
 
-    #[test]
-    fn test_parse_system_time_as_of() {
-        // This syntax is not yet supported by sqlparser-rs directly,
-        // so we'll need custom handling
-        let result =
-            parse_sql("SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '1705315200000000'");
-        // For now, expect this to either parse with temporal context or return unsupported
-        // Once implemented, it should set temporal_context
-        if let Ok(query) = result {
-            assert!(query.temporal_context.is_some());
-        }
-    }
+    // ========================================================================
+    // FOR SYSTEM_TIME AS OF Tests (TDD - RED PHASE)
+    // ========================================================================
 
     #[test]
-    fn test_parse_system_time_between() {
-        let result = parse_sql(
-            "SELECT * FROM nodes FOR SYSTEM_TIME BETWEEN TIMESTAMP '1000000' AND TIMESTAMP '2000000'",
+    fn test_parse_system_time_as_of_basic() {
+        // Test basic FOR SYSTEM_TIME AS OF syntax
+        let query =
+            parse_sql("SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '1705315200000000'")
+                .expect("Should parse FOR SYSTEM_TIME AS OF");
+
+        // Should have temporal context
+        assert!(
+            query.temporal_context.is_some(),
+            "Query should have temporal context"
         );
-        if let Ok(query) = result {
-            assert!(query.temporal_context.is_some());
-            if let Some(ctx) = &query.temporal_context {
-                assert!(ctx.between.is_some());
-            }
-        }
+
+        // Verify the temporal context is as_of
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.as_of.is_some(), "Should have as_of temporal context");
+
+        // Verify the timestamp (system time should be in transaction time position)
+        let (_valid_time, tx_time) = ctx.as_of.unwrap();
+        assert_eq!(tx_time.wallclock(), 1705315200000000);
     }
 
     #[test]
-    fn test_parse_valid_time_as_of() {
-        let result =
-            parse_sql("SELECT * FROM nodes FOR VALID_TIME AS OF TIMESTAMP '1705315200000000'");
-        if let Ok(query) = result {
-            assert!(query.temporal_context.is_some());
-        }
+    fn test_parse_system_time_as_of_with_where() {
+        // Test FOR SYSTEM_TIME AS OF combined with WHERE clause
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '1705315200000000' WHERE age > 21",
+        )
+        .expect("Should parse temporal query with WHERE");
+
+        assert!(query.temporal_context.is_some());
+
+        // Should also have filter operation
+        let has_filter = query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_)));
+        assert!(has_filter, "Query should have filter operation");
+    }
+
+    #[test]
+    fn test_parse_system_time_as_of_with_order_limit() {
+        // Test FOR SYSTEM_TIME AS OF with ORDER BY and LIMIT
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '1705315200000000' ORDER BY name DESC LIMIT 10"
+        ).expect("Should parse temporal query with ORDER BY and LIMIT");
+
+        assert!(query.temporal_context.is_some());
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::Sort { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))));
+    }
+
+    // ========================================================================
+    // FOR SYSTEM_TIME BETWEEN Tests (TDD - RED PHASE)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_system_time_between_basic() {
+        // Test basic FOR SYSTEM_TIME BETWEEN syntax
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME BETWEEN TIMESTAMP '1000000' AND TIMESTAMP '2000000'"
+        ).expect("Should parse FOR SYSTEM_TIME BETWEEN");
+
+        // Should have temporal context
+        assert!(
+            query.temporal_context.is_some(),
+            "Query should have temporal context"
+        );
+
+        // Verify the temporal context is between
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(
+            ctx.between.is_some(),
+            "Should have between temporal context"
+        );
+
+        // Verify the time range
+        let range = ctx.between.as_ref().unwrap();
+        assert_eq!(range.start().wallclock(), 1000000);
+        assert_eq!(range.end().wallclock(), 2000000);
+    }
+
+    #[test]
+    fn test_parse_system_time_between_with_filter() {
+        // Test FOR SYSTEM_TIME BETWEEN with WHERE clause
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME BETWEEN TIMESTAMP '1000000' AND TIMESTAMP '2000000' WHERE label = 'Person'"
+        ).expect("Should parse temporal range query with WHERE");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.between.is_some());
+
+        // Should have filter operation
+        let has_filter = query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_)));
+        assert!(has_filter);
+    }
+
+    // ========================================================================
+    // FOR VALID_TIME AS OF Tests (TDD - RED PHASE)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_valid_time_as_of_basic() {
+        // Test basic FOR VALID_TIME AS OF syntax
+        let query =
+            parse_sql("SELECT * FROM nodes FOR VALID_TIME AS OF TIMESTAMP '1705315200000000'")
+                .expect("Should parse FOR VALID_TIME AS OF");
+
+        // Should have temporal context
+        assert!(
+            query.temporal_context.is_some(),
+            "Query should have temporal context"
+        );
+
+        // Verify the temporal context is as_of with valid time
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.as_of.is_some(), "Should have as_of temporal context");
+
+        // Verify the timestamp (valid time should be in valid time position)
+        let (valid_time, _tx_time) = ctx.as_of.unwrap();
+        assert_eq!(valid_time.wallclock(), 1705315200000000);
+    }
+
+    #[test]
+    fn test_parse_valid_time_as_of_with_where() {
+        // Test FOR VALID_TIME AS OF combined with WHERE clause
+        let query = parse_sql(
+            "SELECT * FROM Person FOR VALID_TIME AS OF TIMESTAMP '1705315200000000' WHERE status = 'active'"
+        ).expect("Should parse valid time query with WHERE");
+
+        assert!(query.temporal_context.is_some());
+
+        // Should have label filter (Person) and status filter
+        let has_filter = query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_)));
+        assert!(has_filter);
+    }
+
+    // ========================================================================
+    // FOR VALID_TIME BETWEEN Tests (TDD - RED PHASE)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_valid_time_between_basic() {
+        // Test basic FOR VALID_TIME BETWEEN syntax
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR VALID_TIME BETWEEN TIMESTAMP '1000000' AND TIMESTAMP '2000000'"
+        ).expect("Should parse FOR VALID_TIME BETWEEN");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.between.is_some());
+
+        // Verify the time range
+        let range = ctx.between.as_ref().unwrap();
+        assert_eq!(range.start().wallclock(), 1000000);
+        assert_eq!(range.end().wallclock(), 2000000);
+    }
+
+    // ========================================================================
+    // Combined Bi-temporal Tests (TDD - RED PHASE)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_bitemporal_system_and_valid_time() {
+        // Test combined SYSTEM_TIME and VALID_TIME
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '2000000' FOR VALID_TIME AS OF TIMESTAMP '1500000'"
+        ).expect("Should parse bi-temporal query");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.as_of.is_some());
+
+        // Both timestamps should be set
+        let (valid_time, tx_time) = ctx.as_of.unwrap();
+        assert_eq!(valid_time.wallclock(), 1500000);
+        assert_eq!(tx_time.wallclock(), 2000000);
+    }
+
+    #[test]
+    fn test_parse_bitemporal_reverse_order() {
+        // Test with clauses in reverse order (VALID_TIME then SYSTEM_TIME)
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR VALID_TIME AS OF TIMESTAMP '1500000' FOR SYSTEM_TIME AS OF TIMESTAMP '2000000'"
+        ).expect("Should parse bi-temporal query in reverse order");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.as_of.is_some());
+
+        let (valid_time, tx_time) = ctx.as_of.unwrap();
+        assert_eq!(valid_time.wallclock(), 1500000);
+        assert_eq!(tx_time.wallclock(), 2000000);
+    }
+
+    #[test]
+    fn test_parse_bitemporal_with_complex_query() {
+        // Test bi-temporal with full query features
+        let query = parse_sql(
+            "SELECT name, age FROM Person FOR SYSTEM_TIME AS OF TIMESTAMP '2000000' FOR VALID_TIME AS OF TIMESTAMP '1500000' WHERE age > 21 ORDER BY name LIMIT 10"
+        ).expect("Should parse complex bi-temporal query");
+
+        assert!(query.temporal_context.is_some());
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_))));
+        assert!(
+            query
+                .ops
+                .iter()
+                .any(|op| matches!(op, QueryOp::Sort { .. }))
+        );
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Limit(10))));
+        assert!(query.ops.iter().any(|op| matches!(op, QueryOp::Project(_))));
     }
 
     #[test]

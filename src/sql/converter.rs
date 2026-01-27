@@ -17,6 +17,7 @@ use crate::query::plan::QueryHints;
 
 use super::error::SqlError;
 use super::parser::SqlParser;
+use super::temporal_parser;
 
 /// Parameter values that can be bound to SQL queries.
 #[derive(Debug, Clone)]
@@ -63,8 +64,17 @@ impl SqlConverter {
 
     /// Convert a SQL string to a Query.
     pub fn convert_sql(&self, sql: &str) -> Result<Query, SqlError> {
-        let stmt = SqlParser::parse(sql)?;
-        self.convert(&stmt)
+        // Extract temporal clauses first
+        let extracted = temporal_parser::extract_temporal_clauses(sql)?;
+
+        // Parse the cleaned SQL (without temporal clauses)
+        let stmt = SqlParser::parse(&extracted.cleaned_sql)?;
+
+        // Convert to Query and add temporal context
+        let mut query = self.convert(&stmt)?;
+        query.temporal_context = extracted.to_temporal_context()?;
+
+        Ok(query)
     }
 
     /// Convert a SQL statement to a Query.
@@ -91,7 +101,7 @@ impl SqlConverter {
         };
 
         let mut ops = Vec::new();
-        // TODO: temporal_context will be populated when temporal syntax support is added
+        // Temporal context is populated by convert_sql() via temporal preprocessing
         let temporal_context = None;
 
         // Convert FROM clause
