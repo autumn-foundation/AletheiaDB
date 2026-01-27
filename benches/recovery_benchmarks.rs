@@ -77,9 +77,7 @@ fn create_checkpointed_database(
             .insert("name", format!("Node{}", name_id))
             .build();
 
-        current
-            .create_node(GLOBAL_INTERNER.intern("TestNode").unwrap(), props)
-            .unwrap();
+        current.create_node("TestNode", props).unwrap();
     }
 
     // Create edges (exactly edge_count edges)
@@ -95,7 +93,7 @@ fn create_checkpointed_database(
             .create_edge(
                 source_id,
                 target_id,
-                GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
+                "CONNECTS",
                 PropertyMapBuilder::new().insert("weight", i as i64).build(),
             )
             .unwrap();
@@ -152,9 +150,7 @@ fn create_vector_checkpointed_database(
             .insert_vector("embedding", &embedding)
             .build();
 
-        current
-            .create_node(GLOBAL_INTERNER.intern("VectorNode").unwrap(), props)
-            .unwrap();
+        current.create_node("VectorNode", props).unwrap();
     }
 
     let historical = HistoricalStorage::new();

@@ -31,7 +31,7 @@ fn bench_checkpoint_creation(c: &mut Criterion) {
             for i in 0..*node_count {
                 current
                     .create_node(
-                        GLOBAL_INTERNER.intern("Person").unwrap(),
+                        "Person",
                         PropertyMapBuilder::new().insert("id", i as i64).build(),
                     )
                     .unwrap();

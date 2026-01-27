@@ -709,7 +709,7 @@ mod tests {
     fn create_test_operation(id: u64) -> WalOperation {
         WalOperation::CreateNode {
             node_id: NodeId::new(id).unwrap(),
-            label: GLOBAL_INTERNER.intern(&format!("Node{}", id)).unwrap(),
+            label: GLOBAL_INTERNER.intern(format!("Node{}", id)).unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         }

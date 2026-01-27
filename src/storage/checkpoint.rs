@@ -2942,7 +2942,7 @@ mod tests {
         for i in 1..=100 {
             let op = WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: GLOBAL_INTERNER.intern(&format!("Node{}", i)).unwrap(),
+                label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 temporal: BiTemporalInterval::current(time::now()),
             };
@@ -3052,7 +3052,7 @@ mod tests {
         for i in 1..=100 {
             let op = WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: GLOBAL_INTERNER.intern(&format!("Node{}", i)).unwrap(),
+                label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 temporal: BiTemporalInterval::current(time::now()),
             };
@@ -3164,7 +3164,7 @@ mod tests {
         for i in 1..=50 {
             let op = WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: GLOBAL_INTERNER.intern(&format!("Node{}", i)).unwrap(),
+                label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 temporal: BiTemporalInterval::current(time::now()),
             };
