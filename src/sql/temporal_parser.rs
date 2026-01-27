@@ -376,7 +376,8 @@ fn extract_temporal_clause_from_tokens(
                 if tokens[i + 3].1 != Token::Timestamp {
                     return Err(SqlError::InvalidTemporalClause(format!(
                         "FOR {} AS OF requires TIMESTAMP keyword, found {:?}",
-                        time_name, tokens[i + 3].1
+                        time_name,
+                        tokens[i + 3].1
                     )));
                 }
 
@@ -411,7 +412,8 @@ fn extract_temporal_clause_from_tokens(
                 } else {
                     return Err(SqlError::InvalidTemporalClause(format!(
                         "FOR {} AS OF TIMESTAMP requires a quoted timestamp value, found {:?}",
-                        time_name, tokens[i + 4].1
+                        time_name,
+                        tokens[i + 4].1
                     )));
                 }
             } else if i + 2 < tokens.len() && tokens[i + 2].1 == Token::Between {
@@ -426,7 +428,8 @@ fn extract_temporal_clause_from_tokens(
                 if tokens[i + 3].1 != Token::Timestamp {
                     return Err(SqlError::InvalidTemporalClause(format!(
                         "FOR {} BETWEEN requires TIMESTAMP keyword, found {:?}",
-                        time_name, tokens[i + 3].1
+                        time_name,
+                        tokens[i + 3].1
                     )));
                 }
 
@@ -450,7 +453,8 @@ fn extract_temporal_clause_from_tokens(
                     if tokens[i + 5].1 != Token::And {
                         return Err(SqlError::InvalidTemporalClause(format!(
                             "FOR {} BETWEEN requires AND keyword, found {:?}",
-                            time_name, tokens[i + 5].1
+                            time_name,
+                            tokens[i + 5].1
                         )));
                     }
 
@@ -465,7 +469,8 @@ fn extract_temporal_clause_from_tokens(
                     if tokens[i + 6].1 != Token::Timestamp {
                         return Err(SqlError::InvalidTemporalClause(format!(
                             "FOR {} BETWEEN ... AND requires TIMESTAMP keyword, found {:?}",
-                            time_name, tokens[i + 6].1
+                            time_name,
+                            tokens[i + 6].1
                         )));
                     }
 
@@ -489,8 +494,12 @@ fn extract_temporal_clause_from_tokens(
                         };
 
                         let clause = match time_type_token {
-                            Token::SystemTime => TemporalClause::system_time_between(start_ts, end_ts)?,
-                            Token::ValidTime => TemporalClause::valid_time_between(start_ts, end_ts)?,
+                            Token::SystemTime => {
+                                TemporalClause::system_time_between(start_ts, end_ts)?
+                            }
+                            Token::ValidTime => {
+                                TemporalClause::valid_time_between(start_ts, end_ts)?
+                            }
                             _ => unreachable!(),
                         };
 
@@ -498,20 +507,23 @@ fn extract_temporal_clause_from_tokens(
                     } else {
                         return Err(SqlError::InvalidTemporalClause(format!(
                             "FOR {} BETWEEN ... AND TIMESTAMP requires a quoted timestamp value, found {:?}",
-                            time_name, tokens[i + 7].1
+                            time_name,
+                            tokens[i + 7].1
                         )));
                     }
                 } else {
                     return Err(SqlError::InvalidTemporalClause(format!(
                         "FOR {} BETWEEN TIMESTAMP requires a quoted timestamp value, found {:?}",
-                        time_name, tokens[i + 4].1
+                        time_name,
+                        tokens[i + 4].1
                     )));
                 }
             } else if i + 2 < tokens.len() {
                 // Found FOR SYSTEM_TIME/VALID_TIME but not followed by AS OF or BETWEEN
                 return Err(SqlError::InvalidTemporalClause(format!(
                     "FOR {} must be followed by AS OF or BETWEEN, found {:?}",
-                    time_name, tokens[i + 2].1
+                    time_name,
+                    tokens[i + 2].1
                 )));
             } else {
                 // Found FOR SYSTEM_TIME/VALID_TIME at end of tokens
