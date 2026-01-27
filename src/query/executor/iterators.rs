@@ -362,6 +362,193 @@ impl ResultIterator for BatchTemporalNodeIterator {
     }
 }
 
+/// Iterator for temporal node lookups with optional label filtering.
+///
+/// This iterator addresses the deep nesting issue (#356) by extracting the
+/// filtering logic into well-defined helper methods:
+///
+/// - `get_temporal_version()` - Retrieves a node at a specific point in bi-temporal time
+/// - `apply_label_filter()` - Checks if a node matches the optional label filter
+/// - `filter_node()` - Orchestrates the filtering logic with maximum 2-3 levels of nesting
+///
+/// ## Design Rationale
+///
+/// Instead of deeply nested conditionals (8+ levels), this design:
+/// 1. Separates concerns into small, focused methods
+/// 2. Keeps each method at 2-3 levels of nesting maximum
+/// 3. Makes each component independently testable
+/// 4. Improves readability and maintainability
+///
+/// ## Example
+///
+/// ```ignore
+/// let iter = TemporalNodeScanIterator::new(
+///     node_ids,
+///     valid_time,
+///     transaction_time,
+///     historical,
+///     Some("Person".to_string()), // Optional label filter
+/// );
+///
+/// for result in iter {
+///     // Only Person nodes at the specified time point
+/// }
+/// ```
+pub struct TemporalNodeScanIterator {
+    node_ids: std::vec::IntoIter<NodeId>,
+    valid_time: Timestamp,
+    transaction_time: Timestamp,
+    historical: Arc<RwLock<HistoricalStorage>>,
+    /// Optional label filter - if Some, only nodes with matching label are returned
+    label_filter: Option<String>,
+}
+
+impl TemporalNodeScanIterator {
+    /// Create a new temporal node scan iterator.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_ids` - The node IDs to iterate over
+    /// * `valid_time` - The valid time for temporal reconstruction
+    /// * `transaction_time` - The transaction time for temporal reconstruction
+    /// * `historical` - Reference to historical storage
+    /// * `label_filter` - Optional label to filter nodes by
+    pub fn new(
+        node_ids: Vec<NodeId>,
+        valid_time: Timestamp,
+        transaction_time: Timestamp,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        label_filter: Option<String>,
+    ) -> Self {
+        TemporalNodeScanIterator {
+            node_ids: node_ids.into_iter(),
+            valid_time,
+            transaction_time,
+            historical,
+            label_filter,
+        }
+    }
+
+    /// Retrieve the temporal version of a node at the configured time point.
+    ///
+    /// This helper method encapsulates the temporal reconstruction logic:
+    /// 1. Find the version valid at (valid_time, transaction_time)
+    /// 2. Retrieve the version metadata
+    /// 3. Reconstruct properties from anchor+delta compression
+    /// 4. Return a fully reconstructed Node
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No version exists at the specified time point
+    /// - Version metadata is missing (data inconsistency)
+    /// - Property reconstruction fails
+    pub fn get_temporal_version(
+        &self,
+        node_id: NodeId,
+        guard: &parking_lot::RwLockReadGuard<'_, HistoricalStorage>,
+    ) -> Result<Node> {
+        // Step 1: Find the version valid at the requested time
+        let version_id = guard
+            .find_node_version_at_time(node_id, self.valid_time, self.transaction_time)
+            .ok_or(crate::utils::error::TemporalError::NodeNotFoundAtTime {
+                node_id,
+                valid_time: self.valid_time,
+                transaction_time: self.transaction_time,
+            })?;
+
+        // INVARIANT: If find_node_version_at_time returns a version_id,
+        // that version MUST exist in storage. If this fails, it indicates
+        // a critical data inconsistency (broken version chain or dangling version_id).
+        debug_assert!(
+            guard.get_node_version(version_id).is_some(),
+            "INVARIANT VIOLATION: find_node_version_at_time returned non-existent version_id {}",
+            version_id
+        );
+
+        // Step 2: Get the version metadata
+        let version = guard.get_node_version(version_id).ok_or(
+            crate::utils::error::TemporalError::VersionNotFound(version_id),
+        )?;
+
+        // Step 3: Reconstruct properties
+        let properties = guard.reconstruct_node_properties(version_id)?;
+
+        // Step 4: Build and return the node
+        Ok(Node::new(node_id, version.label, properties, version_id))
+    }
+
+    /// Check if a node passes the label filter.
+    ///
+    /// Returns `true` if:
+    /// - No label filter is configured (all nodes pass)
+    /// - The node's label matches the filter
+    ///
+    /// Returns `false` if the node's label doesn't match the filter.
+    #[inline]
+    pub fn apply_label_filter(&self, node: &Node) -> bool {
+        match &self.label_filter {
+            None => true, // No filter, all nodes pass
+            Some(filter_label) => {
+                let filter_id = GLOBAL_INTERNER.get_id(filter_label);
+                filter_id == Some(node.label)
+            }
+        }
+    }
+
+    /// Orchestrate the filtering logic for a single node.
+    ///
+    /// This method combines temporal reconstruction with label filtering
+    /// while maintaining flat control flow (2-3 levels of nesting max).
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Ok(QueryRow))` - Node exists at time point and passes label filter
+    /// - `Some(Err(...))` - Node lookup failed (error should be propagated)
+    /// - `None` - Node exists but doesn't pass label filter (skip to next)
+    pub fn filter_node(
+        &self,
+        node_id: NodeId,
+        guard: &parking_lot::RwLockReadGuard<'_, HistoricalStorage>,
+    ) -> Option<Result<QueryRow>> {
+        // Step 1: Get the temporal version
+        let node = match self.get_temporal_version(node_id, guard) {
+            Ok(n) => n,
+            Err(e) => return Some(Err(e)),
+        };
+
+        // Step 2: Apply label filter
+        if !self.apply_label_filter(&node) {
+            return None; // Skip this node
+        }
+
+        // Step 3: Build and return the query row
+        Some(Ok(
+            QueryRow::from_entity(EntityResult::Node(node)).at_time(self.valid_time)
+        ))
+    }
+}
+
+impl ResultIterator for TemporalNodeScanIterator {
+    fn next(&mut self) -> Option<Result<QueryRow>> {
+        // Acquire read lock once for the duration of finding the next valid node
+        let guard = self.historical.read();
+
+        loop {
+            let node_id = self.node_ids.next()?;
+
+            match self.filter_node(node_id, &guard) {
+                Some(result) => return Some(result), // Found valid node or error
+                None => continue,                    // Label filter didn't match, try next
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.node_ids.size_hint()
+    }
+}
+
 /// Iterator for graph traversal using BFS.
 ///
 /// # Deduplication Semantics
@@ -2225,6 +2412,409 @@ mod tests {
         let node_ids = vec![];
         let mut iter =
             BatchTemporalNodeIterator::new(node_ids, 1000.into(), 1000.into(), historical).unwrap();
+
+        assert!(iter.next().is_none());
+    }
+
+    // ==================== TemporalNodeScanIterator Tests (Issue #356) ====================
+    //
+    // These tests verify the refactored iterator with helper methods:
+    // - get_temporal_version(): Handles timestamp-based node retrieval
+    // - apply_label_filter(): Manages label-based filtering
+    // - filter_node(): Orchestrates filtering logic
+
+    #[test]
+    fn test_temporal_node_scan_iterator_get_temporal_version_success() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let timestamp: Timestamp = 1000.into();
+
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+
+        {
+            let mut hist = historical.write();
+            hist.add_node_version(
+                node_id,
+                version_id,
+                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                label,
+                props,
+            )
+            .unwrap();
+        }
+
+        // Test the get_temporal_version helper method directly
+        let iter = TemporalNodeScanIterator::new(
+            vec![node_id],
+            timestamp,
+            timestamp,
+            historical.clone(),
+            None, // No label filter
+        );
+
+        let guard = historical.read();
+        let result = iter.get_temporal_version(node_id, &guard);
+        assert!(result.is_ok());
+
+        let node = result.unwrap();
+        assert_eq!(node.id, node_id);
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_get_temporal_version_not_found() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let node_id = NodeId::new(999).unwrap();
+        let timestamp: Timestamp = 1000.into();
+
+        let iter = TemporalNodeScanIterator::new(
+            vec![node_id],
+            timestamp,
+            timestamp,
+            historical.clone(),
+            None,
+        );
+
+        let guard = historical.read();
+        let result = iter.get_temporal_version(node_id, &guard);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_apply_label_filter_matches() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let timestamp: Timestamp = 1000.into();
+
+        // Create iterator with "Person" label filter
+        let iter = TemporalNodeScanIterator::new(
+            vec![],
+            timestamp,
+            timestamp,
+            historical,
+            Some("Person".to_string()),
+        );
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        // Label matches, should return true
+        assert!(iter.apply_label_filter(&node));
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_apply_label_filter_no_match() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let timestamp: Timestamp = 1000.into();
+
+        // Create iterator with "Company" label filter
+        let iter = TemporalNodeScanIterator::new(
+            vec![],
+            timestamp,
+            timestamp,
+            historical,
+            Some("Company".to_string()),
+        );
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        // Label doesn't match, should return false
+        assert!(!iter.apply_label_filter(&node));
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_apply_label_filter_no_filter() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let timestamp: Timestamp = 1000.into();
+
+        // Create iterator with no label filter
+        let iter = TemporalNodeScanIterator::new(vec![], timestamp, timestamp, historical, None);
+
+        let label = GLOBAL_INTERNER.intern("AnyLabel").unwrap();
+        let props = PropertyMapBuilder::new().build();
+        let node = Node::new(
+            NodeId::new(1).unwrap(),
+            label,
+            props,
+            VersionId::new(1).unwrap(),
+        );
+
+        // No filter, should always return true
+        assert!(iter.apply_label_filter(&node));
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_filter_node_success() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let timestamp: Timestamp = 1000.into();
+
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+
+        {
+            let mut hist = historical.write();
+            hist.add_node_version(
+                node_id,
+                version_id,
+                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                label,
+                props,
+            )
+            .unwrap();
+        }
+
+        // Test filter_node orchestrator with matching label
+        let iter = TemporalNodeScanIterator::new(
+            vec![node_id],
+            timestamp,
+            timestamp,
+            historical.clone(),
+            Some("Person".to_string()),
+        );
+
+        let guard = historical.read();
+        let result = iter.filter_node(node_id, &guard);
+
+        // Should return Some(Ok(QueryRow)) for matching node
+        assert!(result.is_some());
+        let query_row = result.unwrap();
+        assert!(query_row.is_ok());
+        assert_eq!(query_row.unwrap().entity.node_id(), Some(node_id));
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_filter_node_label_mismatch() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let node_id = NodeId::new(1).unwrap();
+        let version_id = VersionId::new(100).unwrap();
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+        let timestamp: Timestamp = 1000.into();
+
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+
+        {
+            let mut hist = historical.write();
+            hist.add_node_version(
+                node_id,
+                version_id,
+                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                label,
+                props,
+            )
+            .unwrap();
+        }
+
+        // Test filter_node with non-matching label
+        let iter = TemporalNodeScanIterator::new(
+            vec![node_id],
+            timestamp,
+            timestamp,
+            historical.clone(),
+            Some("Company".to_string()), // Different label
+        );
+
+        let guard = historical.read();
+        let result = iter.filter_node(node_id, &guard);
+
+        // Should return None when label doesn't match
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_filter_node_not_found() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let node_id = NodeId::new(999).unwrap();
+        let timestamp: Timestamp = 1000.into();
+
+        let iter = TemporalNodeScanIterator::new(
+            vec![node_id],
+            timestamp,
+            timestamp,
+            historical.clone(),
+            None,
+        );
+
+        let guard = historical.read();
+        let result = iter.filter_node(node_id, &guard);
+
+        // Should return Some(Err(...)) when node not found
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_full_iteration() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let timestamp: Timestamp = 5000.into();
+
+        // Add 3 Person nodes and 1 Company node
+        {
+            let mut hist = historical.write();
+            for i in 1..=3 {
+                let node_id = NodeId::new(i).unwrap();
+                let version_id = VersionId::new(i * 100).unwrap();
+                let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+                let props = PropertyMapBuilder::new()
+                    .insert("name", format!("Person{}", i).as_str())
+                    .build();
+
+                hist.add_node_version(
+                    node_id,
+                    version_id,
+                    crate::core::temporal::BiTemporalInterval::current(timestamp),
+                    label,
+                    props,
+                )
+                .unwrap();
+            }
+
+            // Add Company node
+            let company_label = GLOBAL_INTERNER.intern("Company").unwrap();
+            hist.add_node_version(
+                NodeId::new(4).unwrap(),
+                VersionId::new(400).unwrap(),
+                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                company_label,
+                PropertyMapBuilder::new().insert("name", "Acme").build(),
+            )
+            .unwrap();
+        }
+
+        // Iterate with "Person" filter - should get 3 results
+        let node_ids = vec![
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            NodeId::new(3).unwrap(),
+            NodeId::new(4).unwrap(),
+        ];
+
+        let mut iter = TemporalNodeScanIterator::new(
+            node_ids,
+            timestamp,
+            timestamp,
+            historical.clone(),
+            Some("Person".to_string()),
+        );
+
+        let mut count = 0;
+        while let Some(result) = iter.next() {
+            assert!(result.is_ok());
+            count += 1;
+        }
+
+        assert_eq!(count, 3); // Only Person nodes, not Company
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_no_label_filter() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let timestamp: Timestamp = 5000.into();
+
+        // Add 2 nodes with different labels
+        {
+            let mut hist = historical.write();
+
+            let person_label = GLOBAL_INTERNER.intern("Person").unwrap();
+            hist.add_node_version(
+                NodeId::new(1).unwrap(),
+                VersionId::new(100).unwrap(),
+                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                person_label,
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+            )
+            .unwrap();
+
+            let company_label = GLOBAL_INTERNER.intern("Company").unwrap();
+            hist.add_node_version(
+                NodeId::new(2).unwrap(),
+                VersionId::new(200).unwrap(),
+                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                company_label,
+                PropertyMapBuilder::new().insert("name", "Acme").build(),
+            )
+            .unwrap();
+        }
+
+        // Iterate without label filter - should get all nodes
+        let node_ids = vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()];
+
+        let mut iter =
+            TemporalNodeScanIterator::new(node_ids, timestamp, timestamp, historical, None);
+
+        let mut count = 0;
+        while let Some(result) = iter.next() {
+            assert!(result.is_ok());
+            count += 1;
+        }
+
+        assert_eq!(count, 2); // Both nodes returned
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_size_hint() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let timestamp: Timestamp = 1000.into();
+
+        let node_ids = vec![
+            NodeId::new(1).unwrap(),
+            NodeId::new(2).unwrap(),
+            NodeId::new(3).unwrap(),
+        ];
+
+        let iter = TemporalNodeScanIterator::new(node_ids, timestamp, timestamp, historical, None);
+
+        let (lower, upper) = iter.size_hint();
+        assert_eq!(lower, 3);
+        assert_eq!(upper, Some(3));
+    }
+
+    #[test]
+    fn test_temporal_node_scan_iterator_empty() {
+        use crate::storage::historical::HistoricalStorage;
+
+        let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+        let timestamp: Timestamp = 1000.into();
+
+        let mut iter =
+            TemporalNodeScanIterator::new(vec![], timestamp, timestamp, historical, None);
 
         assert!(iter.next().is_none());
     }
