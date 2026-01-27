@@ -95,8 +95,41 @@ pub trait WriteOps: ReadOps {
     /// Update an edge's properties (creates new version)
     fn update_edge(&mut self, edge_id: EdgeId, properties: PropertyMap) -> Result<()>;
 
-    /// Delete a node
+    /// Delete a node (without deleting connected edges)
+    ///
+    /// # Warning
+    ///
+    /// This method does NOT delete edges connected to the node, which may leave
+    /// orphaned edges in the graph. For most use cases, prefer
+    /// [`delete_node_cascade`](Self::delete_node_cascade) which automatically
+    /// removes all connected edges to maintain referential integrity.
+    ///
+    /// Only use this method if you explicitly need to preserve edges for some
+    /// specialized use case.
     fn delete_node(&mut self, node_id: NodeId) -> Result<()>;
+
+    /// Delete a node and all connected edges (cascade delete)
+    ///
+    /// This method deletes both the node and all edges where the node
+    /// appears as either the source or target. This prevents orphaned edges
+    /// and maintains referential integrity in the graph.
+    ///
+    /// # Performance
+    ///
+    /// The cascade delete operation is efficient even for highly-connected nodes:
+    /// - O(degree) complexity where degree is the number of connected edges
+    /// - All edge deletions are buffered and applied atomically on commit
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut tx = db.begin_write();
+    /// let node_id = tx.create_node("Person", properties)?;
+    /// // ... create edges ...
+    /// tx.delete_node_cascade(node_id)?; // Deletes node and all connected edges
+    /// tx.commit()?;
+    /// ```
+    fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()>;
 
     /// Delete an edge
     fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()>;
