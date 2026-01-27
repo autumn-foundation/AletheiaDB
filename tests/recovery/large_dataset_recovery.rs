@@ -9,6 +9,7 @@
 //! Run with: `cargo test --test recovery large_dataset -- --ignored`
 
 use gallifreydb::{
+    GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId},
         property::{PropertyMap, PropertyMapBuilder},

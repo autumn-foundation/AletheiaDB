@@ -9,6 +9,7 @@
 //! - Temporal index updates
 
 use gallifreydb::{
+    GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId},
         property::{PropertyMap, PropertyMapBuilder},
@@ -194,7 +195,7 @@ fn test_replay_create_edge_basic() -> Result<()> {
         edge_id,
         source: source_id,
         target: target_id,
-        label: "KNOWS".to_string(),
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -260,7 +261,7 @@ fn test_replay_create_edge_with_properties() -> Result<()> {
         edge_id,
         source: source_id,
         target: target_id,
-        label: "KNOWS".to_string(),
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: edge_properties.clone(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -301,7 +302,7 @@ fn test_replay_multiple_creates() -> Result<()> {
     for i in 1..=10 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: format!("Node{}", i),
+            label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -313,7 +314,7 @@ fn test_replay_multiple_creates() -> Result<()> {
             edge_id: EdgeId::new(i).unwrap(),
             source: NodeId::new(i).unwrap(),
             target: NodeId::new(i + 1).unwrap(),
-            label: "LINKS_TO".to_string(),
+            label: GLOBAL_INTERNER.intern("LINKS_TO").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -352,7 +353,7 @@ fn test_replay_create_node_tracks_max_id() -> Result<()> {
     for id in [5, 100, 42] {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(id).unwrap(),
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -396,7 +397,7 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
 
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Test".to_string(),
+        label: GLOBAL_INTERNER.intern("Test").unwrap(),
         properties: PropertyMap::new(),
         temporal,
     })?;

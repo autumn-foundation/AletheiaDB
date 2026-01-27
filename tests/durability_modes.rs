@@ -1310,7 +1310,7 @@ fn test_recovery_after_concurrent_writes() {
                             NodeId::new((thread_id * appends_per_thread + i) as u64).unwrap();
                         let operation = WalOperation::CreateNode {
                             node_id,
-                            label: "CrashTest".into(),
+                            label: GLOBAL_INTERNER.intern("CrashTest").unwrap(),
                             properties: PropertyMap::new(),
                             temporal: BiTemporalInterval::current(time::now()),
                         };
@@ -1444,7 +1444,7 @@ fn test_recovery_partial_flush_ordering() {
                             NodeId::new((thread_id * appends_per_thread + i) as u64).unwrap();
                         let operation = WalOperation::CreateNode {
                             node_id,
-                            label: "PartialCrashTest".into(),
+                            label: GLOBAL_INTERNER.intern("PartialCrashTest").unwrap(),
                             properties: PropertyMap::new(),
                             temporal: BiTemporalInterval::current(time::now()),
                         };

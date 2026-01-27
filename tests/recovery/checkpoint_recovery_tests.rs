@@ -7,9 +7,8 @@
 //! - Maintains LSN consistency across checkpoint and recovery
 
 use gallifreydb::{
-    PropertyMapBuilder,
+    GLOBAL_INTERNER, PropertyMapBuilder,
     core::{
-        GLOBAL_INTERNER,
         graph::Node,
         id::{EdgeId, NodeId, VersionId},
         property::PropertyMap,

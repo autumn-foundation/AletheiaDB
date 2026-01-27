@@ -99,7 +99,7 @@ fn main() -> Result<()> {
         let node_id = NodeId::new(i)?;
         wal.append(WalOperation::CreateNode {
             node_id,
-            label: GLOBAL_INTERNER.intern(&format!("Person{}", i)).unwrap(),
+            label: GLOBAL_INTERNER.intern(format!("Person{}", i)).unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("name", format!("Alice{}", i))
                 .insert("age", (20 + i) as i64)

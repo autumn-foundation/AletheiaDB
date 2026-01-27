@@ -7,6 +7,7 @@
 //! - Ensure new operations generate non-conflicting IDs
 
 use gallifreydb::{
+    GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::{PropertyMap, PropertyMapBuilder},
@@ -327,7 +328,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id: NodeId::new(1).unwrap(),
         version_id: VersionId::new(6).unwrap(),
-        label: "UpdatedNode".to_string(),
+        label: GLOBAL_INTERNER.intern("UpdatedNode").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;

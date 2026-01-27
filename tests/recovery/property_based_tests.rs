@@ -28,6 +28,7 @@
 //! **50,000-200,000 operations** to thoroughly validate invariants.
 
 use gallifreydb::{
+    GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::PropertyMapBuilder,
@@ -217,7 +218,7 @@ impl RecoveryTestHarness {
                     if !created_nodes.contains(id) {
                         wal.append(WalOperation::CreateNode {
                             node_id: NodeId::new(*id)?,
-                            label: label.clone(),
+                            label: GLOBAL_INTERNER.intern(label).unwrap(),
                             properties: PropertyMapBuilder::new().insert("value", *value).build(),
                             temporal: BiTemporalInterval::current(timestamp_counter),
                         })?;
@@ -262,7 +263,7 @@ impl RecoveryTestHarness {
                             edge_id: EdgeId::new(*id)?,
                             source: NodeId::new(*from)?,
                             target: NodeId::new(*to)?,
-                            label: label.clone(),
+                            label: GLOBAL_INTERNER.intern(label).unwrap(),
                             properties: PropertyMapBuilder::new().build(),
                             temporal: BiTemporalInterval::current(timestamp_counter),
                         })?;

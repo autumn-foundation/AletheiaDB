@@ -19,6 +19,7 @@
 //! See: <https://github.com/madmax983/GallifreyDB/issues/XXX> (TODO: create issue)
 
 use gallifreydb::{
+    GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::{PropertyMap, PropertyMapBuilder, PropertyValue},
@@ -81,7 +82,7 @@ fn test_crash_before_checkpoint_nodes_only() -> Result<()> {
     for i in 1..=100 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: format!("Node{}", i),
+            label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
             properties: PropertyMapBuilder::new().insert("index", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -808,7 +809,7 @@ fn test_complex_workflow_create_update_delete() -> Result<()> {
             edge_id: EdgeId::new(i - 10).unwrap(),
             source: NodeId::new(i).unwrap(),
             target: NodeId::new(i + 1).unwrap(),
-            label: "WORKS_WITH".to_string(),
+            label: GLOBAL_INTERNER.intern("WORKS_WITH").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -883,21 +884,21 @@ fn test_complex_workflow_with_edges_and_updates() -> Result<()> {
     // Create nodes
     wal.append(WalOperation::CreateNode {
         node_id: NodeId::new(1).unwrap(),
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: NodeId::new(2).unwrap(),
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Bob").build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: NodeId::new(3).unwrap(),
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Charlie").build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -925,7 +926,7 @@ fn test_complex_workflow_with_edges_and_updates() -> Result<()> {
     wal.append(WalOperation::UpdateEdge {
         edge_id: EdgeId::new(1).unwrap(),
         version_id: VersionId::new(6).unwrap(),
-        label: "FRIENDS_WITH".to_string(),
+        label: GLOBAL_INTERNER.intern("FRIENDS_WITH").unwrap(),
         properties: PropertyMapBuilder::new()
             .insert("since", 2020_i64)
             .insert("strength", "strong")
@@ -993,7 +994,7 @@ fn test_complex_workflow_with_vector_properties() -> Result<()> {
             .collect();
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Document".to_string(),
+            label: GLOBAL_INTERNER.intern("Document").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("title", format!("Doc{}", i))
                 .insert_vector("embedding", &embedding)
@@ -1007,7 +1008,7 @@ fn test_complex_workflow_with_vector_properties() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id: NodeId::new(1).unwrap(),
         version_id: VersionId::new(6).unwrap(),
-        label: "Document".to_string(),
+        label: GLOBAL_INTERNER.intern("Document").unwrap(),
         properties: PropertyMapBuilder::new()
             .insert("title", "Doc1 - Updated")
             .insert_vector("embedding", &new_embedding)

@@ -191,7 +191,7 @@ fn main() -> Result<()> {
         let node_id = NodeId::new(i)?;
         wal.append(WalOperation::CreateNode {
             node_id,
-            label: GLOBAL_INTERNER.intern(&format!("Node{}", i)).unwrap(),
+            label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
             properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;

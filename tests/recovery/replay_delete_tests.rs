@@ -8,6 +8,7 @@
 //! - Tombstone versions in historical storage
 
 use gallifreydb::{
+    GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::{PropertyMap, PropertyMapBuilder},
@@ -160,7 +161,7 @@ fn test_replay_delete_edge_basic() -> Result<()> {
         edge_id,
         source: source_id,
         target: target_id,
-        label: "KNOWS".to_string(),
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -210,7 +211,7 @@ fn test_replay_multiple_deletes() -> Result<()> {
     for i in 1..=5 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -264,7 +265,7 @@ fn test_replay_delete_with_vector() -> Result<()> {
     // Create node with vector
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Document".to_string(),
+        label: GLOBAL_INTERNER.intern("Document").unwrap(),
         properties: PropertyMapBuilder::new()
             .insert_vector("embedding", &embedding)
             .build(),
@@ -308,7 +309,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
     // Create node 1
     wal.append(WalOperation::CreateNode {
         node_id: NodeId::new(1).unwrap(),
-        label: "Node".to_string(),
+        label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 1_i64).build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -316,7 +317,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
     // Create node 2
     wal.append(WalOperation::CreateNode {
         node_id: NodeId::new(2).unwrap(),
-        label: "Node".to_string(),
+        label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 2_i64).build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -325,7 +326,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id: NodeId::new(1).unwrap(),
         version_id: VersionId::new(3).unwrap(),
-        label: "Node".to_string(),
+        label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 10_i64).build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -339,7 +340,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
     // Create node 3
     wal.append(WalOperation::CreateNode {
         node_id: NodeId::new(3).unwrap(),
-        label: "Node".to_string(),
+        label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 3_i64).build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;

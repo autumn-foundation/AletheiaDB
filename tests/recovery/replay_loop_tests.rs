@@ -7,6 +7,7 @@
 //! - Handles errors gracefully (corrupt entries, invalid IDs)
 
 use gallifreydb::{
+    GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::PropertyMap,
@@ -242,7 +243,7 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(100).unwrap(),
-        label: "Updated".to_string(),
+        label: GLOBAL_INTERNER.intern("Updated").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -251,7 +252,7 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(50).unwrap(),
-        label: "Another".to_string(),
+        label: GLOBAL_INTERNER.intern("Another").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -298,7 +299,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
     // Create node
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -308,7 +309,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
         edge_id,
         source: node_id,
         target: NodeId::new(2).unwrap(),
-        label: "KNOWS".to_string(),
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -317,7 +318,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(2).unwrap(),
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
