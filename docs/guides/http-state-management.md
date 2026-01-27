@@ -101,8 +101,9 @@ async fn create_node(
     state: web::Data<AppState>,
     body: web::Json<CreateNodeRequest>
 ) -> HttpResponse {
+    let request = body.into_inner();
     let node_id = state.db()
-        .create_node(&body.label, body.properties.clone())
+        .create_node(&request.label, request.properties)
         .unwrap();
     HttpResponse::Ok().json(node_id)
 }
@@ -192,23 +193,26 @@ cargo test --test http_server --features http-server test_app_state_concurrent_w
 
 ## Common Pitfalls
 
-### ❌ Don't: Try to mutate through &GallifreyDB
+### ❌ Don't: Expect you need &mut for mutations
 
 ```rust
-async fn bad_handler(state: web::Data<AppState>) -> HttpResponse {
+async fn confused_handler(state: web::Data<AppState>) -> HttpResponse {
     let db: &GallifreyDB = state.db();
-    // This won't compile - create_node takes &self, not &mut self
-    // But it works because GallifreyDB uses interior mutability
+    // This compiles, even though it mutates state!
+    // It works because GallifreyDB methods like `create_node` take `&self`
+    // and use interior mutability, so a `&mut` reference is not needed.
+    let node_id = db.create_node("Person", properties).unwrap();
+    HttpResponse::Ok().json(node_id)
 }
 ```
 
-### ✅ Do: Use &self methods directly
+### ✅ Do: Use &self methods directly with proper error handling
 
 ```rust
-async fn good_handler(state: web::Data<AppState>) -> HttpResponse {
+async fn good_handler(state: web::Data<AppState>) -> actix_web::Result<HttpResponse> {
     // All GallifreyDB methods take &self and use interior mutability
     let node_id = state.db().create_node("Person", properties)?;
-    HttpResponse::Ok().json(node_id)
+    Ok(HttpResponse::Ok().json(node_id))
 }
 ```
 
