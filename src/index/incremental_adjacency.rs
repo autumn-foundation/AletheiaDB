@@ -306,65 +306,12 @@ impl IncrementalAdjacencyIndex {
         let mut all_edges = Vec::with_capacity(estimated_capacity);
 
         // 1. Collect edges from frozen (excluding tombstones)
-        // We need to iterate through the frozen index to get source node IDs
-        // Since AdjacencyIndex doesn't expose node_ids directly, we'll use the delta
-        // and collect from get_adjacency for each node
-        for entry in self.delta.iter() {
-            let source = *entry.key();
-            let frozen_slice = frozen.get_adjacency(source);
+        // Use iter_nodes() for efficient sparse graph iteration - O(nodes_with_edges) not O(max_node_id)
+        for node_id in frozen.iter_nodes() {
+            let frozen_slice = frozen.get_adjacency(node_id);
             for adj in frozen_slice {
                 if !self.tombstones.contains_key(&adj.edge_id) {
-                    all_edges.push((source, adj.target, adj.edge_id, adj.label));
-                }
-            }
-        }
-
-        // Also need to get frozen edges from nodes not in delta
-        // This is a limitation of current AdjacencyIndex API - it doesn't expose all node IDs
-        // For now, we'll rebuild by iterating through known node IDs
-        // Let's collect all unique source nodes from both frozen and delta
-        let mut all_sources = std::collections::HashSet::new();
-
-        // Get sources from delta
-        for entry in self.delta.iter() {
-            all_sources.insert(*entry.key());
-        }
-
-        // We need a way to iterate all nodes in frozen - let's add that later
-        // For now, let's use a different approach: collect edges during the adjacency build
-
-        // Actually, let's iterate the edges map from CurrentIndexes pattern
-        // But we don't have that here. Let me reconsider the approach.
-
-        // Better approach: Since we're rebuilding anyway, let's collect from what we know:
-        // 1. Iterate through all entries in frozen by checking all possible node IDs
-        //    This is inefficient but correct for now
-        // 2. Collect delta edges
-
-        // For now, let's use a simpler approach that works with the API we have:
-        // Collect all edges from frozen by iterating through frozen's internal structure
-        // Since we can't access frozen's node_ids directly, let's use a workaround
-
-        let frozen_ref = &*frozen;
-
-        // We need to extract edges from frozen somehow
-        // Since AdjacencyIndex doesn't expose this, we need to either:
-        // 1. Add a method to AdjacencyIndex to export edges
-        // 2. Keep track of all node IDs separately
-        // 3. Iterate through a large range of potential node IDs (inefficient)
-
-        // Let's use approach 3 for now (it works for tests with small IDs)
-        let max_node_id = frozen_ref.max_node_id();
-
-        for node_id_u64 in 0..=max_node_id {
-            let node_id = NodeId::new_unchecked(node_id_u64);
-            let frozen_slice = frozen_ref.get_adjacency(node_id);
-
-            if !frozen_slice.is_empty() {
-                for adj in frozen_slice {
-                    if !self.tombstones.contains_key(&adj.edge_id) {
-                        all_edges.push((node_id, adj.target, adj.edge_id, adj.label));
-                    }
+                    all_edges.push((node_id, adj.target, adj.edge_id, adj.label));
                 }
             }
         }
@@ -442,8 +389,9 @@ impl<'a> MergedAdjacencyGuard<'a> {
     }
 
     /// Check if the adjacency list is empty.
+    /// O(1) - uses early-return iterator pattern instead of counting all entries.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.iter().next().is_none()
     }
 
     /// Get entry at index (for compatibility with slice-like indexing).
@@ -511,12 +459,19 @@ use std::thread::{self, JoinHandle};
 ///
 /// Includes panic recovery: if compaction panics, the thread logs the panic,
 /// increments a counter, and continues monitoring.
+///
+/// Safety: If consecutive panics exceed `MAX_CONSECUTIVE_PANICS` (default 5),
+/// the scheduler will exit to prevent hiding persistent bugs.
 pub struct CompactionScheduler {
     index: Arc<IncrementalAdjacencyIndex>,
     running: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     panic_count: Arc<AtomicUsize>,
+    consecutive_panics: Arc<AtomicUsize>,
 }
+
+/// Maximum consecutive panics before scheduler exits to prevent hiding bugs.
+const MAX_CONSECUTIVE_PANICS: usize = 5;
 
 impl CompactionScheduler {
     /// Create a new compaction scheduler for the given index.
@@ -526,6 +481,7 @@ impl CompactionScheduler {
             running: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
             panic_count: Arc::new(AtomicUsize::new(0)),
+            consecutive_panics: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -544,6 +500,9 @@ impl CompactionScheduler {
     /// If compaction panics, the panic is caught, logged to stderr, and the
     /// thread continues monitoring. Panic count is incremented for observability.
     ///
+    /// **Safety**: If consecutive panics exceed `MAX_CONSECUTIVE_PANICS`, the
+    /// scheduler will exit to prevent hiding persistent bugs.
+    ///
     /// Returns a join handle that can be used to wait for thread termination.
     pub fn start(&self) -> JoinHandle<()> {
         self.running.store(true, Ordering::SeqCst);
@@ -552,6 +511,7 @@ impl CompactionScheduler {
         let running = Arc::clone(&self.running);
         let paused = Arc::clone(&self.paused);
         let panic_count = Arc::clone(&self.panic_count);
+        let consecutive_panics = Arc::clone(&self.consecutive_panics);
 
         thread::spawn(move || {
             let check_interval = index.config.check_interval;
@@ -567,17 +527,30 @@ impl CompactionScheduler {
                         }));
 
                         if let Err(panic_payload) = result {
-                            // Increment panic counter
+                            // Increment panic counters
                             panic_count.fetch_add(1, Ordering::Relaxed);
+                            let consecutive =
+                                consecutive_panics.fetch_add(1, Ordering::Relaxed) + 1;
 
                             // Log panic to stderr
                             eprintln!(
-                                "[CompactionScheduler] Panic during compaction (count: {}): {:?}",
+                                "[CompactionScheduler] Panic during compaction (total: {}, consecutive: {}): {:?}",
                                 panic_count.load(Ordering::Relaxed),
+                                consecutive,
                                 panic_payload
                             );
 
-                            // Continue monitoring - don't let one panic kill the scheduler
+                            // Exit if too many consecutive panics to prevent hiding bugs
+                            if consecutive >= MAX_CONSECUTIVE_PANICS {
+                                eprintln!(
+                                    "[CompactionScheduler] Exiting after {} consecutive panics",
+                                    consecutive
+                                );
+                                break;
+                            }
+                        } else {
+                            // Reset consecutive panic count on successful compaction
+                            consecutive_panics.store(0, Ordering::Relaxed);
                         }
                     }
                 }

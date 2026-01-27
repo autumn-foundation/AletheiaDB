@@ -548,6 +548,211 @@ mod phase4_compaction {
             reader.join().unwrap();
         }
     }
+
+    // Test deletion followed by compaction correctly removes edges
+    #[test]
+    fn test_delete_then_compact() {
+        // Create frozen with 3 edges from node 0
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let frozen_edges = vec![
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(1).unwrap(),
+                EdgeId::new(0).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(2).unwrap(),
+                EdgeId::new(1).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(0).unwrap(),
+                NodeId::new(3).unwrap(),
+                EdgeId::new(2).unwrap(),
+                knows,
+            ),
+        ];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // Delete middle edge
+        index.delete(EdgeId::new(1).unwrap());
+
+        // Verify before compaction
+        let guard = index.get_adjacency(NodeId::new(0).unwrap());
+        let edges: Vec<_> = guard.iter().map(|e| e.edge_id).collect();
+        assert_eq!(edges.len(), 2); // Edge 1 filtered out
+        drop(guard);
+
+        // Compact
+        index.compact();
+
+        // Verify after compaction
+        assert_eq!(index.frozen_edge_count(), 2);
+        assert_eq!(index.tombstone_count(), 0);
+
+        let guard = index.get_adjacency(NodeId::new(0).unwrap());
+        let edges: Vec<_> = guard.iter().map(|e| e.edge_id).collect();
+        assert_eq!(edges.len(), 2);
+        assert!(edges.contains(&EdgeId::new(0).unwrap()));
+        assert!(edges.contains(&EdgeId::new(2).unwrap()));
+        assert!(!edges.contains(&EdgeId::new(1).unwrap())); // Deleted
+    }
+
+    // Test concurrent delete operations
+    #[test]
+    fn test_concurrent_delete() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Create index with edges 0-99
+        let frozen_edges: Vec<_> = (0..100)
+            .map(|i| {
+                (
+                    NodeId::new(i).unwrap(),
+                    NodeId::new(i + 1).unwrap(),
+                    EdgeId::new(i).unwrap(),
+                    knows,
+                )
+            })
+            .collect();
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = Arc::new(IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen)));
+
+        // Spawn multiple threads to delete different edges concurrently
+        let handles: Vec<_> = (0..4)
+            .map(|thread_id| {
+                let index_clone = Arc::clone(&index);
+                thread::spawn(move || {
+                    for i in 0..25 {
+                        let edge_id = (thread_id * 25 + i) as u64;
+                        index_clone.delete(EdgeId::new(edge_id).unwrap());
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // All 100 edges should be tombstoned
+        assert_eq!(index.tombstone_count(), 100);
+
+        // Compact should result in 0 edges
+        index.compact();
+        assert_eq!(index.frozen_edge_count(), 0);
+    }
+
+    // Test delete and reinsert same edge ID
+    // Tombstones apply to edge IDs - reinserting with same ID is also filtered
+    #[test]
+    fn test_delete_reinsert_same_id() {
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Create frozen with edge 0
+        let frozen_edges = vec![(
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            EdgeId::new(0).unwrap(),
+            knows,
+        )];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // Delete edge 0
+        index.delete(EdgeId::new(0).unwrap());
+
+        // Verify edge is filtered
+        {
+            let guard = index.get_adjacency(NodeId::new(0).unwrap());
+            assert_eq!(guard.iter().count(), 0);
+        }
+
+        // Reinsert with same edge ID but different target
+        index.insert(
+            NodeId::new(0).unwrap(),
+            AdjacencyEntry::new(NodeId::new(99).unwrap(), EdgeId::new(0).unwrap(), knows),
+        );
+
+        // Edge should still be filtered (tombstone takes precedence until compaction)
+        // Tombstones apply to edge IDs, so the reinserted edge is also filtered
+        {
+            let guard = index.get_adjacency(NodeId::new(0).unwrap());
+            assert_eq!(guard.iter().count(), 0);
+        }
+
+        // After compaction, both old and new edges with that ID are gone
+        // because tombstone was in effect during edge collection
+        index.compact();
+
+        {
+            let guard = index.get_adjacency(NodeId::new(0).unwrap());
+            assert_eq!(guard.iter().count(), 0);
+        }
+
+        // To properly reinsert after delete+compact, use a NEW edge ID
+        index.insert(
+            NodeId::new(0).unwrap(),
+            AdjacencyEntry::new(NodeId::new(99).unwrap(), EdgeId::new(100).unwrap(), knows),
+        );
+
+        {
+            let guard = index.get_adjacency(NodeId::new(0).unwrap());
+            let edges: Vec<_> = guard.iter().collect();
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].edge_id, EdgeId::new(100).unwrap());
+            assert_eq!(edges[0].target, NodeId::new(99).unwrap());
+        }
+    }
+
+    // Test compaction with overlapping frozen and delta edges for same node
+    #[test]
+    fn test_compact_node_with_frozen_and_delta() {
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Create frozen with edges from node 0: 0→1
+        let frozen_edges = vec![(
+            NodeId::new(0).unwrap(),
+            NodeId::new(1).unwrap(),
+            EdgeId::new(0).unwrap(),
+            knows,
+        )];
+        let frozen = AdjacencyIndex::build(frozen_edges);
+        let index = IncrementalAdjacencyIndex::from_frozen(Arc::new(frozen));
+
+        // Add delta edge from same node 0: 0→2
+        index.insert(
+            NodeId::new(0).unwrap(),
+            AdjacencyEntry::new(NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), knows),
+        );
+
+        // Before compaction, should see both edges
+        {
+            let guard = index.get_adjacency(NodeId::new(0).unwrap());
+            let edges: Vec<_> = guard.iter().map(|e| e.edge_id).collect();
+            assert_eq!(edges.len(), 2);
+        }
+
+        // Compact
+        index.compact();
+
+        // After compaction, should still see exactly 2 edges (no duplicates)
+        assert_eq!(index.frozen_edge_count(), 2);
+        assert_eq!(index.delta_edge_count(), 0);
+
+        {
+            let guard = index.get_adjacency(NodeId::new(0).unwrap());
+            let edges: Vec<_> = guard.iter().map(|e| e.edge_id).collect();
+            assert_eq!(edges.len(), 2);
+            assert!(edges.contains(&EdgeId::new(0).unwrap()));
+            assert!(edges.contains(&EdgeId::new(1).unwrap()));
+        }
+    }
 }
 
 // ============================================================================
@@ -946,7 +1151,9 @@ mod phase6_current_indexes_integration {
         assert!(indexes.frozen_edge_count() > 0);
 
         // Cleanup
-        indexes.shutdown_background_compaction();
+        indexes
+            .shutdown_background_compaction()
+            .expect("shutdown should succeed");
     }
 
     // Step 6.9 RED: Test remove_edge with tombstones

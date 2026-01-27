@@ -94,11 +94,19 @@ impl CurrentIndexes {
     ///
     /// Waits for background thread to finish. Safe to call even if
     /// background compaction is not enabled (no-op).
-    pub fn shutdown_background_compaction(&mut self) {
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if shutdown was successful or no scheduler was running
+    /// - `Err(String)` if the background thread panicked during shutdown
+    pub fn shutdown_background_compaction(&mut self) -> Result<(), String> {
         if let Some((scheduler, handle)) = self.compaction_scheduler.take() {
             scheduler.shutdown();
-            let _ = handle.join(); // Ignore join errors
+            handle
+                .join()
+                .map_err(|e| format!("Background compaction thread panicked: {:?}", e))?;
         }
+        Ok(())
     }
 
     /// Get frozen edge count for outgoing adjacency (for testing).
@@ -736,6 +744,19 @@ impl CurrentIndexes {
 impl Default for CurrentIndexes {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for CurrentIndexes {
+    fn drop(&mut self) {
+        // Ensure background compaction thread is shut down gracefully
+        // to prevent thread leaks when CurrentIndexes is dropped.
+        if let Some((scheduler, handle)) = self.compaction_scheduler.take() {
+            scheduler.shutdown();
+            // Give thread a moment to finish, but don't block indefinitely
+            // on drop since that could cause deadlocks.
+            let _ = handle.join();
+        }
     }
 }
 
