@@ -146,13 +146,21 @@ impl CurrentIndexes {
         let source = edge.source;
         let target = edge.target;
         let label = edge.label;
+
+        // Check if this is an update (edge already exists) vs new insertion
+        // For updates, the adjacency doesn't change (source/target stay the same)
+        // so we skip adjacency insertion to avoid duplicates
+        let is_update = self.edges.contains_key(&edge_id);
+
         self.edges.insert(edge_id, edge);
 
-        // Insert into incremental adjacency indexes (O(1))
-        self.outgoing
-            .insert(source, AdjacencyEntry::new(target, edge_id, label));
-        self.incoming
-            .insert(target, AdjacencyEntry::new(source, edge_id, label));
+        // Only insert into adjacency indexes for NEW edges, not updates
+        if !is_update {
+            self.outgoing
+                .insert(source, AdjacencyEntry::new(target, edge_id, label));
+            self.incoming
+                .insert(target, AdjacencyEntry::new(source, edge_id, label));
+        }
     }
 
     /// Get a node by ID.
