@@ -14,7 +14,10 @@ pub mod vector;
 // Re-export commonly used types for convenience
 pub use graph::{Edge, Node};
 pub use id::{EdgeId, EntityId, IdGenerator, NodeId, VersionId};
-pub use interning::{GLOBAL_INTERNER, InternedString, StringInterner};
+pub use interning::{
+    DEFAULT_MAX_INTERNED_STRINGS, GLOBAL_INTERNER, InternedString, MAX_INTERNED_STRINGS_ENV,
+    StringInterner,
+};
 pub use property::{PropertyKey, PropertyMap, PropertyMapBuilder, PropertyValue};
 pub use temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange, Timestamp};
 pub use vector::{
