@@ -120,6 +120,7 @@ pub use group_commit::GroupCommitCoordinator;
 
 use crate::core::{
     id::{EdgeId, NodeId, VersionId},
+    interning::InternedString,
     property::PropertyMap,
     temporal::{BiTemporalInterval, Timestamp, time},
 };
@@ -147,8 +148,8 @@ pub enum WalOperation {
     CreateNode {
         /// The node ID
         node_id: NodeId,
-        /// The node label
-        label: String,
+        /// The node label (interned for efficiency)
+        label: InternedString,
         /// The node properties
         properties: PropertyMap,
         /// The bi-temporal interval
@@ -162,8 +163,8 @@ pub enum WalOperation {
         source: NodeId,
         /// The target node ID
         target: NodeId,
-        /// The edge label
-        label: String,
+        /// The edge label (interned for efficiency)
+        label: InternedString,
         /// The edge properties
         properties: PropertyMap,
         /// The bi-temporal interval
@@ -175,8 +176,8 @@ pub enum WalOperation {
         node_id: NodeId,
         /// The version ID
         version_id: VersionId,
-        /// The new label
-        label: String,
+        /// The new label (interned for efficiency)
+        label: InternedString,
         /// The new properties
         properties: PropertyMap,
         /// The bi-temporal interval
@@ -188,8 +189,8 @@ pub enum WalOperation {
         edge_id: EdgeId,
         /// The version ID
         version_id: VersionId,
-        /// The new label
-        label: String,
+        /// The new label (interned for efficiency)
+        label: InternedString,
         /// The new properties
         properties: PropertyMap,
         /// The bi-temporal interval
@@ -273,11 +274,10 @@ impl WalEntry {
 
 use crate::utils::error::Result;
 
-/// Helper to serialize a string into the buffer (length prefix + bytes)
+/// Helper to serialize an InternedString into the buffer (4-byte ID)
 #[inline(always)]
-fn serialize_str(s: &str, buffer: &mut Vec<u8>) {
-    buffer.extend_from_slice(&(s.len() as u32).to_le_bytes());
-    buffer.extend_from_slice(s.as_bytes());
+fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
+    buffer.extend_from_slice(&s.as_u32().to_le_bytes());
 }
 
 /// Estimate the required buffer capacity for serializing a WAL entry.
@@ -324,32 +324,24 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
     const TEMPORAL_SIZE: usize = 48;
 
     let variable_size = match operation {
-        WalOperation::CreateNode {
-            label, properties, ..
-        } => {
-            // op type (1) + node_id (8) + label length prefix (4) + label + properties + temporal (48)
-            let base = 1 + 8 + 4 + label.len() + TEMPORAL_SIZE;
+        WalOperation::CreateNode { properties, .. } => {
+            // op type (1) + node_id (8) + label (4-byte InternedString ID) + properties + temporal (48)
+            let base = 1 + 8 + 4 + TEMPORAL_SIZE;
             base + estimate_property_map_size(properties)
         }
-        WalOperation::CreateEdge {
-            label, properties, ..
-        } => {
-            // op type (1) + edge_id (8) + source (8) + target (8) + label length (4) + label + properties + temporal (48)
-            let base = 1 + 8 + 8 + 8 + 4 + label.len() + TEMPORAL_SIZE;
+        WalOperation::CreateEdge { properties, .. } => {
+            // op type (1) + edge_id (8) + source (8) + target (8) + label (4-byte InternedString ID) + properties + temporal (48)
+            let base = 1 + 8 + 8 + 8 + 4 + TEMPORAL_SIZE;
             base + estimate_property_map_size(properties)
         }
-        WalOperation::UpdateNode {
-            label, properties, ..
-        } => {
-            // op type (1) + node_id (8) + version_id (8) + label length (4) + label + properties + temporal (48)
-            let base = 1 + 8 + 8 + 4 + label.len() + TEMPORAL_SIZE;
+        WalOperation::UpdateNode { properties, .. } => {
+            // op type (1) + node_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + temporal (48)
+            let base = 1 + 8 + 8 + 4 + TEMPORAL_SIZE;
             base + estimate_property_map_size(properties)
         }
-        WalOperation::UpdateEdge {
-            label, properties, ..
-        } => {
-            // op type (1) + edge_id (8) + version_id (8) + label length (4) + label + properties + temporal (48)
-            let base = 1 + 8 + 8 + 4 + label.len() + TEMPORAL_SIZE;
+        WalOperation::UpdateEdge { properties, .. } => {
+            // op type (1) + edge_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + temporal (48)
+            let base = 1 + 8 + 8 + 4 + TEMPORAL_SIZE;
             base + estimate_property_map_size(properties)
         }
         WalOperation::DeleteNode { .. } => {
@@ -468,7 +460,7 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
         } => {
             buffer.push(1); // operation type
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
-            serialize_str(label, buffer);
+            serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             temporal.serialize_into(buffer);
         }
@@ -484,7 +476,7 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&source.as_u64().to_le_bytes());
             buffer.extend_from_slice(&target.as_u64().to_le_bytes());
-            serialize_str(label, buffer);
+            serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             temporal.serialize_into(buffer);
         }
@@ -498,7 +490,7 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
             buffer.push(3); // operation type
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
-            serialize_str(label, buffer);
+            serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             temporal.serialize_into(buffer);
         }
@@ -512,7 +504,7 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
             buffer.push(4); // operation type
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
-            serialize_str(label, buffer);
+            serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
             temporal.serialize_into(buffer);
         }
@@ -551,6 +543,7 @@ mod tests {
     use super::*;
     use crate::core::EdgeId;
     use crate::core::NodeId;
+    use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::BiTemporalInterval;
 
@@ -645,20 +638,20 @@ mod tests {
     #[test]
     fn test_estimate_capacity_create_node_empty_properties() {
         // CreateNode with empty properties:
-        // Fixed: 24 bytes
-        // op type (1) + node_id (8) + label_len (4) + label (4 for "test") + properties (4 for count) + temporal (48)
-        // = 24 + 1 + 8 + 4 + 4 + 4 + 48 = 93 bytes
+        // Fixed: 24 bytes (LSN + Timestamp + Checksum)
+        // op type (1) + node_id (8) + label (4-byte InternedString) + properties (4 for empty count) + temporal (48)
+        // = 24 + 1 + 8 + 4 + 4 + 48 = 89 bytes
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
-            label: "test".to_string(),
+            label: GLOBAL_INTERNER.intern("test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             temporal: test_temporal(),
         };
 
         let estimated = estimate_entry_capacity(&op);
         assert_eq!(
-            estimated, 93,
-            "CreateNode with empty properties should be 93 bytes"
+            estimated, 89,
+            "CreateNode with empty properties should be 89 bytes"
         );
 
         // Verify by actually serializing
@@ -684,7 +677,7 @@ mod tests {
 
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
-            label: "Person".to_string(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
             temporal: test_temporal(),
         };
@@ -725,7 +718,7 @@ mod tests {
             edge_id: EdgeId::new(1).unwrap(),
             source: NodeId::new(1).unwrap(),
             target: NodeId::new(2).unwrap(),
-            label: "KNOWS".to_string(),
+            label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties,
             temporal: test_temporal(),
         };
@@ -763,7 +756,7 @@ mod tests {
 
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
-            label: "Document".to_string(),
+            label: GLOBAL_INTERNER.intern("Document").unwrap(),
             properties,
             temporal: test_temporal(),
         };
@@ -803,7 +796,7 @@ mod tests {
         let op = WalOperation::UpdateNode {
             node_id: NodeId::new(1).unwrap(),
             version_id: crate::core::VersionId::new(1).unwrap(),
-            label: "LargeNode".to_string(),
+            label: GLOBAL_INTERNER.intern("LargeNode").unwrap(),
             properties,
             temporal: test_temporal(),
         };

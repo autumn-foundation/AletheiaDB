@@ -61,6 +61,7 @@
 
 use gallifreydb::core::{
     id::{EdgeId, NodeId},
+    interning::GLOBAL_INTERNER,
     property::PropertyMapBuilder,
     temporal::{BiTemporalInterval, time},
 };
@@ -190,7 +191,7 @@ fn main() -> Result<()> {
         let node_id = NodeId::new(i)?;
         wal.append(WalOperation::CreateNode {
             node_id,
-            label: format!("Node{}", i),
+            label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
             properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -206,7 +207,7 @@ fn main() -> Result<()> {
             edge_id,
             source,
             target,
-            label: "EDGE".to_string(),
+            label: GLOBAL_INTERNER.intern("EDGE").unwrap(),
             properties: PropertyMapBuilder::new().insert("weight", i as i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;

@@ -10,6 +10,7 @@ use gallifreydb::{
     core::{
         PropertyMapBuilder,
         id::{EdgeId, NodeId, VersionId},
+        interning::GLOBAL_INTERNER,
         temporal::{BiTemporalInterval, time},
     },
     storage::wal::{
@@ -46,7 +47,7 @@ fn bench_serialize_create_node(c: &mut Criterion) {
 
                 let operation = WalOperation::CreateNode {
                     node_id: black_box(NodeId::new(1).unwrap()),
-                    label: "Person".to_string(),
+                    label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: props.build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
@@ -79,7 +80,7 @@ fn bench_serialize_create_edge(c: &mut Criterion) {
                     edge_id: black_box(EdgeId::new(1).unwrap()),
                     source: NodeId::new(1).unwrap(),
                     target: NodeId::new(2).unwrap(),
-                    label: "KNOWS".to_string(),
+                    label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
                     properties: props.build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
@@ -110,7 +111,7 @@ fn bench_serialize_update_node(c: &mut Criterion) {
                 let operation = WalOperation::UpdateNode {
                     node_id: black_box(NodeId::new(1).unwrap()),
                     version_id: VersionId::new(2).unwrap(),
-                    label: "Person".to_string(),
+                    label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: props.build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
@@ -135,7 +136,7 @@ fn bench_serialize_batch(c: &mut Criterion) {
             for i in 0..1000 {
                 let operation = WalOperation::CreateNode {
                     node_id: NodeId::new(i).unwrap(),
-                    label: "Person".to_string(),
+                    label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
@@ -159,7 +160,7 @@ fn bench_serialize_high_frequency(c: &mut Criterion) {
             for i in 0..10000 {
                 let operation = WalOperation::CreateNode {
                     node_id: NodeId::new(i).unwrap(),
-                    label: "Test".to_string(),
+                    label: GLOBAL_INTERNER.intern("Test").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };

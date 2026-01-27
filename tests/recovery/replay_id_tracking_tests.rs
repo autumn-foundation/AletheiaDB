@@ -7,6 +7,7 @@
 //! - Ensure new operations generate non-conflicting IDs
 
 use gallifreydb::{
+    GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::{PropertyMap, PropertyMapBuilder},
@@ -36,7 +37,7 @@ fn test_recover_initializes_node_id_generator() -> Result<()> {
     for i in 1..=5 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -77,7 +78,7 @@ fn test_recover_initializes_edge_id_generator() -> Result<()> {
     for i in 1..=2 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -89,7 +90,7 @@ fn test_recover_initializes_edge_id_generator() -> Result<()> {
             edge_id: EdgeId::new(i).unwrap(),
             source: NodeId::new(1).unwrap(),
             target: NodeId::new(2).unwrap(),
-            label: "CONNECTS".to_string(),
+            label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -135,7 +136,7 @@ fn test_recover_initializes_version_id_generator() -> Result<()> {
     // Create node (version 1)
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Node".to_string(),
+        label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("count", 0_i64).build(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -145,7 +146,7 @@ fn test_recover_initializes_version_id_generator() -> Result<()> {
         wal.append(WalOperation::UpdateNode {
             node_id,
             version_id: VersionId::new((i + 1) as u64).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMapBuilder::new().insert("count", i).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -189,7 +190,7 @@ fn test_recover_handles_gaps_in_ids() -> Result<()> {
     for id in [1, 5, 10] {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(id).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -229,7 +230,7 @@ fn test_recover_with_deletes_tracks_max_ids() -> Result<()> {
     for i in 1..=3 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -305,7 +306,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
     for i in 1..=3 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -317,7 +318,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
             edge_id: EdgeId::new(i).unwrap(),
             source: NodeId::new(1).unwrap(),
             target: NodeId::new(2).unwrap(),
-            label: "CONNECTS".to_string(),
+            label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -327,7 +328,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id: NodeId::new(1).unwrap(),
         version_id: VersionId::new(6).unwrap(),
-        label: "UpdatedNode".to_string(),
+        label: GLOBAL_INTERNER.intern("UpdatedNode").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;

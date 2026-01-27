@@ -640,13 +640,10 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    let label_str = GLOBAL_INTERNER
-                        .resolve(*label)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| String::from(""));
+                    // No allocation! Just copy the 4-byte InternedString ID
                     WalOperation::CreateNode {
                         node_id: *node_id,
-                        label: label_str,
+                        label: *label,
                         properties: properties.clone(),
                         temporal,
                     }
@@ -659,15 +656,12 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    let label_str = GLOBAL_INTERNER
-                        .resolve(*label)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| String::from(""));
+                    // No allocation! Just copy the 4-byte InternedString ID
                     WalOperation::CreateEdge {
                         edge_id: *edge_id,
                         source: *source,
                         target: *target,
-                        label: label_str,
+                        label: *label,
                         properties: properties.clone(),
                         temporal,
                     }
@@ -679,14 +673,11 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    let label_str = GLOBAL_INTERNER
-                        .resolve(*label)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| String::from(""));
+                    // No allocation! Just copy the 4-byte InternedString ID
                     WalOperation::UpdateNode {
                         node_id: *node_id,
                         version_id: *version_id,
-                        label: label_str,
+                        label: *label,
                         properties: properties.clone(),
                         temporal,
                     }
@@ -698,14 +689,11 @@ impl WriteTransaction {
                     properties,
                     ..
                 } => {
-                    let label_str = GLOBAL_INTERNER
-                        .resolve(*label)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| String::from(""));
+                    // No allocation! Just copy the 4-byte InternedString ID
                     WalOperation::UpdateEdge {
                         edge_id: *edge_id,
                         version_id: *version_id,
-                        label: label_str,
+                        label: *label,
                         properties: properties.clone(),
                         temporal,
                     }

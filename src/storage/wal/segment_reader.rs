@@ -299,24 +299,24 @@ pub(crate) fn parse_entry_at(
             let node_id = deserialize_node_id(buffer, current_offset, "CreateNode")?;
             current_offset += 8;
 
-            let label_len = u32::from_le_bytes(
-                buffer[current_offset..current_offset + 4]
-                    .try_into()
-                    .unwrap(), // Safe due to buffer length check above
-            ) as usize;
-            current_offset += 4;
-
-            // Use saturating_add to prevent overflow
-            if current_offset.saturating_add(label_len) > buffer.len() {
+            // Read 4-byte InternedString ID
+            if current_offset + 4 > buffer.len() {
                 return Err(StorageError::CorruptedData(
                     "Insufficient buffer size for CreateNode label".to_string(),
                 )
                 .into());
             }
-            let label =
-                String::from_utf8_lossy(&buffer[current_offset..current_offset + label_len])
-                    .to_string();
-            current_offset += label_len;
+            let label_id = u32::from_le_bytes(
+                buffer[current_offset..current_offset + 4]
+                    .try_into()
+                    .unwrap(), // Safe due to buffer length check above
+            );
+            current_offset += 4;
+
+            // Reconstruct InternedString from ID
+            // During recovery, the string should already be in the interner
+            // (either from checkpoint or previous WAL entries)
+            let label = crate::core::interning::InternedString::from_raw(label_id);
 
             // V1+: deserialize properties and temporal
             let (properties, temporal) = if version >= WAL_VERSION {
@@ -353,24 +353,22 @@ pub(crate) fn parse_entry_at(
             let target = deserialize_node_id(buffer, current_offset, "CreateEdge target")?;
             current_offset += 8;
 
-            let label_len = u32::from_le_bytes(
-                buffer[current_offset..current_offset + 4]
-                    .try_into()
-                    .unwrap(), // Safe due to buffer length check above
-            ) as usize;
-            current_offset += 4;
-
-            // Use saturating_add to prevent overflow
-            if current_offset.saturating_add(label_len) > buffer.len() {
+            // Read 4-byte InternedString ID
+            if current_offset + 4 > buffer.len() {
                 return Err(StorageError::CorruptedData(
                     "Insufficient buffer size for CreateEdge label".to_string(),
                 )
                 .into());
             }
-            let label =
-                String::from_utf8_lossy(&buffer[current_offset..current_offset + label_len])
-                    .to_string();
-            current_offset += label_len;
+            let label_id = u32::from_le_bytes(
+                buffer[current_offset..current_offset + 4]
+                    .try_into()
+                    .unwrap(), // Safe due to buffer length check above
+            );
+            current_offset += 4;
+
+            // Reconstruct InternedString from ID
+            let label = crate::core::interning::InternedString::from_raw(label_id);
 
             let (properties, temporal) = if version >= WAL_VERSION {
                 let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
@@ -393,7 +391,7 @@ pub(crate) fn parse_entry_at(
         }
         3 => {
             // UpdateNode
-            if current_offset + 16 > buffer.len() {
+            if current_offset + 20 > buffer.len() {
                 return Err(StorageError::CorruptedData(
                     "Insufficient buffer size for UpdateNode".to_string(),
                 )
@@ -406,24 +404,17 @@ pub(crate) fn parse_entry_at(
             current_offset += 8;
 
             let (label, properties, temporal) = if version >= WAL_VERSION {
-                let label_len = u32::from_le_bytes([
+                // Read 4-byte InternedString ID
+                let label_id = u32::from_le_bytes([
                     buffer[current_offset],
                     buffer[current_offset + 1],
                     buffer[current_offset + 2],
                     buffer[current_offset + 3],
-                ]) as usize;
+                ]);
                 current_offset += 4;
 
-                if current_offset + label_len > buffer.len() {
-                    return Err(StorageError::CorruptedData(
-                        "Insufficient buffer size for UpdateNode label".to_string(),
-                    )
-                    .into());
-                }
-                let lbl =
-                    String::from_utf8_lossy(&buffer[current_offset..current_offset + label_len])
-                        .to_string();
-                current_offset += label_len;
+                // Reconstruct InternedString from ID
+                let lbl = crate::core::interning::InternedString::from_raw(label_id);
 
                 let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
                 current_offset += props_len;
@@ -432,7 +423,8 @@ pub(crate) fn parse_entry_at(
                 (lbl, props, temp)
             } else {
                 (
-                    String::new(),
+                    // For old WAL format, create a dummy InternedString (this shouldn't happen in practice)
+                    crate::core::interning::InternedString::from_raw(0),
                     PropertyMap::new(),
                     BiTemporalInterval::current(timestamp),
                 )
@@ -461,24 +453,17 @@ pub(crate) fn parse_entry_at(
             current_offset += 8;
 
             let (label, properties, temporal) = if version >= WAL_VERSION {
-                let label_len = u32::from_le_bytes([
+                // Read 4-byte InternedString ID
+                let label_id = u32::from_le_bytes([
                     buffer[current_offset],
                     buffer[current_offset + 1],
                     buffer[current_offset + 2],
                     buffer[current_offset + 3],
-                ]) as usize;
+                ]);
                 current_offset += 4;
 
-                if current_offset + label_len > buffer.len() {
-                    return Err(StorageError::CorruptedData(
-                        "Insufficient buffer size for UpdateEdge label".to_string(),
-                    )
-                    .into());
-                }
-                let lbl =
-                    String::from_utf8_lossy(&buffer[current_offset..current_offset + label_len])
-                        .to_string();
-                current_offset += label_len;
+                // Reconstruct InternedString from ID
+                let lbl = crate::core::interning::InternedString::from_raw(label_id);
 
                 let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
                 current_offset += props_len;
@@ -487,7 +472,8 @@ pub(crate) fn parse_entry_at(
                 (lbl, props, temp)
             } else {
                 (
-                    String::new(),
+                    // For old WAL format, create a dummy InternedString (this shouldn't happen in practice)
+                    crate::core::interning::InternedString::from_raw(0),
                     PropertyMap::new(),
                     BiTemporalInterval::current(timestamp),
                 )
@@ -670,6 +656,7 @@ fn deserialize_version_id(buffer: &[u8], offset: usize, context: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::temporal::time;
     use crate::storage::wal::serialize_entry_into;
     use tempfile::TempDir;
@@ -699,7 +686,7 @@ mod tests {
         let node_id = NodeId::new(42).unwrap();
         let operation = WalOperation::CreateNode {
             node_id,
-            label: "Person".to_string(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         };
@@ -722,7 +709,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(parsed_id, node_id);
-                assert_eq!(label, "Person");
+                assert_eq!(label, GLOBAL_INTERNER.intern("Person").unwrap());
             }
             _ => panic!("Expected CreateNode operation"),
         }
@@ -738,7 +725,7 @@ mod tests {
             edge_id,
             source,
             target,
-            label: "KNOWS".to_string(),
+            label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         };
@@ -765,7 +752,7 @@ mod tests {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(parsed_source, source);
                 assert_eq!(parsed_target, target);
-                assert_eq!(label, "KNOWS");
+                assert_eq!(label, GLOBAL_INTERNER.intern("KNOWS").unwrap());
             }
             _ => panic!("Expected CreateEdge operation"),
         }
@@ -779,7 +766,7 @@ mod tests {
         let operation = WalOperation::UpdateNode {
             node_id,
             version_id,
-            label: "UpdatedPerson".to_string(),
+            label: GLOBAL_INTERNER.intern("UpdatedPerson").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         };
@@ -804,7 +791,7 @@ mod tests {
             } => {
                 assert_eq!(parsed_id, node_id);
                 assert_eq!(parsed_version, version_id);
-                assert_eq!(label, "UpdatedPerson");
+                assert_eq!(label, GLOBAL_INTERNER.intern("UpdatedPerson").unwrap());
             }
             _ => panic!("Expected UpdateNode operation"),
         }
@@ -818,7 +805,7 @@ mod tests {
         let operation = WalOperation::UpdateEdge {
             edge_id,
             version_id,
-            label: "UPDATED_KNOWS".to_string(),
+            label: GLOBAL_INTERNER.intern("UPDATED_KNOWS").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         };
@@ -843,7 +830,7 @@ mod tests {
             } => {
                 assert_eq!(parsed_id, edge_id);
                 assert_eq!(parsed_version, version_id);
-                assert_eq!(label, "UPDATED_KNOWS");
+                assert_eq!(label, GLOBAL_INTERNER.intern("UPDATED_KNOWS").unwrap());
             }
             _ => panic!("Expected UpdateEdge operation"),
         }
@@ -942,7 +929,7 @@ mod tests {
         // Create two entries
         let operation1 = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
-            label: "First".to_string(),
+            label: GLOBAL_INTERNER.intern("First").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         };
@@ -950,7 +937,7 @@ mod tests {
 
         let operation2 = WalOperation::CreateNode {
             node_id: NodeId::new(2).unwrap(),
-            label: "Second".to_string(),
+            label: GLOBAL_INTERNER.intern("Second").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         };
@@ -975,7 +962,7 @@ mod tests {
         assert_eq!(parsed_entry.lsn, LSN(2));
         match parsed_entry.operation {
             WalOperation::CreateNode { label, .. } => {
-                assert_eq!(label, "Second");
+                assert_eq!(label, GLOBAL_INTERNER.intern("Second").unwrap());
             }
             _ => panic!("Expected CreateNode operation"),
         }
@@ -1064,10 +1051,9 @@ mod tests {
         // Node ID (8 bytes)
         buffer.extend_from_slice(&123u64.to_le_bytes());
 
-        // Label
-        let label = "TestNode";
-        buffer.extend_from_slice(&(label.len() as u32).to_le_bytes());
-        buffer.extend_from_slice(label.as_bytes());
+        // Label (4-byte InternedString ID)
+        let label_id = GLOBAL_INTERNER.intern("TestNode").unwrap().as_u32();
+        buffer.extend_from_slice(&label_id.to_le_bytes());
 
         // Note: Version 0 format does NOT include properties or temporal data
 
@@ -1092,7 +1078,7 @@ mod tests {
                 temporal,
             } => {
                 assert_eq!(node_id.as_u64(), 123);
-                assert_eq!(parsed_label, "TestNode");
+                assert_eq!(parsed_label, GLOBAL_INTERNER.intern("TestNode").unwrap());
                 // Version 0 should have empty properties
                 assert!(properties.is_empty());
                 // Temporal should be set to current(timestamp)
@@ -1108,7 +1094,7 @@ mod tests {
         let node_id = NodeId::new(42).unwrap();
         let operation = WalOperation::CreateNode {
             node_id,
-            label: "Person".to_string(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         };
@@ -1164,7 +1150,7 @@ mod tests {
 
             let operation = WalOperation::CreateNode {
                 node_id: NodeId::new(i + 1).unwrap(),
-                label: format!("Node_{}", i),
+                label: GLOBAL_INTERNER.intern(format!("Node_{}", i)).unwrap(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             };
@@ -1216,7 +1202,9 @@ mod tests {
 
                 let operation = WalOperation::CreateNode {
                     node_id: NodeId::new(lsn.0).unwrap(),
-                    label: format!("Node_seg{}_entry{}", seg_id, i),
+                    label: GLOBAL_INTERNER
+                        .intern(format!("Node_seg{}_entry{}", seg_id, i))
+                        .unwrap(),
                     properties: PropertyMap::new(),
                     temporal: BiTemporalInterval::current(time::now()),
                 };
@@ -1264,7 +1252,7 @@ mod tests {
             let lsn = LSN(i);
             let operation = WalOperation::CreateNode {
                 node_id: NodeId::new(i).unwrap(),
-                label: format!("Node_{}", i),
+                label: GLOBAL_INTERNER.intern(format!("Node_{}", i)).unwrap(),
                 properties: PropertyMap::new(),
                 temporal: BiTemporalInterval::current(time::now()),
             };
@@ -1330,7 +1318,7 @@ mod tests {
         // Write one complete entry
         let operation = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
-            label: "Node_1".to_string(),
+            label: GLOBAL_INTERNER.intern("Node_1").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         };

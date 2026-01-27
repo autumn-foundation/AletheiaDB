@@ -1103,12 +1103,8 @@ impl CheckpointManager {
                 } => {
                     max_node_id = max_node_id.max(node_id.as_u64());
 
-                    let interned_label =
-                        GLOBAL_INTERNER
-                            .intern(&label)
-                            .map_err(|e| StorageError::WalError {
-                                reason: format!("Failed to intern label: {}", e),
-                            })?;
+                    // Label is already an InternedString (no allocation needed!)
+                    let interned_label = label;
 
                     let commit_timestamp = temporal.transaction_time().start();
                     let metadata =
@@ -1145,12 +1141,8 @@ impl CheckpointManager {
                 } => {
                     max_edge_id = max_edge_id.max(edge_id.as_u64());
 
-                    let interned_label =
-                        GLOBAL_INTERNER
-                            .intern(&label)
-                            .map_err(|e| StorageError::WalError {
-                                reason: format!("Failed to intern label: {}", e),
-                            })?;
+                    // Label is already an InternedString (no allocation needed!)
+                    let interned_label = label;
 
                     let commit_timestamp = temporal.transaction_time().start();
                     let metadata =
@@ -1191,12 +1183,8 @@ impl CheckpointManager {
                     max_version_id = max_version_id.max(version_id.as_u64());
                     next_version_id = next_version_id.max(version_id.as_u64() + 1);
 
-                    let interned_label =
-                        GLOBAL_INTERNER
-                            .intern(&label)
-                            .map_err(|e| StorageError::WalError {
-                                reason: format!("Failed to intern label: {}", e),
-                            })?;
+                    // Label is already an InternedString (no allocation needed!)
+                    let interned_label = label;
 
                     let commit_timestamp = temporal.transaction_time().start();
                     let metadata =
@@ -1239,12 +1227,8 @@ impl CheckpointManager {
 
                     let current_edge = current.get_edge(edge_id)?;
 
-                    let interned_label =
-                        GLOBAL_INTERNER
-                            .intern(&label)
-                            .map_err(|e| StorageError::WalError {
-                                reason: format!("Failed to intern label: {}", e),
-                            })?;
+                    // Label is already an InternedString (no allocation needed!)
+                    let interned_label = label;
 
                     let commit_timestamp = temporal.transaction_time().start();
                     let metadata =
@@ -1379,6 +1363,7 @@ pub struct CheckpointStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GLOBAL_INTERNER;
     use crate::PropertyMapBuilder;
     use crate::core::id::NodeId;
     use crate::core::temporal::{BiTemporalInterval, time};
@@ -1538,7 +1523,7 @@ mod tests {
                 .build();
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: "Person".to_string(),
+                label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: props,
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -1582,7 +1567,7 @@ mod tests {
                 .build();
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: "Person".to_string(),
+                label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: props,
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -1681,7 +1666,7 @@ mod tests {
             let props = PropertyMapBuilder::new().insert("value", i as i64).build();
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: "Test".to_string(),
+                label: GLOBAL_INTERNER.intern("Test").unwrap(),
                 properties: props,
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -2075,7 +2060,7 @@ mod tests {
         for i in 1..=2 {
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: "Person".to_string(),
+                label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: PropertyMapBuilder::new()
                     .insert("name", format!("Person{}", i))
                     .build(),
@@ -2088,7 +2073,7 @@ mod tests {
             edge_id: EdgeId::new(1)?,
             source: NodeId::new(1)?,
             target: NodeId::new(2)?,
-            label: "KNOWS".to_string(),
+            label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("since", 2023i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -2128,7 +2113,7 @@ mod tests {
         // Create node
         wal.append(WalOperation::CreateNode {
             node_id,
-            label: "Person".to_string(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("name", "Alice")
                 .insert("age", 30i64)
@@ -2140,7 +2125,7 @@ mod tests {
         wal.append(WalOperation::UpdateNode {
             node_id,
             version_id: VersionId::new(2)?,
-            label: "Person".to_string(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("name", "Alice")
                 .insert("age", 31i64)
@@ -2182,7 +2167,7 @@ mod tests {
         for i in 1..=2 {
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: "Person".to_string(),
+                label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -2195,7 +2180,7 @@ mod tests {
             edge_id,
             source: NodeId::new(1)?,
             target: NodeId::new(2)?,
-            label: "KNOWS".to_string(),
+            label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("strength", 5i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -2204,7 +2189,7 @@ mod tests {
         wal.append(WalOperation::UpdateEdge {
             edge_id,
             version_id: VersionId::new(4)?,
-            label: "KNOWS".to_string(),
+            label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("strength", 10i64).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -2242,7 +2227,7 @@ mod tests {
         // Create node
         wal.append(WalOperation::CreateNode {
             node_id,
-            label: "ToDelete".to_string(),
+            label: GLOBAL_INTERNER.intern("ToDelete").unwrap(),
             properties: PropertyMapBuilder::new().insert("temp", true).build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -2285,7 +2270,7 @@ mod tests {
         for i in 1..=2 {
             wal.append(WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: "Person".to_string(),
+                label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 temporal: BiTemporalInterval::current(time::now()),
             })?;
@@ -2298,7 +2283,7 @@ mod tests {
             edge_id,
             source: NodeId::new(1)?,
             target: NodeId::new(2)?,
-            label: "TEMP_EDGE".to_string(),
+            label: GLOBAL_INTERNER.intern("TEMP_EDGE").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -2340,7 +2325,7 @@ mod tests {
         // Create a node
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(1)?,
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -2354,7 +2339,7 @@ mod tests {
         // Create another node
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(2)?,
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -2765,7 +2750,7 @@ mod tests {
         // Add entry with high node ID
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(500)?,
-            label: "HighId".to_string(),
+            label: GLOBAL_INTERNER.intern("HighId").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -2775,7 +2760,7 @@ mod tests {
             edge_id: EdgeId::new(600)?,
             source: NodeId::new(1)?,
             target: NodeId::new(500)?,
-            label: "HighEdge".to_string(),
+            label: GLOBAL_INTERNER.intern("HighEdge").unwrap(),
             properties: PropertyMapBuilder::new().build(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -2957,7 +2942,7 @@ mod tests {
         for i in 1..=100 {
             let op = WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: format!("Node{}", i),
+                label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 temporal: BiTemporalInterval::current(time::now()),
             };
@@ -3067,7 +3052,7 @@ mod tests {
         for i in 1..=100 {
             let op = WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: format!("Node{}", i),
+                label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 temporal: BiTemporalInterval::current(time::now()),
             };
@@ -3179,7 +3164,7 @@ mod tests {
         for i in 1..=50 {
             let op = WalOperation::CreateNode {
                 node_id: NodeId::new(i)?,
-                label: format!("Node{}", i),
+                label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
                 temporal: BiTemporalInterval::current(time::now()),
             };

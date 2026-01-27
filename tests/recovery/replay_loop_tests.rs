@@ -7,6 +7,7 @@
 //! - Handles errors gracefully (corrupt entries, invalid IDs)
 
 use gallifreydb::{
+    GLOBAL_INTERNER,
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::PropertyMap,
@@ -78,7 +79,7 @@ fn test_recover_tracks_max_node_id() -> Result<()> {
     for id in [10, 20, 100] {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(id).unwrap(),
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -119,7 +120,7 @@ fn test_recover_tracks_max_edge_id() -> Result<()> {
     for id in [1, 2] {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(id).unwrap(),
-            label: "Node".to_string(),
+            label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -131,7 +132,7 @@ fn test_recover_tracks_max_edge_id() -> Result<()> {
             edge_id: EdgeId::new(id).unwrap(),
             source: NodeId::new(1).unwrap(),
             target: NodeId::new(2).unwrap(),
-            label: "CONNECTS".to_string(),
+            label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -178,7 +179,7 @@ fn test_recover_tracks_max_version_id() -> Result<()> {
     // Create node first
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Node".to_string(),
+        label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -188,7 +189,7 @@ fn test_recover_tracks_max_version_id() -> Result<()> {
         wal.append(WalOperation::UpdateNode {
             node_id,
             version_id: VersionId::new(version_id).unwrap(),
-            label: "Updated".to_string(),
+            label: GLOBAL_INTERNER.intern("Updated").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -233,7 +234,7 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
     // Create node
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Node".to_string(),
+        label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -242,7 +243,7 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(100).unwrap(),
-        label: "Updated".to_string(),
+        label: GLOBAL_INTERNER.intern("Updated").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -251,7 +252,7 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(50).unwrap(),
-        label: "Another".to_string(),
+        label: GLOBAL_INTERNER.intern("Another").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -298,7 +299,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
     // Create node
     wal.append(WalOperation::CreateNode {
         node_id,
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -308,7 +309,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
         edge_id,
         source: node_id,
         target: NodeId::new(2).unwrap(),
-        label: "KNOWS".to_string(),
+        label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -317,7 +318,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
     wal.append(WalOperation::UpdateNode {
         node_id,
         version_id: VersionId::new(2).unwrap(),
-        label: "Person".to_string(),
+        label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
         temporal: BiTemporalInterval::current(time::now()),
     })?;
@@ -360,7 +361,7 @@ fn test_recover_from_checkpoint_lsn() -> Result<()> {
     for i in 1..=100 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -423,7 +424,7 @@ fn test_recover_handles_checkpoint_marker() -> Result<()> {
     for i in 1..=10 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
@@ -439,7 +440,7 @@ fn test_recover_handles_checkpoint_marker() -> Result<()> {
     for i in 11..=20 {
         wal.append(WalOperation::CreateNode {
             node_id: NodeId::new(i).unwrap(),
-            label: "Test".to_string(),
+            label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
             temporal: BiTemporalInterval::current(time::now()),
         })?;
