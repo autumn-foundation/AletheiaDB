@@ -1,7 +1,8 @@
 # ADR-0026: Incremental CSR Adjacency Index
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-01-26
+**Implemented:** 2026-01-26
 **Deciders:** GallifreyDB Core Team
 **Categories:** index, performance, concurrency
 **Supersedes:** ADR-0005 (partially - evolves CSR format with incremental updates)
@@ -473,14 +474,22 @@ struct CurrentIndexes {
 ### Testing Strategy (TDD)
 
 **Phase 0**: ADR + test infrastructure ✓
-**Phase 1**: Core data structure (insert, stats)
-**Phase 2**: Read path with merged guard
-**Phase 3**: Tombstones & delete
-**Phase 4**: Compaction logic
-**Phase 5**: Background compaction thread
-**Phase 6**: CurrentIndexes integration
-**Phase 7**: Persistence integration
-**Phase 8**: Benchmarks & validation
+**Phase 1**: Core data structure (insert, stats) ✓
+**Phase 2**: Read path with merged guard ✓
+**Phase 3**: Tombstones & delete ✓
+**Phase 4**: Compaction logic ✓
+**Phase 5**: Background compaction thread ✓
+**Phase 6**: CurrentIndexes integration ✓
+**Phase 7**: Persistence integration (future)
+**Phase 8**: Benchmarks & validation (future)
+
+**Test Results (Phase 6 Complete):**
+- 29 incremental adjacency tests passing
+- 48 index::current tests passing
+- 64 recovery tests passing
+- 23 index persistence tests passing
+- 31 vector storage tests passing
+- All durability mode tests passing
 
 ### Migration Path
 
