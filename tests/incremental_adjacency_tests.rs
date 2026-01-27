@@ -983,6 +983,304 @@ mod phase6_current_indexes_integration {
 }
 
 // ============================================================================
+// Phase 7: Persistence Integration Tests
+// ============================================================================
+
+#[cfg(test)]
+mod phase7_persistence_integration {
+    use super::*;
+    use gallifreydb::PropertyMapBuilder;
+    use gallifreydb::core::graph::Edge;
+    use gallifreydb::core::id::VersionId;
+    use gallifreydb::index::current::CurrentIndexes;
+
+    // Step 7.1: Test delta reconstruction after import
+    #[test]
+    fn test_delta_reconstruction_after_import() {
+        let indexes = CurrentIndexes::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Insert 10 edges
+        for i in 0..10 {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                NodeId::new(0).unwrap(),
+                NodeId::new(i + 1).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+
+        // Compact to move edges to frozen
+        indexes.compact_adjacency();
+
+        // Add 3 more edges (these go to delta)
+        for i in 10..13 {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                NodeId::new(0).unwrap(),
+                NodeId::new(i + 1).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+
+        // Export CSR (only exports frozen, not delta)
+        let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
+        let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
+
+        // Create new indexes and import
+        let new_indexes = CurrentIndexes::new();
+
+        // Copy edges to new indexes (simulating persistence loading)
+        // In real persistence, edges would be loaded from disk
+        for i in 0..13 {
+            let edge_id = EdgeId::new(i).unwrap();
+            if let Some(edge) = indexes.get_edge(edge_id) {
+                new_indexes.insert_edge(edge);
+            }
+        }
+
+        // Import CSR - should reconstruct delta from diff
+        new_indexes.import_csr(
+            out_nodes,
+            out_offsets,
+            out_edges,
+            in_nodes,
+            in_offsets,
+            in_edges,
+        );
+
+        // Verify all 13 edges are visible (10 in frozen + 3 in delta)
+        {
+            let guard = new_indexes.get_outgoing(NodeId::new(0).unwrap());
+            assert_eq!(
+                guard.len(),
+                13,
+                "Should see all 13 edges after delta reconstruction"
+            );
+        }
+
+        // Verify delta was reconstructed (3 edges)
+        assert_eq!(
+            new_indexes.delta_edge_count(),
+            3,
+            "Delta should have 3 edges"
+        );
+        assert_eq!(
+            new_indexes.frozen_edge_count(),
+            10,
+            "Frozen should have 10 edges"
+        );
+    }
+
+    // Step 7.3: Test empty delta reconstruction
+    #[test]
+    fn test_empty_delta_reconstruction() {
+        let indexes = CurrentIndexes::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Insert 10 edges and compact (all go to frozen)
+        for i in 0..10 {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                NodeId::new(0).unwrap(),
+                NodeId::new(i + 1).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+        indexes.compact_adjacency();
+
+        // Export and import
+        let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
+        let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
+
+        let new_indexes = CurrentIndexes::new();
+        // Copy all edges using public API (simulating persistence loading)
+        let max_edge_id = 100; // Large enough to cover all tests
+        for i in 0..max_edge_id {
+            let edge_id = EdgeId::new(i).unwrap();
+            if let Some(edge) = indexes.get_edge(edge_id) {
+                new_indexes.insert_edge(edge);
+            }
+        }
+
+        new_indexes.import_csr(
+            out_nodes,
+            out_offsets,
+            out_edges,
+            in_nodes,
+            in_offsets,
+            in_edges,
+        );
+
+        // Verify delta is empty
+        assert_eq!(new_indexes.delta_edge_count(), 0, "Delta should be empty");
+        assert_eq!(
+            new_indexes.frozen_edge_count(),
+            10,
+            "Frozen should have 10 edges"
+        );
+
+        // Verify all edges are visible
+        {
+            let guard = new_indexes.get_outgoing(NodeId::new(0).unwrap());
+            assert_eq!(guard.len(), 10, "Should see all 10 edges");
+        }
+    }
+
+    // Step 7.5: Test delta reconstruction with multiple nodes
+    #[test]
+    fn test_delta_reconstruction_multiple_nodes() {
+        let indexes = CurrentIndexes::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Insert edges for nodes 0, 1, 2
+        for source in 0..3 {
+            for target in 0..5 {
+                let edge_id = source * 5 + target;
+                let edge = Edge::new(
+                    EdgeId::new(edge_id).unwrap(),
+                    knows,
+                    NodeId::new(source).unwrap(),
+                    NodeId::new(target + 10).unwrap(),
+                    PropertyMapBuilder::new().build(),
+                    VersionId::new(1).unwrap(),
+                );
+                indexes.insert_edge(edge);
+            }
+        }
+
+        // Compact to freeze first 15 edges
+        indexes.compact_adjacency();
+
+        // Add more edges for each node (these go to delta)
+        for source in 0..3 {
+            for target in 5..7 {
+                let edge_id = 15 + source * 2 + (target - 5);
+                let edge = Edge::new(
+                    EdgeId::new(edge_id).unwrap(),
+                    knows,
+                    NodeId::new(source).unwrap(),
+                    NodeId::new(target + 10).unwrap(),
+                    PropertyMapBuilder::new().build(),
+                    VersionId::new(1).unwrap(),
+                );
+                indexes.insert_edge(edge);
+            }
+        }
+
+        // Export and import
+        let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
+        let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
+
+        let new_indexes = CurrentIndexes::new();
+        // Copy all edges using public API (simulating persistence loading)
+        let max_edge_id = 100; // Large enough to cover all tests
+        for i in 0..max_edge_id {
+            let edge_id = EdgeId::new(i).unwrap();
+            if let Some(edge) = indexes.get_edge(edge_id) {
+                new_indexes.insert_edge(edge);
+            }
+        }
+
+        new_indexes.import_csr(
+            out_nodes,
+            out_offsets,
+            out_edges,
+            in_nodes,
+            in_offsets,
+            in_edges,
+        );
+
+        // Verify each node has correct edge count
+        for source in 0..3 {
+            let guard = new_indexes.get_outgoing(NodeId::new(source).unwrap());
+            assert_eq!(
+                guard.len(),
+                7,
+                "Each node should have 7 edges (5 frozen + 2 delta)"
+            );
+        }
+
+        // Verify delta was reconstructed correctly
+        assert_eq!(
+            new_indexes.delta_edge_count(),
+            6,
+            "Delta should have 6 edges (3 nodes × 2 edges)"
+        );
+        assert_eq!(
+            new_indexes.frozen_edge_count(),
+            15,
+            "Frozen should have 15 edges"
+        );
+    }
+
+    // Step 7.7: Test no delta when all edges in frozen
+    #[test]
+    fn test_no_delta_when_all_edges_frozen() {
+        let indexes = CurrentIndexes::new();
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Insert and compact (all edges frozen, no delta)
+        for i in 0..20 {
+            let edge = Edge::new(
+                EdgeId::new(i).unwrap(),
+                knows,
+                NodeId::new(i / 5).unwrap(),
+                NodeId::new(i + 10).unwrap(),
+                PropertyMapBuilder::new().build(),
+                VersionId::new(1).unwrap(),
+            );
+            indexes.insert_edge(edge);
+        }
+        indexes.compact_adjacency();
+
+        // Export and import
+        let (out_nodes, out_offsets, out_edges) = indexes.export_outgoing_csr();
+        let (in_nodes, in_offsets, in_edges) = indexes.export_incoming_csr();
+
+        let new_indexes = CurrentIndexes::new();
+        // Copy all edges using public API (simulating persistence loading)
+        let max_edge_id = 100; // Large enough to cover all tests
+        for i in 0..max_edge_id {
+            let edge_id = EdgeId::new(i).unwrap();
+            if let Some(edge) = indexes.get_edge(edge_id) {
+                new_indexes.insert_edge(edge);
+            }
+        }
+
+        new_indexes.import_csr(
+            out_nodes,
+            out_offsets,
+            out_edges,
+            in_nodes,
+            in_offsets,
+            in_edges,
+        );
+
+        // Delta should be empty
+        assert_eq!(
+            new_indexes.delta_edge_count(),
+            0,
+            "Delta should be empty when all edges are in frozen"
+        );
+        assert_eq!(
+            new_indexes.frozen_edge_count(),
+            20,
+            "Frozen should have all 20 edges"
+        );
+    }
+}
+
+// ============================================================================
 // Test Utilities
 // ============================================================================
 
