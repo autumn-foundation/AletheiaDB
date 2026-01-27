@@ -515,6 +515,137 @@ fn bench_semantic_evolution_memory_overhead(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark add_batch() vs multiple add() calls (Issue #233)
+///
+/// This benchmark demonstrates the performance improvement from using add_batch()
+/// instead of multiple individual add() calls. The improvement comes from:
+/// - Single lock acquisition for the entire batch vs N lock acquisitions
+/// - Better CPU cache locality during vector storage
+fn bench_add_batch_vs_individual(c: &mut Criterion) {
+    let mut group = c.benchmark_group("add_batch_optimization");
+
+    for batch_size in [10, 50, 100, 500, 1000] {
+        let index1 = create_temporal_index(128);
+        let index2 = create_temporal_index(128);
+
+        // Prepare batch data
+        let batch: Vec<_> = (0..batch_size)
+            .map(|i| {
+                let node_id = NodeId::new(i as u64).unwrap();
+                let vector = gen_vector(128, i);
+                let timestamp = ((i * 1000) as i64).into();
+                (node_id, vector, timestamp)
+            })
+            .collect();
+
+        // Benchmark individual add() calls
+        group.bench_with_input(
+            BenchmarkId::new("individual_add", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    for (id, vector, ts) in &batch {
+                        let _ = black_box(index1.add(*id, vector, *ts));
+                    }
+                });
+            },
+        );
+
+        // Benchmark add_batch()
+        group.bench_with_input(
+            BenchmarkId::new("add_batch", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    let _ = black_box(index2.add_batch(&batch));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark add_batch() throughput with large batches
+fn bench_add_batch_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("add_batch_throughput");
+
+    for batch_size in [100, 500, 1000, 5000] {
+        group.throughput(Throughput::Elements(batch_size as u64));
+
+        // Prepare batch data
+        let batch: Vec<_> = (0..batch_size)
+            .map(|i| {
+                let node_id = NodeId::new(i as u64).unwrap();
+                let vector = gen_vector(128, i);
+                let timestamp = ((i * 1000) as i64).into();
+                (node_id, vector, timestamp)
+            })
+            .collect();
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(batch_size),
+            &batch_size,
+            |b, _| {
+                let index = create_temporal_index(128);
+                b.iter(|| {
+                    let _ = black_box(index.add_batch(&batch));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark concurrent add() operations to measure RwLock contention
+///
+/// **Issue #233**: Tests whether RwLock causes performance regression compared to DashMap.
+/// Measures throughput of concurrent individual add() calls from multiple threads.
+fn bench_concurrent_add_operations(c: &mut Criterion) {
+    use std::sync::Arc;
+    use std::thread;
+
+    let mut group = c.benchmark_group("concurrent_add_operations");
+
+    for num_threads in [1, 2, 4, 8] {
+        group.throughput(Throughput::Elements((num_threads * 100) as u64));
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}threads", num_threads)),
+            &num_threads,
+            |b, &num_threads| {
+                b.iter_batched(
+                    || Arc::new(create_temporal_index(128)),
+                    |index| {
+                        let mut handles = vec![];
+                        for thread_id in 0..num_threads {
+                            let index_clone = Arc::clone(&index);
+                            let handle = thread::spawn(move || {
+                                for i in 0..100 {
+                                    let node_id =
+                                        NodeId::new((thread_id * 100 + i) as u64).unwrap();
+                                    let vector = gen_vector(128, (thread_id * 100 + i) as usize);
+                                    let timestamp = ((thread_id * 100 + i) as i64 * 1000).into();
+                                    let _ = black_box(index_clone.add(node_id, &vector, timestamp));
+                                }
+                            });
+                            handles.push(handle);
+                        }
+
+                        for handle in handles {
+                            handle.join().unwrap();
+                        }
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = common::configure_criterion();
@@ -528,5 +659,8 @@ criterion_group!(
     bench_track_semantic_drift,
     bench_calculate_consecutive_drift,
     bench_semantic_evolution_memory_overhead,
+    bench_add_batch_vs_individual,
+    bench_add_batch_throughput,
+    bench_concurrent_add_operations,
 );
 criterion_main!(benches);
