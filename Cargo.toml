@@ -21,6 +21,8 @@ bitcode = "0.6"
 zstd = "0.13"
 memmap2 = "0.9"
 thiserror = "2.0"
+smallvec = "1.13"
+chrono = "0.4"
 
 # Configuration support (optional TOML config files)
 serde = { version = "1.0", features = ["derive"], optional = true }
@@ -42,7 +44,6 @@ metrics-exporter-prometheus = { version = "0.17", optional = true }
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
 rmcp = { version = "0.13", features = ["server", "transport-io"], optional = true }
 base64 = { version = "0.22", optional = true }
-chrono = { version = "0.4", optional = true }
 
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
@@ -112,7 +113,7 @@ embedding-all = [
 ]
 
 # MCP server support
-mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base64", "dep:chrono"]
+mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base64"]
 
 # Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
@@ -306,6 +307,12 @@ required-features = []
 name = "vector_serialization"
 harness = false
 path = "benches/vector_serialization.rs"
+
+# Incremental CSR Adjacency (ADR-0026)
+[[bench]]
+name = "incremental_adjacency"
+harness = false
+path = "benches/incremental_adjacency.rs"
 
 # MCP server binary
 [[bin]]

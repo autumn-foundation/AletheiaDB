@@ -594,8 +594,8 @@ fn bench_get_outgoing_allocation_overhead(c: &mut Criterion) {
             indexes.insert_edge(edge);
         }
 
-        // Trigger initial rebuild
-        indexes.rebuild_adjacency();
+        // Trigger initial compaction
+        indexes.compact_adjacency();
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("degree_{}", out_degree)),

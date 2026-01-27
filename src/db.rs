@@ -1200,7 +1200,7 @@ impl GallifreyDB {
                             );
                         } else {
                             // Fallback for older index files without CSR data
-                            db.current.rebuild_adjacency();
+                            db.current.compact_adjacency();
                         }
                     }
                     Err(_e) => {

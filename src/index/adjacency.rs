@@ -254,6 +254,21 @@ impl AdjacencyIndex {
     pub fn max_node_id(&self) -> u64 {
         self.max_node_id
     }
+
+    /// Iterate over all nodes that have outgoing edges.
+    ///
+    /// This is efficient for sparse graphs as it only yields nodes
+    /// that actually have edges, not all possible node IDs.
+    #[inline]
+    pub fn iter_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.node_ids.iter().copied()
+    }
+
+    /// Get the number of nodes with outgoing edges.
+    #[inline]
+    pub fn node_count(&self) -> usize {
+        self.node_ids.len()
+    }
 }
 
 impl Default for AdjacencyIndex {

@@ -8,12 +8,17 @@
 
 pub mod adjacency;
 pub mod current;
+pub mod incremental_adjacency;
 pub mod temporal;
 pub mod vector;
 
 // Re-export commonly used types
 pub use adjacency::{AdjacencyEntry, AdjacencyIndex};
 pub use current::CurrentIndexes;
+pub use incremental_adjacency::{
+    CompactionScheduler, FrozenAdjacencyView, IncrementalAdjacencyIndex, IncrementalConfig,
+    Tombstone,
+};
 pub use temporal::TemporalIndexes;
 pub use vector::{DistanceMetric, VectorIndex};
 pub use vector::{HnswIndex, HnswIndexBuilder};

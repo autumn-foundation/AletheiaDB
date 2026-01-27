@@ -240,12 +240,14 @@ impl ReadOps for ReadTransaction {
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         // Filter edges to only return those visible in our snapshot
         // This prevents phantom reads where we see edges created after our snapshot
+        // Note: CurrentStorage::get_outgoing_edges() uses frozen view when available
         let edge_ids = self.current.get_outgoing_edges(node_id);
         self.filter_visible_edges(edge_ids)
     }
 
     fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         // Filter edges to only return those visible in our snapshot
+        // Note: CurrentStorage::get_incoming_edges() uses frozen view when available
         let edge_ids = self.current.get_incoming_edges(node_id);
         self.filter_visible_edges(edge_ids)
     }
