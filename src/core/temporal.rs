@@ -428,29 +428,49 @@ pub mod time {
         HybridTimestamp::new_unchecked(wallclock, 0)
     }
 
-    /// Returns current HybridTimestamp without panicking.
+    /// Returns current HybridTimestamp with proper error handling.
     ///
     /// This is the safe version of `now()` that should be used in production code
-    /// where panics are unacceptable. Falls back to epoch (0) if system clock
-    /// is unavailable or before Unix epoch.
+    /// where panics are unacceptable. Returns an error if the system clock is
+    /// unavailable, invalid, or set before Unix epoch.
     ///
     /// For monotonic HLC generation with causality, use HLC's send() method on
     /// the returned timestamp.
     ///
-    /// # Fallback Behavior
-    /// If system time is unavailable or invalid, returns HybridTimestamp(0, 0).
-    /// This ensures the function never panics, at the cost of potentially using
-    /// a zero timestamp in rare clock failure scenarios.
-    pub fn now_safe() -> Timestamp {
-        let wallclock = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_micros() as i64)
-            .unwrap_or(0); // Fallback to epoch on clock error
+    /// # Errors
+    /// Returns `TemporalError::SystemClockUnavailable` if:
+    /// - System clock is set before Unix epoch
+    /// - System time source is unavailable
+    /// - Running in constrained environments (containers, sandboxes)
+    /// - Timestamp would exceed i64 range (far future, ~290,000 years)
+    ///
+    /// # Examples
+    /// ```
+    /// use gallifreydb::core::temporal::time;
+    ///
+    /// let timestamp = time::now_safe().expect("system clock should be available");
+    /// ```
+    pub fn now_safe() -> Result<Timestamp, TemporalError> {
+        let duration = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| {
+            TemporalError::SystemClockUnavailable {
+                reason: format!("System clock is before Unix epoch: {}", e),
+            }
+        })?;
+
+        // Convert to microseconds with overflow check
+        // as_micros() returns u128, so we need to check it fits in i64
+        let micros = duration.as_micros();
+        let wallclock =
+            i64::try_from(micros).map_err(|_| TemporalError::SystemClockUnavailable {
+                reason: format!(
+                    "Timestamp {} microseconds exceeds i64 range (far future timestamp)",
+                    micros
+                ),
+            })?;
 
         // Return HybridTimestamp with logical counter = 0
-        // Use new_unchecked since we control the wallclock value
-        HybridTimestamp::new_unchecked(wallclock, 0)
+        // Use new_unchecked since we validated the wallclock value
+        Ok(HybridTimestamp::new_unchecked(wallclock, 0))
     }
 
     /// Convert a Timestamp to a human-readable ISO 8601 string (UTC).

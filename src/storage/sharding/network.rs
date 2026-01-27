@@ -654,15 +654,19 @@ pub struct MockShardClient {
 
 impl MockShardClient {
     /// Create a new mock client.
+    ///
+    /// # Panics
+    /// Panics if the system clock is unavailable (test code should fail loudly).
     pub fn new(shard_id: ShardId) -> Self {
-        // Get current time safely for mock responses (never panics)
-        let prepare_timestamp = crate::core::temporal::time::now_safe();
+        // Get current time - fail loudly in tests if clock is unavailable
+        let prepare_timestamp = crate::core::temporal::time::now_safe()
+            .expect("System clock should be available in tests");
 
         // For realism, advance the commit timestamp slightly
         // Commit logically happens after prepare in 2PC flow
         let commit_timestamp = prepare_timestamp
             .send(prepare_timestamp.wallclock() + 1)
-            .unwrap_or(prepare_timestamp); // Fallback if send fails
+            .expect("HLC send() should not fail with wallclock+1");
 
         Self {
             shard_id,

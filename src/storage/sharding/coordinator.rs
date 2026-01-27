@@ -238,7 +238,11 @@ impl ShardCoordinator {
             );
 
         let transaction =
-            DistributedTransaction::new(tx_id, participants, self.transaction_timeout);
+            DistributedTransaction::new(tx_id, participants, self.transaction_timeout).map_err(
+                |e| DistributedTxError::Aborted {
+                    reason: format!("Failed to create transaction: {}", e),
+                },
+            )?;
 
         if let Ok(mut txns) = self.active_transactions.write() {
             txns.insert(tx_id, transaction);
@@ -360,7 +364,7 @@ impl ShardCoordinator {
                 .map_err(|_| DistributedTxError::Aborted {
                     reason: "Lock poisoned".to_string(),
                 })?;
-            log.log_commit(tx_id, transaction.participant_shards());
+            let _ = log.log_commit(tx_id, transaction.participant_shards());
         }
         transaction.commit_decision_logged = true;
 
@@ -475,7 +479,7 @@ impl ShardCoordinator {
                 .map_err(|_| DistributedTxError::Aborted {
                     reason: "Lock poisoned".to_string(),
                 })?;
-            log.log_abort(tx_id, transaction.participant_shards());
+            let _ = log.log_abort(tx_id, transaction.participant_shards());
         }
 
         // Send abort to all participants
@@ -556,7 +560,26 @@ impl ShardCoordinator {
 
         for (tx_id, participants) in decisions {
             // Create a transaction in committing state for recovery
-            let mut tx = DistributedTransaction::new(tx_id, participants, self.transaction_timeout);
+            let mut tx =
+                match DistributedTransaction::new(tx_id, participants, self.transaction_timeout) {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        // If we can't create the transaction due to clock error, dead-letter it
+                        let dead_letter = DeadLetteredTransaction {
+                            tx_id,
+                            reason: format!("System clock unavailable during recovery: {}", e),
+                            last_attempt: Instant::now(),
+                            attempt_count: 0,
+                        };
+                        dead_lettered.push(dead_letter.clone());
+                        // Also add to the DLQ
+                        if let Ok(mut dlq) = self.dead_letter_queue.write() {
+                            dlq.insert(tx_id, dead_letter);
+                        }
+                        continue;
+                    }
+                };
+
             tx.begin_prepare().ok();
             for shard_id in tx.participant_shards() {
                 tx.record_prepare_success(shard_id);
@@ -681,7 +704,11 @@ impl ShardCoordinator {
 
         if let Some((found_tx_id, participants)) = decisions.into_iter().next() {
             let mut tx =
-                DistributedTransaction::new(found_tx_id, participants, self.transaction_timeout);
+                DistributedTransaction::new(found_tx_id, participants, self.transaction_timeout)
+                    .map_err(|e| DistributedTxError::Aborted {
+                        reason: format!("Failed to create transaction during recovery: {}", e),
+                    })?;
+
             tx.begin_prepare().ok();
             for shard_id in tx.participant_shards() {
                 tx.record_prepare_success(shard_id);

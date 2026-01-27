@@ -393,6 +393,16 @@ pub enum TemporalError {
         /// The current logical counter value (u32::MAX)
         current_logical: u32,
     },
+    /// System clock is unavailable or invalid.
+    ///
+    /// This can occur if:
+    /// - System clock is set before Unix epoch
+    /// - System time source is unavailable
+    /// - Running in constrained environments (containers, sandboxes)
+    SystemClockUnavailable {
+        /// Reason for clock failure
+        reason: String,
+    },
 }
 
 impl fmt::Display for TemporalError {
@@ -469,6 +479,9 @@ impl fmt::Display for TemporalError {
                     "HLC logical counter overflow at wallclock={}: current_logical={} would exceed u32::MAX",
                     wallclock, current_logical
                 )
+            }
+            TemporalError::SystemClockUnavailable { reason } => {
+                write!(f, "System clock unavailable: {}", reason)
             }
         }
     }

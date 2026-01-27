@@ -205,11 +205,24 @@ pub struct DistributedTransaction {
 
 impl DistributedTransaction {
     /// Create a new distributed transaction with current time.
-    pub fn new(tx_id: TxId, participants: Vec<ShardId>, timeout: Duration) -> Self {
-        // Get current time safely (never panics)
-        let start_ts = crate::core::temporal::time::now_safe();
+    ///
+    /// # Errors
+    /// Returns `TemporalError::SystemClockUnavailable` if the system clock is unavailable
+    /// or invalid. This is rare but can occur in constrained environments.
+    pub fn new(
+        tx_id: TxId,
+        participants: Vec<ShardId>,
+        timeout: Duration,
+    ) -> Result<Self, TemporalError> {
+        // Get current time safely with proper error propagation
+        let start_ts = crate::core::temporal::time::now_safe()?;
 
-        Self::new_with_timestamp(tx_id, participants, timeout, start_ts)
+        Ok(Self::new_with_timestamp(
+            tx_id,
+            participants,
+            timeout,
+            start_ts,
+        ))
     }
 
     /// Create a new distributed transaction with explicit HLC timestamp.
@@ -550,11 +563,18 @@ impl TwoPhaseCommitLog {
     /// Log a commit decision with current time.
     ///
     /// This MUST be called before sending commit messages to participants.
-    pub fn log_commit(&mut self, tx_id: TxId, participants: Vec<ShardId>) -> u64 {
-        // Get current time safely (never panics)
-        let timestamp = crate::core::temporal::time::now_safe();
+    ///
+    /// # Errors
+    /// Returns `TemporalError::SystemClockUnavailable` if the system clock is unavailable.
+    pub fn log_commit(
+        &mut self,
+        tx_id: TxId,
+        participants: Vec<ShardId>,
+    ) -> Result<u64, TemporalError> {
+        // Get current time with proper error propagation
+        let timestamp = crate::core::temporal::time::now_safe()?;
 
-        self.log_commit_with_timestamp(tx_id, participants, timestamp)
+        Ok(self.log_commit_with_timestamp(tx_id, participants, timestamp))
     }
 
     /// Log a commit decision with explicit HLC timestamp.
@@ -581,11 +601,18 @@ impl TwoPhaseCommitLog {
     }
 
     /// Log an abort decision.
-    pub fn log_abort(&mut self, tx_id: TxId, participants: Vec<ShardId>) -> u64 {
-        // Get current time safely (never panics)
-        let timestamp = crate::core::temporal::time::now_safe();
+    ///
+    /// # Errors
+    /// Returns `TemporalError::SystemClockUnavailable` if the system clock is unavailable.
+    pub fn log_abort(
+        &mut self,
+        tx_id: TxId,
+        participants: Vec<ShardId>,
+    ) -> Result<u64, TemporalError> {
+        // Get current time with proper error propagation
+        let timestamp = crate::core::temporal::time::now_safe()?;
 
-        self.log_abort_with_timestamp(tx_id, participants, timestamp)
+        Ok(self.log_abort_with_timestamp(tx_id, participants, timestamp))
     }
 
     /// Log an abort decision with explicit HLC timestamp.
@@ -688,7 +715,7 @@ mod tests {
     fn test_distributed_tx_creation() {
         let tx_id = make_tx_id(1);
         let shards = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
-        let tx = DistributedTransaction::new(tx_id, shards, Duration::from_secs(30));
+        let tx = DistributedTransaction::new(tx_id, shards, Duration::from_secs(30)).unwrap();
 
         assert_eq!(tx.tx_id, tx_id);
         assert_eq!(tx.phase, TransactionPhase::Pending);
@@ -702,7 +729,8 @@ mod tests {
         let shard0 = ShardId::new(0).unwrap();
         let shard1 = ShardId::new(1).unwrap();
         let mut tx =
-            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30));
+            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30))
+                .unwrap();
 
         // Begin prepare
         assert!(tx.begin_prepare().is_ok());
@@ -726,7 +754,8 @@ mod tests {
         let shard0 = ShardId::new(0).unwrap();
         let shard1 = ShardId::new(1).unwrap();
         let mut tx =
-            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30));
+            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30))
+                .unwrap();
 
         // Prepare
         tx.begin_prepare().unwrap();
@@ -756,7 +785,8 @@ mod tests {
         let shard0 = ShardId::new(0).unwrap();
         let shard1 = ShardId::new(1).unwrap();
         let mut tx =
-            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30));
+            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30))
+                .unwrap();
 
         tx.begin_prepare().unwrap();
         tx.record_prepare_success(shard0);
@@ -783,7 +813,8 @@ mod tests {
         let shard0 = ShardId::new(0).unwrap();
         let shard1 = ShardId::new(1).unwrap();
         let mut tx =
-            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30));
+            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30))
+                .unwrap();
 
         tx.begin_prepare().unwrap();
         tx.record_prepare_success(shard0);
@@ -799,7 +830,8 @@ mod tests {
         let shard0 = ShardId::new(0).unwrap();
         let shard1 = ShardId::new(1).unwrap();
         let mut tx =
-            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30));
+            DistributedTransaction::new(tx_id, vec![shard0, shard1], Duration::from_secs(30))
+                .unwrap();
 
         tx.begin_prepare().unwrap();
         tx.record_prepare_success(shard0);
@@ -815,7 +847,8 @@ mod tests {
             tx_id,
             vec![ShardId::new(0).unwrap()],
             Duration::from_secs(30),
-        );
+        )
+        .unwrap();
 
         // Can't begin commit from Pending
         assert!(tx.begin_commit().is_err());
@@ -838,7 +871,8 @@ mod tests {
             tx_id,
             vec![ShardId::new(0).unwrap()],
             Duration::from_secs(30),
-        );
+        )
+        .unwrap();
 
         assert_eq!(tx.retries_remaining, 3);
         assert!(tx.can_retry());
@@ -860,7 +894,8 @@ mod tests {
             tx_id,
             vec![ShardId::new(0).unwrap()],
             Duration::from_millis(1),
-        );
+        )
+        .unwrap();
 
         // Sleep briefly to trigger timeout
         std::thread::sleep(Duration::from_millis(10));
@@ -875,7 +910,7 @@ mod tests {
         let shards = vec![ShardId::new(0).unwrap(), ShardId::new(1).unwrap()];
 
         // Log a commit decision
-        let lsn = log.log_commit(tx_id, shards.clone());
+        let lsn = log.log_commit(tx_id, shards.clone()).unwrap();
         assert_eq!(lsn, 0);
         assert!(log.has_pending_decision(tx_id));
 
@@ -897,7 +932,7 @@ mod tests {
         let tx_id = make_tx_id(1);
         let shards = vec![ShardId::new(0).unwrap()];
 
-        let lsn = log.log_abort(tx_id, shards);
+        let lsn = log.log_abort(tx_id, shards).unwrap();
         assert_eq!(lsn, 0);
 
         let decision = log.get_decision(tx_id).unwrap();
@@ -920,9 +955,9 @@ mod tests {
         let tx3 = make_tx_id(3);
         let shards = vec![ShardId::new(0).unwrap()];
 
-        log.log_commit(tx1, shards.clone());
-        log.log_abort(tx2, shards.clone());
-        log.log_commit(tx3, shards.clone());
+        log.log_commit(tx1, shards.clone()).unwrap();
+        log.log_abort(tx2, shards.clone()).unwrap();
+        log.log_commit(tx3, shards.clone()).unwrap();
 
         // Check pending decisions
         let pending = log.pending_decisions();
@@ -942,9 +977,9 @@ mod tests {
         let mut log = TwoPhaseCommitLog::new();
         let shards = vec![ShardId::new(0).unwrap()];
 
-        let lsn1 = log.log_commit(make_tx_id(1), shards.clone());
-        let lsn2 = log.log_commit(make_tx_id(2), shards.clone());
-        let lsn3 = log.log_commit(make_tx_id(3), shards.clone());
+        let lsn1 = log.log_commit(make_tx_id(1), shards.clone()).unwrap();
+        let lsn2 = log.log_commit(make_tx_id(2), shards.clone()).unwrap();
+        let lsn3 = log.log_commit(make_tx_id(3), shards.clone()).unwrap();
 
         assert!(lsn1 < lsn2);
         assert!(lsn2 < lsn3);
@@ -961,7 +996,8 @@ mod tests {
             tx_id,
             vec![shard0, shard1, shard2],
             Duration::from_secs(30),
-        );
+        )
+        .unwrap();
 
         // Prepare all
         tx.begin_prepare().unwrap();
