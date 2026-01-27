@@ -45,7 +45,7 @@ fn create_test_operations(count: usize) -> Vec<WalOperation> {
     (0..count)
         .map(|i| WalOperation::CreateNode {
             node_id: NodeId::new(i as u64 + 1).unwrap(),
-            label: GLOBAL_INTERNER.intern(&format!("Node{}", i)).unwrap(),
+            label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
             properties: PropertyMapBuilder::new()
                 .insert("id", i as i64)
                 .insert("name", format!("Node {}", i))
