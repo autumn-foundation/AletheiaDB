@@ -694,6 +694,30 @@ mod iso8601_parsing {
         assert_eq!(ts.unwrap().wallclock(), 1705276800000000);
     }
 
+    #[test]
+    fn test_parse_sql_timestamp_with_fractional_seconds() {
+        // SQL timestamp with fractional seconds (now supported via strict parse)
+        let ts = TemporalClause::parse_timestamp("2024-01-15 10:00:00.123456");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800123456);
+    }
+
+    #[test]
+    fn test_parse_naive_datetime_with_t_separator() {
+        // ISO-like format without timezone (e.g., "2024-01-15T10:00:00")
+        let ts = TemporalClause::parse_timestamp("2024-01-15T10:00:00");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_parse_naive_datetime_with_t_and_fractional() {
+        // ISO-like format with T separator and fractional seconds
+        let ts = TemporalClause::parse_timestamp("2024-01-15T10:00:00.123456");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800123456);
+    }
+
     // ========================================================================
     // Cycle 5: Date-Only Format
     // ========================================================================
@@ -757,6 +781,30 @@ mod iso8601_parsing {
     fn test_parse_invalid_format() {
         let ts = TemporalClause::parse_timestamp("not a timestamp");
         assert!(ts.is_err());
+    }
+
+    #[test]
+    fn test_parse_strict_rejects_trailing_characters_date() {
+        // Strict parsing should reject dates with trailing invalid characters
+        let ts = TemporalClause::parse_timestamp("2024-01-15-invalid");
+        assert!(ts.is_err(), "Should reject date with trailing characters");
+    }
+
+    #[test]
+    fn test_parse_strict_rejects_trailing_characters_datetime() {
+        // Strict parsing should reject datetimes with trailing invalid characters
+        let ts = TemporalClause::parse_timestamp("2024-01-15 10:00:00 invalid");
+        assert!(
+            ts.is_err(),
+            "Should reject datetime with trailing characters"
+        );
+    }
+
+    #[test]
+    fn test_parse_strict_rejects_partial_date() {
+        // Strict parsing should reject partial dates
+        let ts = TemporalClause::parse_timestamp("2024-01");
+        assert!(ts.is_err(), "Should reject partial date");
     }
 
     // ========================================================================

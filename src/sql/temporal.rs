@@ -40,6 +40,64 @@ pub enum TemporalClause {
 }
 
 impl TemporalClause {
+    /// Validates that a string matches the SQL timestamp format strictly.
+    ///
+    /// Accepts:
+    /// - `YYYY-MM-DD HH:MM:SS` (exactly 19 characters)
+    /// - `YYYY-MM-DD HH:MM:SS.f` (20-26 characters, where f is 1-6 digits)
+    ///
+    /// This prevents parse_from_str from accepting invalid inputs with trailing characters.
+    fn is_valid_sql_timestamp(s: &str) -> bool {
+        let len = s.len();
+
+        // Must be at least 19 characters for "YYYY-MM-DD HH:MM:SS"
+        if len < 19 {
+            return false;
+        }
+
+        // Must be at most 26 characters for "YYYY-MM-DD HH:MM:SS.ffffff"
+        if len > 26 {
+            return false;
+        }
+
+        // Basic structure check: YYYY-MM-DD HH:MM:SS
+        let chars: Vec<char> = s.chars().collect();
+
+        // Check positions of fixed characters
+        if chars.get(4) != Some(&'-')
+            || chars.get(7) != Some(&'-')
+            || chars.get(10) != Some(&' ')
+            || chars.get(13) != Some(&':')
+            || chars.get(16) != Some(&':')
+        {
+            return false;
+        }
+
+        // If there's more than 19 characters, must have a dot at position 19
+        if len > 19 && chars.get(19) != Some(&'.') {
+            return false;
+        }
+
+        // Check that all digit positions contain digits
+        let digit_positions = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+        for &pos in &digit_positions {
+            if !chars.get(pos).is_some_and(|c| c.is_ascii_digit()) {
+                return false;
+            }
+        }
+
+        // If fractional seconds, check they're all digits
+        if len > 20 {
+            for i in 20..len {
+                if !chars.get(i).is_some_and(|c| c.is_ascii_digit()) {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     /// Parse a timestamp string.
     ///
     /// Supports the following formats:
@@ -89,16 +147,33 @@ impl TemporalClause {
             return Ok(Timestamp::from(dt.with_timezone(&Utc).timestamp_micros()));
         }
 
-        // Try parsing as SQL timestamp format (e.g., "2024-01-15 10:00:00")
-        // Assume UTC timezone
-        if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        // Try parsing as a naive datetime with ISO-like format (T separator)
+        // e.g., "2024-01-15T10:00:00" or "2024-01-15T10:00:00.123456"
+        // This parse is strict and does not allow trailing characters.
+        // We assume UTC for naive timestamps.
+        if let Ok(dt) = trimmed.parse::<NaiveDateTime>() {
             return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
         }
 
-        // Try parsing as date-only format (e.g., "2024-01-15")
-        // Assume midnight UTC
-        if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
-            // Use and_hms_opt to safely construct a time
+        // Try parsing as SQL timestamp format with space separator (e.g., "2024-01-15 10:00:00")
+        // NaiveDateTime::FromStr doesn't support space separator, so we use parse_from_str.
+        // To ensure strictness, we validate the format by checking length and characters.
+        if Self::is_valid_sql_timestamp(trimmed) {
+            // Try with fractional seconds first (more specific)
+            if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f") {
+                return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
+            }
+            // Try without fractional seconds
+            if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+                return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
+            }
+        }
+
+        // Try parsing as date-only format (e.g., "2024-01-15").
+        // This parse is strict.
+        // Assume midnight UTC.
+        if let Ok(date) = trimmed.parse::<NaiveDate>() {
+            // `and_hms_opt` is safe and will not panic.
             if let Some(dt) = date.and_hms_opt(0, 0, 0) {
                 return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
             }
