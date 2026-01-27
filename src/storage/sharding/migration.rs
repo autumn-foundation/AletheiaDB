@@ -962,7 +962,7 @@ mod tests {
                 id: NodeId::new(1).unwrap(),
                 label: "Person".to_string(),
                 properties: vec![0; 100],
-                valid_from: 0,
+                valid_from: 0.into(),
                 valid_to: None,
             }],
             edges: vec![],

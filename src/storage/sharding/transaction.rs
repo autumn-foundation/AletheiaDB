@@ -2,9 +2,18 @@
 //!
 //! This module implements distributed transactions for writes that span multiple
 //! shards, ensuring ACID properties across shard boundaries.
+//!
+//! # HLC Integration (Phase 3)
+//!
+//! Distributed transactions use Hybrid Logical Clocks for timestamp coordination:
+//! - Transaction start times use HLC for total ordering
+//! - Prepare/commit responses synchronize HLC across shards
+//! - Ensures causality preservation in distributed environment
 
 use super::types::ShardId;
 use crate::api::TxId;
+use crate::core::temporal::Timestamp;
+use crate::utils::error::TemporalError;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -178,8 +187,14 @@ pub struct DistributedTransaction {
     pub phase: TransactionPhase,
     /// Participating shards and their states.
     pub participants: HashMap<ShardId, ParticipantState>,
-    /// When the transaction started.
+    /// When the transaction started (for timeout tracking).
     pub start_time: Instant,
+    /// HLC timestamp when transaction started.
+    pub start_timestamp: Timestamp,
+    /// Current HLC timestamp (updated via send/receive during coordination).
+    pub current_timestamp: Timestamp,
+    /// HLC timestamp when transaction committed (None if not committed).
+    pub commit_timestamp: Option<Timestamp>,
     /// Timeout for the entire transaction.
     pub timeout: Duration,
     /// Number of retry attempts remaining.
@@ -189,8 +204,30 @@ pub struct DistributedTransaction {
 }
 
 impl DistributedTransaction {
-    /// Create a new distributed transaction.
+    /// Create a new distributed transaction with current time.
     pub fn new(tx_id: TxId, participants: Vec<ShardId>, timeout: Duration) -> Self {
+        // Get current time from system
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        let start_ts = Timestamp::from(now);
+
+        Self::new_with_timestamp(tx_id, participants, timeout, start_ts)
+    }
+
+    /// Create a new distributed transaction with explicit HLC timestamp.
+    ///
+    /// This is the primary constructor for Phase 3 distributed coordination.
+    /// The provided timestamp will be used for transaction ordering and
+    /// will be synchronized with participating shards via HLC send/receive.
+    pub fn new_with_timestamp(
+        tx_id: TxId,
+        participants: Vec<ShardId>,
+        timeout: Duration,
+        start_timestamp: Timestamp,
+    ) -> Self {
         let mut participant_map = HashMap::new();
         for shard in participants {
             participant_map.insert(shard, ParticipantState::Unknown);
@@ -201,6 +238,9 @@ impl DistributedTransaction {
             phase: TransactionPhase::Pending,
             participants: participant_map,
             start_time: Instant::now(),
+            start_timestamp,
+            current_timestamp: start_timestamp,
+            commit_timestamp: None,
             timeout,
             retries_remaining: 3,
             commit_decision_logged: false,
@@ -354,6 +394,88 @@ impl DistributedTransaction {
         Ok(())
     }
 
+    // =============================================================================
+    // HLC Phase 3: Timestamp Synchronization Methods
+    // =============================================================================
+
+    /// Get the transaction start timestamp.
+    pub fn start_timestamp(&self) -> Timestamp {
+        self.start_timestamp
+    }
+
+    /// Get the current HLC timestamp.
+    pub fn current_timestamp(&self) -> Timestamp {
+        self.current_timestamp
+    }
+
+    /// Get the commit timestamp (if committed).
+    pub fn commit_timestamp(&self) -> Option<Timestamp> {
+        self.commit_timestamp
+    }
+
+    /// Record a successful commit from a participant with HLC timestamp synchronization.
+    ///
+    /// This method uses HLC's `send()` operation to advance the coordinator's clock
+    /// when recording a commit.
+    ///
+    /// # Arguments
+    /// * `shard_id` - The shard that successfully committed
+    /// * `physical_wallclock` - Current physical clock reading in microseconds
+    ///
+    /// # Errors
+    /// Returns `TemporalError::LogicalCounterOverflow` if the logical counter would overflow.
+    pub fn record_commit_with_timestamp(
+        &mut self,
+        shard_id: ShardId,
+        physical_wallclock: i64,
+    ) -> Result<(), TemporalError> {
+        // Update participant state
+        if let Some(state) = self.participants.get_mut(&shard_id) {
+            *state = ParticipantState::Committed;
+        }
+
+        // Advance HLC using send() semantics
+        self.current_timestamp = self.current_timestamp.send(physical_wallclock)?;
+
+        // If all committed, record final commit timestamp
+        if self.all_committed() && self.commit_timestamp.is_none() {
+            self.commit_timestamp = Some(self.current_timestamp);
+        }
+
+        Ok(())
+    }
+
+    /// Record a successful prepare from a participant with HLC timestamp synchronization.
+    ///
+    /// This method uses HLC's `receive()` operation to synchronize clocks when receiving
+    /// a prepare response from a shard.
+    ///
+    /// # Arguments
+    /// * `shard_id` - The shard that is ready to commit
+    /// * `shard_timestamp` - The HLC timestamp from the shard's prepare response
+    /// * `physical_wallclock` - Current physical clock reading in microseconds
+    ///
+    /// # Errors
+    /// Returns `TemporalError::LogicalCounterOverflow` if the logical counter would overflow.
+    pub fn record_prepare_success_with_timestamp(
+        &mut self,
+        shard_id: ShardId,
+        shard_timestamp: Timestamp,
+        physical_wallclock: i64,
+    ) -> Result<(), TemporalError> {
+        // Update participant state
+        if let Some(state) = self.participants.get_mut(&shard_id) {
+            *state = ParticipantState::Prepared;
+        }
+
+        // Synchronize HLC using receive() semantics
+        self.current_timestamp = self
+            .current_timestamp
+            .receive(shard_timestamp, physical_wallclock)?;
+
+        Ok(())
+    }
+
     /// Abort the transaction.
     pub fn abort(&mut self, reason: &str) {
         self.phase = TransactionPhase::Aborted;
@@ -415,8 +537,10 @@ pub struct CommitDecision {
     pub participants: Vec<ShardId>,
     /// Decision: true = commit, false = abort.
     pub decision: bool,
-    /// When the decision was made.
-    pub timestamp: Instant,
+    /// HLC timestamp when the decision was made.
+    pub timestamp: Timestamp,
+    /// Wall-clock time for timeout tracking (kept separate from HLC).
+    pub instant: Instant,
 }
 
 impl TwoPhaseCommitLog {
@@ -428,17 +552,38 @@ impl TwoPhaseCommitLog {
         }
     }
 
-    /// Log a commit decision.
+    /// Log a commit decision with current time.
     ///
     /// This MUST be called before sending commit messages to participants.
     pub fn log_commit(&mut self, tx_id: TxId, participants: Vec<ShardId>) -> u64 {
+        // Get current time
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+        let timestamp = Timestamp::from(now);
+
+        self.log_commit_with_timestamp(tx_id, participants, timestamp)
+    }
+
+    /// Log a commit decision with explicit HLC timestamp.
+    ///
+    /// This MUST be called before sending commit messages to participants.
+    /// This is the primary method for Phase 3 distributed coordination.
+    pub fn log_commit_with_timestamp(
+        &mut self,
+        tx_id: TxId,
+        participants: Vec<ShardId>,
+        timestamp: Timestamp,
+    ) -> u64 {
         let lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
         let decision = CommitDecision {
             tx_id,
             lsn,
             participants,
             decision: true,
-            timestamp: Instant::now(),
+            timestamp,
+            instant: Instant::now(),
         };
         self.pending_decisions.insert(tx_id, decision);
         lsn
@@ -446,13 +591,31 @@ impl TwoPhaseCommitLog {
 
     /// Log an abort decision.
     pub fn log_abort(&mut self, tx_id: TxId, participants: Vec<ShardId>) -> u64 {
+        // Get current time
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+        let timestamp = Timestamp::from(now);
+
+        self.log_abort_with_timestamp(tx_id, participants, timestamp)
+    }
+
+    /// Log an abort decision with explicit HLC timestamp.
+    pub fn log_abort_with_timestamp(
+        &mut self,
+        tx_id: TxId,
+        participants: Vec<ShardId>,
+        timestamp: Timestamp,
+    ) -> u64 {
         let lsn = self.lsn_generator.fetch_add(1, Ordering::SeqCst);
         let decision = CommitDecision {
             tx_id,
             lsn,
             participants,
             decision: false,
-            timestamp: Instant::now(),
+            timestamp,
+            instant: Instant::now(),
         };
         self.pending_decisions.insert(tx_id, decision);
         lsn

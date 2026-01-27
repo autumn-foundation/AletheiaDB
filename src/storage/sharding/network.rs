@@ -2,6 +2,13 @@
 //!
 //! This module provides traits and implementations for network communication
 //! between shards, including connection pooling and circuit breakers.
+//!
+//! # HLC Integration (Phase 3)
+//!
+//! Network messages include HybridTimestamp fields for distributed clock synchronization:
+//! - NodeData/EdgeData include HLC temporal bounds
+//! - Prepare/Commit responses include HLC timestamps
+//! - Enables causality tracking across shards
 
 // Allow nested if statements - they're sometimes clearer
 #![allow(clippy::collapsible_if)]
@@ -9,6 +16,7 @@
 use super::types::{ShardId, ShardState};
 use crate::api::TxId;
 use crate::core::id::{EdgeId, NodeId};
+use crate::core::temporal::Timestamp;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -108,6 +116,8 @@ pub struct PrepareResponse {
     pub ready: bool,
     /// Optional reason if not ready.
     pub reason: Option<String>,
+    /// HLC timestamp from the shard (for clock synchronization).
+    pub timestamp: Timestamp,
 }
 
 /// Response from a commit request.
@@ -115,6 +125,8 @@ pub struct PrepareResponse {
 pub struct CommitResponse {
     /// Whether the commit succeeded.
     pub success: bool,
+    /// HLC timestamp when the commit completed (for clock synchronization).
+    pub timestamp: Timestamp,
 }
 
 /// Response from an abort request.
@@ -133,10 +145,10 @@ pub struct NodeData {
     pub label: String,
     /// Serialized properties.
     pub properties: Vec<u8>,
-    /// Valid time start.
-    pub valid_from: u64,
-    /// Valid time end (None = current).
-    pub valid_to: Option<u64>,
+    /// Valid time start (HLC timestamp).
+    pub valid_from: Timestamp,
+    /// Valid time end (None = current, Some = HLC timestamp).
+    pub valid_to: Option<Timestamp>,
 }
 
 /// Data for a single edge being migrated.
@@ -152,10 +164,10 @@ pub struct EdgeData {
     pub label: String,
     /// Serialized properties.
     pub properties: Vec<u8>,
-    /// Valid time start.
-    pub valid_from: u64,
-    /// Valid time end (None = current).
-    pub valid_to: Option<u64>,
+    /// Valid time start (HLC timestamp).
+    pub valid_from: Timestamp,
+    /// Valid time end (None = current, Some = HLC timestamp).
+    pub valid_to: Option<Timestamp>,
 }
 
 /// Batch of migration data.
@@ -643,14 +655,25 @@ pub struct MockShardClient {
 impl MockShardClient {
     /// Create a new mock client.
     pub fn new(shard_id: ShardId) -> Self {
+        // Get current time for mock responses
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+        let timestamp = Timestamp::from(now);
+
         Self {
             shard_id,
             healthy: RwLock::new(true),
             prepare_response: RwLock::new(Some(PrepareResponse {
                 ready: true,
                 reason: None,
+                timestamp,
             })),
-            commit_response: RwLock::new(Some(CommitResponse { success: true })),
+            commit_response: RwLock::new(Some(CommitResponse {
+                success: true,
+                timestamp,
+            })),
             abort_response: RwLock::new(Some(AbortResponse { acknowledged: true })),
             state: RwLock::new(ShardState::new(shard_id)),
             latency: RwLock::new(Duration::from_micros(100)),
@@ -1195,6 +1218,7 @@ mod tests {
         client.set_prepare_response(PrepareResponse {
             ready: false,
             reason: Some("test".to_string()),
+            timestamp: 1000.into(),
         });
 
         let response = client.prepare(TxId::new(1), &[]).unwrap();
@@ -1226,7 +1250,7 @@ mod tests {
                 id: NodeId::new(1).unwrap(),
                 label: "Person".to_string(),
                 properties: vec![],
-                valid_from: 0,
+                valid_from: 0.into(),
                 valid_to: None,
             }],
             edges: vec![],
