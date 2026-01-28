@@ -28,6 +28,7 @@
 //! ```
 
 mod config;
+pub(crate) mod converters;
 mod handlers;
 mod server;
 mod state;
