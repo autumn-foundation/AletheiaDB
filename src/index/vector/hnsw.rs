@@ -323,14 +323,22 @@ struct IndexStats {
 ///
 /// # Performance Impact
 ///
-/// With exponential backoff (1ms, 2ms, 4ms), a query that exhausts all retry attempts will
-/// add up to 7ms latency. This is significant relative to the project's performance targets:
+/// We use a hybrid backoff strategy (spin-loop + `yield_now`) to avoid blocking the async
+/// executor. A query that exhausts all retry attempts may add significant latency under
+/// heavy contention.
+///
 /// - k-NN search target: <10ms
 /// - Hybrid query target: <30ms
 ///
 /// Operators should monitor `search_retries` and `search_retry_failures` metrics. Frequent
 /// retries indicate thread pool exhaustion and may require tuning usearch parameters or
 /// reducing concurrency.
+///
+/// TODO: Migrate to `spawn_blocking` to properly offload this CPU-bound work from the
+/// async runtime (see Issue #609).
+///
+/// The retry count of 16 is empirically chosen to cover transient spikes in thread pool
+/// contention without excessive blocking, matching the previous ~7ms backoff window.
 const MAX_SEARCH_ATTEMPTS: u32 = 16; // 1 initial attempt + 15 retries
 
 /// Check if a usearch error is transient and should be retried.
@@ -1684,6 +1692,116 @@ mod tests {
             .vectors_added
             .load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(after_update - initial_adds, 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_with_retry_logic() -> Result<()> {
+        use std::sync::atomic::AtomicUsize;
+
+        // Test the retry logic specifically to ensure it handles transient errors
+        // and eventually succeeds, exercising the yield/spin path.
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+
+        // Mock a search function that fails with a retryable error for the first 3 calls
+        // We use String as the error type because it implements Display and matches our
+        // trait bound search_with_retry<E, F> where E: Display
+        let mock_search = move || {
+            let count = attempts_clone.fetch_add(1, Ordering::Relaxed);
+            if count < 3 {
+                // Simulate "No available threads to lock" error from usearch
+                Err("No available threads to lock".to_string())
+            } else {
+                Ok(Matches {
+                    keys: vec![],
+                    distances: vec![],
+                })
+            }
+        };
+
+        // Execute retry logic
+        // This is a private method, so we test it within the module
+        let result = index.search_with_retry(mock_search, "Test search");
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::Relaxed), 4); // 3 failures + 1 success
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_retry_exhaustion() -> Result<()> {
+        use std::sync::atomic::AtomicUsize;
+
+        // Test that we eventually give up after MAX_SEARCH_ATTEMPTS
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+
+        let mock_search = move || {
+            attempts_clone.fetch_add(1, Ordering::Relaxed);
+            Err("No available threads to lock".to_string())
+        };
+
+        let result = index.search_with_retry(mock_search, "Test search");
+
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::Relaxed), MAX_SEARCH_ATTEMPTS as usize);
+
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Test search"));
+                assert!(msg.contains("No available threads"));
+            }
+            _ => panic!("Unexpected error type"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_immediate_success() -> Result<()> {
+        // Test the happy path where no retry is needed
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        let mock_search = || {
+            Ok(Matches {
+                keys: vec![],
+                distances: vec![],
+            })
+        };
+
+        // Should succeed immediately without error (using string type for error bound)
+        let result = index.search_with_retry::<String, _>(mock_search, "Test search");
+        assert!(result.is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_non_retryable_error() -> Result<()> {
+        // Test immediate failure with a non-retryable error
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        let mock_search = || {
+            Err("Some other fatal error".to_string())
+        };
+
+        let result = index.search_with_retry(mock_search, "Test search");
+
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Test search"));
+                assert!(msg.contains("Some other fatal error"));
+            }
+            _ => panic!("Unexpected error type"),
+        }
 
         Ok(())
     }
