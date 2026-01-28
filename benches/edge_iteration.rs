@@ -4,12 +4,12 @@
 //! After optimization (returning DashMap guards), iteration is ~46% faster
 //! when edge data is accessed without taking ownership.
 
-use criterion::{criterion_group, criterion_main, Criterion, black_box};
-use gallifreydb::index::current::CurrentIndexes;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::graph::Edge;
 use gallifreydb::core::id::{EdgeId, NodeId, VersionId};
 use gallifreydb::core::interning::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
+use gallifreydb::index::current::CurrentIndexes;
 
 fn bench_iter_edges(c: &mut Criterion) {
     let indexes = CurrentIndexes::new();
@@ -23,7 +23,7 @@ fn bench_iter_edges(c: &mut Criterion) {
             EdgeId::new(i).unwrap(),
             knows,
             NodeId::new(0).unwrap(),
-            NodeId::new(i+1).unwrap(),
+            NodeId::new(i + 1).unwrap(),
             props.clone(),
             version,
         );

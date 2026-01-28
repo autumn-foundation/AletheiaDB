@@ -702,7 +702,9 @@ impl CurrentIndexes {
     ///
     /// - **Zero allocation**: Returns guards/references to nodes without cloning (~56 bytes + Arc overhead)
     /// - **Efficient**: Avoids implicit cloning in hot loops
-    pub fn iter_nodes(&self) -> impl Iterator<Item = impl std::ops::Deref<Target = Node> + '_> + '_ {
+    pub fn iter_nodes(
+        &self,
+    ) -> impl Iterator<Item = impl std::ops::Deref<Target = Node> + '_> + '_ {
         self.nodes.iter()
     }
 
@@ -715,7 +717,9 @@ impl CurrentIndexes {
     ///
     /// - **Zero allocation**: Returns guards/references to edges without cloning (~72 bytes + Arc overhead)
     /// - **Efficient**: Avoids implicit cloning in hot loops (benchmark: ~370µs -> ~200µs for 10k edges)
-    pub fn iter_edges(&self) -> impl Iterator<Item = impl std::ops::Deref<Target = Edge> + '_> + '_ {
+    pub fn iter_edges(
+        &self,
+    ) -> impl Iterator<Item = impl std::ops::Deref<Target = Edge> + '_> + '_ {
         self.edges.iter()
     }
 
