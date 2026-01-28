@@ -47,8 +47,10 @@ impl TemporalClause {
     /// - `YYYY-MM-DD HH:MM:SS.f` (20-26 characters, where f is 1-6 digits)
     ///
     /// This prevents parse_from_str from accepting invalid inputs with trailing characters.
+    /// Uses byte-level validation to avoid allocations.
     fn is_valid_sql_timestamp(s: &str) -> bool {
-        let len = s.len();
+        let bytes = s.as_bytes();
+        let len = bytes.len();
 
         // Must be at least 19 characters for "YYYY-MM-DD HH:MM:SS"
         if len < 19 {
@@ -60,36 +62,31 @@ impl TemporalClause {
             return false;
         }
 
-        // Basic structure check: YYYY-MM-DD HH:MM:SS
-        let chars: Vec<char> = s.chars().collect();
-
-        // Check positions of fixed characters
-        if chars.get(4) != Some(&'-')
-            || chars.get(7) != Some(&'-')
-            || chars.get(10) != Some(&' ')
-            || chars.get(13) != Some(&':')
-            || chars.get(16) != Some(&':')
+        // Check structure: YYYY-MM-DD HH:MM:SS
+        if bytes[4] != b'-'
+            || bytes[7] != b'-'
+            || bytes[10] != b' '
+            || bytes[13] != b':'
+            || bytes[16] != b':'
         {
             return false;
         }
 
-        // If there's more than 19 characters, must have a dot at position 19
-        if len > 19 && chars.get(19) != Some(&'.') {
-            return false;
-        }
-
-        // Check that all digit positions contain digits
+        // Check digit positions
         let digit_positions = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
         for &pos in &digit_positions {
-            if !chars.get(pos).is_some_and(|c| c.is_ascii_digit()) {
+            if !bytes[pos].is_ascii_digit() {
                 return false;
             }
         }
 
-        // If fractional seconds, check they're all digits
-        if len > 20 {
-            for i in 20..len {
-                if !chars.get(i).is_some_and(|c| c.is_ascii_digit()) {
+        // Check fractional seconds if present
+        if len > 19 {
+            if bytes[19] != b'.' {
+                return false;
+            }
+            for &byte in &bytes[20..] {
+                if !byte.is_ascii_digit() {
                     return false;
                 }
             }
