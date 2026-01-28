@@ -1,0 +1,92 @@
+
+    #[test]
+    fn test_vector_rerank_heap_logic() {
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use crate::core::property::PropertyMapBuilder;
+
+        // This test verifies that the heap logic correctly maintains the top-k items
+        // and orders them correctly (descending score).
+
+        let current = Arc::new(CurrentStorage::new());
+        // Enable vector index
+        current
+            .enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+            .unwrap();
+
+        // Create 5 nodes with predictable embeddings/scores relative to query [1,0,0,0]
+        // Node 1: [1,0,0,0] -> score 1.0 (Best)
+        // Node 2: [0,1,0,0] -> score 0.0
+        // Node 3: [0.5, 0.866, 0, 0] -> score 0.5
+        // Node 4: [0.8, 0.6, 0, 0] -> score 0.8
+        // Node 5: [-1, 0, 0, 0] -> score -1.0 (Worst)
+
+        let create_node = |name: &str, vec: Vec<f32>| {
+            let props = PropertyMapBuilder::new()
+                .insert("name", name)
+                .insert_vector("embedding", &vec)
+                .build();
+            current.create_node("Person", props).unwrap()
+        };
+
+        let n1 = create_node("N1", vec![1.0, 0.0, 0.0, 0.0]);
+        let n2 = create_node("N2", vec![0.0, 1.0, 0.0, 0.0]);
+        let n3 = create_node("N3", vec![0.5, 0.866, 0.0, 0.0]);
+        let n4 = create_node("N4", vec![0.8, 0.6, 0.0, 0.0]);
+        let n5 = create_node("N5", vec![-1.0, 0.0, 0.0, 0.0]);
+
+        // Case 1: k=3. Expect top 3: N1 (1.0), N4 (0.8), N3 (0.5)
+        let nodes = vec![n1, n2, n3, n4, n5];
+        let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
+        let query_embedding: Arc<[f32]> = vec![1.0, 0.0, 0.0, 0.0].into();
+
+        let mut rerank = VectorRerankIterator::new(
+            input,
+            query_embedding.clone(),
+            3,
+            current.clone(),
+            None
+        );
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = rerank.next() {
+            results.push(row);
+        }
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].entity.node_id(), Some(n1)); // 1.0
+        assert_eq!(results[1].entity.node_id(), Some(n4)); // 0.8
+        assert_eq!(results[2].entity.node_id(), Some(n3)); // 0.5
+
+        // Case 2: k=1. Expect top 1: N1
+        let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
+        let mut rerank = VectorRerankIterator::new(
+            input,
+            query_embedding.clone(),
+            1,
+            current.clone(),
+            None
+        );
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = rerank.next() {
+            results.push(row);
+        }
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entity.node_id(), Some(n1));
+
+        // Case 3: k=10 (more than available). Expect all 5 sorted.
+        let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
+        let mut rerank = VectorRerankIterator::new(
+            input,
+            query_embedding.clone(),
+            10,
+            current.clone(),
+            None
+        );
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = rerank.next() {
+            results.push(row);
+        }
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0].entity.node_id(), Some(n1));
+        assert_eq!(results[4].entity.node_id(), Some(n5));
+    }
