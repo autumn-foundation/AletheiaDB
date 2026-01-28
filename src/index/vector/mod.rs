@@ -43,34 +43,31 @@
 //!
 //! # Examples
 //!
-//! ```rust,no_run
-//! use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
+//! ```rust
+//! use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric, Quantization};
 //! use gallifreydb::index::VectorIndex;
 //! use gallifreydb::core::id::NodeId;
 //!
-//! fn search_similar_documents(
-//!     index: &impl VectorIndex,
-//!     query_embedding: &[f32],
-//!     limit: usize
-//! ) -> gallifreydb::utils::Result<Vec<(NodeId, f32)>> {
-//!     // Find top-k most similar documents
-//!     let results = index.search(query_embedding, limit)?;
-//!
-//!     // Results are sorted by similarity (highest first)
-//!     for (node_id, similarity) in &results {
-//!         println!("Node {:?}: similarity = {}", node_id, similarity);
-//!     }
-//!
-//!     Ok(results)
-//! }
-//!
 //! # fn main() -> gallifreydb::utils::Result<()> {
-//! // Create an HNSW index
-//! let index = HnswIndexBuilder::new(384, DistanceMetric::Cosine).build()?;
+//! // 1. Create an HNSW index
+//! let index = HnswIndexBuilder::new(384, DistanceMetric::Cosine)
+//!     .m(16)
+//!     .ef_construction(128)
+//!     .quantization(Quantization::F16)
+//!     .build()?;
 //!
-//! // Use the generic search function
+//! // 2. Add vectors
+//! let node_id = NodeId::new(1).unwrap();
+//! let embedding = vec![0.1f32; 384];
+//! index.add(node_id, &embedding)?;
+//!
+//! // 3. Search for similar vectors
 //! let query = vec![0.1f32; 384];
-//! let _results = search_similar_documents(&index, &query, 10)?;
+//! let results = index.search(&query, 10)?;
+//!
+//! for (id, similarity) in results {
+//!     println!("Found node {:?} with similarity {:.4}", id, similarity);
+//! }
 //! # Ok(())
 //! # }
 //! ```

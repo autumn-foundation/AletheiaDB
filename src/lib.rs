@@ -39,13 +39,17 @@
 //! db.write(|tx| {
 //!     tx.update_node(alice, properties! {
 //!         "age" => 31,
-//!     })
+//!     })?;
+//!     Ok(())
 //! })?;
 //!
 //! // Query current state
 //! let current = db.get_node(alice)?;
 //!
 //! // Time-travel to see historical state
+//! // use gallifreydb::core::temporal::Timestamp;
+//! // let valid_time = Timestamp::now();
+//! // let tx_time = Timestamp::now();
 //! // let historical = db.get_node_at_time(alice, valid_time, tx_time)?;
 //! # Ok(())
 //! # }
