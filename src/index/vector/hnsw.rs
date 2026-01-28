@@ -358,6 +358,36 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
     error_msg.contains("No available threads to lock")
 }
 
+/// Create a wrapper for custom metric functions that handles FFI safety.
+///
+/// This wrapper ensures that null pointers passed from usearch do not cause
+/// Undefined Behavior when converting to Rust slices.
+///
+/// # Safety
+///
+/// This function returns a closure that is called by C code. It must handle
+/// invalid pointers gracefully (e.g. by returning INFINITY) rather than panicking
+/// or accessing invalid memory.
+fn create_metric_wrapper(
+    dims: usize,
+    distance_fn: Arc<dyn Fn(&[f32], &[f32]) -> f32 + Send + Sync>,
+) -> Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> {
+    Box::new(move |a: *const f32, b: *const f32| {
+        // Safety check: null pointers from FFI
+        if a.is_null() || b.is_null() {
+            // Return infinite distance for invalid inputs to prevent UB
+            return f32::INFINITY;
+        }
+
+        // SAFETY: usearch guarantees pointers are valid for `dims` elements
+        // if they are not null (which we checked above).
+        // We also rely on usearch providing properly aligned pointers.
+        let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
+        let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+        distance_fn(slice_a, slice_b)
+    })
+}
+
 /// Builder for configuring and creating an `HnswIndex`.
 pub struct HnswIndexBuilder {
     config: HnswConfig,
@@ -472,18 +502,8 @@ impl HnswIndexBuilder {
             let dims = self.config.dimensions;
             let distance_fn = Arc::clone(&custom.distance_fn);
 
-            // Create a wrapper that converts usearch's raw pointer API to our safe slice API
-            // SAFETY: usearch guarantees that:
-            // 1. Both pointers are valid and point to `dims` contiguous f32 values
-            // 2. The pointers remain valid for the duration of the function call
-            // 3. The data is properly aligned for f32
-            let metric_wrapper: Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> =
-                Box::new(move |a: *const f32, b: *const f32| {
-                    // SAFETY: usearch guarantees pointers are valid for `dims` elements
-                    let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
-                    let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-                    distance_fn(slice_a, slice_b)
-                });
+            // Create a safe wrapper that handles pointer validation
+            let metric_wrapper = create_metric_wrapper(dims, distance_fn);
 
             index.change_metric(metric_wrapper);
         }
@@ -1700,5 +1720,48 @@ mod tests {
         assert_eq!(after_update - initial_adds, 3);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_metric_wrapper_safety() {
+        use std::sync::Arc;
+
+        // Create a dummy distance function that just sums differences
+        let distance_fn = Arc::new(|a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+        });
+
+        // Create the wrapper for 2-dimensional vectors
+        let wrapper = create_metric_wrapper(2, distance_fn);
+
+        // Test with valid pointers
+        let a = [1.0f32, 2.0];
+        let b = [3.0f32, 4.0];
+        let result = wrapper(a.as_ptr(), b.as_ptr());
+        // |1-3| + |2-4| = 2 + 2 = 4
+        assert!((result - 4.0).abs() < f32::EPSILON, "Valid input should work");
+
+        // Test with null pointers - should return INFINITY, not crash
+        let null_ptr = std::ptr::null();
+        let result_null_a = wrapper(null_ptr, b.as_ptr());
+        assert_eq!(
+            result_null_a,
+            f32::INFINITY,
+            "Null first pointer should return INFINITY"
+        );
+
+        let result_null_b = wrapper(a.as_ptr(), null_ptr);
+        assert_eq!(
+            result_null_b,
+            f32::INFINITY,
+            "Null second pointer should return INFINITY"
+        );
+
+        let result_null_both = wrapper(null_ptr, null_ptr);
+        assert_eq!(
+            result_null_both,
+            f32::INFINITY,
+            "Both pointers null should return INFINITY"
+        );
     }
 }
