@@ -1,0 +1,67 @@
+    pub fn persist_indexes(&self) -> Result<()> {
+        use crate::storage::index_persistence::formats::IndexManifest;
+        use crate::storage::index_persistence::formats::StringInternerManifestEntry;
+        use crate::storage::index_persistence::formats::GraphIndexManifestEntry;
+
+        // Warn if background persistence thread has stopped
+        if self
+            .persistence_thread_stopped
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            eprintln!(
+                "Warning: Background persistence thread has stopped. \
+                 Automatic persistence is disabled. Manual persist_indexes() calls will still work."
+            );
+        }
+
+        let manager =
+            self.persistence_manager
+                .as_ref()
+                .ok_or_else(|| StorageError::InconsistentState {
+                    reason: "Index persistence not enabled".to_string(),
+                })?;
+
+        let tracker = self.persistence_tracker.as_ref().ok_or_else(|| StorageError::InconsistentState {
+            reason: "Persistence tracker not found but manager exists".to_string()
+        })?;
+
+        // 1. String interner
+        persist_string_interner(manager, tracker)?;
+
+        // 2. Graph index
+        persist_graph_index(&self.current, manager, tracker)?;
+
+        // 3. Vector indexes
+        persist_vector_indexes(&self.current, manager, tracker)?;
+
+        // 4. Temporal index (version history)
+        persist_temporal_index(&self.historical, &self.temporal_indexes, manager, tracker)?;
+
+        // 5. Save manifest last with current WAL LSN
+        // Note: This records the WAL position at persist time for future WAL replay coordination
+        let current_lsn = self.wal.current_lsn().0;
+        let mut manifest = IndexManifest::new(current_lsn);
+
+        // Add string interner entry
+        manifest.string_interner = Some(StringInternerManifestEntry {
+            interner_file: "strings/interner.idx".to_string(),
+            string_count: crate::core::GLOBAL_INTERNER.len() as u64,
+        });
+
+        // Add graph index entry if we have nodes/edges
+        let node_count = self.current.node_count();
+        let edge_count = self.current.edge_count();
+        if node_count > 0 || edge_count > 0 {
+            manifest.graph_index = Some(GraphIndexManifestEntry {
+                adjacency_file: "graph/adjacency.idx".to_string(),
+                node_count: node_count as u64,
+                edge_count: edge_count as u64,
+            });
+        }
+
+        manager.save_manifest(&manifest).map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to save manifest: {}", e))
+        })?;
+
+        Ok(())
+    }
