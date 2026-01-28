@@ -2002,8 +2002,13 @@ impl HistoricalStorage {
     /// but is hidden from documentation and marked with `__test_` prefix to
     /// discourage production use.
     ///
-    /// **Warning**: This method exposes internal implementation details and
-    /// should only be used in tests.
+    /// **TEST ONLY**: Iterate over all node versions.
+    ///
+    /// This method exposes internal implementation details and must ONLY be used
+    /// in integration tests for validation purposes. Do not use in production code.
+    ///
+    /// # Warning
+    /// This API is unstable and may change without notice.
     #[doc(hidden)]
     pub fn iter_node_versions(&self) -> impl Iterator<Item = &NodeVersion> {
         self.node_versions.values()

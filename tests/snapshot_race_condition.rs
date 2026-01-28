@@ -45,7 +45,7 @@ fn test_concurrent_write_during_snapshot_creation()
             .expect("Failed to insert initial node");
         historical
             .write()
-            .unwrap()
+            .expect("Lock poisoned: historical storage lock corrupted")
             .add_node_version(node_id, version_id, temporal, label, props)
             .expect("Failed to add initial node version");
     }
@@ -90,10 +90,9 @@ fn test_concurrent_write_during_snapshot_creation()
         move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             barrier.wait(); // Synchronize start
 
-            // Small delay to ensure checkpoint thread has time to acquire the lock first
-            // and create the "torn read" condition described above.
             // Intentional delay to increase probability of checkpoint thread
             // acquiring lock before writer, creating the "torn read" condition
+            // described above.
             std::thread::sleep(std::time::Duration::from_millis(10));
 
             // Try to write many times to increase chance of hitting the race window
@@ -121,7 +120,7 @@ fn test_concurrent_write_during_snapshot_creation()
                 // increases the chance of race if checkpoint interleaves.
                 historical
                     .write()
-                    .unwrap()
+                    .expect("Lock poisoned: historical storage lock corrupted")
                     .add_node_version(node_id, version_id, temporal, label, props)
                     .map_err(|e| format!("Failed to add node version in writer thread: {}", e))?;
             }
