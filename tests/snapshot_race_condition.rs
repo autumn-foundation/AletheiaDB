@@ -89,13 +89,14 @@ fn test_concurrent_write_during_snapshot_creation() {
             // It should NEVER happen between the two snapshot creations!
 
             // Update both storages (simulating transaction)
-            let _ = current.insert_node_direct(node, time::now());
+            current.insert_node_direct(node, time::now()).unwrap();
             // In a real DB, these happen together. Here we do them sequentially which
             // increases the chance of race if checkpoint interleaves.
-            let _ = historical
+            historical
                 .write()
                 .unwrap()
-                .add_node_version(node_id, version_id, temporal, label, props);
+                .add_node_version(node_id, version_id, temporal, label, props)
+                .unwrap();
         }
     });
 
@@ -134,15 +135,16 @@ fn test_concurrent_write_during_snapshot_creation() {
 
     // Check 1: Orphaned Versions
     // For every historical version that is current (valid_to is MAX), check if it exists in current
-    for version in recovered_historical.__test_get_node_versions_iterator() {
-        if version.temporal.valid_time().is_current() {
-            if recovered_current.get_node(version.node_id).is_err() {
-                panic!(
-                    "Found orphaned version: {:?} for node {:?} (exists in historical but not current)",
-                    version.id, version.node_id
-                );
-            }
-        }
+    if let Some(version) = recovered_historical
+        .__test_get_node_versions_iterator()
+        .find(|v| {
+            v.temporal.valid_time().is_current() && recovered_current.get_node(v.node_id).is_err()
+        })
+    {
+        panic!(
+            "Found orphaned version: {:?} for node {:?} (exists in historical but not current)",
+            version.id, version.node_id
+        );
     }
 
     // Check 2: Missing History
