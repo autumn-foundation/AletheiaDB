@@ -180,28 +180,6 @@ pub struct VectorIndexInfo {
     pub distance_metric: DistanceMetric,
 }
 
-/// Internal state for vector indexing (legacy single-property).
-///
-/// TODO: Remove in next major version - replaced by multi-property DashMap.
-struct VectorIndexState {
-    index: Option<Arc<HnswIndex>>,
-    property_name: Option<String>,
-    config: Option<HnswConfig>,
-}
-
-impl VectorIndexState {
-    fn new() -> Self {
-        VectorIndexState {
-            index: None,
-            property_name: None,
-            config: None,
-        }
-    }
-
-    fn is_enabled(&self) -> bool {
-        self.index.is_some()
-    }
-}
 
 /// Entry for a temporal vector index (multi-property support).
 struct TemporalVectorIndexEntry {
@@ -415,8 +393,6 @@ pub struct CurrentStorage {
     /// Multi-property vector indexes (Issue #389)
     /// Maps property name -> VectorIndexEntry
     vector_indexes: DashMap<String, VectorIndexEntry>,
-    /// Vector index state (legacy single-property, for backward compatibility)
-    vector_index_state: Arc<RwLock<VectorIndexState>>,
     /// Multi-property temporal vector indexes (Issue #389 fix)
     /// Maps property name -> TemporalVectorIndexEntry
     temporal_vector_indexes: DashMap<String, TemporalVectorIndexEntry>,
@@ -444,7 +420,6 @@ impl CurrentStorage {
             edge_id_gen: IdGenerator::new(),
             version_id_gen: IdGenerator::new(),
             vector_indexes: DashMap::new(),
-            vector_index_state: Arc::new(RwLock::new(VectorIndexState::new())),
             temporal_vector_indexes: DashMap::new(),
             temporal_vector_index_state: Arc::new(RwLock::new(TemporalVectorIndexState::new())),
             filter_stats: DashMap::new(),
@@ -572,16 +547,6 @@ impl CurrentStorage {
             }
         }
 
-        // Update legacy single-property state for backward compatibility
-        // Only stores property name/config for legacy API methods; actual index is in DashMap
-        let mut state = self.vector_index_state.write();
-        if !state.is_enabled() {
-            // First index becomes the "default" for legacy API (find_similar, etc.)
-            state.property_name = Some(property_name.to_string());
-            state.config = Some(config);
-            // Note: state.index is no longer used - we read from DashMap
-        }
-
         Ok(())
     }
 
@@ -589,7 +554,7 @@ impl CurrentStorage {
     ///
     /// Returns `true` if at least one property has a vector index.
     pub fn is_vector_index_enabled(&self) -> bool {
-        !self.vector_indexes.is_empty() || self.vector_index_state.read().is_enabled()
+        !self.vector_indexes.is_empty()
     }
 
     /// Check if vector indexing is enabled for a specific property.
@@ -606,13 +571,7 @@ impl CurrentStorage {
     ///
     /// Note: For multi-property setups, use [`list_vector_indexes`] instead.
     pub fn get_indexed_property_name(&self) -> Option<String> {
-        // First check legacy state for backward compatibility
-        let legacy = self.vector_index_state.read().property_name.clone();
-        if legacy.is_some() {
-            return legacy;
-        }
-        // Fallback to first entry in multi-property map
-        self.vector_indexes.iter().next().map(|r| r.key().clone())
+        self.get_default_vector_property_name()
     }
 
     /// List all configured vector indexes.
@@ -667,15 +626,16 @@ impl CurrentStorage {
     ) -> crate::storage::persistence::VectorIndexCheckpointData {
         use crate::storage::persistence::VectorIndexCheckpointData;
 
-        let state = self.vector_index_state.read();
-
-        if let (Some(config), Some(property_name)) =
-            (state.config.clone(), state.property_name.clone())
-        {
-            VectorIndexCheckpointData::enabled(property_name, config)
-        } else {
-            VectorIndexCheckpointData::disabled()
+        if let Some(property_name) = self.get_default_vector_property_name() {
+            if let Some(entry) = self.vector_indexes.get(&property_name) {
+                return VectorIndexCheckpointData::enabled(
+                    property_name,
+                    entry.value().config.clone(),
+                );
+            }
         }
+
+        VectorIndexCheckpointData::disabled()
     }
 
     /// Register a vector index (used during index loading from disk).
@@ -698,11 +658,6 @@ impl CurrentStorage {
             },
         );
 
-        // Update legacy single-property state (for backward compatibility)
-        let mut state = self.vector_index_state.write();
-        state.index = Some(Arc::clone(&index_arc));
-        state.property_name = Some(property_name.to_string());
-        state.config = Some(config);
     }
 
     /// Get a reference to the HNSW index and its config for a specific property.
@@ -1345,6 +1300,31 @@ impl CurrentStorage {
         self.indexes.in_degree(node)
     }
 
+    /// Get the default property name for vector indexing.
+    ///
+    /// This is used to maintain backward compatibility for legacy APIs that
+    /// don't specify a property name. It deterministically selects the
+    /// alphabetically first property name from the enabled vector indexes.
+    ///
+    /// Returns `None` if no vector indexes are enabled.
+    fn get_default_vector_property_name(&self) -> Option<String> {
+        if self.vector_indexes.is_empty() {
+            return None;
+        }
+
+        // Optimization: if len == 1, just take it (no sorting needed)
+        if self.vector_indexes.len() == 1 {
+            return self.vector_indexes.iter().next().map(|r| r.key().clone());
+        }
+
+        // Find min key alphabetically
+        // Note: DashMap iteration order is not guaranteed, so we must scan all keys
+        self.vector_indexes
+            .iter()
+            .map(|r| r.key().clone())
+            .min()
+    }
+
     /// Helper method to prepare for vector search.
     /// Returns the Arc<HnswIndex> and the query vector.
     ///
@@ -1361,15 +1341,12 @@ impl CurrentStorage {
     /// For 384-dim embeddings, this saves ~1.5KB allocation per search.
     /// For 1536-dim embeddings, this saves ~6KB allocation per search.
     fn prepare_vector_search(&self, query_node_id: NodeId) -> Result<(Arc<HnswIndex>, Arc<[f32]>)> {
-        // Get the default property name from legacy state
-        let state = self.vector_index_state.read();
-        let prop_name = state.property_name.as_ref().ok_or_else(|| {
+        // Get the default property name
+        let prop_name = self.get_default_vector_property_name().ok_or_else(|| {
             crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
                 "Vector index is not enabled".to_string(),
             ))
         })?;
-        let prop_name = prop_name.clone();
-        drop(state);
 
         // Get the index from DashMap (where actual data is stored)
         let entry = self.vector_indexes.get(&prop_name).ok_or_else(|| {
@@ -1865,15 +1842,12 @@ impl CurrentStorage {
     /// This uses the "default" property (first enabled) for backward compatibility.
     /// For multi-property searches, use `search_vectors_in` instead.
     fn prepare_vector_search_raw(&self, embedding: &[f32]) -> Result<Arc<HnswIndex>> {
-        // Get the default property name from legacy state
-        let state = self.vector_index_state.read();
-        let prop_name = state.property_name.as_ref().ok_or_else(|| {
+        // Get the default property name
+        let prop_name = self.get_default_vector_property_name().ok_or_else(|| {
             crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
                 "Vector index is not enabled. Call enable_vector_index() first.".to_string(),
             ))
         })?;
-        let prop_name = prop_name.clone();
-        drop(state);
 
         // Get the index from DashMap (where actual data is stored)
         let entry = self.vector_indexes.get(&prop_name).ok_or_else(|| {
@@ -2346,7 +2320,7 @@ impl CurrentStorage {
     /// Returns `None` if vector indexing is not enabled.
     /// This is used by the query executor for vector reranking operations.
     pub fn get_vector_property_name(&self) -> Option<String> {
-        self.vector_index_state.read().property_name.clone()
+        self.get_default_vector_property_name()
     }
 
     /// Get node counts grouped by label.
@@ -2427,8 +2401,12 @@ impl CurrentStorage {
     ///
     /// Used by the query planner for statistics.
     pub fn vector_count(&self) -> usize {
-        let state = self.vector_index_state.read();
-        state.index.as_ref().map(|idx| idx.len()).unwrap_or(0)
+        if let Some(prop_name) = self.get_default_vector_property_name() {
+            if let Some(entry) = self.vector_indexes.get(&prop_name) {
+                return entry.value().index.len();
+            }
+        }
+        0
     }
 
     /// Iterate over all nodes (for persistence).
