@@ -7,6 +7,7 @@
 //! - Combined temporal specifications
 
 use crate::core::temporal::{TimeRange, Timestamp};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 
 use super::error::SqlError;
 
@@ -39,25 +40,150 @@ pub enum TemporalClause {
 }
 
 impl TemporalClause {
+    /// Validates that a string matches the SQL timestamp format strictly.
+    ///
+    /// Accepts:
+    /// - `YYYY-MM-DD HH:MM:SS` (exactly 19 characters)
+    /// - `YYYY-MM-DD HH:MM:SS.f` (20-26 characters, where f is 1-6 digits)
+    ///
+    /// This prevents parse_from_str from accepting invalid inputs with trailing characters.
+    /// Uses byte-level validation to avoid allocations.
+    fn is_valid_sql_timestamp(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+
+        // Must be at least 19 characters for "YYYY-MM-DD HH:MM:SS"
+        if len < 19 {
+            return false;
+        }
+
+        // Must be at most 26 characters for "YYYY-MM-DD HH:MM:SS.ffffff"
+        if len > 26 {
+            return false;
+        }
+
+        // Check structure: YYYY-MM-DD HH:MM:SS
+        if bytes[4] != b'-'
+            || bytes[7] != b'-'
+            || bytes[10] != b' '
+            || bytes[13] != b':'
+            || bytes[16] != b':'
+        {
+            return false;
+        }
+
+        // Check digit positions
+        let digit_positions = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+        for &pos in &digit_positions {
+            if !bytes[pos].is_ascii_digit() {
+                return false;
+            }
+        }
+
+        // Check fractional seconds if present
+        if len > 19 {
+            if bytes[19] != b'.' {
+                return false;
+            }
+            for &byte in &bytes[20..] {
+                if !byte.is_ascii_digit() {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     /// Parse a timestamp string.
     ///
-    /// Currently supports:
-    /// - Unix microseconds: `1705315200000000`
+    /// Supports the following formats:
+    /// - **Unix microseconds**: `1705315200000000` (fast path)
+    /// - **ISO 8601 UTC**: `2024-01-15T10:00:00Z`
+    /// - **ISO 8601 with offset**: `2024-01-15T15:30:00+05:30`
+    /// - **SQL timestamp**: `2024-01-15 10:00:00` (assumes UTC)
+    /// - **Date only**: `2024-01-15` (assumes midnight UTC)
     ///
-    /// Support for ISO 8601 (`2024-01-15T10:00:00Z`) and SQL timestamp
-    /// (`2024-01-15 10:00:00`) formats is planned for a future update.
+    /// All formats support optional single or double quotes and whitespace.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gallifreydb::sql::temporal::TemporalClause;
+    ///
+    /// // Unix microseconds
+    /// let ts = TemporalClause::parse_timestamp("1705315200000000").unwrap();
+    ///
+    /// // ISO 8601 UTC
+    /// let ts = TemporalClause::parse_timestamp("2024-01-15T10:00:00Z").unwrap();
+    ///
+    /// // ISO 8601 with timezone
+    /// let ts = TemporalClause::parse_timestamp("2024-01-15T15:30:00+05:30").unwrap();
+    ///
+    /// // SQL timestamp format
+    /// let ts = TemporalClause::parse_timestamp("2024-01-15 10:00:00").unwrap();
+    ///
+    /// // Date only
+    /// let ts = TemporalClause::parse_timestamp("2024-01-15").unwrap();
+    /// ```
     pub fn parse_timestamp(s: &str) -> Result<Timestamp, SqlError> {
         let trimmed = s.trim().trim_matches('\'').trim_matches('"');
 
-        // Try parsing as microseconds
+        // Fast path: Try parsing as Unix microseconds first
         if let Ok(micros) = trimmed.parse::<i64>() {
             return Ok(Timestamp::from(micros));
         }
 
-        // Try parsing as ISO 8601 / SQL timestamp format
-        // For now, we'll require microseconds format and add ISO 8601 support later
+        // Try parsing as ISO 8601 with UTC timezone (e.g., "2024-01-15T10:00:00Z")
+        if let Ok(dt) = trimmed.parse::<DateTime<Utc>>() {
+            return Ok(Timestamp::from(dt.timestamp_micros()));
+        }
+
+        // Try parsing as ISO 8601 with timezone offset (e.g., "2024-01-15T15:30:00+05:30")
+        if let Ok(dt) = trimmed.parse::<DateTime<FixedOffset>>() {
+            return Ok(Timestamp::from(dt.with_timezone(&Utc).timestamp_micros()));
+        }
+
+        // Try parsing as a naive datetime with ISO-like format (T separator)
+        // e.g., "2024-01-15T10:00:00" or "2024-01-15T10:00:00.123456"
+        // This parse is strict and does not allow trailing characters.
+        // We assume UTC for naive timestamps.
+        if let Ok(dt) = trimmed.parse::<NaiveDateTime>() {
+            return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
+        }
+
+        // Try parsing as SQL timestamp format with space separator (e.g., "2024-01-15 10:00:00")
+        // NaiveDateTime::FromStr doesn't support space separator, so we use parse_from_str.
+        // To ensure strictness, we validate the format by checking length and characters.
+        if Self::is_valid_sql_timestamp(trimmed) {
+            // Try with fractional seconds first (more specific)
+            if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f") {
+                return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
+            }
+            // Try without fractional seconds
+            if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+                return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
+            }
+        }
+
+        // Try parsing as date-only format (e.g., "2024-01-15").
+        // This parse is strict.
+        // Assume midnight UTC.
+        if let Ok(date) = trimmed.parse::<NaiveDate>() {
+            // `and_hms_opt` is safe and will not panic.
+            if let Some(dt) = date.and_hms_opt(0, 0, 0) {
+                return Ok(Timestamp::from(dt.and_utc().timestamp_micros()));
+            }
+        }
+
+        // None of the formats worked, return detailed error
         Err(SqlError::InvalidTimestamp(format!(
-            "Cannot parse timestamp '{}'. Use microseconds since epoch.",
+            "Cannot parse timestamp '{}'. Supported formats:\n\
+             - Unix microseconds: 1705315200000000\n\
+             - ISO 8601 UTC: 2024-01-15T10:00:00Z\n\
+             - ISO 8601 with offset: 2024-01-15T15:30:00+05:30\n\
+             - SQL timestamp: 2024-01-15 10:00:00 (assumes UTC)\n\
+             - Date only: 2024-01-15 (assumes midnight UTC)",
             s
         )))
     }

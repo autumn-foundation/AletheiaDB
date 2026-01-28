@@ -538,6 +538,347 @@ mod phase2_temporal {
 }
 
 // ============================================================================
+// ISO 8601 Timestamp Parsing Tests
+// ============================================================================
+
+mod iso8601_parsing {
+    use super::*;
+
+    // ========================================================================
+    // Cycle 1: Preserve Existing Unix Microseconds Behavior
+    // ========================================================================
+
+    #[test]
+    fn test_parse_unix_microseconds_zero() {
+        let ts = TemporalClause::parse_timestamp("0");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 0);
+    }
+
+    #[test]
+    fn test_parse_unix_microseconds_negative() {
+        let ts = TemporalClause::parse_timestamp("-1000000");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), -1000000);
+    }
+
+    #[test]
+    fn test_parse_unix_microseconds_large() {
+        let ts = TemporalClause::parse_timestamp("9223372036854775000");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 9223372036854775000);
+    }
+
+    #[test]
+    fn test_parse_unix_microseconds_with_quotes() {
+        let ts = TemporalClause::parse_timestamp("'1705315200000000'");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705315200000000);
+    }
+
+    #[test]
+    fn test_parse_unix_microseconds_with_double_quotes() {
+        let ts = TemporalClause::parse_timestamp("\"1705315200000000\"");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705315200000000);
+    }
+
+    #[test]
+    fn test_parse_unix_microseconds_with_whitespace() {
+        let ts = TemporalClause::parse_timestamp("  1705315200000000  ");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705315200000000);
+    }
+
+    // ========================================================================
+    // Cycle 2: ISO 8601 UTC Format
+    // ========================================================================
+
+    #[test]
+    fn test_parse_iso8601_utc_basic() {
+        // 2024-01-15T10:00:00Z = 1705312800000000 microseconds
+        let ts = TemporalClause::parse_timestamp("2024-01-15T10:00:00Z");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_parse_iso8601_utc_with_single_quotes() {
+        let ts = TemporalClause::parse_timestamp("'2024-01-15T10:00:00Z'");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_parse_iso8601_utc_with_double_quotes() {
+        let ts = TemporalClause::parse_timestamp("\"2024-01-15T10:00:00Z\"");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_parse_iso8601_utc_with_whitespace() {
+        let ts = TemporalClause::parse_timestamp("  2024-01-15T10:00:00Z  ");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_parse_iso8601_utc_with_fractional_seconds() {
+        // 2024-01-15T10:00:00.123456Z
+        let ts = TemporalClause::parse_timestamp("2024-01-15T10:00:00.123456Z");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800123456);
+    }
+
+    #[test]
+    fn test_parse_iso8601_utc_midnight() {
+        // 2024-01-15T00:00:00Z = 1705276800000000 microseconds
+        let ts = TemporalClause::parse_timestamp("2024-01-15T00:00:00Z");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705276800000000);
+    }
+
+    #[test]
+    fn test_parse_iso8601_utc_epoch() {
+        // 1970-01-01T00:00:00Z = 0 microseconds
+        let ts = TemporalClause::parse_timestamp("1970-01-01T00:00:00Z");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 0);
+    }
+
+    // ========================================================================
+    // Cycle 3: ISO 8601 with Timezone Offset
+    // ========================================================================
+
+    #[test]
+    fn test_parse_iso8601_with_zero_offset() {
+        // 2024-01-15T10:00:00+00:00 should equal Z format
+        let ts = TemporalClause::parse_timestamp("2024-01-15T10:00:00+00:00");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_parse_iso8601_with_positive_offset() {
+        // 2024-01-15T15:30:00+05:30 = 2024-01-15T10:00:00Z
+        let ts = TemporalClause::parse_timestamp("2024-01-15T15:30:00+05:30");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_parse_iso8601_with_negative_offset() {
+        // 2024-01-15T02:00:00-08:00 = 2024-01-15T10:00:00Z
+        let ts = TemporalClause::parse_timestamp("2024-01-15T02:00:00-08:00");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    // ========================================================================
+    // Cycle 4: SQL Timestamp Format (space separator)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_sql_timestamp_format() {
+        // 2024-01-15 10:00:00 (space separator, assume UTC)
+        let ts = TemporalClause::parse_timestamp("2024-01-15 10:00:00");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_parse_sql_timestamp_midnight() {
+        let ts = TemporalClause::parse_timestamp("2024-01-15 00:00:00");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705276800000000);
+    }
+
+    #[test]
+    fn test_parse_sql_timestamp_with_fractional_seconds() {
+        // SQL timestamp with fractional seconds (now supported via strict parse)
+        let ts = TemporalClause::parse_timestamp("2024-01-15 10:00:00.123456");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800123456);
+    }
+
+    #[test]
+    fn test_parse_naive_datetime_with_t_separator() {
+        // ISO-like format without timezone (e.g., "2024-01-15T10:00:00")
+        let ts = TemporalClause::parse_timestamp("2024-01-15T10:00:00");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_parse_naive_datetime_with_t_and_fractional() {
+        // ISO-like format with T separator and fractional seconds
+        let ts = TemporalClause::parse_timestamp("2024-01-15T10:00:00.123456");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705312800123456);
+    }
+
+    // ========================================================================
+    // Cycle 5: Date-Only Format
+    // ========================================================================
+
+    #[test]
+    fn test_parse_date_only() {
+        // 2024-01-15 (assume midnight UTC)
+        let ts = TemporalClause::parse_timestamp("2024-01-15");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705276800000000);
+    }
+
+    #[test]
+    fn test_parse_date_only_with_quotes() {
+        let ts = TemporalClause::parse_timestamp("'2024-01-15'");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1705276800000000);
+    }
+
+    // ========================================================================
+    // Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_parse_empty_string() {
+        let ts = TemporalClause::parse_timestamp("");
+        assert!(ts.is_err());
+    }
+
+    #[test]
+    fn test_parse_invalid_date_feb_30() {
+        let ts = TemporalClause::parse_timestamp("2024-02-30T10:00:00Z");
+        assert!(ts.is_err());
+    }
+
+    #[test]
+    fn test_parse_invalid_leap_year() {
+        // 2023 is not a leap year, Feb 29 should fail
+        let ts = TemporalClause::parse_timestamp("2023-02-29T10:00:00Z");
+        assert!(ts.is_err());
+    }
+
+    #[test]
+    fn test_parse_valid_leap_year() {
+        // 2024 is a leap year, Feb 29 should work
+        // 2024-02-29T00:00:00Z = 1709164800000000 microseconds
+        let ts = TemporalClause::parse_timestamp("2024-02-29T00:00:00Z");
+        assert!(ts.is_ok());
+        assert_eq!(ts.unwrap().wallclock(), 1709164800000000);
+    }
+
+    #[test]
+    fn test_parse_far_future_date() {
+        // 2100-12-31T23:59:59Z should work
+        let ts = TemporalClause::parse_timestamp("2100-12-31T23:59:59Z");
+        assert!(ts.is_ok());
+        // Just verify it parses, don't check exact value
+    }
+
+    #[test]
+    fn test_parse_invalid_format() {
+        let ts = TemporalClause::parse_timestamp("not a timestamp");
+        assert!(ts.is_err());
+    }
+
+    #[test]
+    fn test_parse_strict_rejects_trailing_characters_date() {
+        // Strict parsing should reject dates with trailing invalid characters
+        let ts = TemporalClause::parse_timestamp("2024-01-15-invalid");
+        assert!(ts.is_err(), "Should reject date with trailing characters");
+    }
+
+    #[test]
+    fn test_parse_strict_rejects_trailing_characters_datetime() {
+        // Strict parsing should reject datetimes with trailing invalid characters
+        let ts = TemporalClause::parse_timestamp("2024-01-15 10:00:00 invalid");
+        assert!(
+            ts.is_err(),
+            "Should reject datetime with trailing characters"
+        );
+    }
+
+    #[test]
+    fn test_parse_strict_rejects_partial_date() {
+        // Strict parsing should reject partial dates
+        let ts = TemporalClause::parse_timestamp("2024-01");
+        assert!(ts.is_err(), "Should reject partial date");
+    }
+
+    // ========================================================================
+    // Cycle 6: Error Messages
+    // ========================================================================
+
+    #[test]
+    fn test_error_message_lists_formats() {
+        let result = TemporalClause::parse_timestamp("invalid");
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        // Error message should mention supported formats
+        assert!(
+            err_msg.contains("ISO 8601") || err_msg.contains("microseconds"),
+            "Error message should list supported formats"
+        );
+    }
+
+    // ========================================================================
+    // Cycle 7: Integration Tests with Full SQL Parsing
+    // ========================================================================
+
+    #[test]
+    fn test_sql_parse_with_iso8601_timestamp() {
+        let query =
+            parse_sql("SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '2024-01-15T10:00:00Z'")
+                .expect("Should parse SQL with ISO 8601 timestamp");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.as_of.is_some());
+
+        let (_valid_time, tx_time) = ctx.as_of.unwrap();
+        assert_eq!(tx_time.wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_sql_parse_with_date_only() {
+        let query = parse_sql("SELECT * FROM nodes FOR VALID_TIME AS OF TIMESTAMP '2024-01-15'")
+            .expect("Should parse SQL with date-only timestamp");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        let (valid_time, _tx_time) = ctx.as_of.unwrap();
+        assert_eq!(valid_time.wallclock(), 1705276800000000);
+    }
+
+    #[test]
+    fn test_sql_parse_with_timezone_offset() {
+        let query = parse_sql(
+            "SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '2024-01-15T15:30:00+05:30'",
+        )
+        .expect("Should parse SQL with timezone offset");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        let (_valid_time, tx_time) = ctx.as_of.unwrap();
+        assert_eq!(tx_time.wallclock(), 1705312800000000);
+    }
+
+    #[test]
+    fn test_sql_parse_with_sql_format() {
+        let query =
+            parse_sql("SELECT * FROM nodes FOR SYSTEM_TIME AS OF TIMESTAMP '2024-01-15 10:00:00'")
+                .expect("Should parse SQL with SQL timestamp format");
+
+        assert!(query.temporal_context.is_some());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        let (_valid_time, tx_time) = ctx.as_of.unwrap();
+        assert_eq!(tx_time.wallclock(), 1705312800000000);
+    }
+}
+
+// ============================================================================
 // PHASE 3: Graph Extension Tests
 // ============================================================================
 
