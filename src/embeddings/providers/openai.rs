@@ -366,7 +366,7 @@ mod tests {
         let _guard = ENV_MUTEX.lock().unwrap(); // Lock before manipulating env
         let original_var = std::env::var("OPENAI_API_KEY").ok();
 
-        // SAFETY: Only used in single-threaded test context protected by mutex
+// SAFETY: This test modifies a global environment variable. Access is protected by the `ENV_MUTEX` to prevent race conditions when tests are run in parallel.
         unsafe {
             std::env::remove_var("OPENAI_API_KEY");
         }
