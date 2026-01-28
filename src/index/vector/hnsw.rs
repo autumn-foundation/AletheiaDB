@@ -979,28 +979,27 @@ impl HnswIndex {
         // Save mappings to companion file with integrity checks
         // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
         let mappings_path = path.with_extension("usearch.mappings");
-        let mut mappings = Vec::new();
+        let mut mappings = Vec::with_capacity(self.id_mapping.len());
         for entry in self.id_mapping.iter() {
             mappings.push((*entry.key(), *entry.value()));
         }
 
         let count = mappings.len() as u64;
-        let mappings_data: Vec<u8> = mappings
-            .iter()
-            .flat_map(|(node_id, key)| {
-                let mut bytes = Vec::with_capacity(16);
-                bytes.extend_from_slice(&node_id.as_u64().to_le_bytes());
-                bytes.extend_from_slice(&key.to_le_bytes());
-                bytes
-            })
-            .collect();
 
-        // Build file with header and checksum
-        let mut file_data = Vec::with_capacity(4 + 1 + 8 + mappings_data.len() + 4);
+        // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
+        let total_size = 4 + 1 + 8 + (mappings.len() * 16) + 4;
+        let mut file_data = Vec::with_capacity(total_size);
+
+        // Write header
         file_data.extend_from_slice(MAPPING_MAGIC);
         file_data.push(MAPPING_VERSION);
         file_data.extend_from_slice(&count.to_le_bytes());
-        file_data.extend_from_slice(&mappings_data);
+
+        // Write data directly
+        for (node_id, key) in &mappings {
+            file_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            file_data.extend_from_slice(&key.to_le_bytes());
+        }
 
         // Calculate CRC32 over all data (header + mappings)
         let mut hasher = Hasher::new();
