@@ -1937,4 +1937,38 @@ mod zero_copy_access_tests {
             handle.join().expect("Thread should complete successfully");
         }
     }
+
+    #[test]
+    fn test_iter_node_ids_optimization() {
+        let indexes = CurrentIndexes::new();
+
+        // Create nodes with properties to verify we're not cloning them
+        let n1 = create_test_node(1, "Person");
+        let n2 = create_test_node(2, "Person");
+        indexes.insert_node(n1);
+        indexes.insert_node(n2);
+
+        // Collect IDs using new optimized method
+        let ids: Vec<NodeId> = indexes.iter_node_ids().collect();
+
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&NodeId::new(1).unwrap()));
+        assert!(ids.contains(&NodeId::new(2).unwrap()));
+    }
+
+    #[test]
+    fn test_iter_edge_ids_optimization() {
+        let indexes = CurrentIndexes::new();
+
+        let e1 = create_test_edge(1, 0, 1, "KNOWS");
+        let e2 = create_test_edge(2, 1, 2, "FOLLOWS");
+        indexes.insert_edge(e1);
+        indexes.insert_edge(e2);
+
+        let ids: Vec<EdgeId> = indexes.iter_edge_ids().collect();
+
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&EdgeId::new(1).unwrap()));
+        assert!(ids.contains(&EdgeId::new(2).unwrap()));
+    }
 }
