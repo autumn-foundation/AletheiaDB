@@ -1,7 +1,12 @@
 //! HTTP server creation and management.
 
 use actix_cors::Cors;
-use actix_web::{App, HttpServer, dev::Server, middleware::Logger, web};
+use actix_web::{
+    App, HttpServer,
+    dev::Server,
+    middleware::{DefaultHeaders, Logger},
+    web,
+};
 use tokio::sync::oneshot;
 
 use super::config::{CorsConfig, ServerConfig};
@@ -51,6 +56,17 @@ impl ShutdownHandle {
 /// ```
 pub fn configure_app(cfg: &mut web::ServiceConfig) {
     configure_health_routes(cfg);
+}
+
+/// Build security headers middleware.
+fn build_security_headers() -> DefaultHeaders {
+    DefaultHeaders::new()
+        .add(("X-Content-Type-Options", "nosniff"))
+        .add(("X-Frame-Options", "DENY"))
+        .add((
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'",
+        ))
 }
 
 /// Build CORS middleware from configuration.
@@ -112,6 +128,7 @@ pub fn create_app() -> App<
     let cors_config = CorsConfig::permissive();
     App::new()
         .wrap(Logger::default())
+        .wrap(build_security_headers())
         .wrap(build_cors(&cors_config))
         .configure(configure_app)
 }
@@ -155,6 +172,7 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
     let server = HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
+            .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))
             .configure(configure_app)
     })
@@ -209,6 +227,7 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
+            .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))
             .configure(configure_app)
     })
@@ -271,5 +290,23 @@ mod tests {
         let cors_config = CorsConfig::restrictive();
         let _cors = build_cors(&cors_config);
         // If we get here without panic, CORS middleware was created successfully
+    }
+
+    #[actix_rt::test]
+    async fn test_security_headers() {
+        let app = test::init_service(create_app()).await;
+
+        let req = test::TestRequest::get().uri("/status").to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert!(resp.status().is_success());
+        let headers = resp.headers();
+
+        assert_eq!(headers.get("X-Content-Type-Options").unwrap(), "nosniff");
+        assert_eq!(headers.get("X-Frame-Options").unwrap(), "DENY");
+        assert_eq!(
+            headers.get("Content-Security-Policy").unwrap(),
+            "default-src 'none'; frame-ancestors 'none'"
+        );
     }
 }
