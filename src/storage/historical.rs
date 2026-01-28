@@ -398,7 +398,7 @@ impl HistoricalStorage {
     /// # Example
     /// ```no_run
     /// # use gallifreydb::storage::historical::HistoricalStorage;
-    /// # use gallifreydb::storage::observer::{StorageObserver, StorageEvent};
+    /// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
     /// # use std::sync::Arc;
     /// struct VectorIndexObserver;
     ///
