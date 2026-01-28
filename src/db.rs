@@ -343,17 +343,96 @@ fn spawn_background_persistence_thread(
     });
 }
 
+/// Persist a single vector index to disk.
+fn persist_single_vector_index(
+    current: &Arc<CurrentStorage>,
+    manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
+    property_name: &str,
+) -> crate::utils::error::Result<()> {
+    use crate::index::vector::VectorIndex;
+    use crate::storage::index_persistence::formats::{PersistedHnswConfig, VectorMapping};
+    use crate::storage::index_persistence::vector::{
+        new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
+    };
+
+    // Create vector directory
+    let vec_path = manager.vector_path(property_name);
+    std::fs::create_dir_all(&vec_path).map_err(|e| {
+        StorageError::PersistenceError(format!(
+            "Failed to create vector index directory for {}: {}",
+            property_name, e
+        ))
+    })?;
+
+    // Get the index, config, vector count, and mappings
+    let (index, config, vector_count, id_mappings) = current
+        .get_vector_index_for_persistence(property_name)
+        .ok_or_else(|| {
+            StorageError::PersistenceError(format!(
+                "Failed to get vector index for persistence: {}",
+                property_name
+            ))
+        })?;
+
+    // Save HNSW index using usearch native format
+    let usearch_path = vec_path.join("current.usearch");
+
+    // Use the VectorIndex trait's save method
+    index.save(&usearch_path).map_err(|e| {
+        StorageError::PersistenceError(format!("Failed to save usearch index: {}", e))
+    })?;
+
+    // Create and save metadata
+    let hnsw_config = PersistedHnswConfig {
+        m: config.m as u16,
+        ef_construction: config.ef_construction as u16,
+        ef_search: config.ef_search as u16,
+    };
+
+    let mut vector_meta = new_vector_meta(
+        property_name,
+        config.dimensions as u32,
+        config.metric.to_u8(),
+        hnsw_config,
+    );
+
+    // Set the actual vector count
+    vector_meta.vector_count = vector_count as u64;
+
+    save_vector_meta(&vector_meta, &vec_path.join("meta.idx")).map_err(|e| {
+        StorageError::PersistenceError(format!(
+            "Failed to save vector metadata for {}: {}",
+            property_name, e
+        ))
+    })?;
+
+    // Create and save mappings
+    let mut vector_mappings = new_vector_mappings();
+    vector_mappings.count = id_mappings.len() as u64;
+    vector_mappings.mappings = id_mappings
+        .into_iter()
+        .map(|(node_id, usearch_key)| VectorMapping {
+            node_id,
+            usearch_key,
+        })
+        .collect();
+
+    save_vector_mappings(&vector_mappings, &vec_path.join("mappings.idx")).map_err(|e| {
+        StorageError::PersistenceError(format!(
+            "Failed to save vector mappings for {}: {}",
+            property_name, e
+        ))
+    })?;
+
+    Ok(())
+}
+
 /// Persist vector indexes to disk.
 fn persist_vector_indexes(
     current: &Arc<CurrentStorage>,
     manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
     tracker: &Arc<PersistenceTracker>,
 ) -> crate::utils::error::Result<()> {
-    use crate::storage::index_persistence::formats::PersistedHnswConfig;
-    use crate::storage::index_persistence::vector::{
-        new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
-    };
-
     // Save string interner first (required by all indexes)
     manager.save_string_interner().map_err(|e| {
         StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
@@ -364,81 +443,414 @@ fn persist_vector_indexes(
 
     // Persist each vector index
     for info in vector_indexes_info {
-        let property_name = &info.property_name;
-
-        // Create vector directory
-        let vec_path = manager.vector_path(property_name);
-        std::fs::create_dir_all(&vec_path).map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to create vector index directory for {}: {}",
-                property_name, e
-            ))
-        })?;
-
-        // Get the index, config, vector count, and mappings
-        let (index, config, vector_count, id_mappings) = current
-            .get_vector_index_for_persistence(property_name)
-            .ok_or_else(|| {
-                StorageError::PersistenceError(format!(
-                    "Failed to get vector index for persistence: {}",
-                    property_name
-                ))
-            })?;
-
-        // Save HNSW index using usearch native format
-        let usearch_path = vec_path.join("current.usearch");
-
-        // Use the VectorIndex trait's save method
-        use crate::index::vector::VectorIndex;
-        index.save(&usearch_path).map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to save usearch index: {}", e))
-        })?;
-
-        // Create and save metadata
-        let hnsw_config = PersistedHnswConfig {
-            m: config.m as u16,
-            ef_construction: config.ef_construction as u16,
-            ef_search: config.ef_search as u16,
-        };
-
-        let mut vector_meta = new_vector_meta(
-            property_name,
-            config.dimensions as u32,
-            config.metric.to_u8(),
-            hnsw_config,
-        );
-
-        // Set the actual vector count
-        vector_meta.vector_count = vector_count as u64;
-
-        save_vector_meta(&vector_meta, &vec_path.join("meta.idx")).map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to save vector metadata for {}: {}",
-                property_name, e
-            ))
-        })?;
-
-        // Create and save mappings
-        use crate::storage::index_persistence::formats::VectorMapping;
-        let mut vector_mappings = new_vector_mappings();
-        vector_mappings.count = id_mappings.len() as u64;
-        vector_mappings.mappings = id_mappings
-            .into_iter()
-            .map(|(node_id, usearch_key)| VectorMapping {
-                node_id,
-                usearch_key,
-            })
-            .collect();
-
-        save_vector_mappings(&vector_mappings, &vec_path.join("mappings.idx")).map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to save vector mappings for {}: {}",
-                property_name, e
-            ))
-        })?;
+        persist_single_vector_index(current, manager, &info.property_name)?;
     }
 
     tracker.reset_vector_mutations();
+    Ok(())
+}
+
+/// Load a single vector index from disk.
+fn load_single_vector_index(
+    db: &GallifreyDB,
+    entry: std::fs::DirEntry,
+) -> crate::utils::error::Result<()> {
+    use crate::core::id::NodeId;
+    use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
+    use crate::storage::index_persistence::vector::{load_vector_mappings, load_vector_meta};
+
+    let vec_path = entry.path();
+    if !vec_path.is_dir() {
+        return Ok(());
+    }
+
+    let property_name = vec_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| StorageError::PersistenceError("Invalid vector directory name".to_string()))?
+        .to_string();
+
+    // Load metadata
+    let meta_path = vec_path.join("meta.idx");
+    if !meta_path.exists() {
+        eprintln!(
+            "Warning: Skipping vector index '{}': metadata not found",
+            property_name
+        );
+        return Ok(());
+    }
+
+    let meta = load_vector_meta(&meta_path).map_err(|e| {
+        StorageError::PersistenceError(format!(
+            "Failed to load vector metadata for {}: {}",
+            property_name, e
+        ))
+    })?;
+
+    // Convert metric from u8 to DistanceMetric using from_u8()
+    let metric = match DistanceMetric::from_u8(meta.metric) {
+        Ok(m) => m,
+        Err(_) => {
+            eprintln!(
+                "Warning: Skipping vector index '{}': unknown metric {}",
+                property_name, meta.metric
+            );
+            return Ok(());
+        }
+    };
+
+    // Create config from metadata
+    let config = HnswConfig::new(meta.dimensions as usize, metric)
+        .with_m(meta.hnsw_config.m as usize)
+        .with_ef_construction(meta.hnsw_config.ef_construction as usize)
+        .with_ef_search(meta.hnsw_config.ef_search as usize);
+
+    // Load or create index
+    let usearch_path = vec_path.join("current.usearch");
+    let index = if usearch_path.exists() {
+        // Load existing index
+        HnswIndex::load(&usearch_path, config.clone()).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to load usearch index for {}: {}",
+                property_name, e
+            ))
+        })?
+    } else {
+        // Create new empty index
+        HnswIndex::new(config.clone()).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to create HNSW index for {}: {}",
+                property_name, e
+            ))
+        })?
+    };
+
+    // Load mappings and restore them to the index
+    let mappings_path = vec_path.join("mappings.idx");
+    if mappings_path.exists() {
+        let mappings_data = load_vector_mappings(&mappings_path).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to load vector mappings for {}: {}",
+                property_name, e
+            ))
+        })?;
+
+        // Restore ID mappings
+        // Note: The usearch index already has the vectors loaded from disk,
+        // but we need to restore the NodeId <-> usearch_key mappings
+        for mapping in &mappings_data.mappings {
+            match NodeId::new(mapping.node_id) {
+                Ok(node_id) => {
+                    index.restore_mapping(node_id, mapping.usearch_key);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Skipping invalid NodeId {} in vector index '{}': {}",
+                        mapping.node_id, property_name, e
+                    );
+                }
+            }
+        }
+    }
+
+    // Register index with CurrentStorage
+    db.current
+        .register_vector_index(&property_name, index, config);
+
+    println!(
+        "✓ Loaded vector index '{}': {} dimensions, {} vectors",
+        property_name, meta.dimensions, meta.vector_count
+    );
+
+    Ok(())
+}
+
+/// Restore all indexes from persistence.
+fn restore_indexes_from_persistence(db: &GallifreyDB) -> crate::utils::error::Result<()> {
+    let manager = match db.persistence_manager.as_ref() {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+
+    if !db.persistence_config.load_on_startup {
+        return Ok(());
+    }
+
+    // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
+    // (manifest is only saved on shutdown, not during background persistence)
+    match manager.load_manifest_and_strings() {
+        Ok(_) => {}                      // Successfully loaded
+        Err(e) if e.is_not_found() => {} // Expected on first run
+        Err(e) => eprintln!("Warning: Failed to load manifest: {}", e),
+    }
+
+    // Try to restore graph data even if manifest loading failed
+    let graph_path = manager.graph_path().join("adjacency.idx");
+    if graph_path.exists() {
+        use crate::api::transaction::types::TxId;
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::graph::{Edge, Node};
+        use crate::core::id::{EdgeId, NodeId, VersionId};
+        use crate::storage::index_persistence::graph::{load_graph_index, restore_property_map};
+        use crate::storage::version::VersionMetadata;
+        use crate::utils::lock::MutexExt;
+
+        match load_graph_index(&graph_path) {
+            Ok(graph_data) => {
+                let current_time = time::now();
+                let mut max_node_id = 0u64;
+                let mut max_edge_id = 0u64;
+
+                // Track restoration statistics
+                let total_nodes = graph_data.nodes.len();
+                let total_edges = graph_data.edges.len();
+                let mut nodes_loaded = 0usize;
+                let mut edges_loaded = 0usize;
+                let mut nodes_failed_label = 0usize;
+                let mut nodes_failed_properties = 0usize;
+                let mut nodes_failed_version = 0usize;
+                let mut edges_failed_label = 0usize;
+                let mut edges_failed_properties = 0usize;
+                let mut edges_failed_version = 0usize;
+
+                // Pre-calculate max IDs before inserting to avoid race conditions
+                let mut max_version_id = 0u64;
+                for persisted_node in &graph_data.nodes {
+                    max_node_id = max_node_id.max(persisted_node.id);
+                    max_version_id = max_version_id.max(persisted_node.version_id);
+                }
+                for persisted_edge in &graph_data.edges {
+                    max_edge_id = max_edge_id.max(persisted_edge.id);
+                    max_version_id = max_version_id.max(persisted_edge.version_id);
+                }
+
+                // Initialize ID generators BEFORE inserting entities to prevent collisions
+                if max_node_id > 0
+                    && let Ok(mut node_gen) = db.node_id_gen.lock_or_err()
+                {
+                    *node_gen = crate::core::id::IdGenerator::with_start(max_node_id + 1);
+                }
+                if max_edge_id > 0
+                    && let Ok(mut edge_gen) = db.edge_id_gen.lock_or_err()
+                {
+                    *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
+                }
+                // Initialize version ID generator from max persisted version_id
+                if max_version_id > 0
+                    && let Ok(mut version_gen) = db.version_id_gen.lock_or_err()
+                {
+                    *version_gen = crate::core::id::IdGenerator::with_start(max_version_id + 1);
+                }
+
+                // Restore nodes with explicit error tracking
+                for persisted_node in &graph_data.nodes {
+                    // Validate label exists in string interner
+                    let label_str = match GLOBAL_INTERNER.resolve(
+                        crate::core::InternedString::from_raw(persisted_node.label_idx),
+                    ) {
+                        Some(s) => s,
+                        None => {
+                            nodes_failed_label += 1;
+                            eprintln!(
+                                "Warning: Skipping node {}: label index {} not found in string interner",
+                                persisted_node.id, persisted_node.label_idx
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Restore properties
+                    let properties = match restore_property_map(&persisted_node.properties) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            nodes_failed_properties += 1;
+                            eprintln!(
+                                "Warning: Skipping node {} (label '{}'): property restoration failed: {}",
+                                persisted_node.id, label_str, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Restore version ID from persisted data (CRITICAL for temporal provenance)
+                    let version_id = match VersionId::new(persisted_node.version_id) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            nodes_failed_version += 1;
+                            eprintln!(
+                                "Warning: Skipping node {} (label '{}'): invalid version ID {}: {}",
+                                persisted_node.id, label_str, persisted_node.version_id, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    let node = Node {
+                        id: NodeId::new_unchecked(persisted_node.id),
+                        label: crate::core::InternedString::from_raw(persisted_node.label_idx),
+                        properties,
+                        current_version: version_id,
+                        metadata: VersionMetadata {
+                            created_by_tx: TxId::new(0), // Restored from disk
+                            commit_timestamp: Some(current_time),
+                        },
+                    };
+
+                    let _ = db.current.insert_node_direct(node, current_time);
+                    nodes_loaded += 1;
+                }
+
+                // Restore edges with explicit error tracking
+                for persisted_edge in &graph_data.edges {
+                    // Validate label exists in string interner
+                    let label_str = match GLOBAL_INTERNER.resolve(
+                        crate::core::InternedString::from_raw(persisted_edge.label_idx),
+                    ) {
+                        Some(s) => s,
+                        None => {
+                            edges_failed_label += 1;
+                            eprintln!(
+                                "Warning: Skipping edge {}: label index {} not found in string interner",
+                                persisted_edge.id, persisted_edge.label_idx
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Restore properties
+                    let properties = match restore_property_map(&persisted_edge.properties) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            edges_failed_properties += 1;
+                            eprintln!(
+                                "Warning: Skipping edge {} (label '{}'): property restoration failed: {}",
+                                persisted_edge.id, label_str, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Restore version ID from persisted data (CRITICAL for temporal provenance)
+                    let version_id = match VersionId::new(persisted_edge.version_id) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            edges_failed_version += 1;
+                            eprintln!(
+                                "Warning: Skipping edge {} (label '{}'): invalid version ID {}: {}",
+                                persisted_edge.id, label_str, persisted_edge.version_id, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    let edge = Edge {
+                        id: EdgeId::new_unchecked(persisted_edge.id),
+                        source: NodeId::new_unchecked(persisted_edge.source_id),
+                        target: NodeId::new_unchecked(persisted_edge.target_id),
+                        label: crate::core::InternedString::from_raw(persisted_edge.label_idx),
+                        properties,
+                        current_version: version_id,
+                        metadata: VersionMetadata {
+                            created_by_tx: TxId::new(0), // Restored from disk
+                            commit_timestamp: Some(current_time),
+                        },
+                    };
+
+                    let _ = db.current.insert_edge_direct(edge);
+                    edges_loaded += 1;
+                }
+
+                // Log restoration summary
+                let nodes_skipped = total_nodes - nodes_loaded;
+                let edges_skipped = total_edges - edges_loaded;
+
+                if nodes_skipped > 0 || edges_skipped > 0 {
+                    eprintln!(
+                        "Index restoration completed with data loss:\n\
+                                 Nodes: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)\n\
+                                 Edges: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)",
+                        nodes_loaded,
+                        total_nodes,
+                        nodes_skipped,
+                        nodes_failed_label,
+                        nodes_failed_properties,
+                        nodes_failed_version,
+                        edges_loaded,
+                        total_edges,
+                        edges_skipped,
+                        edges_failed_label,
+                        edges_failed_properties,
+                        edges_failed_version
+                    );
+                } else if total_nodes > 0 || total_edges > 0 {
+                    eprintln!(
+                        "Index restoration completed successfully: {} nodes, {} edges loaded",
+                        nodes_loaded, edges_loaded
+                    );
+                }
+
+                // Import CSR adjacency structures if available, otherwise rebuild
+                if !graph_data.outgoing_offsets.is_empty()
+                    && !graph_data.incoming_offsets.is_empty()
+                {
+                    db.current.import_csr(
+                        graph_data.outgoing_node_ids,
+                        graph_data.outgoing_offsets,
+                        graph_data.outgoing_neighbors,
+                        graph_data.incoming_node_ids,
+                        graph_data.incoming_offsets,
+                        graph_data.incoming_neighbors,
+                    );
+                } else {
+                    // Fallback for older index files without CSR data
+                    db.current.compact_adjacency();
+                }
+            }
+            Err(_e) => {
+                // Graph index loading failed - start with empty graph
+                // This is normal if no index files exist yet
+            }
+        }
+    }
+
+    // Load temporal index (version history)
+    let temporal_path = manager.temporal_path().join("versions.idx");
+    if temporal_path.exists() {
+        use crate::storage::index_persistence::temporal::{
+            load_temporal_index, restore_into_historical_storage,
+        };
+        use crate::utils::lock::RwLockExt;
+
+        match load_temporal_index(&temporal_path) {
+            Ok(temporal_data) => {
+                // Restore versions into historical storage
+                // Labels are now stored directly in the persisted entries
+                let mut historical_guard = db.historical.write_or_err()?;
+                match restore_into_historical_storage(&temporal_data, &mut historical_guard) {
+                    Ok(()) => {
+                        eprintln!(
+                            "Temporal index restored: {} node versions, {} edge versions",
+                            temporal_data.node_versions.len(),
+                            temporal_data.edge_versions.len()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to restore temporal versions: {}", e);
+                    }
+                }
+                drop(historical_guard);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to load temporal index: {}", e);
+            }
+        }
+    }
+
+    // Load vector indexes
+    if let Err(e) = load_vector_indexes(db, manager) {
+        eprintln!("Warning: Failed to load vector indexes: {}", e);
+    }
+
     Ok(())
 }
 
@@ -447,9 +859,6 @@ fn load_vector_indexes(
     db: &GallifreyDB,
     manager: &Arc<crate::storage::index_persistence::IndexPersistenceManager>,
 ) -> crate::utils::error::Result<()> {
-    use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
-    use crate::storage::index_persistence::vector::{load_vector_mappings, load_vector_meta};
-
     // Get vector directory
     let vector_base = manager.indexes_path().join("vector");
     if !vector_base.exists() {
@@ -466,110 +875,9 @@ fn load_vector_indexes(
             StorageError::PersistenceError(format!("Failed to read directory entry: {}", e))
         })?;
 
-        let vec_path = entry.path();
-        if !vec_path.is_dir() {
-            continue;
+        if let Err(e) = load_single_vector_index(db, entry) {
+            eprintln!("Warning: Failed to load vector index: {}", e);
         }
-
-        let property_name = vec_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| {
-                StorageError::PersistenceError("Invalid vector directory name".to_string())
-            })?;
-
-        // Load metadata
-        let meta_path = vec_path.join("meta.idx");
-        if !meta_path.exists() {
-            eprintln!(
-                "Warning: Skipping vector index '{}': metadata not found",
-                property_name
-            );
-            continue;
-        }
-
-        let meta = load_vector_meta(&meta_path).map_err(|e| {
-            StorageError::PersistenceError(format!(
-                "Failed to load vector metadata for {}: {}",
-                property_name, e
-            ))
-        })?;
-
-        // Convert metric from u8 to DistanceMetric using from_u8()
-        let metric = match DistanceMetric::from_u8(meta.metric) {
-            Ok(m) => m,
-            Err(_) => {
-                eprintln!(
-                    "Warning: Skipping vector index '{}': unknown metric {}",
-                    property_name, meta.metric
-                );
-                continue;
-            }
-        };
-
-        // Create config from metadata
-        let config = HnswConfig::new(meta.dimensions as usize, metric)
-            .with_m(meta.hnsw_config.m as usize)
-            .with_ef_construction(meta.hnsw_config.ef_construction as usize)
-            .with_ef_search(meta.hnsw_config.ef_search as usize);
-
-        // Load or create index
-        let usearch_path = vec_path.join("current.usearch");
-        let index = if usearch_path.exists() {
-            // Load existing index
-            HnswIndex::load(&usearch_path, config.clone()).map_err(|e| {
-                StorageError::PersistenceError(format!(
-                    "Failed to load usearch index for {}: {}",
-                    property_name, e
-                ))
-            })?
-        } else {
-            // Create new empty index
-            HnswIndex::new(config.clone()).map_err(|e| {
-                StorageError::PersistenceError(format!(
-                    "Failed to create HNSW index for {}: {}",
-                    property_name, e
-                ))
-            })?
-        };
-
-        // Load mappings and restore them to the index
-        let mappings_path = vec_path.join("mappings.idx");
-        if mappings_path.exists() {
-            let mappings_data = load_vector_mappings(&mappings_path).map_err(|e| {
-                StorageError::PersistenceError(format!(
-                    "Failed to load vector mappings for {}: {}",
-                    property_name, e
-                ))
-            })?;
-
-            // Restore ID mappings
-            // Note: The usearch index already has the vectors loaded from disk,
-            // but we need to restore the NodeId <-> usearch_key mappings
-            use crate::core::id::NodeId;
-            for mapping in &mappings_data.mappings {
-                match NodeId::new(mapping.node_id) {
-                    Ok(node_id) => {
-                        index.restore_mapping(node_id, mapping.usearch_key);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: Skipping invalid NodeId {} in vector index '{}': {}",
-                            mapping.node_id, property_name, e
-                        );
-                    }
-                }
-            }
-        }
-
-        // Register index with CurrentStorage
-        db.current
-            .register_vector_index(property_name, index, config);
-
-        println!(
-            "✓ Loaded vector index '{}': {} dimensions, {} vectors",
-            property_name, meta.dimensions, meta.vector_count
-        );
     }
 
     Ok(())
@@ -962,292 +1270,9 @@ impl GallifreyDB {
         };
 
         // Load indexes on startup if enabled
-        if let Some(ref manager) = persistence_manager
-            && config.persistence.load_on_startup
-        {
-            // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
-            // (manifest is only saved on shutdown, not during background persistence)
-            match manager.load_manifest_and_strings() {
-                Ok(_) => {}                      // Successfully loaded
-                Err(e) if e.is_not_found() => {} // Expected on first run
-                Err(e) => eprintln!("Warning: Failed to load manifest: {}", e),
-            }
-
-            // Try to restore graph data even if manifest loading failed
-            let graph_path = manager.graph_path().join("adjacency.idx");
-            if graph_path.exists() {
-                use crate::api::transaction::types::TxId;
-                use crate::core::GLOBAL_INTERNER;
-                use crate::core::graph::{Edge, Node};
-                use crate::core::id::{EdgeId, NodeId, VersionId};
-                use crate::storage::index_persistence::graph::{
-                    load_graph_index, restore_property_map,
-                };
-                use crate::storage::version::VersionMetadata;
-
-                match load_graph_index(&graph_path) {
-                    Ok(graph_data) => {
-                        let current_time = time::now();
-                        let mut max_node_id = 0u64;
-                        let mut max_edge_id = 0u64;
-
-                        // Track restoration statistics
-                        let total_nodes = graph_data.nodes.len();
-                        let total_edges = graph_data.edges.len();
-                        let mut nodes_loaded = 0usize;
-                        let mut edges_loaded = 0usize;
-                        let mut nodes_failed_label = 0usize;
-                        let mut nodes_failed_properties = 0usize;
-                        let mut nodes_failed_version = 0usize;
-                        let mut edges_failed_label = 0usize;
-                        let mut edges_failed_properties = 0usize;
-                        let mut edges_failed_version = 0usize;
-
-                        // Pre-calculate max IDs before inserting to avoid race conditions
-                        let mut max_version_id = 0u64;
-                        for persisted_node in &graph_data.nodes {
-                            max_node_id = max_node_id.max(persisted_node.id);
-                            max_version_id = max_version_id.max(persisted_node.version_id);
-                        }
-                        for persisted_edge in &graph_data.edges {
-                            max_edge_id = max_edge_id.max(persisted_edge.id);
-                            max_version_id = max_version_id.max(persisted_edge.version_id);
-                        }
-
-                        // Initialize ID generators BEFORE inserting entities to prevent collisions
-                        if max_node_id > 0
-                            && let Ok(mut node_gen) = db.node_id_gen.lock_or_err()
-                        {
-                            *node_gen = crate::core::id::IdGenerator::with_start(max_node_id + 1);
-                        }
-                        if max_edge_id > 0
-                            && let Ok(mut edge_gen) = db.edge_id_gen.lock_or_err()
-                        {
-                            *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
-                        }
-                        // Initialize version ID generator from max persisted version_id
-                        if max_version_id > 0
-                            && let Ok(mut version_gen) = db.version_id_gen.lock_or_err()
-                        {
-                            *version_gen =
-                                crate::core::id::IdGenerator::with_start(max_version_id + 1);
-                        }
-
-                        // Restore nodes with explicit error tracking
-                        for persisted_node in &graph_data.nodes {
-                            // Validate label exists in string interner
-                            let label_str = match GLOBAL_INTERNER.resolve(
-                                crate::core::InternedString::from_raw(persisted_node.label_idx),
-                            ) {
-                                Some(s) => s,
-                                None => {
-                                    nodes_failed_label += 1;
-                                    eprintln!(
-                                        "Warning: Skipping node {}: label index {} not found in string interner",
-                                        persisted_node.id, persisted_node.label_idx
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            // Restore properties
-                            let properties = match restore_property_map(&persisted_node.properties)
-                            {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    nodes_failed_properties += 1;
-                                    eprintln!(
-                                        "Warning: Skipping node {} (label '{}'): property restoration failed: {}",
-                                        persisted_node.id, label_str, e
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            // Restore version ID from persisted data (CRITICAL for temporal provenance)
-                            let version_id = match VersionId::new(persisted_node.version_id) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    nodes_failed_version += 1;
-                                    eprintln!(
-                                        "Warning: Skipping node {} (label '{}'): invalid version ID {}: {}",
-                                        persisted_node.id, label_str, persisted_node.version_id, e
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            let node = Node {
-                                id: NodeId::new_unchecked(persisted_node.id),
-                                label: crate::core::InternedString::from_raw(
-                                    persisted_node.label_idx,
-                                ),
-                                properties,
-                                current_version: version_id,
-                                metadata: VersionMetadata {
-                                    created_by_tx: TxId::new(0), // Restored from disk
-                                    commit_timestamp: Some(current_time),
-                                },
-                            };
-
-                            let _ = db.current.insert_node_direct(node, current_time);
-                            nodes_loaded += 1;
-                        }
-
-                        // Restore edges with explicit error tracking
-                        for persisted_edge in &graph_data.edges {
-                            // Validate label exists in string interner
-                            let label_str = match GLOBAL_INTERNER.resolve(
-                                crate::core::InternedString::from_raw(persisted_edge.label_idx),
-                            ) {
-                                Some(s) => s,
-                                None => {
-                                    edges_failed_label += 1;
-                                    eprintln!(
-                                        "Warning: Skipping edge {}: label index {} not found in string interner",
-                                        persisted_edge.id, persisted_edge.label_idx
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            // Restore properties
-                            let properties = match restore_property_map(&persisted_edge.properties)
-                            {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    edges_failed_properties += 1;
-                                    eprintln!(
-                                        "Warning: Skipping edge {} (label '{}'): property restoration failed: {}",
-                                        persisted_edge.id, label_str, e
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            // Restore version ID from persisted data (CRITICAL for temporal provenance)
-                            let version_id = match VersionId::new(persisted_edge.version_id) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    edges_failed_version += 1;
-                                    eprintln!(
-                                        "Warning: Skipping edge {} (label '{}'): invalid version ID {}: {}",
-                                        persisted_edge.id, label_str, persisted_edge.version_id, e
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            let edge = Edge {
-                                id: EdgeId::new_unchecked(persisted_edge.id),
-                                source: NodeId::new_unchecked(persisted_edge.source_id),
-                                target: NodeId::new_unchecked(persisted_edge.target_id),
-                                label: crate::core::InternedString::from_raw(
-                                    persisted_edge.label_idx,
-                                ),
-                                properties,
-                                current_version: version_id,
-                                metadata: VersionMetadata {
-                                    created_by_tx: TxId::new(0), // Restored from disk
-                                    commit_timestamp: Some(current_time),
-                                },
-                            };
-
-                            let _ = db.current.insert_edge_direct(edge);
-                            edges_loaded += 1;
-                        }
-
-                        // Log restoration summary
-                        let nodes_skipped = total_nodes - nodes_loaded;
-                        let edges_skipped = total_edges - edges_loaded;
-
-                        if nodes_skipped > 0 || edges_skipped > 0 {
-                            eprintln!(
-                                "Index restoration completed with data loss:\n\
-                                 Nodes: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)\n\
-                                 Edges: {}/{} loaded ({} skipped - {} label errors, {} property errors, {} version errors)",
-                                nodes_loaded,
-                                total_nodes,
-                                nodes_skipped,
-                                nodes_failed_label,
-                                nodes_failed_properties,
-                                nodes_failed_version,
-                                edges_loaded,
-                                total_edges,
-                                edges_skipped,
-                                edges_failed_label,
-                                edges_failed_properties,
-                                edges_failed_version
-                            );
-                        } else if total_nodes > 0 || total_edges > 0 {
-                            eprintln!(
-                                "Index restoration completed successfully: {} nodes, {} edges loaded",
-                                nodes_loaded, edges_loaded
-                            );
-                        }
-
-                        // Import CSR adjacency structures if available, otherwise rebuild
-                        if !graph_data.outgoing_offsets.is_empty()
-                            && !graph_data.incoming_offsets.is_empty()
-                        {
-                            db.current.import_csr(
-                                graph_data.outgoing_node_ids,
-                                graph_data.outgoing_offsets,
-                                graph_data.outgoing_neighbors,
-                                graph_data.incoming_node_ids,
-                                graph_data.incoming_offsets,
-                                graph_data.incoming_neighbors,
-                            );
-                        } else {
-                            // Fallback for older index files without CSR data
-                            db.current.compact_adjacency();
-                        }
-                    }
-                    Err(_e) => {
-                        // Graph index loading failed - start with empty graph
-                        // This is normal if no index files exist yet
-                    }
-                }
-            }
-
-            // Load temporal index (version history)
-            let temporal_path = manager.temporal_path().join("versions.idx");
-            if temporal_path.exists() {
-                use crate::storage::index_persistence::temporal::{
-                    load_temporal_index, restore_into_historical_storage,
-                };
-
-                match load_temporal_index(&temporal_path) {
-                    Ok(temporal_data) => {
-                        // Restore versions into historical storage
-                        // Labels are now stored directly in the persisted entries
-                        let mut historical_guard = db.historical.write();
-                        match restore_into_historical_storage(&temporal_data, &mut historical_guard)
-                        {
-                            Ok(()) => {
-                                eprintln!(
-                                    "Temporal index restored: {} node versions, {} edge versions",
-                                    temporal_data.node_versions.len(),
-                                    temporal_data.edge_versions.len()
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!("Warning: Failed to restore temporal versions: {}", e);
-                            }
-                        }
-                        drop(historical_guard);
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: Failed to load temporal index: {}", e);
-                    }
-                }
-            }
-
-            // Load vector indexes
-            if let Err(e) = load_vector_indexes(&db, manager) {
-                eprintln!("Warning: Failed to load vector indexes: {}", e);
-            }
-        }
+        restore_indexes_from_persistence(&db).map_err(|e| {
+            StorageError::PersistenceError(format!("Failed to restore indexes: {}", e))
+        })?;
 
         // Start background persistence thread if enabled
         if let Some(ref tracker) = persistence_tracker
