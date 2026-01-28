@@ -1,7 +1,17 @@
 //! Core primitives for GallifreyDB.
 //!
 //! This module contains the fundamental types and data structures that
-//! everything else is built upon.
+//! serve as the building blocks for the database engine.
+//!
+//! # Core Components
+//!
+//! - **[`graph`]**: Fundamental graph elements ([`Node`], [`Edge`]).
+//! - **[`id`]**: Strongly-typed identifiers ([`NodeId`], [`EdgeId`]) and ID generation.
+//! - **[`property`]**: Copy-on-write property system with [`PropertyMap`].
+//! - **[`temporal`]**: Bi-temporal primitives ([`Timestamp`], [`TimeRange`]) for tracking valid and transaction time.
+//! - **[`vector`]**: Vector embeddings and similarity metrics.
+//! - **[`interning`]**: String interning for memory-efficient storage of labels and keys.
+//! - **[`hlc`]**: Hybrid Logical Clock implementation for distributed timekeeping.
 
 pub mod graph;
 pub mod hlc;

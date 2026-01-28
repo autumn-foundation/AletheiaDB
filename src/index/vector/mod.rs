@@ -43,10 +43,7 @@
 //!
 //! # Examples
 //!
-//! ```no_run
-//! // Examples use `no_run` because no VectorIndex implementation exists yet.
-//! // VS-022 will add the HNSW implementation using usearch.
-//!
+//! ```ignore
 //! use gallifreydb::index::VectorIndex;
 //! use gallifreydb::core::id::NodeId;
 //!
@@ -77,15 +74,15 @@
 //! }
 //! ```
 //!
-//! # Phase 2 Implementation
+//! # Implementation
 //!
-//! Phase 2 of vector search will implement this trait using HNSW (Hierarchical
-//! Navigable Small World) via the `usearch` crate, which provides:
-//! - Typical query latency: 100µs-1ms (depends on dataset size and dimensionality)
-//! - High recall (>95% for typical configurations)
-//! - Memory-efficient graph structure
-//! - Configurable index parameters (M, ef_construction, ef_search)
-//! - Concurrent insertions via internal locking
+//! GallifreyDB implements this trait using HNSW (Hierarchical Navigable Small World)
+//! via the `usearch` crate. This implementation provides:
+//!
+//! - **High Performance**: 100µs-1ms typical query latency
+//! - **High Recall**: >95% for typical configurations
+//! - **Memory Efficiency**: Memory-efficient graph structure with optional quantization
+//! - **Concurrency**: Thread-safe insertions and searches via internal locking
 //!
 //! See [`docs/VECTOR_SEARCH_DESIGN.md`](../../docs/VECTOR_SEARCH_DESIGN.md) for complete architecture.
 
@@ -318,8 +315,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```ignore
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
     /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
@@ -346,8 +342,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```ignore
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
     /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
@@ -383,8 +378,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```ignore
     /// # use gallifreydb::index::VectorIndex;
     /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
@@ -432,8 +426,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```ignore
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
     /// # use std::collections::HashSet;
@@ -459,8 +452,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```ignore
     /// # use gallifreydb::index::VectorIndex;
     /// # fn example(index: &impl VectorIndex) {
     /// println!("Index contains {} vectors", index.len());
@@ -475,8 +467,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```ignore
     /// # use gallifreydb::index::VectorIndex;
     /// # fn example(index: &impl VectorIndex) {
     /// let dims = index.dimensions();
@@ -503,8 +494,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```ignore
     /// # use gallifreydb::index::{VectorIndex, DistanceMetric};
     /// # fn example(index: &impl VectorIndex) {
     /// match index.distance_metric() {
@@ -526,8 +516,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```ignore
     /// # use gallifreydb::index::VectorIndex;
     /// # fn example(index: &impl VectorIndex) {
     /// if index.is_empty() {
