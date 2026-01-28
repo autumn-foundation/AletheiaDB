@@ -699,8 +699,8 @@ impl CurrentIndexes {
     }
 
     /// Iterate over all edges.
-    pub fn iter_edges(&self) -> impl Iterator<Item = Edge> + '_ {
-        self.edges.iter().map(|entry| entry.value().clone())
+    pub fn iter_edges(&self) -> impl Iterator<Item = impl std::ops::Deref<Target = Edge> + '_> + '_ {
+        self.edges.iter()
     }
 
     /// Export outgoing CSR data for persistence.
