@@ -65,7 +65,7 @@ tokenizers = { version = "0.15", optional = true }
 num_cpus = { version = "1.16", optional = true }
 
 # Redb for tiered cold storage (pure Rust, ADR-0025)
-redb = "2.4"
+redb = "3.1"
 
 # SQL parser for SQL:2011 temporal syntax support (optional)
 sqlparser = { version = "0.40", optional = true }
@@ -235,6 +235,13 @@ harness = false
 path = "benches/gallifreydb.rs"
 required-features = []
 
+# Storage layer benchmarks
+[[bench]]
+name = "storage_current"
+harness = false
+path = "benches/storage/current.rs"
+required-features = []
+
 # Persistence layer - durability modes and checkpoint operations
 [[bench]]
 name = "durability_modes"
@@ -334,3 +341,8 @@ name = "gallifrey-server"
 path = "src/bin/server.rs"
 required-features = ["http-server"]
 
+[[bench]]
+name = "edge_iteration"
+harness = false
+path = "benches/edge_iteration.rs"
+required-features = []
