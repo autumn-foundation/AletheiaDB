@@ -360,7 +360,7 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
 
 /// Perform an async-aware sleep that yields to tokio runtime if available.
 #[cfg(feature = "tokio")]
-fn async_aware_sleep(duration: std::time::Duration) {
+pub(crate) fn async_aware_sleep(duration: std::time::Duration) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
             tokio::task::block_in_place(|| {
@@ -378,7 +378,7 @@ fn async_aware_sleep(duration: std::time::Duration) {
 
 /// Perform a standard sleep when tokio feature is disabled.
 #[cfg(not(feature = "tokio"))]
-fn async_aware_sleep(duration: std::time::Duration) {
+pub(crate) fn async_aware_sleep(duration: std::time::Duration) {
     std::thread::sleep(duration);
 }
 
@@ -1726,5 +1726,29 @@ mod tests {
         assert_eq!(after_update - initial_adds, 3);
 
         Ok(())
+    }
+
+    #[cfg(feature = "tokio")]
+    mod sleep_tests {
+        use super::*;
+        use std::time::Duration;
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn test_async_sleep_multi_thread() {
+            // Should use block_in_place
+            async_aware_sleep(Duration::from_millis(1));
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn test_async_sleep_current_thread() {
+            // Should fallback to thread::sleep without panic
+            async_aware_sleep(Duration::from_millis(1));
+        }
+
+        #[test]
+        fn test_async_sleep_no_runtime() {
+            // Should fallback to thread::sleep
+            async_aware_sleep(Duration::from_millis(1));
+        }
     }
 }
