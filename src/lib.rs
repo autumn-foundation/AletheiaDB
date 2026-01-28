@@ -23,10 +23,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use gallifreydb::{GallifreyDB, properties};
+//! ```
+//! use gallifreydb::{GallifreyDB, properties, WriteOps};
 //!
-//! let db = GallifreyDB::new();
+//! # fn main() -> gallifreydb::utils::Result<()> {
+//! let db = GallifreyDB::new()?;
 //!
 //! // Create a node
 //! let alice = db.create_node("Person", properties! {
@@ -35,27 +36,39 @@
 //! })?;
 //!
 //! // Later, update a property
-//! db.update_node(alice, properties! {
-//!     "age" => 31,
+//! db.write(|tx| {
+//!     tx.update_node(alice, properties! {
+//!         "age" => 31,
+//!     })
 //! })?;
 //!
 //! // Query current state
 //! let current = db.get_node(alice)?;
 //!
 //! // Time-travel to see historical state
-//! let historical = db.as_of(timestamp).get_node(alice)?;
+//! // let historical = db.get_node_at_time(alice, valid_time, tx_time)?;
+//! # Ok(())
+//! # }
 //! ```
 
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+/// Core API types including [`ReadTransaction`], [`WriteTransaction`] and ID types.
 pub mod api;
+/// Configuration structs for [`GallifreyDB`], WAL, and storage.
 pub mod config;
+/// Fundamental primitives like [`Node`], [`Edge`], [`Timestamp`] and [`PropertyMap`].
 pub mod core;
+/// Main database interface [`GallifreyDB`].
 pub mod db;
+/// Index implementations including [`VectorIndex`](index::VectorIndex) and [`AdjacencyIndex`].
 pub mod index;
+/// Query engine and planner.
 pub mod query;
+/// Storage engine internals (current, historical, WAL).
 pub mod storage;
+/// Utility types including [`Error`] and [`Result`].
 pub mod utils;
 // Optional embedding generation module
 #[cfg(feature = "embeddings")]

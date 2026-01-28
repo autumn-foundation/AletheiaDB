@@ -43,10 +43,8 @@
 //!
 //! # Examples
 //!
-//! ```no_run
-//! // Examples use `no_run` because no VectorIndex implementation exists yet.
-//! // VS-022 will add the HNSW implementation using usearch.
-//!
+//! ```rust,no_run
+//! use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
 //! use gallifreydb::index::VectorIndex;
 //! use gallifreydb::core::id::NodeId;
 //!
@@ -66,21 +64,21 @@
 //!     Ok(results)
 //! }
 //!
-//! fn search_with_constraint(
-//!     index: &impl VectorIndex,
-//!     query: &[f32],
-//!     allowed_ids: &[NodeId],
-//!     k: usize
-//! ) -> gallifreydb::utils::Result<Vec<(NodeId, f32)>> {
-//!     // Search only within a subset of nodes
-//!     index.search_with_filter(query, k, |id| allowed_ids.contains(id))
-//! }
+//! # fn main() -> gallifreydb::utils::Result<()> {
+//! // Create an HNSW index
+//! let index = HnswIndexBuilder::new(384, DistanceMetric::Cosine).build()?;
+//!
+//! // Use the generic search function
+//! let query = vec![0.1f32; 384];
+//! let _results = search_similar_documents(&index, &query, 10)?;
+//! # Ok(())
+//! # }
 //! ```
 //!
-//! # Phase 2 Implementation
+//! # Implementation
 //!
-//! Phase 2 of vector search will implement this trait using HNSW (Hierarchical
-//! Navigable Small World) via the `usearch` crate, which provides:
+//! The primary implementation is HNSW (Hierarchical Navigable Small World) via the
+//! `usearch` crate, which provides:
 //! - Typical query latency: 100µs-1ms (depends on dataset size and dimensionality)
 //! - High recall (>95% for typical configurations)
 //! - Memory-efficient graph structure
@@ -318,8 +316,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
     /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
@@ -383,8 +380,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```
     /// # use gallifreydb::index::VectorIndex;
     /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
@@ -432,8 +428,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
     /// # use std::collections::HashSet;
@@ -459,8 +454,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```
     /// # use gallifreydb::index::VectorIndex;
     /// # fn example(index: &impl VectorIndex) {
     /// println!("Index contains {} vectors", index.len());
@@ -475,8 +469,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```
     /// # use gallifreydb::index::VectorIndex;
     /// # fn example(index: &impl VectorIndex) {
     /// let dims = index.dimensions();
@@ -503,8 +496,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```
     /// # use gallifreydb::index::{VectorIndex, DistanceMetric};
     /// # fn example(index: &impl VectorIndex) {
     /// match index.distance_metric() {
@@ -526,8 +518,7 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// // Example uses `no_run` - no implementation exists until VS-022
+    /// ```
     /// # use gallifreydb::index::VectorIndex;
     /// # fn example(index: &impl VectorIndex) {
     /// if index.is_empty() {
