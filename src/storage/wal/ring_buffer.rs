@@ -1061,5 +1061,4 @@ mod tests {
         let result = buf.try_append(PendingEntry::new_async(LSN(3), vec![]));
         assert!(result.is_err());
     }
-
 }
