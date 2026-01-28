@@ -112,6 +112,7 @@ pub struct NodeScanIterator {
 }
 
 impl NodeScanIterator {
+    /// Create a new NodeScanIterator.
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
         NodeScanIterator {
             label,
@@ -1039,7 +1040,7 @@ impl Eq for ScoredRow {}
 
 impl PartialOrd for ScoredRow {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.score.partial_cmp(&other.score)
+        Some(self.cmp(other))
     }
 }
 
@@ -1147,13 +1148,16 @@ impl ResultIterator for VectorRerankIterator {
                                     row,
                                     score: similarity,
                                 }));
-                            } else if let Some(Reverse(min_row)) = heap.peek() {
-                                if similarity > min_row.score {
-                                    heap.pop();
-                                    heap.push(Reverse(ScoredRow {
-                                        row,
-                                        score: similarity,
-                                    }));
+                            } else {
+                                #[allow(clippy::collapsible_if)]
+                                if let Some(Reverse(min_row)) = heap.peek() {
+                                    if similarity > min_row.score {
+                                        heap.pop();
+                                        heap.push(Reverse(ScoredRow {
+                                            row,
+                                            score: similarity,
+                                        }));
+                                    }
                                 }
                             }
                         }
