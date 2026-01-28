@@ -58,6 +58,17 @@ pub fn configure_app(cfg: &mut web::ServiceConfig) {
     configure_health_routes(cfg);
 }
 
+/// Build security headers middleware.
+fn build_security_headers() -> DefaultHeaders {
+    DefaultHeaders::new()
+        .add(("X-Content-Type-Options", "nosniff"))
+        .add(("X-Frame-Options", "DENY"))
+        .add((
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'",
+        ))
+}
+
 /// Build CORS middleware from configuration.
 fn build_cors(cors_config: &CorsConfig) -> Cors {
     let mut cors = Cors::default();
@@ -117,12 +128,7 @@ pub fn create_app() -> App<
     let cors_config = CorsConfig::permissive();
     App::new()
         .wrap(Logger::default())
-        .wrap(
-            DefaultHeaders::new()
-                .add(("X-Content-Type-Options", "nosniff"))
-                .add(("X-Frame-Options", "DENY"))
-                .add(("Content-Security-Policy", "default-src 'self'")),
-        )
+        .wrap(build_security_headers())
         .wrap(build_cors(&cors_config))
         .configure(configure_app)
 }
@@ -166,12 +172,7 @@ pub async fn create_server(config: ServerConfig) -> std::io::Result<(Server, Shu
     let server = HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
-            .wrap(
-                DefaultHeaders::new()
-                    .add(("X-Content-Type-Options", "nosniff"))
-                    .add(("X-Frame-Options", "DENY"))
-                    .add(("Content-Security-Policy", "default-src 'self'")),
-            )
+            .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))
             .configure(configure_app)
     })
@@ -226,12 +227,7 @@ pub async fn run_server(config: ServerConfig) -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
-            .wrap(
-                DefaultHeaders::new()
-                    .add(("X-Content-Type-Options", "nosniff"))
-                    .add(("X-Frame-Options", "DENY"))
-                    .add(("Content-Security-Policy", "default-src 'self'")),
-            )
+            .wrap(build_security_headers())
             .wrap(build_cors(&cors_config))
             .configure(configure_app)
     })
@@ -310,7 +306,7 @@ mod tests {
         assert_eq!(headers.get("X-Frame-Options").unwrap(), "DENY");
         assert_eq!(
             headers.get("Content-Security-Policy").unwrap(),
-            "default-src 'self'"
+            "default-src 'none'; frame-ancestors 'none'"
         );
     }
 }
