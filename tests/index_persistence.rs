@@ -2714,3 +2714,63 @@ fn test_parallel_loading_with_vectors() {
 
     println!("✓ Parallel loading with vectors test passed");
 }
+
+/// Test that errors in parallel loading are correctly propagated.
+#[test]
+fn test_parallel_loading_error_propagation() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
+    use gallifreydb::storage::index_persistence::load_indexes_parallel;
+    use gallifreydb::storage::index_persistence::vector::{
+        new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
+    };
+    use gallifreydb::storage::index_persistence::formats::PersistedHnswConfig;
+
+    let dir = tempdir().unwrap();
+    let graph_path = dir.path().join("graph.idx");
+
+    // Create minimal graph index
+    let graph_data = new_graph_index_data();
+    save_graph_index(&graph_data, &graph_path).unwrap();
+
+    // Create a valid vector index
+    let vector_dir1 = dir.path().join("vector_valid");
+    std::fs::create_dir_all(&vector_dir1).unwrap();
+
+    let hnsw_config = PersistedHnswConfig {
+        m: 16,
+        ef_construction: 128,
+        ef_search: 64,
+    };
+    let vector_meta = new_vector_meta("valid", 384, 0, hnsw_config);
+    let vector_mappings = new_vector_mappings();
+
+    save_vector_meta(&vector_meta, &vector_dir1.join("meta.idx")).unwrap();
+    save_vector_mappings(&vector_mappings, &vector_dir1.join("mappings.idx")).unwrap();
+
+    // Create a CORRUPTED vector index (missing mappings.idx)
+    let vector_dir2 = dir.path().join("vector_corrupted");
+    std::fs::create_dir_all(&vector_dir2).unwrap();
+
+    // Only save meta, missing mappings will cause load failure
+    save_vector_meta(&vector_meta, &vector_dir2.join("meta.idx")).unwrap();
+
+    // Call load_indexes_parallel with both valid and corrupted vector paths
+    let result = load_indexes_parallel(
+        &graph_path,
+        None,
+        vec![&vector_dir1, &vector_dir2]
+    );
+
+    // Should return an error
+    assert!(result.is_err());
+
+    // Verify the error is related to the missing file
+    let err = result.unwrap_err();
+    let err_str = format!("{}", err);
+    assert!(err_str.contains("mappings.idx") || err_str.contains("No such file"),
+            "Error should indicate missing mappings file, got: {}", err_str);
+
+    println!("✓ Parallel loading error propagation test passed");
+}
