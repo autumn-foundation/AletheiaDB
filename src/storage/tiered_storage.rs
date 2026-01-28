@@ -49,6 +49,7 @@ use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::utils::error::Result;
 use parking_lot::Mutex;
 use quick_cache::sync::Cache;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -167,7 +168,7 @@ impl TieredStorageMetrics {
 #[derive(Debug)]
 struct LatencyTracker {
     /// Circular buffer of latency samples (in microseconds).
-    samples: Mutex<Vec<u64>>,
+    samples: Mutex<VecDeque<u64>>,
     /// Maximum number of samples to keep.
     max_samples: usize,
 }
@@ -182,7 +183,7 @@ impl LatencyTracker {
     /// Create a new latency tracker with the given sample size.
     fn new(max_samples: usize) -> Self {
         Self {
-            samples: Mutex::new(Vec::with_capacity(max_samples)),
+            samples: Mutex::new(VecDeque::with_capacity(max_samples)),
             max_samples,
         }
     }
@@ -192,9 +193,9 @@ impl LatencyTracker {
         let us = duration.as_micros() as u64;
         let mut samples = self.samples.lock();
         if samples.len() >= self.max_samples {
-            samples.remove(0);
+            samples.pop_front();
         }
-        samples.push(us);
+        samples.push_back(us);
     }
 
     /// Calculate latency percentiles from the current samples.
@@ -204,7 +205,7 @@ impl LatencyTracker {
             return LatencyPercentiles::default();
         }
 
-        let mut sorted: Vec<u64> = samples.clone();
+        let mut sorted: Vec<u64> = Vec::from(samples.clone());
         sorted.sort_unstable();
 
         let len = sorted.len();
