@@ -62,7 +62,7 @@ fn bench_vector_rerank(c: &mut Criterion) {
                 };
 
                 let results = executor.execute(plan).expect("Execution failed");
-                let _count = results.collect_all().expect("Collection failed").len();
+                black_box(results.collect_all().expect("Collection failed"));
             })
         });
     }
