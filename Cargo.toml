@@ -100,7 +100,10 @@ default = ["config-toml"]
 config-toml = ["dep:serde", "dep:toml"]
 
 # Embedding generation features
-embeddings = ["dep:tokio", "dep:async-trait", "dep:serde_json"]
+embeddings = ["tokio", "dep:async-trait", "dep:serde_json"]
+
+# Explicit tokio feature
+tokio = ["dep:tokio"]
 
 # Individual provider features (each implies 'embeddings')
 embedding-openai = ["embeddings", "dep:reqwest"]
@@ -118,7 +121,7 @@ embedding-all = [
 ]
 
 # MCP server support
-mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base64"]
+mcp-server = ["dep:rmcp", "tokio", "dep:serde", "dep:serde_json", "dep:base64"]
 
 # Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
@@ -127,7 +130,7 @@ sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 sql = ["dep:sqlparser"]
 
 # HTTP server support (Issue #465)
-http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde", "dep:serde_json"]
+http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "tokio", "dep:serde", "dep:serde_json"]
 
 # MVCC snapshot TDD tests (not yet implemented)
 mvcc-snapshots-tdd = []

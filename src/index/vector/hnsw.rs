@@ -758,7 +758,35 @@ impl VectorIndex for HnswIndex {
 
                         // Exponential backoff: 1ms, 2ms, 4ms
                         let delay_ms = 1u64 << attempt;
-                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        let duration = std::time::Duration::from_millis(delay_ms);
+
+                        #[cfg(feature = "tokio")]
+                        {
+                            // Try to detect if we're in a multi-threaded tokio runtime
+                            // where blocking the thread would be harmful.
+                            // Handle::try_current() returns Ok only if inside a tokio runtime.
+                            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                if handle.runtime_flavor()
+                                    == tokio::runtime::RuntimeFlavor::MultiThread
+                                {
+                                    tokio::task::block_in_place(|| {
+                                        std::thread::sleep(duration);
+                                    });
+                                } else {
+                                    // In current_thread runtime, block_in_place panics, so we must block directly
+                                    std::thread::sleep(duration);
+                                }
+                            } else {
+                                // Not in a tokio runtime
+                                std::thread::sleep(duration);
+                            }
+                        }
+
+                        #[cfg(not(feature = "tokio"))]
+                        {
+                            std::thread::sleep(duration);
+                        }
+
                         continue;
                     }
                     // Non-retryable error or exhausted retries
@@ -845,7 +873,35 @@ impl VectorIndex for HnswIndex {
 
                         // Exponential backoff: 1ms, 2ms, 4ms
                         let delay_ms = 1u64 << attempt;
-                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        let duration = std::time::Duration::from_millis(delay_ms);
+
+                        #[cfg(feature = "tokio")]
+                        {
+                            // Try to detect if we're in a multi-threaded tokio runtime
+                            // where blocking the thread would be harmful.
+                            // Handle::try_current() returns Ok only if inside a tokio runtime.
+                            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                if handle.runtime_flavor()
+                                    == tokio::runtime::RuntimeFlavor::MultiThread
+                                {
+                                    tokio::task::block_in_place(|| {
+                                        std::thread::sleep(duration);
+                                    });
+                                } else {
+                                    // In current_thread runtime, block_in_place panics, so we must block directly
+                                    std::thread::sleep(duration);
+                                }
+                            } else {
+                                // Not in a tokio runtime
+                                std::thread::sleep(duration);
+                            }
+                        }
+
+                        #[cfg(not(feature = "tokio"))]
+                        {
+                            std::thread::sleep(duration);
+                        }
+
                         continue;
                     }
                     // Non-retryable error or exhausted retries
