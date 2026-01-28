@@ -2793,11 +2793,7 @@ fn test_parallel_loading_graph_error() {
 
     // Call load_indexes_parallel with a non-existent graph path
     // This should cause the graph loading thread to return an error, which should be propagated
-    let result = load_indexes_parallel(
-        &graph_path,
-        None,
-        vec![]
-    );
+    let result = load_indexes_parallel(&graph_path, None, vec![]);
 
     // Should return an error
     assert!(result.is_err());
@@ -2806,8 +2802,13 @@ fn test_parallel_loading_graph_error() {
     let err = result.unwrap_err();
     let err_str = format!("{}", err);
     // The exact error message depends on the OS, but it should be an IO error about missing file
-    assert!(err_str.contains("No such file") || err_str.contains("entity not found") || err_str.contains("os error"),
-            "Error should indicate missing graph file, got: {}", err_str);
+    assert!(
+        err_str.contains("No such file")
+            || err_str.contains("entity not found")
+            || err_str.contains("os error"),
+        "Error should indicate missing graph file, got: {}",
+        err_str
+    );
 
     println!("✓ Parallel loading graph error test passed");
 }
