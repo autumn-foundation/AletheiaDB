@@ -115,7 +115,9 @@ fn test_save_fallback_no_runtime() {
     // 2. Populate with data
     for i in 0..count {
         let node_id = NodeId::new(i as u64 + 1).unwrap();
-        let vector: Vec<f32> = (0..dimensions).map(|x| (x as f32) / (dimensions as f32)).collect();
+        let vector: Vec<f32> = (0..dimensions)
+            .map(|x| (x as f32) / (dimensions as f32))
+            .collect();
         index.add(node_id, &vector).expect("Failed to add vector");
     }
 
