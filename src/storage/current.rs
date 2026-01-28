@@ -1019,7 +1019,7 @@ impl CurrentStorage {
     }
 
     /// Internal locked version of insert_node_direct.
-    #[doc(hidden)]
+    #[doc(hidden)] // Helper for tests
     pub fn insert_node_direct_locked(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
         // we have not modified any graph state, so we can safely return error without rollback.
@@ -1043,8 +1043,8 @@ impl CurrentStorage {
     }
 
     /// Internal locked version of insert_edge_direct.
-    #[doc(hidden)]
-    pub fn insert_edge_direct_locked(&self, edge: Edge) -> Result<()> {
+    #[doc(hidden)] // Helper for tests
+    pub(crate) fn insert_edge_direct_locked(&self, edge: Edge) -> Result<()> {
         self.indexes.insert_edge(edge);
         Ok(())
     }
@@ -1055,8 +1055,8 @@ impl CurrentStorage {
     }
 
     /// Internal locked version of update_node_direct.
-    #[doc(hidden)]
-    pub fn update_node_direct_locked(&self, node: Node, timestamp: Timestamp) -> Result<()> {
+    #[doc(hidden)] // Helper for tests
+    pub(crate) fn update_node_direct_locked(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // Save old node for potential rollback
         let old_node = self.indexes.get_node(node.id);
 
@@ -1084,8 +1084,8 @@ impl CurrentStorage {
     }
 
     /// Internal locked version of update_edge_direct.
-    #[doc(hidden)]
-    pub fn update_edge_direct_locked(&self, edge: Edge) -> Result<()> {
+    #[doc(hidden)] // Helper for tests
+    pub(crate) fn update_edge_direct_locked(&self, edge: Edge) -> Result<()> {
         // Remove old version and insert new
         self.indexes.insert_edge(edge);
         Ok(())
@@ -1097,8 +1097,8 @@ impl CurrentStorage {
     }
 
     /// Internal locked version of delete_node_direct.
-    #[doc(hidden)]
-    pub fn delete_node_direct_locked(
+    #[doc(hidden)] // Helper for tests
+    pub(crate) fn delete_node_direct_locked(
         &self,
         id: NodeId,
         timestamp: Timestamp,
@@ -1122,8 +1122,8 @@ impl CurrentStorage {
     }
 
     /// Internal locked version of delete_edge_direct.
-    #[doc(hidden)]
-    pub fn delete_edge_direct_locked(&self, id: EdgeId) -> Result<()> {
+    #[doc(hidden)] // Helper for tests
+    pub(crate) fn delete_edge_direct_locked(&self, id: EdgeId) -> Result<()> {
         self.indexes
             .remove_edge(id)
             .ok_or(StorageError::EdgeNotFound(id))?;
