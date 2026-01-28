@@ -723,25 +723,6 @@ impl CurrentIndexes {
     /// IDs are needed, as it avoids cloning the full Edge objects.
     pub fn iter_edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
         self.edges.iter().map(|entry| *entry.key())
-    /// Iterate over all node IDs.
-    ///
-    /// This is more efficient than `iter_nodes().map(|n| n.id)` when only
-    /// IDs are needed, as it avoids cloning the full Node objects.
-    pub fn iter_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes.iter().map(|entry| *entry.key())
-    }
-
-    /// Iterate over all edges.
-    pub fn iter_edges(&self) -> impl Iterator<Item = Edge> + '_ {
-        self.edges.iter().map(|entry| entry.value().clone())
-    }
-
-    /// Iterate over all edge IDs.
-    ///
-    /// This is more efficient than `iter_edges().map(|e| e.id)` when only
-    /// IDs are needed, as it avoids cloning the full Edge objects.
-    pub fn iter_edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
-        self.edges.iter().map(|entry| *entry.key())
     }
 
     /// Export outgoing CSR data for persistence.
@@ -1995,5 +1976,39 @@ mod zero_copy_access_tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&EdgeId::new(1).unwrap()));
         assert!(ids.contains(&EdgeId::new(2).unwrap()));
+    }
+
+    #[test]
+    fn test_iter_nodes_returns_references() {
+        let indexes = CurrentIndexes::new();
+        let node = create_test_node(1, "Person");
+        indexes.insert_node(node.clone());
+
+        // Should be able to deref without clone
+        let collected: Vec<_> = indexes.iter_nodes().map(|n| n.id).collect();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0], node.id);
+
+        // Should be able to clone when needed
+        let cloned: Vec<Node> = indexes.iter_nodes().map(|n| n.clone()).collect();
+        assert_eq!(cloned.len(), 1);
+        assert_eq!(cloned[0].id, node.id);
+    }
+
+    #[test]
+    fn test_iter_edges_returns_references() {
+        let indexes = CurrentIndexes::new();
+        let edge = create_test_edge(1, 0, 1, "KNOWS");
+        indexes.insert_edge(edge.clone());
+
+        // Should be able to deref without clone
+        let collected: Vec<_> = indexes.iter_edges().map(|e| e.id).collect();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0], edge.id);
+
+        // Should be able to clone when needed
+        let cloned: Vec<Edge> = indexes.iter_edges().map(|e| e.clone()).collect();
+        assert_eq!(cloned.len(), 1);
+        assert_eq!(cloned[0].id, edge.id);
     }
 }
