@@ -205,7 +205,7 @@ impl LatencyTracker {
             return LatencyPercentiles::default();
         }
 
-        let mut sorted: Vec<u64> = Vec::from(samples.clone());
+        let mut sorted: Vec<u64> = samples.to_vec();
         sorted.sort_unstable();
 
         let len = sorted.len();
