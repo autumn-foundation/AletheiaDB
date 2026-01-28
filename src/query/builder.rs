@@ -64,6 +64,12 @@ impl Query {
         self.temporal_context.is_some()
     }
 
+    /// Get the temporal context of this query
+    #[must_use]
+    pub fn temporal_context(&self) -> Option<&TemporalContext> {
+        self.temporal_context.as_ref()
+    }
+
     /// Get the number of operations in this query
     #[must_use]
     pub fn operation_count(&self) -> usize {
