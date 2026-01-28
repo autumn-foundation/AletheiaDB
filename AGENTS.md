@@ -507,7 +507,7 @@ db.between("2024-01-01", "2024-12-31").track_changes(node_id)
 
 **Integration Methods:**
 1. Direct Rust API (for embedded use)
-2. MCP Server (for Claude integration)
+2. MCP Server (for AI agent integration)
 3. REST/GraphQL API (for general LLM tool use)
 
 **See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete LLM integration patterns.**
