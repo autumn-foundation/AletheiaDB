@@ -612,45 +612,100 @@ mod simd {
     pub unsafe fn dot_and_magnitudes_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
         unsafe {
             let len = a.len();
-            let chunks = len / 8;
-            let remainder = len % 8;
+            let mut ptr_a = a.as_ptr();
+            let mut ptr_b = b.as_ptr();
 
-            // Accumulators for 8 floats at a time
-            let mut dot_acc = _mm256_setzero_ps();
-            let mut mag_a_acc = _mm256_setzero_ps();
-            let mut mag_b_acc = _mm256_setzero_ps();
+            // Accumulators
+            let mut dot_acc1 = _mm256_setzero_ps();
+            let mut dot_acc2 = _mm256_setzero_ps();
+            let mut dot_acc3 = _mm256_setzero_ps();
+            let mut dot_acc4 = _mm256_setzero_ps();
 
-            let a_ptr = a.as_ptr();
-            let b_ptr = b.as_ptr();
+            let mut mag_a_acc1 = _mm256_setzero_ps();
+            let mut mag_a_acc2 = _mm256_setzero_ps();
+            let mut mag_a_acc3 = _mm256_setzero_ps();
+            let mut mag_a_acc4 = _mm256_setzero_ps();
 
-            // Process 8 floats at a time
-            for i in 0..chunks {
-                let offset = i * 8;
-                let va = _mm256_loadu_ps(a_ptr.add(offset));
-                let vb = _mm256_loadu_ps(b_ptr.add(offset));
+            let mut mag_b_acc1 = _mm256_setzero_ps();
+            let mut mag_b_acc2 = _mm256_setzero_ps();
+            let mut mag_b_acc3 = _mm256_setzero_ps();
+            let mut mag_b_acc4 = _mm256_setzero_ps();
 
-                // Fused multiply-add for dot product and magnitudes
+            // Process 32 floats at a time (unrolled 4x)
+            let chunks_32 = len / 32;
+            for _ in 0..chunks_32 {
+                let va1 = _mm256_loadu_ps(ptr_a);
+                let vb1 = _mm256_loadu_ps(ptr_b);
+                let va2 = _mm256_loadu_ps(ptr_a.add(8));
+                let vb2 = _mm256_loadu_ps(ptr_b.add(8));
+                let va3 = _mm256_loadu_ps(ptr_a.add(16));
+                let vb3 = _mm256_loadu_ps(ptr_b.add(16));
+                let va4 = _mm256_loadu_ps(ptr_a.add(24));
+                let vb4 = _mm256_loadu_ps(ptr_b.add(24));
+
+                dot_acc1 = _mm256_fmadd_ps(va1, vb1, dot_acc1);
+                mag_a_acc1 = _mm256_fmadd_ps(va1, va1, mag_a_acc1);
+                mag_b_acc1 = _mm256_fmadd_ps(vb1, vb1, mag_b_acc1);
+
+                dot_acc2 = _mm256_fmadd_ps(va2, vb2, dot_acc2);
+                mag_a_acc2 = _mm256_fmadd_ps(va2, va2, mag_a_acc2);
+                mag_b_acc2 = _mm256_fmadd_ps(vb2, vb2, mag_b_acc2);
+
+                dot_acc3 = _mm256_fmadd_ps(va3, vb3, dot_acc3);
+                mag_a_acc3 = _mm256_fmadd_ps(va3, va3, mag_a_acc3);
+                mag_b_acc3 = _mm256_fmadd_ps(vb3, vb3, mag_b_acc3);
+
+                dot_acc4 = _mm256_fmadd_ps(va4, vb4, dot_acc4);
+                mag_a_acc4 = _mm256_fmadd_ps(va4, va4, mag_a_acc4);
+                mag_b_acc4 = _mm256_fmadd_ps(vb4, vb4, mag_b_acc4);
+
+                ptr_a = ptr_a.add(32);
+                ptr_b = ptr_b.add(32);
+            }
+
+            // Merge accumulators
+            let mut dot_acc = _mm256_add_ps(
+                _mm256_add_ps(dot_acc1, dot_acc2),
+                _mm256_add_ps(dot_acc3, dot_acc4),
+            );
+            let mut mag_a_acc = _mm256_add_ps(
+                _mm256_add_ps(mag_a_acc1, mag_a_acc2),
+                _mm256_add_ps(mag_a_acc3, mag_a_acc4),
+            );
+            let mut mag_b_acc = _mm256_add_ps(
+                _mm256_add_ps(mag_b_acc1, mag_b_acc2),
+                _mm256_add_ps(mag_b_acc3, mag_b_acc4),
+            );
+
+            // Handle remaining chunks of 8
+            let remaining_after_32 = len % 32;
+            let chunks_8 = remaining_after_32 / 8;
+            for _ in 0..chunks_8 {
+                let va = _mm256_loadu_ps(ptr_a);
+                let vb = _mm256_loadu_ps(ptr_b);
+
                 dot_acc = _mm256_fmadd_ps(va, vb, dot_acc);
                 mag_a_acc = _mm256_fmadd_ps(va, va, mag_a_acc);
                 mag_b_acc = _mm256_fmadd_ps(vb, vb, mag_b_acc);
+
+                ptr_a = ptr_a.add(8);
+                ptr_b = ptr_b.add(8);
             }
 
-            // Horizontal sum of 256-bit vectors
+            // Horizontal sum
             let dot = horizontal_sum_avx(dot_acc);
             let mag_a = horizontal_sum_avx(mag_a_acc);
             let mag_b = horizontal_sum_avx(mag_b_acc);
 
-            // Handle remainder with safe scalar operations.
-            // Using safe indexing here as the compiler optimizes away bounds checks
-            // when the loop bound is known to be < 8 (the chunk size).
+            // Handle scalar remainder
             let mut dot_rem = 0.0f32;
             let mut mag_a_rem = 0.0f32;
             let mut mag_b_rem = 0.0f32;
 
-            let start = chunks * 8;
+            let remainder = remaining_after_32 % 8;
             for i in 0..remainder {
-                let ai = a[start + i];
-                let bi = b[start + i];
+                let ai = *ptr_a.add(i);
+                let bi = *ptr_b.add(i);
                 dot_rem += ai * bi;
                 mag_a_rem += ai * ai;
                 mag_b_rem += bi * bi;
@@ -759,29 +814,58 @@ mod simd {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
-            let a_chunks = a.chunks_exact(8);
-            let b_chunks = b.chunks_exact(8);
-            let a_rem = a_chunks.remainder();
-            let b_rem = b_chunks.remainder();
+            let len = a.len();
+            let mut ptr_a = a.as_ptr();
+            let mut ptr_b = b.as_ptr();
 
-            // Accumulator for 8 floats at a time
-            let mut acc = _mm256_setzero_ps();
+            // Accumulators
+            let mut acc1 = _mm256_setzero_ps();
+            let mut acc2 = _mm256_setzero_ps();
+            let mut acc3 = _mm256_setzero_ps();
+            let mut acc4 = _mm256_setzero_ps();
 
-            // Process 8 floats at a time
-            for (va_chunk, vb_chunk) in a_chunks.zip(b_chunks) {
-                let va = _mm256_loadu_ps(va_chunk.as_ptr());
-                let vb = _mm256_loadu_ps(vb_chunk.as_ptr());
+            // Process 32 floats at a time (unrolled 4x)
+            let chunks_32 = len / 32;
+            for _ in 0..chunks_32 {
+                let va1 = _mm256_loadu_ps(ptr_a);
+                let vb1 = _mm256_loadu_ps(ptr_b);
+                let va2 = _mm256_loadu_ps(ptr_a.add(8));
+                let vb2 = _mm256_loadu_ps(ptr_b.add(8));
+                let va3 = _mm256_loadu_ps(ptr_a.add(16));
+                let vb3 = _mm256_loadu_ps(ptr_b.add(16));
+                let va4 = _mm256_loadu_ps(ptr_a.add(24));
+                let vb4 = _mm256_loadu_ps(ptr_b.add(24));
 
-                // Fused multiply-add: acc = va * vb + acc
+                acc1 = _mm256_fmadd_ps(va1, vb1, acc1);
+                acc2 = _mm256_fmadd_ps(va2, vb2, acc2);
+                acc3 = _mm256_fmadd_ps(va3, vb3, acc3);
+                acc4 = _mm256_fmadd_ps(va4, vb4, acc4);
+
+                ptr_a = ptr_a.add(32);
+                ptr_b = ptr_b.add(32);
+            }
+
+            // Merge accumulators
+            let mut acc = _mm256_add_ps(_mm256_add_ps(acc1, acc2), _mm256_add_ps(acc3, acc4));
+
+            // Handle remaining chunks of 8
+            let remaining_after_32 = len % 32;
+            let chunks_8 = remaining_after_32 / 8;
+            for _ in 0..chunks_8 {
+                let va = _mm256_loadu_ps(ptr_a);
+                let vb = _mm256_loadu_ps(ptr_b);
                 acc = _mm256_fmadd_ps(va, vb, acc);
+                ptr_a = ptr_a.add(8);
+                ptr_b = ptr_b.add(8);
             }
 
             // Horizontal sum of 256-bit vector
             let mut sum = horizontal_sum_avx(acc);
 
-            // Handle remainder with scalar operations
-            for (&va, &vb) in a_rem.iter().zip(b_rem) {
-                sum += va * vb;
+            // Handle scalar remainder
+            let remainder = remaining_after_32 % 8;
+            for i in 0..remainder {
+                sum += *ptr_a.add(i) * *ptr_b.add(i);
             }
 
             sum
@@ -842,35 +926,65 @@ mod simd {
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
             let len = a.len();
-            let chunks = len / 8;
-            let remainder = len % 8;
+            let mut ptr_a = a.as_ptr();
+            let mut ptr_b = b.as_ptr();
 
-            // Accumulator for 8 floats at a time
-            let mut acc = _mm256_setzero_ps();
+            // Accumulators
+            let mut acc1 = _mm256_setzero_ps();
+            let mut acc2 = _mm256_setzero_ps();
+            let mut acc3 = _mm256_setzero_ps();
+            let mut acc4 = _mm256_setzero_ps();
 
-            let a_ptr = a.as_ptr();
-            let b_ptr = b.as_ptr();
+            // Process 32 floats at a time (unrolled 4x)
+            let chunks_32 = len / 32;
+            for _ in 0..chunks_32 {
+                let va1 = _mm256_loadu_ps(ptr_a);
+                let vb1 = _mm256_loadu_ps(ptr_b);
+                let diff1 = _mm256_sub_ps(va1, vb1);
+                acc1 = _mm256_fmadd_ps(diff1, diff1, acc1);
 
-            // Process 8 floats at a time
-            for i in 0..chunks {
-                let offset = i * 8;
-                let va = _mm256_loadu_ps(a_ptr.add(offset));
-                let vb = _mm256_loadu_ps(b_ptr.add(offset));
+                let va2 = _mm256_loadu_ps(ptr_a.add(8));
+                let vb2 = _mm256_loadu_ps(ptr_b.add(8));
+                let diff2 = _mm256_sub_ps(va2, vb2);
+                acc2 = _mm256_fmadd_ps(diff2, diff2, acc2);
 
-                // Compute difference
+                let va3 = _mm256_loadu_ps(ptr_a.add(16));
+                let vb3 = _mm256_loadu_ps(ptr_b.add(16));
+                let diff3 = _mm256_sub_ps(va3, vb3);
+                acc3 = _mm256_fmadd_ps(diff3, diff3, acc3);
+
+                let va4 = _mm256_loadu_ps(ptr_a.add(24));
+                let vb4 = _mm256_loadu_ps(ptr_b.add(24));
+                let diff4 = _mm256_sub_ps(va4, vb4);
+                acc4 = _mm256_fmadd_ps(diff4, diff4, acc4);
+
+                ptr_a = ptr_a.add(32);
+                ptr_b = ptr_b.add(32);
+            }
+
+            // Merge accumulators
+            let mut acc = _mm256_add_ps(_mm256_add_ps(acc1, acc2), _mm256_add_ps(acc3, acc4));
+
+            // Handle remaining chunks of 8
+            let remaining_after_32 = len % 32;
+            let chunks_8 = remaining_after_32 / 8;
+            for _ in 0..chunks_8 {
+                let va = _mm256_loadu_ps(ptr_a);
+                let vb = _mm256_loadu_ps(ptr_b);
                 let diff = _mm256_sub_ps(va, vb);
-
-                // Square and accumulate using FMA: acc = diff * diff + acc
                 acc = _mm256_fmadd_ps(diff, diff, acc);
+
+                ptr_a = ptr_a.add(8);
+                ptr_b = ptr_b.add(8);
             }
 
             // Horizontal sum of 256-bit vector
             let mut sum = horizontal_sum_avx(acc);
 
-            // Handle remainder with scalar operations
-            let start = chunks * 8;
+            // Handle scalar remainder
+            let remainder = remaining_after_32 % 8;
             for i in 0..remainder {
-                let diff = a[start + i] - b[start + i];
+                let diff = *ptr_a.add(i) - *ptr_b.add(i);
                 sum += diff * diff;
             }
 
