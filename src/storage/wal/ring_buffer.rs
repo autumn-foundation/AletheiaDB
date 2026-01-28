@@ -1104,14 +1104,17 @@ mod tests {
 
             while drained_count < total_items {
                 let entries = buf_clone.drain();
+                if entries.is_empty() {
+                    thread::yield_now();
+                    continue;
+                }
+
                 for entry in entries {
                     drained_count += 1;
                     // Verify data integrity
                     let val = u64::from_le_bytes(entry.data.try_into().unwrap());
                     checksum = checksum.wrapping_add(val);
                 }
-
-                thread::yield_now();
             }
             (drained_count, checksum)
         });
@@ -1128,13 +1131,7 @@ mod tests {
         assert_eq!(drained, total_items);
 
         // Calculate expected checksum
-        let mut expected_checksum = 0u64;
-        for p in 0..num_producers {
-            for i in 0..items_per_producer {
-                expected_checksum =
-                    expected_checksum.wrapping_add((p * items_per_producer + i) as u64);
-            }
-        }
+        let expected_checksum = (0..total_items as u64).fold(0u64, |sum, i| sum.wrapping_add(i));
         assert_eq!(checksum, expected_checksum);
     }
 
