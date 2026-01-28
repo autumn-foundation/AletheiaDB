@@ -2765,8 +2765,14 @@ fn test_parallel_loading_error_propagation() {
     // Verify the error is related to the missing file
     let err = result.unwrap_err();
     let err_str = format!("{}", err);
+    // On different OSs, the IO error message varies.
+    // Windows: "The system cannot find the file specified"
+    // Unix: "No such file or directory"
+    // The wrapped error might not contain the filename depending on how fs::read returned it.
     assert!(
-        err_str.contains("mappings.idx") || err_str.contains("No such file"),
+        err_str.contains("mappings.idx")
+            || err_str.contains("No such file")
+            || err_str.contains("cannot find the file"),
         "Error should indicate missing mappings file, got: {}",
         err_str
     );
