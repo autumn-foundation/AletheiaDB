@@ -19,6 +19,8 @@ pub mod id;
 pub mod interning;
 pub mod observer;
 pub mod property;
+/// Security primitives (Key management, encryption).
+pub mod security;
 pub mod temporal;
 pub mod vector;
 

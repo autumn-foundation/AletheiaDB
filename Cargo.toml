@@ -43,17 +43,26 @@ metrics-exporter-prometheus = { version = "0.17", optional = true }
 # MCP server support (optional)
 # Note: rmcp re-exports schemars, so we don't need a separate dependency
 rmcp = { version = "0.13", features = ["server", "transport-io"], optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = "0.22"
 
 # HTTP server support (optional)
 actix-web = { version = "4.9", optional = true }
 actix-cors = { version = "0.7", optional = true }
 actix-rt = { version = "2.10", optional = true }
 
+# Key provider dependencies
+zeroize = { version = "1.8", features = ["derive"] }
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+aws-config = { version = "1.5", optional = true }
+aws-sdk-kms = { version = "1.55", optional = true }
+vaultrs = { version = "0.7", optional = true }
+
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
-async-trait = { version = "0.1", optional = true }
+async-trait = "0.1"
 
 # HTTP client for API-based providers (OpenAI, HuggingFace, Ollama) and sharding RPC
 reqwest = { version = "0.11", features = ["json", "blocking"], optional = true }
@@ -103,7 +112,7 @@ tokio = ["dep:tokio"]
 config-toml = ["dep:serde", "dep:toml"]
 
 # Embedding generation features
-embeddings = ["dep:tokio", "dep:async-trait", "dep:serde_json"]
+embeddings = ["dep:tokio", "dep:serde_json"]
 
 # Individual provider features (each implies 'embeddings')
 embedding-openai = ["embeddings", "dep:reqwest"]
@@ -121,7 +130,7 @@ embedding-all = [
 ]
 
 # MCP server support
-mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base64"]
+mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json"]
 
 # Sharding RPC client support (uses blocking reqwest)
 sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
@@ -141,6 +150,10 @@ honeycomb-client = ["dep:serde", "dep:serde_json"]
 
 # Honeycomb client with HTTP transmission support
 honeycomb = ["honeycomb-client", "dep:reqwest"]
+
+# Key provider features
+aws-kms = ["dep:aws-sdk-kms", "dep:aws-config"]
+vault = ["dep:vaultrs", "dep:serde"]
 
 [profile.dev]
 # Fast compilation for development
