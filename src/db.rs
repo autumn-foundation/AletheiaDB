@@ -795,6 +795,50 @@ fn persist_all_indexes(
 ///
 /// Use [`with_wal_config`](Self::with_wal_config) to configure the default mode,
 /// or [`write_with_options`](Self::write_with_options) for per-transaction overrides.
+///
+/// # Examples
+///
+/// ```ignore
+/// use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+/// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+///
+/// // 1. Initialize the database
+/// let db = GallifreyDB::new().expect("Failed to open database");
+///
+/// // 2. Enable vector indexing (optional)
+/// db.vector_index("embedding")
+///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+///     .enable()?;
+///
+/// // 3. Create nodes
+/// let alice_id = db.create_node(
+///     "Person",
+///     PropertyMapBuilder::new()
+///         .insert("name", "Alice")
+///         .insert("age", 30)
+///         .build()
+/// )?;
+///
+/// let bob_id = db.create_node(
+///     "Person",
+///     PropertyMapBuilder::new()
+///         .insert("name", "Bob")
+///         .insert_vector("embedding", &[0.1, 0.2, 0.3])
+///         .build()
+/// )?;
+///
+/// // 4. Create an edge
+/// db.create_edge(
+///     alice_id,
+///     bob_id,
+///     "KNOWS",
+///     PropertyMapBuilder::new().insert("since", 2024).build()
+/// )?;
+///
+/// // 5. Query
+/// let alice = db.get_node(alice_id)?;
+/// println!("Found: {:?}", alice.properties.get("name"));
+/// ```
 pub struct GallifreyDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
     current: Arc<CurrentStorage>,
@@ -1692,6 +1736,19 @@ impl GallifreyDB {
     ///
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::PropertyMapBuilder;
+    ///
+    /// let node_id = db.create_node(
+    ///     "Person",
+    ///     PropertyMapBuilder::new()
+    ///         .insert("name", "Alice")
+    ///         .build()
+    /// )?;
+    /// ```
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.write(|tx| tx.create_node(label, properties))
     }
@@ -1700,6 +1757,19 @@ impl GallifreyDB {
     ///
     /// This is a convenience method that internally uses a write transaction.
     /// For multiple operations, prefer using `write()` or `write_transaction()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::PropertyMapBuilder;
+    ///
+    /// let edge_id = db.create_edge(
+    ///     source_id,
+    ///     target_id,
+    ///     "KNOWS",
+    ///     PropertyMapBuilder::new().insert("since", 2024).build()
+    /// )?;
+    /// ```
     pub fn create_edge(
         &self,
         source: NodeId,
@@ -1881,7 +1951,7 @@ impl GallifreyDB {
     ///
     /// # Returns
     ///
-    /// A vector of (NodeId, Option<Node>) pairs, where None indicates the node
+    /// A vector of (NodeId, `Option<Node>`) pairs, where None indicates the node
     /// did not exist at the specified time. Results are returned in the same
     /// order as the input node_ids.
     ///
@@ -1998,7 +2068,7 @@ impl GallifreyDB {
     ///
     /// # Returns
     ///
-    /// A vector of (EdgeId, Option<Edge>) pairs, where None indicates the edge
+    /// A vector of (EdgeId, `Option<Edge>`) pairs, where None indicates the edge
     /// did not exist at the specified time. Results are returned in the same
     /// order as the input edge_ids.
     ///

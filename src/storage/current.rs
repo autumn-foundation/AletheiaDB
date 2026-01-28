@@ -2283,7 +2283,7 @@ impl CurrentStorage {
     /// This is used by the query executor for full node scans.
     /// For large graphs, prefer using label-filtered scans instead.
     pub fn get_all_node_ids(&self) -> Vec<NodeId> {
-        self.indexes.iter_nodes().map(|n| n.id).collect()
+        self.indexes.iter_node_ids().collect()
     }
 
     /// Get all edge IDs in the current storage.
@@ -2291,7 +2291,7 @@ impl CurrentStorage {
     /// This is used by recovery tests and query executor for full edge scans.
     /// For large graphs, prefer using filtered scans instead.
     pub fn get_all_edge_ids(&self) -> Vec<EdgeId> {
-        self.indexes.iter_edges().map(|e| e.id).collect()
+        self.indexes.iter_edge_ids().collect()
     }
 
     /// Get all nodes in the current storage.
