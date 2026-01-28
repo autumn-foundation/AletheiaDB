@@ -314,6 +314,7 @@ pub trait VectorIndex: Send + Sync {
     /// # Examples
     ///
     /// ```
+    /// ```
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
     /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
