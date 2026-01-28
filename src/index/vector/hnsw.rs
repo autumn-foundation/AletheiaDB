@@ -479,7 +479,16 @@ impl HnswIndexBuilder {
             // 3. The data is properly aligned for f32
             let metric_wrapper: Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> =
                 Box::new(move |a: *const f32, b: *const f32| {
-                    // SAFETY: usearch guarantees pointers are valid for `dims` elements
+                    // Check for null pointers to prevent UB
+                    if a.is_null() || b.is_null() {
+                        // This should never happen with a correct usearch implementation.
+                        // If it does, we panic to prevent UB from dereferencing null.
+                        // We cannot return an error here because the signature is fixed by usearch trait.
+                        panic!("usearch passed null pointer to metric function");
+                    }
+
+                    // SAFETY: usearch guarantees pointers are valid for `dims` elements.
+                    // We verified they are not null above.
                     let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
                     let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
                     distance_fn(slice_a, slice_b)
