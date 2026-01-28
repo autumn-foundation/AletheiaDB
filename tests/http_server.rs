@@ -221,3 +221,221 @@ mod shutdown_tests {
         );
     }
 }
+
+// ============================================================================
+// AppState Tests (Issue #466)
+// ============================================================================
+
+#[cfg(test)]
+mod state_tests {
+    use gallifreydb::GallifreyDB;
+    use gallifreydb::PropertyMapBuilder;
+    use gallifreydb::http::AppState;
+    use std::sync::Arc;
+
+    /// Test that AppState can be created with an Arc<GallifreyDB>
+    #[test]
+    fn test_app_state_creation() {
+        let db = Arc::new(GallifreyDB::new().unwrap());
+        let state = AppState::new(db.clone());
+
+        // Verify we can access the database through the state
+        assert_eq!(state.db().node_count(), 0);
+    }
+
+    /// Test that AppState implements Clone for actix-web sharing
+    #[test]
+    fn test_app_state_is_clone() {
+        let db = Arc::new(GallifreyDB::new().unwrap());
+        let state = AppState::new(db.clone());
+
+        // Clone should work
+        let state2 = state.clone();
+
+        // Both should reference the same database
+        let node_id = state
+            .db()
+            .create_node("Test", PropertyMapBuilder::new().build())
+            .unwrap();
+        assert_eq!(state2.db().node_count(), 1);
+        // get_node returns Result<Node>, not Option
+        let node = state2.db().get_node(node_id).unwrap();
+        assert_eq!(node.id, node_id);
+    }
+
+    /// Test multiple concurrent reads succeed without blocking
+    #[actix_rt::test]
+    async fn test_app_state_concurrent_reads() {
+        let db = Arc::new(GallifreyDB::new().unwrap());
+
+        // Pre-populate with some nodes
+        for i in 0..100 {
+            db.create_node(
+                "Test",
+                PropertyMapBuilder::new().insert("id", i as i64).build(),
+            )
+            .unwrap();
+        }
+
+        let state = AppState::new(db);
+
+        // Spawn 10 concurrent read tasks
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    for _ in 0..100 {
+                        let count = state.db().node_count();
+                        assert_eq!(count, 100);
+                    }
+                })
+            })
+            .collect();
+
+        // All tasks should complete successfully
+        for handle in handles {
+            handle.await.expect("Task should not panic");
+        }
+    }
+
+    /// Test multiple concurrent writes succeed without data races
+    #[actix_rt::test]
+    async fn test_app_state_concurrent_writes() {
+        let db = Arc::new(GallifreyDB::new().unwrap());
+        let state = AppState::new(db);
+
+        // Spawn 10 concurrent write tasks, each creating 10 nodes
+        let handles: Vec<_> = (0..10)
+            .map(|task_id| {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    for iter in 0..10 {
+                        state
+                            .db()
+                            .create_node(
+                                "Test",
+                                PropertyMapBuilder::new()
+                                    .insert("task", task_id as i64)
+                                    .insert("iter", iter as i64)
+                                    .build(),
+                            )
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        // All tasks should complete successfully
+        for handle in handles {
+            handle.await.expect("Task should not panic");
+        }
+
+        // Verify all 100 nodes were created (10 tasks × 10 nodes each)
+        assert_eq!(state.db().node_count(), 100);
+    }
+
+    /// Test mixed concurrent reads and writes don't block each other
+    #[actix_rt::test]
+    async fn test_app_state_mixed_concurrent_operations() {
+        let db = Arc::new(GallifreyDB::new().unwrap());
+        let state = AppState::new(db);
+
+        let mut handles = vec![];
+
+        // Spawn 5 writer tasks
+        for task_id in 0..5 {
+            let state = state.clone();
+            handles.push(tokio::spawn(async move {
+                for iter in 0..20 {
+                    state
+                        .db()
+                        .create_node(
+                            "Writer",
+                            PropertyMapBuilder::new()
+                                .insert("task", task_id as i64)
+                                .insert("iter", iter as i64)
+                                .build(),
+                        )
+                        .unwrap();
+                }
+            }));
+        }
+
+        // Spawn 5 reader tasks
+        for _ in 0..5 {
+            let state = state.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..50 {
+                    // Reads should succeed even while writes are happening
+                    let _count = state.db().node_count();
+                    // Count will vary as writes happen, so we don't assert exact value
+                }
+            }));
+        }
+
+        // All tasks should complete successfully
+        for handle in handles {
+            handle.await.expect("Task should not panic");
+        }
+
+        // Verify all writes succeeded (5 tasks × 20 nodes each)
+        assert_eq!(state.db().node_count(), 100);
+    }
+
+    /// Test that heavy concurrent load doesn't cause deadlocks
+    #[actix_rt::test]
+    async fn test_no_deadlock_under_load() {
+        let db = Arc::new(GallifreyDB::new().unwrap());
+        let state = AppState::new(db);
+
+        // Spawn many tasks doing mixed operations
+        let handles: Vec<_> = (0..20)
+            .map(|task_id| {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    for iter in 0..10 {
+                        // Mix of operations
+                        state
+                            .db()
+                            .create_node(
+                                "Load",
+                                PropertyMapBuilder::new()
+                                    .insert("task", task_id as i64)
+                                    .insert("iter", iter as i64)
+                                    .build(),
+                            )
+                            .unwrap();
+
+                        let _count = state.db().node_count();
+                    }
+                })
+            })
+            .collect();
+
+        // Use a timeout to detect deadlocks
+        let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+            for handle in handles {
+                handle.await.expect("Task should not panic");
+            }
+        })
+        .await;
+
+        assert!(
+            timeout_result.is_ok(),
+            "Tasks should complete without deadlock"
+        );
+
+        // Verify expected number of nodes created (20 tasks × 10 nodes each)
+        assert_eq!(state.db().node_count(), 200);
+    }
+
+    /// Test that From<Arc<GallifreyDB>> is implemented for convenience
+    #[test]
+    fn test_app_state_from_arc() {
+        let db = Arc::new(GallifreyDB::new().unwrap());
+        let state: AppState = db.into();
+
+        // Should be usable immediately
+        assert_eq!(state.db().node_count(), 0);
+    }
+}
