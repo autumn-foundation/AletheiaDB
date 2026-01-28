@@ -29,8 +29,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::storage::index_persistence::background::spawn_background_persistence_thread;
 use crate::storage::index_persistence::operations::{
-    load_vector_indexes, persist_graph_index, persist_string_interner, persist_temporal_index,
-    persist_vector_indexes,
+    build_and_save_manifest, load_vector_indexes, persist_graph_index, persist_string_interner,
+    persist_temporal_index, persist_vector_indexes,
 };
 use crate::storage::index_persistence::PersistenceTracker;
 
@@ -2349,9 +2349,6 @@ impl GallifreyDB {
     /// db.persist_indexes()?; // Save indexes to disk
     /// ```
     pub fn persist_indexes(&self) -> Result<()> {
-        use crate::storage::index_persistence::formats::IndexManifest;
-        use crate::storage::index_persistence::formats::StringInternerManifestEntry;
-        use crate::storage::index_persistence::formats::GraphIndexManifestEntry;
 
         // Warn if background persistence thread has stopped
         if self
@@ -2388,32 +2385,7 @@ impl GallifreyDB {
         persist_temporal_index(&self.historical, &self.temporal_indexes, manager, tracker)?;
 
         // 5. Save manifest last with current WAL LSN
-        // Note: This records the WAL position at persist time for future WAL replay coordination
-        let current_lsn = self.wal.current_lsn().0;
-        let mut manifest = IndexManifest::new(current_lsn);
-
-        // Add string interner entry
-        manifest.string_interner = Some(StringInternerManifestEntry {
-            interner_file: "strings/interner.idx".to_string(),
-            string_count: crate::core::GLOBAL_INTERNER.len() as u64,
-        });
-
-        // Add graph index entry if we have nodes/edges
-        let node_count = self.current.node_count();
-        let edge_count = self.current.edge_count();
-        if node_count > 0 || edge_count > 0 {
-            manifest.graph_index = Some(GraphIndexManifestEntry {
-                adjacency_file: "graph/adjacency.idx".to_string(),
-                node_count: node_count as u64,
-                edge_count: edge_count as u64,
-            });
-        }
-
-        manager.save_manifest(&manifest).map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to save manifest: {}", e))
-        })?;
-
-        Ok(())
+        build_and_save_manifest(&self.wal, &self.current, manager)
     }
 
     /// Get a reference to the current storage (test-only helper).

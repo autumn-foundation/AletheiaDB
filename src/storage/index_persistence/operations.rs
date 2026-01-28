@@ -413,6 +413,18 @@ pub fn persist_all_indexes(
     }
 
     // Save manifest
+    build_and_save_manifest(wal, current, manager)
+}
+
+/// Builds and saves the index manifest file.
+///
+/// This function is shared between manual persistence (`persist_indexes`) and
+/// shutdown persistence (`persist_all_indexes`) to avoid code duplication.
+pub fn build_and_save_manifest(
+    wal: &Arc<ConcurrentWalSystem>,
+    current: &Arc<CurrentStorage>,
+    manager: &Arc<IndexPersistenceManager>,
+) -> crate::utils::error::Result<()> {
     use crate::storage::index_persistence::formats::{
         GraphIndexManifestEntry, IndexManifest, StringInternerManifestEntry,
     };
@@ -427,6 +439,7 @@ pub fn persist_all_indexes(
     });
 
     // Add graph index entry if we have nodes/edges
+    // Use node_count() and edge_count() for O(1) performance instead of iterating.
     let node_count = current.node_count();
     let edge_count = current.edge_count();
     if node_count > 0 || edge_count > 0 {
