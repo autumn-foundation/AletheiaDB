@@ -1061,4 +1061,124 @@ mod tests {
         let result = buf.try_append(PendingEntry::new_async(LSN(3), vec![]));
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_concurrent_append_and_drain() {
+        use std::sync::{Barrier, atomic::AtomicBool};
+
+        // Setup: Small buffer to force contention and wraps
+        let buf = Arc::new(WalRingBuffer::new(16));
+        let num_producers = 4;
+        let items_per_producer = 1000;
+        let total_items = num_producers * items_per_producer;
+
+        let barrier = Arc::new(Barrier::new(num_producers + 1));
+        let producers_done = Arc::new(AtomicBool::new(false));
+
+        let mut handles = Vec::new();
+
+        // Spawn producers
+        for p in 0..num_producers {
+            let buf = Arc::clone(&buf);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for i in 0..items_per_producer {
+                    let val = (p * items_per_producer + i) as u64;
+                    let entry = PendingEntry::new_async(LSN(val), val.to_le_bytes().to_vec());
+                    buf.append_blocking(entry).unwrap();
+                }
+            }));
+        }
+
+        // Spawn consumer
+        let buf_clone = Arc::clone(&buf);
+        let barrier_clone = Arc::clone(&barrier);
+        let done_flag = Arc::clone(&producers_done);
+
+        let consumer_handle = thread::spawn(move || {
+            let mut drained_count = 0;
+            let mut checksum = 0u64;
+
+            barrier_clone.wait();
+
+            while drained_count < total_items {
+                let entries = buf_clone.drain();
+                if entries.is_empty() {
+                    // Check if producers are done when buffer is empty to avoid infinite loop
+                    // if for some reason we missed items (though logic below expects total_items)
+                    // This usage of done_flag is effectively just a liveness check/safety valve in this loop
+                    if done_flag.load(Ordering::Acquire) && drained_count < total_items {
+                        // In a real test we expect to get everything, so just yield.
+                        // But we use the flag to silence the unused variable warning
+                        // and logically it makes sense to check if we should stop.
+                    }
+                    thread::yield_now();
+                    continue;
+                }
+
+                for entry in entries {
+                    drained_count += 1;
+                    // Verify data integrity
+                    let val = u64::from_le_bytes(entry.data.try_into().unwrap());
+                    checksum = checksum.wrapping_add(val);
+                }
+            }
+            (drained_count, checksum)
+        });
+
+        // Wait for producers
+        for h in handles {
+            h.join().unwrap();
+        }
+        producers_done.store(true, Ordering::Release);
+
+        // Wait for consumer
+        let (drained, checksum) = consumer_handle.join().unwrap();
+
+        assert_eq!(drained, total_items);
+
+        // Calculate expected checksum
+        let expected_checksum = (0..total_items as u64).fold(0u64, |sum, i| sum.wrapping_add(i));
+        assert_eq!(checksum, expected_checksum);
+    }
+
+    #[test]
+    fn test_drop_safety() {
+        let buf = WalRingBuffer::new(16);
+        // Fill partially
+        for i in 0..5 {
+            buf.try_append(PendingEntry::new_async(LSN(i as u64), vec![]))
+                .unwrap();
+        }
+        assert_eq!(buf.len_approx(), 5);
+        // Drop should not panic
+        drop(buf);
+    }
+
+    #[test]
+    fn test_completion_notifier_multiple_waiters() {
+        let notifier = Arc::new(CompletionNotifier::new());
+        let handle = CompletionHandle(Arc::clone(&notifier));
+        let num_waiters = 10;
+        let mut handles = Vec::new();
+
+        for _ in 0..num_waiters {
+            let h = handle.clone();
+            handles.push(thread::spawn(move || {
+                h.wait().unwrap();
+            }));
+        }
+
+        // Wait a bit to ensure they are all blocked
+        thread::sleep(std::time::Duration::from_millis(10));
+
+        // Notify
+        notifier.notify_success();
+
+        // Join all
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
 }
