@@ -372,6 +372,17 @@ pub struct PersistedHnswConfig {
     pub ef_search: u16,
 }
 
+/// Fully loaded vector index data.
+#[derive(Debug, Clone)]
+pub struct VectorIndexData {
+    /// Metadata
+    pub meta: VectorIndexMeta,
+    /// ID Mappings
+    pub mappings: VectorMappingsData,
+    /// Path to the usearch index file
+    pub index_path: std::path::PathBuf,
+}
+
 /// Vector ID mappings (NodeId <-> usearch key).
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct VectorMappingsData {

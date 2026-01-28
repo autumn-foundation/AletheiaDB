@@ -899,9 +899,9 @@ fn test_parallel_loading_is_faster() {
     let handle2 = thread::spawn(move || load_indexes_parallel(&graph_path_clone2, None, vec![]));
     let handle3 = thread::spawn(move || load_indexes_parallel(&graph_path_clone3, None, vec![]));
 
-    let (data1_par, _) = handle1.join().expect("Thread 1 panicked").unwrap();
-    let (data2_par, _) = handle2.join().expect("Thread 2 panicked").unwrap();
-    let (data3_par, _) = handle3.join().expect("Thread 3 panicked").unwrap();
+    let (data1_par, _, _) = handle1.join().expect("Thread 1 panicked").unwrap();
+    let (data2_par, _, _) = handle2.join().expect("Thread 2 panicked").unwrap();
+    let (data3_par, _, _) = handle3.join().expect("Thread 3 panicked").unwrap();
 
     let parallel_duration = start.elapsed();
 
@@ -2636,4 +2636,81 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
         manifest.lsn, expected_lsn
     );
     println!("✓ Issue #410 fix verified: No hardcoded LSN, exact match confirmed");
+}
+
+/// Test parallel loading with vector indexes.
+///
+/// This test ensures that `load_indexes_parallel` correctly handles the `vector_paths` argument
+/// and loads vector indexes concurrently. This covers the vector loading logic in `load_indexes_parallel`
+/// and `load_vector_index`.
+#[test]
+fn test_parallel_loading_with_vectors() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::storage::index_persistence::formats::PersistedHnswConfig;
+    use gallifreydb::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
+    use gallifreydb::storage::index_persistence::load_indexes_parallel;
+    use gallifreydb::storage::index_persistence::vector::{
+        new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
+    };
+
+    let dir = tempdir().unwrap();
+    let graph_path = dir.path().join("graph.idx");
+
+    // Create minimal graph index
+    let graph_data = new_graph_index_data();
+    save_graph_index(&graph_data, &graph_path).unwrap();
+
+    // Create vector index 1
+    let vector_dir1 = dir.path().join("vector_embedding1");
+    std::fs::create_dir_all(&vector_dir1).unwrap();
+
+    let hnsw_config1 = PersistedHnswConfig {
+        m: 16,
+        ef_construction: 128,
+        ef_search: 64,
+    };
+    let vector_meta1 = new_vector_meta("embedding1", 384, 0, hnsw_config1);
+    let vector_mappings1 = new_vector_mappings();
+
+    save_vector_meta(&vector_meta1, &vector_dir1.join("meta.idx")).unwrap();
+    save_vector_mappings(&vector_mappings1, &vector_dir1.join("mappings.idx")).unwrap();
+
+    // Create vector index 2
+    let vector_dir2 = dir.path().join("vector_embedding2");
+    std::fs::create_dir_all(&vector_dir2).unwrap();
+
+    let hnsw_config2 = PersistedHnswConfig {
+        m: 24,
+        ef_construction: 200,
+        ef_search: 100,
+    };
+    let vector_meta2 = new_vector_meta("embedding2", 768, 1, hnsw_config2);
+    let vector_mappings2 = new_vector_mappings();
+
+    save_vector_meta(&vector_meta2, &vector_dir2.join("meta.idx")).unwrap();
+    save_vector_mappings(&vector_mappings2, &vector_dir2.join("mappings.idx")).unwrap();
+
+    // Call load_indexes_parallel with vector paths
+    let (_, _, mut vector_data) =
+        load_indexes_parallel(&graph_path, None, vec![&vector_dir1, &vector_dir2]).unwrap();
+
+    // Sort vector data by property name to ensure deterministic assertions (threads might finish in any order)
+    vector_data.sort_by(|a, b| a.meta.property_name.cmp(&b.meta.property_name));
+
+    assert_eq!(vector_data.len(), 2);
+
+    // Check first vector index
+    assert_eq!(vector_data[0].meta.property_name, "embedding1");
+    assert_eq!(vector_data[0].meta.dimensions, 384);
+    assert_eq!(vector_data[0].mappings.count, 0);
+    assert!(vector_data[0].index_path.ends_with("current.usearch"));
+
+    // Check second vector index
+    assert_eq!(vector_data[1].meta.property_name, "embedding2");
+    assert_eq!(vector_data[1].meta.dimensions, 768);
+    assert_eq!(vector_data[1].meta.metric, 1); // Euclidean
+    assert_eq!(vector_data[1].mappings.count, 0);
+
+    println!("✓ Parallel loading with vectors test passed");
 }

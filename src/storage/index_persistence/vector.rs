@@ -12,7 +12,7 @@ use crc32fast::Hasher;
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{
-    PersistedHnswConfig, VectorIndexMeta, VectorMappingsData, VectorSnapshotMeta,
+    PersistedHnswConfig, VectorIndexData, VectorIndexMeta, VectorMappingsData, VectorSnapshotMeta,
 };
 use super::{MANIFEST_VERSION, VECTOR_META_MAGIC};
 
@@ -121,6 +121,31 @@ pub fn load_snapshot_meta(path: &Path) -> Result<VectorSnapshotMeta> {
     let data = load_with_crc(path)?;
     let meta: VectorSnapshotMeta = bitcode::decode(&data)?;
     Ok(meta)
+}
+
+/// Load a complete vector index (meta + mappings + index path) from a directory.
+///
+/// # Arguments
+///
+/// * `path` - Directory containing the vector index files
+///
+/// # Errors
+///
+/// Returns an error if any required file (meta.idx, mappings.idx) is missing or corrupted.
+pub fn load_vector_index(path: &Path) -> Result<VectorIndexData> {
+    let meta_path = path.join("meta.idx");
+    let mappings_path = path.join("mappings.idx");
+    // usearch index is just a file path, we don't load it into memory here generally
+    let index_path = path.join("current.usearch");
+
+    let meta = load_vector_meta(&meta_path)?;
+    let mappings = load_vector_mappings(&mappings_path)?;
+
+    Ok(VectorIndexData {
+        meta,
+        mappings,
+        index_path,
+    })
 }
 
 /// Create new vector index metadata.
