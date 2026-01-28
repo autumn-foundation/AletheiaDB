@@ -39,7 +39,7 @@ fn test_streaming_checkpoint_bounded_memory() {
 
     // This should use streaming, not allocate Vec of 50k nodes
     let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
+        .create_checkpoint(LSN(1), &current, || historical.create_snapshot(LSN(1)))
         .unwrap();
 
     assert_eq!(stats.node_count, node_count);
@@ -71,7 +71,7 @@ fn test_streaming_checkpoint_recovery_correctness() {
     let config = CheckpointConfig::with_data_dir(dir.path());
     let mut manager = CheckpointManager::new(config).unwrap();
     manager
-        .create_checkpoint(LSN(1), &current, &historical)
+        .create_checkpoint(LSN(1), &current, || historical.create_snapshot(LSN(1)))
         .unwrap();
 
     // Recover and verify all data is correct
@@ -123,7 +123,7 @@ fn test_streaming_works_with_edges() {
     let config = CheckpointConfig::with_data_dir(dir.path());
     let mut manager = CheckpointManager::new(config).unwrap();
     let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
+        .create_checkpoint(LSN(1), &current, || historical.create_snapshot(LSN(1)))
         .unwrap();
 
     // Should have ~900 edges (100 * 10 - 100 self-edges)
@@ -179,7 +179,7 @@ fn test_streaming_with_temporal_versions() {
     let config = CheckpointConfig::with_data_dir(dir.path());
     let mut manager = CheckpointManager::new(config).unwrap();
     let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
+        .create_checkpoint(LSN(1), &current, || historical.create_snapshot(LSN(1)))
         .unwrap();
 
     // Should have many versions persisted
@@ -228,7 +228,7 @@ fn test_memory_efficient_large_properties() {
     let mut manager = CheckpointManager::new(config).unwrap();
 
     let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
+        .create_checkpoint(LSN(1), &current, || historical.create_snapshot(LSN(1)))
         .unwrap();
 
     assert_eq!(stats.node_count, node_count);
@@ -258,7 +258,7 @@ fn test_streaming_preserves_version_ids() {
     let config = CheckpointConfig::with_data_dir(dir.path());
     let mut manager = CheckpointManager::new(config).unwrap();
     manager
-        .create_checkpoint(LSN(1), &current, &historical)
+        .create_checkpoint(LSN(1), &current, || historical.create_snapshot(LSN(1)))
         .unwrap();
 
     // Recover and verify version IDs are preserved
@@ -302,7 +302,7 @@ fn test_streaming_checkpoint_performance() {
 
     let start = std::time::Instant::now();
     let stats = manager
-        .create_checkpoint(LSN(1), &current, &historical)
+        .create_checkpoint(LSN(1), &current, || historical.create_snapshot(LSN(1)))
         .unwrap();
     let duration = start.elapsed();
 

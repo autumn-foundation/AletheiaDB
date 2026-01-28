@@ -238,24 +238,31 @@ impl CheckpointManager {
     ///
     /// * `lsn` - Current LSN for consistency tracking
     /// * `current` - Current storage to persist
-    /// * `historical` - Historical storage to persist
+    /// * `create_historical_snapshot` - Closure to create historical snapshot (handles locking if needed)
     ///
     /// # Errors
     ///
     /// Returns an error if persistence fails.
-    pub fn create_checkpoint(
+    pub fn create_checkpoint<F>(
         &mut self,
         lsn: LSN,
         current: &CurrentStorage,
-        historical: &HistoricalStorage,
-    ) -> Result<CheckpointStats> {
+        create_historical_snapshot: F,
+    ) -> Result<CheckpointStats>
+    where
+        F: FnOnce() -> crate::storage::snapshot::HistoricalStorageSnapshot,
+    {
         let start_time = std::time::Instant::now();
         let mut bytes_written = 0u64;
 
         // 0. Create MVCC snapshots for isolation
         // This prevents fuzzy checkpointing (mixed state from different LSNs)
-        let current_snapshot = current.create_snapshot(lsn);
-        let historical_snapshot = historical.create_snapshot(lsn);
+        // Acquire global snapshot write lock to ensure atomicity across current and historical storages.
+        // This prevents writes (which hold read lock) from happening between the two snapshot creations.
+        let (current_snapshot, historical_snapshot) = {
+            let _guard = current.snapshot_lock().write();
+            (current.create_snapshot(lsn), create_historical_snapshot())
+        };
 
         // 1. Save string interner first (other indexes depend on it)
         self.persistence_manager
@@ -1385,7 +1392,9 @@ mod tests {
         let current = CurrentStorage::new();
         let historical = HistoricalStorage::new();
 
-        let stats = manager.create_checkpoint(LSN(100), &current, &historical)?;
+        let stats = manager.create_checkpoint(LSN(100), &current, || {
+            historical.create_snapshot(LSN(100))
+        })?;
 
         assert_eq!(stats.lsn, LSN(100));
         assert_eq!(stats.node_count, 0);
@@ -1421,7 +1430,9 @@ mod tests {
         }
 
         let historical = HistoricalStorage::new();
-        let stats = manager.create_checkpoint(LSN(50), &current, &historical)?;
+        let stats = manager.create_checkpoint(LSN(50), &current, || {
+            historical.create_snapshot(LSN(50))
+        })?;
 
         assert_eq!(stats.node_count, 10);
 
@@ -1476,7 +1487,9 @@ mod tests {
 
             let historical = HistoricalStorage::new();
             // Use LSN(0) which is valid for an empty WAL
-            manager.create_checkpoint(LSN(0), &current, &historical)?;
+            manager.create_checkpoint(LSN(0), &current, || {
+                historical.create_snapshot(LSN(0))
+            })?;
         }
 
         // Phase 2: Recover from checkpoint using the same WAL
@@ -1557,7 +1570,9 @@ mod tests {
             }
 
             let historical = HistoricalStorage::new();
-            manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+            manager.create_checkpoint(checkpoint_lsn, &current, || {
+                historical.create_snapshot(checkpoint_lsn)
+            })?;
         }
 
         // Phase 2: Add more WAL entries after checkpoint
@@ -1611,7 +1626,9 @@ mod tests {
         let historical = HistoricalStorage::new();
 
         // Create checkpoint at LSN 42
-        manager.create_checkpoint(LSN(42), &current, &historical)?;
+        manager.create_checkpoint(LSN(42), &current, || {
+            historical.create_snapshot(LSN(42))
+        })?;
 
         // Verify persisted LSN
         let persisted_lsn = manager.get_persisted_lsn();
@@ -1713,7 +1730,9 @@ mod tests {
         }
 
         let historical = HistoricalStorage::new();
-        let stats = manager.create_checkpoint(LSN(100), &current, &historical)?;
+        let stats = manager.create_checkpoint(LSN(100), &current, || {
+            historical.create_snapshot(LSN(100))
+        })?;
 
         assert_eq!(stats.node_count, 100);
         assert!(stats.bytes_written > 0);
@@ -1734,7 +1753,9 @@ mod tests {
         // Create checkpoint
         let current = CurrentStorage::new();
         let historical = HistoricalStorage::new();
-        manager.create_checkpoint(LSN(1), &current, &historical)?;
+        manager.create_checkpoint(LSN(1), &current, || {
+            historical.create_snapshot(LSN(1))
+        })?;
 
         // Now has persisted state
         assert!(manager.has_persisted_state());
@@ -1774,7 +1795,9 @@ mod tests {
             current.insert_node_direct(node, time::now())?;
 
             let historical = HistoricalStorage::new();
-            manager.create_checkpoint(LSN(1), &current, &historical)?;
+            manager.create_checkpoint(LSN(1), &current, || {
+                historical.create_snapshot(LSN(1))
+            })?;
         }
 
         // Phase 2: Recover and verify properties
@@ -1885,7 +1908,9 @@ mod tests {
             }
 
             let historical = HistoricalStorage::new();
-            let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
+            let stats = manager.create_checkpoint(LSN(0), &current, || {
+                historical.create_snapshot(LSN(0))
+            })?;
             assert_eq!(stats.node_count, 5);
         }
 
@@ -1967,7 +1992,9 @@ mod tests {
             current.insert_edge_direct(edge2)?;
 
             let historical = HistoricalStorage::new();
-            let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
+            let stats = manager.create_checkpoint(LSN(0), &current, || {
+                historical.create_snapshot(LSN(0))
+            })?;
             assert_eq!(stats.node_count, 3);
             assert_eq!(stats.edge_count, 2);
         }
@@ -2015,7 +2042,9 @@ mod tests {
             let historical = HistoricalStorage::new();
 
             // Create checkpoint with LSN 1000
-            manager.create_checkpoint(LSN(1000), &current, &historical)?;
+            manager.create_checkpoint(LSN(1000), &current, || {
+                historical.create_snapshot(LSN(1000))
+            })?;
         }
 
         // Try to recover with an empty WAL (current LSN = 0)
@@ -2396,7 +2425,9 @@ mod tests {
                 anchor_props,
             )?;
 
-            let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
+            let stats = manager.create_checkpoint(LSN(0), &current, || {
+                historical.create_snapshot(LSN(0))
+            })?;
             assert_eq!(stats.node_count, 1);
             assert!(stats.version_count >= 1);
         }
@@ -2481,7 +2512,9 @@ mod tests {
                 PropertyMapBuilder::new().insert("strength", 5i64).build(),
             )?;
 
-            let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
+            let stats = manager.create_checkpoint(LSN(0), &current, || {
+                historical.create_snapshot(LSN(0))
+            })?;
             assert_eq!(stats.edge_count, 1);
             assert_eq!(stats.version_count, 1);
         }
@@ -2539,7 +2572,9 @@ mod tests {
         let current = CurrentStorage::new();
         let historical = HistoricalStorage::new();
 
-        manager.create_checkpoint(LSN(42), &current, &historical)?;
+        manager.create_checkpoint(LSN(42), &current, || {
+            historical.create_snapshot(LSN(42))
+        })?;
 
         // After checkpoint, tracking should be updated
         assert_eq!(manager.last_checkpoint_lsn, LSN(42));
@@ -2614,7 +2649,9 @@ mod tests {
                 PropertyMapBuilder::new().insert("deleted", true).build(),
             )?;
 
-            let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
+            let stats = manager.create_checkpoint(LSN(0), &current, || {
+                historical.create_snapshot(LSN(0))
+            })?;
             assert_eq!(stats.version_count, 1);
         }
 
@@ -2679,7 +2716,9 @@ mod tests {
             current.insert_edge_direct(edge)?;
 
             let historical = HistoricalStorage::new();
-            manager.create_checkpoint(LSN(0), &current, &historical)?;
+            manager.create_checkpoint(LSN(0), &current, || {
+                historical.create_snapshot(LSN(0))
+            })?;
         }
 
         // Recover and verify ID generators by creating new entities
@@ -2740,7 +2779,9 @@ mod tests {
             current.insert_node_direct(node, time::now())?;
 
             let historical = HistoricalStorage::new();
-            manager.create_checkpoint(LSN(0), &current, &historical)?;
+            manager.create_checkpoint(LSN(0), &current, || {
+                historical.create_snapshot(LSN(0))
+            })?;
         }
 
         // Add WAL entries with higher IDs
@@ -2801,7 +2842,9 @@ mod tests {
         let current = CurrentStorage::new();
         let historical = HistoricalStorage::new();
 
-        let stats = manager.create_checkpoint(LSN(99), &current, &historical)?;
+        let stats = manager.create_checkpoint(LSN(99), &current, || {
+            historical.create_snapshot(LSN(99))
+        })?;
 
         // Verify stats structure
         assert_eq!(stats.lsn, LSN(99));
@@ -2855,7 +2898,9 @@ mod tests {
                 PropertyMapBuilder::new().insert("v", 100i64).build(),
             )?;
 
-            manager.create_checkpoint(LSN(0), &current, &historical)?;
+            manager.create_checkpoint(LSN(0), &current, || {
+                historical.create_snapshot(LSN(0))
+            })?;
         }
 
         // Recover and verify version ID generator accounts for historical
@@ -2968,7 +3013,9 @@ mod tests {
             }
 
             let historical = HistoricalStorage::new();
-            manager.create_checkpoint(LSN(100), &current, &historical)?;
+            manager.create_checkpoint(LSN(100), &current, || {
+                historical.create_snapshot(LSN(100))
+            })?;
         }
 
         // Recover without cold storage
@@ -3067,7 +3114,9 @@ mod tests {
 
             let current = CurrentStorage::new();
             let historical = HistoricalStorage::new();
-            manager.create_checkpoint(LSN(50), &current, &historical)?;
+            manager.create_checkpoint(LSN(50), &current, || {
+                historical.create_snapshot(LSN(50))
+            })?;
         }
 
         // Create cold storage with flushed_lsn at 100 (higher than checkpoint)
@@ -3179,7 +3228,9 @@ mod tests {
             let mut manager = CheckpointManager::new(config)?;
             let current = CurrentStorage::new();
             let historical = HistoricalStorage::new();
-            manager.create_checkpoint(LSN(10), &current, &historical)?;
+            manager.create_checkpoint(LSN(10), &current, || {
+                historical.create_snapshot(LSN(10))
+            })?;
         }
 
         // Create cold storage with flushed_lsn = 1000 (way ahead of WAL)

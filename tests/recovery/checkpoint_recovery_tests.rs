@@ -113,7 +113,9 @@ fn test_checkpoint_with_persisted_state_and_wal_replay() -> Result<()> {
         }
 
         let historical = HistoricalStorage::new();
-        manager.create_checkpoint(checkpoint_lsn, &current, &historical)?;
+        manager.create_checkpoint(checkpoint_lsn, &current, || {
+            historical.create_snapshot(checkpoint_lsn)
+        })?;
     }
 
     // Add 2 more WAL entries after checkpoint
@@ -186,7 +188,9 @@ fn test_checkpoint_recovery_preserves_edges() -> Result<()> {
 
         let historical = HistoricalStorage::new();
         // Use LSN(0) which is valid for an empty WAL
-        manager.create_checkpoint(LSN(0), &current, &historical)?;
+        manager.create_checkpoint(LSN(0), &current, || {
+            historical.create_snapshot(LSN(0))
+        })?;
     }
 
     // When: Recover using the same WAL
@@ -237,7 +241,9 @@ fn test_checkpoint_recovery_id_generators_initialized() -> Result<()> {
 
         let historical = HistoricalStorage::new();
         // Use LSN(0) which is valid for an empty WAL
-        let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
+        let stats = manager.create_checkpoint(LSN(0), &current, || {
+            historical.create_snapshot(LSN(0))
+        })?;
 
         // Verify checkpoint captured the nodes
         assert_eq!(stats.node_count, 5);
@@ -293,7 +299,9 @@ fn test_checkpoint_manager_should_checkpoint() -> Result<()> {
     assert!(manager.should_checkpoint(LSN(1)));
 
     // Simulate a checkpoint
-    manager.create_checkpoint(LSN(50), &CurrentStorage::new(), &HistoricalStorage::new())?;
+    manager.create_checkpoint(LSN(50), &CurrentStorage::new(), || {
+        HistoricalStorage::new().create_snapshot(LSN(50))
+    })?;
 
     // Should NOT checkpoint (not enough entries)
     assert!(!manager.should_checkpoint(LSN(60)));
@@ -428,7 +436,9 @@ fn test_checkpoint_stats() -> Result<()> {
     let historical = HistoricalStorage::new();
 
     // When: Create checkpoint
-    let stats = manager.create_checkpoint(LSN(50), &current, &historical)?;
+    let stats = manager.create_checkpoint(LSN(50), &current, || {
+        historical.create_snapshot(LSN(50))
+    })?;
 
     // Then: Stats should reflect the data
     assert_eq!(stats.node_count, 10);
@@ -451,7 +461,9 @@ fn test_checkpoint_has_persisted_state() -> Result<()> {
     assert!(!manager.has_persisted_state());
 
     // When: Create checkpoint
-    manager.create_checkpoint(LSN(1), &CurrentStorage::new(), &HistoricalStorage::new())?;
+    manager.create_checkpoint(LSN(1), &CurrentStorage::new(), || {
+        HistoricalStorage::new().create_snapshot(LSN(1))
+    })?;
 
     // Then: Now has persisted state
     assert!(manager.has_persisted_state());
@@ -470,7 +482,9 @@ fn test_checkpoint_get_persisted_lsn() -> Result<()> {
     assert_eq!(manager.get_persisted_lsn(), None);
 
     // When: Create checkpoint at LSN 42
-    manager.create_checkpoint(LSN(42), &CurrentStorage::new(), &HistoricalStorage::new())?;
+    manager.create_checkpoint(LSN(42), &CurrentStorage::new(), || {
+        HistoricalStorage::new().create_snapshot(LSN(42))
+    })?;
 
     // Then: Persisted LSN is 42
     assert_eq!(manager.get_persisted_lsn(), Some(LSN(42)));

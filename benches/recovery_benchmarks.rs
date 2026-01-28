@@ -105,7 +105,9 @@ fn create_checkpointed_database(
 
     let checkpoint_lsn = wal.current_lsn();
     manager
-        .create_checkpoint(checkpoint_lsn, &current, &historical)
+        .create_checkpoint(checkpoint_lsn, &current, || {
+            historical.create_snapshot(checkpoint_lsn)
+        })
         .unwrap();
 
     (temp_dir, wal, manager)
@@ -161,7 +163,9 @@ fn create_vector_checkpointed_database(
 
     let checkpoint_lsn = wal.current_lsn();
     manager
-        .create_checkpoint(checkpoint_lsn, &current, &historical)
+        .create_checkpoint(checkpoint_lsn, &current, || {
+            historical.create_snapshot(checkpoint_lsn)
+        })
         .unwrap();
 
     (temp_dir, wal, manager)

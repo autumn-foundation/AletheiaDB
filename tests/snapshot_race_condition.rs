@@ -17,7 +17,6 @@ use std::thread;
 use tempfile::tempdir;
 
 #[test]
-#[ignore] // Will fail until fix is implemented
 fn test_concurrent_write_during_snapshot_creation() {
     // Setup: Create storage with initial data
     let current = Arc::new(CurrentStorage::new());
@@ -49,7 +48,9 @@ fn test_concurrent_write_during_snapshot_creation() {
 
         // This should be ATOMIC - no writes should sneak in between snapshots
         manager
-            .create_checkpoint(LSN(1), &current_clone, &historical_clone)
+            .create_checkpoint(LSN(1), &current_clone, || {
+                historical_clone.create_snapshot(LSN(1))
+            })
             .unwrap()
     });
 

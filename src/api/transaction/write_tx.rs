@@ -775,10 +775,13 @@ impl WriteTransaction {
         let node = Node::with_metadata(node_id, label, properties.clone(), version_id, metadata);
 
         // Insert or update in current storage
+        // Use _locked versions because we already hold the snapshot lock in apply_changes
         if is_create {
-            self.current.insert_node_direct(node, commit_timestamp)?;
+            self.current
+                .insert_node_direct_locked(node, commit_timestamp)?;
         } else {
-            self.current.update_node_direct(node, commit_timestamp)?;
+            self.current
+                .update_node_direct_locked(node, commit_timestamp)?;
 
             // For updates, explicitly close the current version's transaction_time in historical storage.
             //
@@ -861,10 +864,11 @@ impl WriteTransaction {
         );
 
         // Insert or update in current storage
+        // Use _locked versions because we already hold the snapshot lock in apply_changes
         if is_create {
-            self.current.insert_edge_direct(edge)?;
+            self.current.insert_edge_direct_locked(edge)?;
         } else {
-            self.current.update_edge_direct(edge)?;
+            self.current.update_edge_direct_locked(edge)?;
 
             // For updates, explicitly close the current version's transaction_time in historical storage.
             //
@@ -954,7 +958,9 @@ impl WriteTransaction {
             .insert_node_version(node_id, tombstone_id, tombstone_temporal)?;
 
         // Delete from current storage
-        self.current.delete_node_direct(node_id, commit_timestamp)?;
+        // Use _locked version because we already hold the snapshot lock in apply_changes
+        self.current
+            .delete_node_direct_locked(node_id, commit_timestamp)?;
 
         Ok(())
     }
@@ -1007,7 +1013,8 @@ impl WriteTransaction {
             .insert_edge_version(edge_id, tombstone_id, tombstone_temporal)?;
 
         // Delete from current storage
-        self.current.delete_edge_direct(edge_id)?;
+        // Use _locked version because we already hold the snapshot lock in apply_changes
+        self.current.delete_edge_direct_locked(edge_id)?;
 
         Ok(())
     }
@@ -1020,6 +1027,10 @@ impl WriteTransaction {
         // for multiple updates in the same transaction (since new_tx_time == prev_tx_time).
         // Therefore, we explicitly close previous versions before adding new ones.
         let temporal = BiTemporalInterval::current(commit_timestamp);
+
+        // Acquire snapshot read lock (prevent checkpoints during update application)
+        // This ensures atomicity of current and historical updates with respect to snapshots.
+        let _snapshot_guard = self.current.snapshot_lock().read();
 
         // Acquire lock on historical storage once before processing all operations.
         // TemporalIndexes uses DashMap internally, so no outer lock needed.
