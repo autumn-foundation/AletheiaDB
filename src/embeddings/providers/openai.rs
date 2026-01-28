@@ -382,7 +382,7 @@ mod tests {
 
         // Restore original value
         if let Some(val) = original_var {
-            // SAFETY: Only used in single-threaded test context protected by mutex
+// SAFETY: This test modifies a global environment variable. Access is protected by the `ENV_MUTEX` to prevent race conditions when tests are run in parallel.
             unsafe {
                 std::env::set_var("OPENAI_API_KEY", val);
             }
