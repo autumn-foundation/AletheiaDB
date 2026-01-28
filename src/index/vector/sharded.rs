@@ -1554,9 +1554,7 @@ mod tests {
     fn test_add_batch_ref() -> Result<()> {
         let index = ShardedVectorIndex::with_defaults(4, DistanceMetric::Cosine, 4)?;
 
-        let vectors: Vec<Vec<f32>> = (1..=10)
-            .map(|i| vec![i as f32, 0.0, 0.0, 0.0])
-            .collect();
+        let vectors: Vec<Vec<f32>> = (1..=10).map(|i| vec![i as f32, 0.0, 0.0, 0.0]).collect();
 
         let items: Vec<(NodeId, &[f32])> = vectors
             .iter()
