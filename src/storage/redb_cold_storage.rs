@@ -42,7 +42,7 @@ use crate::storage::cold_storage::{
 use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
@@ -267,7 +267,7 @@ impl RedbColdStorage {
 
         match table.get(FLUSHED_LSN_KEY) {
             Ok(Some(value)) => {
-                let bytes = value.value();
+                let bytes: &[u8] = value.value();
                 if bytes.len() != 8 {
                     return Err(
                         StorageError::corruption("Invalid flushed_lsn format".to_string()).into(),
@@ -486,7 +486,7 @@ impl ColdStorage for RedbColdStorage {
 
         match table.get(id.as_u64()) {
             Ok(Some(value)) => {
-                let compressed = value.value();
+                let compressed: &[u8] = value.value();
                 self.stats
                     .bytes_read_compressed
                     .fetch_add(compressed.len() as u64, Ordering::Relaxed);
@@ -565,7 +565,7 @@ impl ColdStorage for RedbColdStorage {
 
         match table.get(id.as_u64()) {
             Ok(Some(value)) => {
-                let compressed = value.value();
+                let compressed: &[u8] = value.value();
                 self.stats
                     .bytes_read_compressed
                     .fetch_add(compressed.len() as u64, Ordering::Relaxed);
