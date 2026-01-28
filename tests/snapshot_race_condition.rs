@@ -34,12 +34,14 @@ fn test_concurrent_write_during_snapshot_creation() {
         let node = Node::new(node_id, label, props.clone(), version_id);
         let temporal = BiTemporalInterval::current(time::now());
 
-        current.insert_node_direct(node, time::now()).unwrap();
+        current
+            .insert_node_direct(node, time::now())
+            .expect("Failed to insert initial node");
         historical
             .write()
             .unwrap()
             .add_node_version(node_id, version_id, temporal, label, props)
-            .unwrap();
+            .expect("Failed to add initial node version");
     }
 
     // Barrier to synchronize threads
@@ -54,15 +56,24 @@ fn test_concurrent_write_during_snapshot_creation() {
             barrier_clone.wait(); // Synchronize start
 
             let dir = tempdir().unwrap();
-            let path = dir.keep(); // Persist directory to allow main thread access
+            let path = dir.keep().expect("Failed to persist temp dir"); // Persist directory to allow main thread access
             let config = CheckpointConfig::with_data_dir(&path);
-            let mut manager = CheckpointManager::new(config).unwrap();
+            let mut manager = CheckpointManager::new(config).expect("Failed to create checkpoint manager");
 
-            // This should be ATOMIC - no writes should sneak in between snapshots
+            // Acquire read lock on historical storage.
+            // Note: In this test scenario, this lock actually helps REPRODUCE the "missing history" bug.
+            // 1. Checkpoint thread acquires Read Lock.
+            // 2. Writer thread inserts to `current` (allowed, concurrent).
+            // 3. Writer thread tries to insert to `historical` -> BLOCKED by Read Lock.
+            // 4. Checkpoint takes snapshot of `current` -> SEES the new node.
+            // 5. Checkpoint takes snapshot of `historical` -> DOES NOT SEE the new version (writer blocked).
+            // 6. Checkpoint finishes.
+            // 7. Writer unblocks and writes to `historical`.
+            // Result: Checkpoint has node in `current` but no version in `historical`. Inconsistent!
             let historical_guard = historical_clone.read().unwrap();
             let stats = manager
                 .create_checkpoint(LSN(1), &current_clone, &*historical_guard)
-                .unwrap();
+                .expect("Failed to create checkpoint");
 
             (stats, path)
         },
@@ -71,6 +82,10 @@ fn test_concurrent_write_during_snapshot_creation() {
     // Thread 2: Concurrent writer (tries to write during snapshot creation)
     let writer_thread = thread::spawn(move || {
         barrier.wait(); // Synchronize start
+
+        // Small delay to ensure checkpoint thread has time to acquire the lock first
+        // and create the "torn read" condition described above.
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Try to write many times to increase chance of hitting the race window
         for i in 101..=200 {
@@ -89,14 +104,17 @@ fn test_concurrent_write_during_snapshot_creation() {
             // It should NEVER happen between the two snapshot creations!
 
             // Update both storages (simulating transaction)
-            current.insert_node_direct(node, time::now()).unwrap();
+            current
+                .insert_node_direct(node, time::now())
+                .expect("Failed to insert node in writer thread");
+
             // In a real DB, these happen together. Here we do them sequentially which
             // increases the chance of race if checkpoint interleaves.
             historical
                 .write()
                 .unwrap()
                 .add_node_version(node_id, version_id, temporal, label, props)
-                .unwrap();
+                .expect("Failed to add node version in writer thread");
         }
     });
 
