@@ -242,6 +242,23 @@ fn bench_find_neighbors(c: &mut Criterion) {
     });
 }
 
+/// Benchmark node iteration via label_counts.
+fn bench_iter_nodes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("iter_nodes");
+    // Use fewer nodes to keep benchmark fast, but enough to see difference.
+    // 10k nodes is good.
+    let storage = create_test_graph(10000, 10);
+
+    group.bench_function("label_counts_10k", |b| {
+        b.iter(|| {
+            let counts = storage.label_counts();
+            black_box(counts)
+        });
+    });
+
+    group.finish();
+}
+
 // ============================================================================
 // ID Generation Benchmarks
 // ============================================================================
@@ -626,6 +643,7 @@ criterion_group!(
     bench_edge_creation,
     bench_degree_queries,
     bench_find_neighbors,
+    bench_iter_nodes,
     bench_get_outgoing_allocation_overhead,
     // ID Generation
     bench_id_single_thread,

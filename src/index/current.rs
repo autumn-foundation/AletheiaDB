@@ -694,8 +694,8 @@ impl CurrentIndexes {
     }
 
     /// Iterate over all nodes.
-    pub fn iter_nodes(&self) -> impl Iterator<Item = Node> + '_ {
-        self.nodes.iter().map(|entry| entry.value().clone())
+    pub fn iter_nodes(&self) -> impl Iterator<Item = impl std::ops::Deref<Target = Node> + '_> + '_ {
+        self.nodes.iter()
     }
 
     /// Iterate over all edges.
