@@ -106,6 +106,7 @@ mod tests {
         let copy = metadata; // Copy
         assert_eq!(metadata, copy);
 
+        #[allow(clippy::clone_on_copy)]
         let clone = metadata.clone(); // Clone
         assert_eq!(metadata, clone);
     }
