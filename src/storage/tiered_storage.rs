@@ -168,6 +168,7 @@ impl TieredStorageMetrics {
 #[derive(Debug)]
 struct LatencyTracker {
     /// Circular buffer of latency samples (in microseconds).
+    /// Uses VecDeque for O(1) pop_front() instead of Vec::remove(0)'s O(n).
     samples: Mutex<VecDeque<u64>>,
     /// Maximum number of samples to keep.
     max_samples: usize,
@@ -205,7 +206,7 @@ impl LatencyTracker {
             return LatencyPercentiles::default();
         }
 
-        let mut sorted: Vec<u64> = samples.to_vec();
+        let mut sorted: Vec<u64> = samples.iter().copied().collect();
         sorted.sort_unstable();
 
         let len = sorted.len();
