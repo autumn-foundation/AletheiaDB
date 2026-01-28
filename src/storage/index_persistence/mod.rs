@@ -89,8 +89,8 @@ pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;
 pub use operations::{
-    load_vector_indexes, persist_all_indexes, persist_graph_index, persist_string_interner,
-    persist_temporal_index, persist_vector_indexes,
+    build_and_save_manifest, load_vector_indexes, persist_all_indexes, persist_graph_index,
+    persist_string_interner, persist_temporal_index, persist_vector_indexes,
 };
 pub use tracker::PersistenceTracker;
 
