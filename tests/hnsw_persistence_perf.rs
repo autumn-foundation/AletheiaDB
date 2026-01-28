@@ -101,6 +101,36 @@ async fn test_save_in_tokio_context() {
     assert!(file_path.with_extension("usearch.mappings").exists());
 }
 
+#[test]
+fn test_save_fallback_no_runtime() {
+    // Explicitly test the synchronous fallback path when no runtime is present
+    // This runs in a standard thread, ensuring coverage for the !tokio path logic
+    let dimensions = 128;
+    let count = 100;
+
+    // 1. Setup index
+    let config = HnswConfig::new(dimensions, DistanceMetric::Cosine).with_capacity(count);
+    let index = HnswIndex::new(config).expect("Failed to create index");
+
+    // 2. Populate with data
+    for i in 0..count {
+        let node_id = NodeId::new(i as u64 + 1).unwrap();
+        let vector: Vec<f32> = (0..dimensions).map(|x| (x as f32) / (dimensions as f32)).collect();
+        index.add(node_id, &vector).expect("Failed to add vector");
+    }
+
+    // 3. Prepare temp directory
+    let dir = tempdir().expect("Failed to create temp dir");
+    let file_path = dir.path().join("test_index_no_runtime.usearch");
+
+    // 4. Save - should work synchronously
+    index.save(&file_path).expect("Failed to save index");
+
+    // 5. Verify files
+    assert!(file_path.exists());
+    assert!(file_path.with_extension("usearch.mappings").exists());
+}
+
 #[cfg(any(feature = "tokio", feature = "embeddings"))]
 #[tokio::test(flavor = "current_thread")]
 async fn test_save_in_single_thread_context() {
