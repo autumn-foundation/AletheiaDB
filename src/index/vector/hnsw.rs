@@ -331,7 +331,7 @@ struct IndexStats {
 /// Operators should monitor `search_retries` and `search_retry_failures` metrics. Frequent
 /// retries indicate thread pool exhaustion and may require tuning usearch parameters or
 /// reducing concurrency.
-const MAX_SEARCH_ATTEMPTS: u32 = 4; // 1 initial attempt + 3 retries
+const MAX_SEARCH_ATTEMPTS: u32 = 16; // 1 initial attempt + 15 retries
 
 /// Check if a usearch error is transient and should be retried.
 ///
@@ -756,9 +756,9 @@ impl VectorIndex for HnswIndex {
                         // Track retry for observability
                         self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
 
-                        // Exponential backoff: 1ms, 2ms, 4ms
-                        let delay_ms = 1u64 << attempt;
-                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        // Yield to allow other threads to run (including usearch threads)
+                        // This avoids blocking the async executor if running in an async context
+                        std::thread::yield_now();
                         continue;
                     }
                     // Non-retryable error or exhausted retries
@@ -843,9 +843,9 @@ impl VectorIndex for HnswIndex {
                         // Track retry for observability
                         self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
 
-                        // Exponential backoff: 1ms, 2ms, 4ms
-                        let delay_ms = 1u64 << attempt;
-                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        // Yield to allow other threads to run (including usearch threads)
+                        // This avoids blocking the async executor if running in an async context
+                        std::thread::yield_now();
                         continue;
                     }
                     // Non-retryable error or exhausted retries
