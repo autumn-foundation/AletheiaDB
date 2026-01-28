@@ -7,7 +7,7 @@
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyMap;
-use crate::storage::VersionMetadata;
+use crate::core::version::VersionMetadata;
 
 /// A node in the current state of the graph.
 ///

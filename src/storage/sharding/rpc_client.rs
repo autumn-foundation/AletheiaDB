@@ -33,7 +33,7 @@ use super::network::{
     PrepareResponse, ShardClient,
 };
 use super::types::{ShardId, ShardState};
-use crate::api::TxId;
+use crate::core::id::TxId;
 use std::fmt;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

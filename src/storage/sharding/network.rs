@@ -7,8 +7,7 @@
 #![allow(clippy::collapsible_if)]
 
 use super::types::{ShardId, ShardState};
-use crate::api::TxId;
-use crate::core::id::{EdgeId, NodeId};
+use crate::core::id::{EdgeId, NodeId, TxId};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

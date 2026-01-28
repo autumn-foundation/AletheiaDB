@@ -2261,9 +2261,9 @@ impl VectorIndexObserver {
     }
 }
 
-impl crate::storage::observer::StorageObserver for VectorIndexObserver {
-    fn on_event(&self, event: &crate::storage::observer::StorageEvent) -> crate::utils::Result<()> {
-        use crate::storage::observer::StorageEvent;
+impl crate::core::observer::StorageObserver for VectorIndexObserver {
+    fn on_event(&self, event: &crate::core::observer::StorageEvent) -> crate::utils::Result<()> {
+        use crate::core::observer::StorageEvent;
 
         match event {
             // Note: The PreAnchorHook already creates the snapshot and links the snapshot_id
@@ -2299,7 +2299,7 @@ impl crate::storage::observer::StorageObserver for VectorIndexObserver {
         }
     }
 
-    fn interested_in(&self, event: &crate::storage::observer::StorageEvent) -> bool {
+    fn interested_in(&self, event: &crate::core::observer::StorageEvent) -> bool {
         // Only interested in anchor creation events for logging/metrics
         event.is_anchor_event()
     }

@@ -1024,10 +1024,10 @@ impl GallifreyDB {
                 use crate::core::GLOBAL_INTERNER;
                 use crate::core::graph::{Edge, Node};
                 use crate::core::id::{EdgeId, NodeId, VersionId};
+                use crate::core::version::VersionMetadata;
                 use crate::storage::index_persistence::graph::{
                     load_graph_index, restore_property_map,
                 };
-                use crate::storage::version::VersionMetadata;
 
                 match load_graph_index(&graph_path) {
                     Ok(graph_data) => {

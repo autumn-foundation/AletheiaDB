@@ -18,7 +18,6 @@ pub mod current;
 pub mod historical;
 pub mod index_persistence;
 pub mod migration;
-pub mod observer;
 pub mod persistence;
 pub mod redb_cold_storage;
 pub mod sharding;
@@ -43,15 +42,12 @@ pub use migration::{
     MigrationCallback, MigrationCandidate, MigrationPolicy, MigrationProgress, MigrationService,
     MigrationStats,
 };
-pub use observer::{Observer, StorageEvent, StorageObserver};
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
 pub use redb_cold_storage::{RedbColdStorage, RedbConfig};
 pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot, StorageSnapshot};
 pub use tiered_storage::{
     LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
 };
-pub use version::{
-    AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData, VersionMetadata,
-};
+pub use version::{AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData};
 pub use wal::{LSN, WalEntry, WalOperation};
 pub use wal_reader::read_wal_entries;

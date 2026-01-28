@@ -12,20 +12,20 @@
 //! - Are created based on time or WAL size thresholds
 //! - Store complete current state + metadata for historical storage
 
-use crate::api::transaction::types::TxId;
 use crate::core::{
     GLOBAL_INTERNER,
     graph::{Edge, Node},
+    id::TxId,
     id::{EdgeId, NodeId, VersionId},
     interning::InternedString,
     property::PropertyMap,
     temporal::{BiTemporalInterval, Timestamp, time},
+    version::VersionMetadata,
 };
 use crate::index::vector::HnswConfig;
 use crate::storage::{
     current::CurrentStorage,
     historical::HistoricalStorage,
-    version::VersionMetadata,
     wal::{LSN, concurrent_system::ConcurrentWalSystem},
 };
 use crate::utils::error::{Result, StorageError};
@@ -1041,9 +1041,9 @@ impl PersistenceManager {
 mod tests {
     use super::*;
     use crate::GLOBAL_INTERNER;
+    use crate::PropertyMapBuilder;
     use crate::core::graph::Node;
-    use crate::storage::version::VersionMetadata;
-    use crate::{PropertyMapBuilder, api::transaction::types::TxId};
+    use crate::core::version::VersionMetadata;
     use tempfile::TempDir;
 
     #[test]

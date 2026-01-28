@@ -12,9 +12,9 @@
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
+use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
-use crate::storage::observer::{Observer, StorageEvent, notify_observers};
 use crate::storage::version::{
     AnchorConfig, EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData,
 };
@@ -398,7 +398,7 @@ impl HistoricalStorage {
     /// # Example
     /// ```no_run
     /// # use gallifreydb::storage::historical::HistoricalStorage;
-    /// # use gallifreydb::storage::observer::{StorageObserver, StorageEvent};
+    /// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
     /// # use std::sync::Arc;
     /// struct VectorIndexObserver;
     ///
@@ -2500,9 +2500,9 @@ impl HistoricalStats {
 mod tests {
     use super::*;
     use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::observer::{StorageEvent, StorageObserver};
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
-    use crate::storage::{StorageEvent, StorageObserver};
 
     #[test]
     fn test_create_first_version() {

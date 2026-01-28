@@ -1262,3 +1262,59 @@ mod proptests {
         }
     }
 }
+
+/// Transaction ID - globally unique identifier for transactions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TxId(u64);
+
+impl TxId {
+    /// Create a new transaction ID
+    pub fn new(id: u64) -> Self {
+        TxId(id)
+    }
+
+    /// Get the inner ID value
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for TxId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TxId({})", self.0)
+    }
+}
+
+/// Global transaction ID generator
+///
+/// Generates monotonically increasing transaction IDs using atomic operations.
+pub struct TxIdGenerator {
+    counter: AtomicU64,
+}
+
+impl TxIdGenerator {
+    /// Create a new transaction ID generator starting from 1
+    pub fn new() -> Self {
+        TxIdGenerator {
+            counter: AtomicU64::new(1),
+        }
+    }
+
+    /// Generate the next transaction ID
+    ///
+    /// This operation is atomic and thread-safe.
+    pub fn next(&self) -> TxId {
+        TxId(self.counter.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Get the current transaction ID (last generated)
+    pub fn current(&self) -> TxId {
+        TxId(self.counter.load(Ordering::SeqCst).saturating_sub(1))
+    }
+}
+
+impl Default for TxIdGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
