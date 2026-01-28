@@ -17,6 +17,7 @@ use gallifreydb::{
     },
     storage::{
         persistence::{CheckpointConfig, PersistenceManager},
+        version::TemporalVersion,
         wal::{
             WalOperation,
             concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -412,10 +413,18 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
     let (_current, historical, _lsn) = manager.recover(&wal)?;
 
     // Then: Historical version has correct temporal interval
-    // TODO: Once we can query historical versions, verify the temporal interval
-    // For now, verify that historical storage has the version
-    let hist_stats = historical.stats();
-    assert_eq!(hist_stats.total_node_versions, 1);
+    let all_versions = historical.get_all_node_versions();
+    let node_versions = all_versions
+        .get(&node_id)
+        .expect("Node should exist in historical storage");
+    assert_eq!(node_versions.len(), 1, "Should have exactly one version");
+
+    let version = node_versions[0];
+    assert_eq!(
+        version.temporal(),
+        &temporal,
+        "Temporal interval should match"
+    );
 
     Ok(())
 }
