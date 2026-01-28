@@ -4070,4 +4070,63 @@ mod tests {
 
         assert_eq!(vec_edges, iter_edges);
     }
+
+    #[test]
+    fn test_legacy_default_property_selection_determinism() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+
+        // Insert in reverse alphabetical order to ensure min() is doing the work
+        // "z_prop" inserted first
+        storage
+            .enable_vector_index("z_prop", config.clone())
+            .unwrap();
+        // "a_prop" inserted second
+        storage
+            .enable_vector_index("a_prop", config.clone())
+            .unwrap();
+
+        // Should pick "a_prop" alphabetically (deterministic default)
+        assert_eq!(
+            storage.get_indexed_property_name(),
+            Some("a_prop".to_string())
+        );
+
+        // Also verify get_vector_property_name alias
+        assert_eq!(
+            storage.get_vector_property_name(),
+            Some("a_prop".to_string())
+        );
+    }
+
+    #[test]
+    fn test_legacy_vector_count() {
+        use crate::index::vector::DistanceMetric;
+        let storage = CurrentStorage::new();
+
+        // Count with no index
+        assert_eq!(storage.vector_count(), 0);
+
+        let config = HnswConfig::new(4, DistanceMetric::Cosine).with_capacity(100);
+        storage.enable_vector_index("embedding", config).unwrap();
+
+        // Empty index count
+        assert_eq!(storage.vector_count(), 0);
+
+        // Add a node with vector
+        let v1 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let _node1 = storage
+            .create_node(
+                "Doc",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &v1)
+                    .build(),
+            )
+            .unwrap();
+
+        // Count should be 1
+        assert_eq!(storage.vector_count(), 1);
+    }
 }
