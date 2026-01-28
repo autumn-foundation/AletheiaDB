@@ -1242,7 +1242,7 @@ impl HistoricalStorage {
 
     /// Get all node versions for all nodes.
     ///
-    /// Returns a map of NodeId -> Vec<NodeVersion> for recovery property tests.
+    /// Returns a map of NodeId -> `Vec<NodeVersion>` for recovery property tests.
     /// This walks through all node versions and groups them by entity ID.
     pub fn get_all_node_versions(&self) -> std::collections::HashMap<NodeId, Vec<&NodeVersion>> {
         let mut result: std::collections::HashMap<NodeId, Vec<&NodeVersion>> =
@@ -1257,7 +1257,7 @@ impl HistoricalStorage {
 
     /// Get all edge versions for all edges.
     ///
-    /// Returns a map of EdgeId -> Vec<EdgeVersion> for recovery property tests.
+    /// Returns a map of EdgeId -> `Vec<EdgeVersion>` for recovery property tests.
     /// This walks through all edge versions and groups them by entity ID.
     pub fn get_all_edge_versions(&self) -> std::collections::HashMap<EdgeId, Vec<&EdgeVersion>> {
         let mut result: std::collections::HashMap<EdgeId, Vec<&EdgeVersion>> =

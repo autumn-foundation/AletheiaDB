@@ -48,7 +48,7 @@ impl IndexManifest {
 
 /// Save manifest to disk with CRC32 checksum using atomic write.
 ///
-/// Format: [bitcode_data][crc32_checksum_4_bytes]
+/// Format: `[bitcode_data][crc32_checksum_4_bytes]`
 ///
 /// Uses write-temp-then-rename to prevent corruption on crash.
 pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {

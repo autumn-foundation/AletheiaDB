@@ -13,7 +13,7 @@
 //! ├── manifest.idx          # Index registry
 //! ├── strings/interner.idx  # String interning table
 //! ├── graph/adjacency.idx   # CSR adjacency data
-//! ├── temporal/*.idx        # Version chains
+//! ├── temporal/versions.idx # Version chains
 //! └── vector/{prop}/        # Per-property vector indexes
 //! ```
 //!
@@ -27,7 +27,7 @@
 //!
 //! ```ignore
 //! use gallifreydb::storage::index_persistence::{
-//!     IndexPersistenceManager, PersistenceConfig
+//!     IndexPersistenceManager, PersistenceConfig, IndexManifest
 //! };
 //!
 //! let manager = IndexPersistenceManager::new("data");
@@ -48,22 +48,31 @@
 //!
 //! # Format Details
 //!
-//! All index files use bitcode serialization with magic bytes and version validation:
+//! All index files (except the native HNSW index) use [bitcode](https://github.com/llogiq/bitcode)
+//! serialization with a consistent header format: `[MAGIC:4][VERSION:1][DATA...]`.
 //!
-//! - **Manifest** (`GIDX`): Index registry, LSN tracking, timestamps
-//! - **String Interner** (`GSTR`): Ordered string list for ID restoration
-//! - **Graph** (`GGRP`): Nodes, edges, CSR adjacency, properties
-//! - **Temporal** (`GTMP`): Version chains, anchors, deltas
-//! - **Vector** (`GVEC`): Metadata, ID mappings, HNSW snapshots
+//! | File Type | Magic Bytes | Rust Struct | Description |
+//! |-----------|-------------|-------------|-------------|
+//! | **Manifest** | `GIDX` | [`formats::IndexManifest`] | Registry of all indexes, LSN tracking, and timestamps. |
+//! | **String Interner** | `GSTR` | [`formats::StringInternerData`] | Ordered list of interned strings for ID restoration. |
+//! | **Graph Index** | `GGRP` | [`formats::GraphIndexData`] | Nodes, edges, CSR adjacency, and current properties. |
+//! | **Graph Delta** | `GDLT` | [`formats::GraphIndexDelta`] | Incremental changes (added/modified/deleted) since base snapshot. |
+//! | **Temporal Index** | `GTMP` | [`formats::TemporalIndexData`] | Version chains, anchors, and deltas for time-travel. |
+//! | **Vector Meta** | `GVEC` | [`formats::VectorIndexMeta`] | Metadata for a vector index (dimensions, metric, etc.). |
 //!
-//! # Versioning
+//! ## Vector Index Hybrid Format
 //!
-//! Current format version: 1
+//! Vector indexes use a hybrid format for performance:
+//! 1. **Metadata** (`meta.idx`): Bitcode-serialized [`formats::VectorIndexMeta`].
+//! 2. **Mappings** (`mappings.idx`): Bitcode-serialized [`formats::VectorMappingsData`] mapping NodeIDs to usearch keys.
+//! 3. **Index** (`current.usearch`): Native binary format produced by the `usearch` C++ library (HNSW graph).
 //!
-//! Backward compatibility:
-//! - Same major version: guaranteed compatible
-//! - Newer minor version: older code can read newer files
-//! - Unsupported version: returns `UnsupportedVersion` error
+//! # Safety and Integrity
+//!
+//! - **Atomic Writes**: All files are written using a write-temp-then-rename strategy (`atomic_write`) to prevent corruption during crashes.
+//! - **Checksums**: Many formats (Graph, Vector Meta/Mappings) include CRC32 checksums for integrity verification.
+//! - **Magic Bytes**: All files start with 4 magic bytes to prevent parsing invalid file types.
+//! - **Versioning**: All files include a version byte to support future schema evolution.
 
 pub mod api;
 mod error;

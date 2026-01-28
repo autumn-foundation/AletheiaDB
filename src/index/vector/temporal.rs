@@ -959,7 +959,7 @@ pub struct TemporalVectorIndex {
     current: Arc<HnswIndex>,
 
     /// Combined current vector storage and metadata protected by a single lock
-    /// **Issue #233**: This replaces separate DashMap<vectors> and RwLock<metadata>
+    /// **Issue #233**: This replaces separate `DashMap<vectors>` and `RwLock<metadata>`
     /// to reduce lock contention from 3 acquisitions to 1 per add() call
     current_state: RwLock<VectorState>,
 

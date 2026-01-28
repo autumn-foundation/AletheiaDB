@@ -1094,7 +1094,7 @@ impl TemporalIndexes {
     ///
     /// # Current Limitations
     ///
-    /// This implementation still allocates a Vec<VersionId> internally due to
+    /// This implementation still allocates a `Vec<VersionId>` internally due to
     /// DashMap's guard-based access patterns. Future optimizations might use
     /// different concurrent data structures to enable true lazy iteration.
     fn find_version_at_point_iter_impl(

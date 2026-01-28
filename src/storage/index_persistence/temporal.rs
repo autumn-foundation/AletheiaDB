@@ -409,7 +409,7 @@ pub fn restore_into_historical_storage(
 
 /// Save temporal index data to disk with CRC32 checksum using atomic write.
 ///
-/// Format: [bitcode_data][crc32_checksum_4_bytes]
+/// Format: `[bitcode_data][crc32_checksum_4_bytes]`
 ///
 /// Uses write-temp-then-rename to prevent corruption on crash.
 pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> {

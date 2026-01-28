@@ -50,7 +50,7 @@ use std::sync::Arc;
 ///
 /// Snapshots use Arc-based COW:
 /// - Snapshot creation does ONE iteration over DashMap/structures
-/// - Collects Arc<T> references (cheap, just pointer + refcount)
+/// - Collects `Arc<T>` references (cheap, just pointer + refcount)
 /// - Total memory: 8 bytes × num_entities (not full clones)
 /// - Iteration over snapshot is isolated from concurrent writes
 pub trait StorageSnapshot: Send + Sync {
@@ -155,7 +155,7 @@ impl StorageSnapshot for CurrentStorageSnapshot {
 /// Iterator over nodes in CurrentStorageSnapshot.
 ///
 /// Clones nodes from Arc references during iteration (streaming).
-/// No Vec<Node> allocation - memory efficient for large graphs.
+/// No `Vec<Node>` allocation - memory efficient for large graphs.
 pub struct CurrentNodeIterator {
     nodes: Vec<Arc<Node>>,
     index: usize,
@@ -189,7 +189,7 @@ impl ExactSizeIterator for CurrentNodeIterator {
 /// Iterator over edges in CurrentStorageSnapshot.
 ///
 /// Clones edges from Arc references during iteration (streaming).
-/// No Vec<Edge> allocation - memory efficient for large graphs.
+/// No `Vec<Edge>` allocation - memory efficient for large graphs.
 pub struct CurrentEdgeIterator {
     edges: Vec<Arc<Edge>>,
     index: usize,

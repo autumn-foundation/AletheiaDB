@@ -136,7 +136,7 @@ pub fn restore_property_map(persisted: &PersistedPropertyMap) -> Result<Property
 
 /// Save graph index data to disk with CRC32 checksum using atomic write.
 ///
-/// Format: [bitcode_data][crc32_checksum_4_bytes]
+/// Format: `[bitcode_data][crc32_checksum_4_bytes]`
 ///
 /// Uses write-temp-then-rename to prevent corruption on crash.
 pub fn save_graph_index(data: &GraphIndexData, path: &Path) -> Result<()> {

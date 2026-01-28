@@ -1005,7 +1005,7 @@ enum SerializableVersionData {
 
 /// Serializable property value.
 ///
-/// Note: Array is stored as a serialized Vec<u8> to avoid recursive type issues with bitcode.
+/// Note: Array is stored as a serialized `Vec<u8>` to avoid recursive type issues with bitcode.
 #[derive(bitcode::Encode, bitcode::Decode)]
 enum SerializablePropertyValue {
     Null,
