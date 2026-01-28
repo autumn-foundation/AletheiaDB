@@ -2997,13 +2997,8 @@ mod tests {
 
         // Case 4: k=0. Expect 0 results.
         let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
-        let mut rerank = VectorRerankIterator::new(
-            input,
-            query_embedding.clone(),
-            0,
-            current.clone(),
-            None
-        );
+        let mut rerank =
+            VectorRerankIterator::new(input, query_embedding.clone(), 0, current.clone(), None);
         let mut results = Vec::new();
         while let Some(Ok(row)) = rerank.next() {
             results.push(row);
