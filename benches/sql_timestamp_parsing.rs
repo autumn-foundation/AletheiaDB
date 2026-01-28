@@ -7,7 +7,7 @@
 //! - No regressions in parsing logic
 
 #[cfg(feature = "sql")]
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 #[cfg(feature = "sql")]
 use gallifreydb::sql::TemporalClause;
 
@@ -86,11 +86,7 @@ fn bench_timestamp_parsing(c: &mut Criterion) {
 
     // Date-only format
     group.bench_function("date_only", |b| {
-        b.iter(|| {
-            black_box(TemporalClause::parse_timestamp(black_box(
-                "2024-01-15",
-            )))
-        })
+        b.iter(|| black_box(TemporalClause::parse_timestamp(black_box("2024-01-15"))))
     });
 
     // Error path: invalid format (important to measure error handling overhead)
