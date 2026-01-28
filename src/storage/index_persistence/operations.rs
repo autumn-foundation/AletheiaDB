@@ -427,8 +427,8 @@ pub fn persist_all_indexes(
     });
 
     // Add graph index entry if we have nodes/edges
-    let node_count = current.all_nodes().count();
-    let edge_count = current.all_edges().count();
+    let node_count = current.node_count();
+    let edge_count = current.edge_count();
     if node_count > 0 || edge_count > 0 {
         manifest.graph_index = Some(GraphIndexManifestEntry {
             adjacency_file: "graph/adjacency.idx".to_string(),

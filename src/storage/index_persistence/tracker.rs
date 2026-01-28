@@ -31,7 +31,7 @@ impl PersistenceTracker {
     pub fn new() -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("System clock must be after Unix epoch")
             .as_secs();
 
         Self {
@@ -73,7 +73,7 @@ impl PersistenceTracker {
         self.last_vector_persist.store(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("System clock must be after Unix epoch")
                 .as_secs(),
             Ordering::Relaxed,
         );
@@ -86,7 +86,7 @@ impl PersistenceTracker {
         self.last_graph_persist.store(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("System clock must be after Unix epoch")
                 .as_secs(),
             Ordering::Relaxed,
         );
@@ -99,7 +99,7 @@ impl PersistenceTracker {
         self.last_temporal_persist.store(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("System clock must be after Unix epoch")
                 .as_secs(),
             Ordering::Relaxed,
         );
@@ -112,7 +112,7 @@ impl PersistenceTracker {
         self.last_string_persist.store(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("System clock must be after Unix epoch")
                 .as_secs(),
             Ordering::Relaxed,
         );
@@ -143,7 +143,7 @@ impl PersistenceTracker {
     pub fn seconds_since_vector_persist(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("System clock must be after Unix epoch")
             .as_secs();
         let last = self.last_vector_persist.load(Ordering::Relaxed);
         now.saturating_sub(last)
@@ -153,7 +153,7 @@ impl PersistenceTracker {
     pub fn seconds_since_graph_persist(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("System clock must be after Unix epoch")
             .as_secs();
         let last = self.last_graph_persist.load(Ordering::Relaxed);
         now.saturating_sub(last)
@@ -163,7 +163,7 @@ impl PersistenceTracker {
     pub fn seconds_since_temporal_persist(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("System clock must be after Unix epoch")
             .as_secs();
         let last = self.last_temporal_persist.load(Ordering::Relaxed);
         now.saturating_sub(last)
@@ -173,7 +173,7 @@ impl PersistenceTracker {
     pub fn seconds_since_string_persist(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("System clock must be after Unix epoch")
             .as_secs();
         let last = self.last_string_persist.load(Ordering::Relaxed);
         now.saturating_sub(last)
