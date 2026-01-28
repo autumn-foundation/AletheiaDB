@@ -10,9 +10,9 @@ use super::{ReadOps, TransactionSnapshot, TxId, TxMetadata, TxState, TxVisibilit
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::time;
+use crate::core::version::VersionMetadata;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::core::version::VersionMetadata;
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::RwLockExt;
 use parking_lot::RwLock;

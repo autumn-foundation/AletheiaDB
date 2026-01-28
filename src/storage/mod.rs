@@ -48,8 +48,6 @@ pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot, StorageSna
 pub use tiered_storage::{
     LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
 };
-pub use version::{
-    AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData,
-};
+pub use version::{AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData};
 pub use wal::{LSN, WalEntry, WalOperation};
 pub use wal_reader::read_wal_entries;

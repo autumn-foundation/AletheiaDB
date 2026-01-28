@@ -310,7 +310,7 @@ pub trait StorageObserver: Send + Sync {
     ///
     /// # Example
     /// ```no_run
-/// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
+    /// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
     /// struct VectorIndexObserver;
     ///
     /// impl StorageObserver for VectorIndexObserver {

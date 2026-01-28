@@ -14,8 +14,8 @@
 
 use crate::core::{
     GLOBAL_INTERNER,
-    id::TxId,
     graph::{Edge, Node},
+    id::TxId,
     id::{EdgeId, NodeId, VersionId},
     interning::InternedString,
     property::PropertyMap,
@@ -1041,9 +1041,9 @@ impl PersistenceManager {
 mod tests {
     use super::*;
     use crate::GLOBAL_INTERNER;
+    use crate::PropertyMapBuilder;
     use crate::core::graph::Node;
     use crate::core::version::VersionMetadata;
-    use crate::PropertyMapBuilder;
     use tempfile::TempDir;
 
     #[test]
