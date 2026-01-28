@@ -20,7 +20,7 @@ fn test_wal_ring_buffer_stress_dos() {
     // Spawn consumer (slow)
     let consumer = thread::spawn(move || {
         let mut drained = 0;
-        while running_clone.load(std::sync::atomic::Ordering::Relaxed) {
+        while running_clone.load(std::sync::atomic::Ordering::Acquire) {
             let entries = buffer_clone.drain();
             drained += entries.len();
             thread::sleep(Duration::from_millis(5)); // Slow consumer
