@@ -893,14 +893,29 @@ impl VectorIndex for HnswIndex {
         Ok(())
     }
 
+    /// Save the index to disk.
+    ///
+    /// # Async Runtime Behavior
+    ///
+    /// This method performs blocking I/O operations (`std::fs::write` and `usearch::Index::save`).
+    /// When running within a multi-threaded Tokio runtime (enabled via `tokio` or `embeddings` features),
+    /// it automatically uses `tokio::task::block_in_place` to offload this work from the async worker thread.
+    ///
+    /// This prevents the blocking operation from stalling the async reactor, maintaining responsiveness
+    /// for other tasks running on the same thread.
+    ///
+    /// # Fallback
+    ///
+    /// If executed outside a Tokio runtime, or in a single-threaded runtime (where `block_in_place`
+    /// would panic), it falls back to standard synchronous execution.
     fn save(&self, path: &Path) -> Result<()> {
-        #[cfg(feature = "tokio")]
-        if let Some(result) = tokio::runtime::Handle::try_current()
-            .ok()
-            .filter(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
-            .map(|_| tokio::task::block_in_place(|| self.save_internal(path)))
-        {
-            return result;
+        #[cfg(any(feature = "tokio", feature = "embeddings"))]
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Note: Clippy suggests collapsing this if, but 'let chains' are unstable in this context
+            #[allow(clippy::collapsible_if)]
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                return tokio::task::block_in_place(|| self.save_internal(path));
+            }
         }
 
         self.save_internal(path)
