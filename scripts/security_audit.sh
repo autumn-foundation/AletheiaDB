@@ -22,10 +22,8 @@ if command -v cargo-audit &> /dev/null; then
         exit 1
     fi
 else
-    echo -e "${YELLOW}⚠️  cargo-audit NOT found.${NC}"
+    echo -e "${RED}❌ cargo-audit NOT found.${NC}"
     echo "To install: cargo install cargo-audit"
-    echo "Skipping automated audit."
-    # We exit 0 (success) because we don't want to break CI/builds if the tool isn't installed,
-    # unless this is a strict environment.
-    exit 0
+    echo "Enforcing strict security policy: Audit tool must be present."
+    exit 1
 fi

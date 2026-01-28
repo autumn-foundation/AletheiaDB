@@ -1,6 +1,6 @@
 # Warden's Security Journal
 
-## 2024-05-22 - Supply Chain & DoS Hardening
+## 2026-01-28 - Supply Chain & DoS Hardening
 
 **Threat:** Mutable Dependency in Supply Chain
 The `usearch` dependency was pointing to a git branch (`fix/rust-move-semantics`). Git branches are mutable, meaning the underlying code could change without warning, potentially introducing malicious code or breaking changes (Supply Chain Attack).
@@ -25,3 +25,4 @@ Created `scripts/security_audit.sh` to automatically check for and run `cargo-au
 
 ## Open Risks
 - `usearch` FFI boundaries rely on the C++ library behaving correctly regarding pointer validity. We added panic guards for null pointers, but full memory safety depends on `usearch` correctness.
+- The `usearch` dependency points to a fork (`madmax983/USearch`). This fork contains Rust-specific fixes (move semantics) not yet in upstream. We have pinned the specific commit to ensure stability, but future upstream security patches will need manual cherry-picking.
