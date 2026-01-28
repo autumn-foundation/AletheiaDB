@@ -412,7 +412,7 @@ pub(crate) fn persist_all_indexes(
     if let Err(e) = persist_temporal_index(historical, temporal_indexes, manager, tracker) {
         eprintln!("Failed to persist temporal index: {}", e);
     }
-    if let Err(e) = persist_vector_indexes(current, manager, tracker) {
+    if let Err(e) = persist_vector_indexes(current, manager, Some(tracker)) {
         eprintln!("Failed to persist vector indexes: {}", e);
     }
 

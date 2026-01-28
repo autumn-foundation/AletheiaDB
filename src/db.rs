@@ -499,7 +499,7 @@ impl GallifreyDB {
             }
 
             // Load vector indexes
-    if let Err(e) = persist_vector_indexes(current, manager, Some(tracker)) {
+            if let Err(e) = load_vector_indexes(&db.current, manager) {
                 eprintln!("Warning: Failed to load vector indexes: {}", e);
             }
         }
@@ -2424,7 +2424,7 @@ impl GallifreyDB {
 
         // 3. Save vector indexes
         if let Some(ref tracker) = self.persistence_tracker {
-            persist_vector_indexes(&self.current, manager, tracker)?;
+            persist_vector_indexes(&self.current, manager, Some(tracker))?;
         }
 
         // 4. Save temporal index (version history)
