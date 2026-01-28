@@ -81,6 +81,7 @@ pub use api::{
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;
+use rayon::prelude::*;
 
 /// Current manifest format version.
 pub const MANIFEST_VERSION: u16 = 1;
@@ -201,17 +202,11 @@ pub fn load_indexes_parallel(
 
     // Load vector indexes in parallel using Rayon (blocks current thread)
     // We do this while graph and temporal indexes are loading in background threads
-    use rayon::prelude::*;
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(8) // A reasonable number for I/O-bound tasks, can be configured.
-        .build()
-        .unwrap();
-    let vector_data = pool.install(|| {
-        vector_paths
-            .par_iter()
-            .map(|path| vector::load_vector_index(path))
-            .collect::<Result<Vec<_>>>()
-    })?;
+    let vector_data: Result<Vec<_>> = vector_paths
+        .par_iter()
+        .map(|path| vector::load_vector_index(path))
+        .collect();
+    let vector_data = vector_data?;
 
     // Join threads and collect results
     let graph_data = graph_handle
