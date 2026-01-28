@@ -6,13 +6,14 @@ use gallifreydb::core::GLOBAL_INTERNER;
 use gallifreydb::core::graph::Node;
 use gallifreydb::core::id::{NodeId, VersionId};
 use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::time;
+use gallifreydb::core::temporal::{BiTemporalInterval, time};
 use gallifreydb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
 use gallifreydb::storage::current::CurrentStorage;
 use gallifreydb::storage::historical::HistoricalStorage;
 use gallifreydb::storage::snapshot::StorageSnapshot;
 use gallifreydb::storage::wal::LSN;
-use std::sync::{Arc, Barrier};
+use std::path::PathBuf;
+use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
 use tempfile::tempdir;
 
@@ -21,7 +22,8 @@ use tempfile::tempdir;
 fn test_concurrent_write_during_snapshot_creation() {
     // Setup: Create storage with initial data
     let current = Arc::new(CurrentStorage::new());
-    let historical = Arc::new(HistoricalStorage::new());
+    // Use RwLock to allow concurrent writes (CurrentStorage handles it internally, HistoricalStorage needs lock)
+    let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
 
     // Add initial nodes
     for i in 1..=100 {
@@ -29,8 +31,15 @@ fn test_concurrent_write_during_snapshot_creation() {
         let props = PropertyMapBuilder::new().insert("id", i as i64).build();
         let node_id = NodeId::new(i).unwrap();
         let version_id = VersionId::new(i).unwrap();
-        let node = Node::new(node_id, label, props, version_id);
+        let node = Node::new(node_id, label, props.clone(), version_id);
+        let temporal = BiTemporalInterval::current(time::now());
+
         current.insert_node_direct(node, time::now()).unwrap();
+        historical
+            .write()
+            .unwrap()
+            .add_node_version(node_id, version_id, temporal, label, props)
+            .unwrap();
     }
 
     // Barrier to synchronize threads
@@ -40,18 +49,24 @@ fn test_concurrent_write_during_snapshot_creation() {
     let historical_clone = historical.clone();
 
     // Thread 1: Create checkpoint (will call create_snapshot twice)
-    let checkpoint_thread = thread::spawn(move || {
-        barrier_clone.wait(); // Synchronize start
+    let checkpoint_thread = thread::spawn(
+        move || -> (gallifreydb::storage::checkpoint::CheckpointStats, PathBuf) {
+            barrier_clone.wait(); // Synchronize start
 
-        let dir = tempdir().unwrap();
-        let config = CheckpointConfig::with_data_dir(dir.path());
-        let mut manager = CheckpointManager::new(config).unwrap();
+            let dir = tempdir().unwrap();
+            let path = dir.keep(); // Persist directory to allow main thread access
+            let config = CheckpointConfig::with_data_dir(&path);
+            let mut manager = CheckpointManager::new(config).unwrap();
 
-        // This should be ATOMIC - no writes should sneak in between snapshots
-        manager
-            .create_checkpoint(LSN(1), &current_clone, &historical_clone)
-            .unwrap()
-    });
+            // This should be ATOMIC - no writes should sneak in between snapshots
+            let historical_guard = historical_clone.read().unwrap();
+            let stats = manager
+                .create_checkpoint(LSN(1), &current_clone, &*historical_guard)
+                .unwrap();
+
+            (stats, path)
+        },
+    );
 
     // Thread 2: Concurrent writer (tries to write during snapshot creation)
     let writer_thread = thread::spawn(move || {
@@ -63,7 +78,8 @@ fn test_concurrent_write_during_snapshot_creation() {
             let props = PropertyMapBuilder::new().insert("id", i as i64).build();
             let node_id = NodeId::new(i).unwrap();
             let version_id = VersionId::new(i).unwrap();
-            let node = Node::new(node_id, label, props, version_id);
+            let node = Node::new(node_id, label, props.clone(), version_id);
+            let temporal = BiTemporalInterval::current(time::now());
 
             // This write should either:
             // 1. Happen BEFORE both snapshots (both see it)
@@ -71,11 +87,19 @@ fn test_concurrent_write_during_snapshot_creation() {
             // 3. Be BLOCKED during snapshot creation
             //
             // It should NEVER happen between the two snapshot creations!
+
+            // Update both storages (simulating transaction)
             let _ = current.insert_node_direct(node, time::now());
+            // In a real DB, these happen together. Here we do them sequentially which
+            // increases the chance of race if checkpoint interleaves.
+            let _ = historical
+                .write()
+                .unwrap()
+                .add_node_version(node_id, version_id, temporal, label, props);
         }
     });
 
-    let stats = checkpoint_thread.join().unwrap();
+    let (stats, data_path) = checkpoint_thread.join().unwrap();
     writer_thread.join().unwrap();
 
     // Verify checkpoint is consistent:
@@ -92,8 +116,51 @@ fn test_concurrent_write_during_snapshot_creation() {
         "Should have at least initial 100 nodes"
     );
 
-    // TODO: After fix, add validation that current and historical snapshots
-    // are consistent (no orphaned versions)
+    // Validation logic
+    // Recover from checkpoint to inspect its content
+    let config = CheckpointConfig::with_data_dir(&data_path);
+
+    // Create a dummy WAL for recovery (checkpoint recovery requires WAL system, even if empty)
+    use gallifreydb::storage::wal::concurrent_system::{
+        ConcurrentWalSystem, ConcurrentWalSystemConfig,
+    };
+    let wal_dir = data_path.join("wal_recovery"); // separate dir inside data_path
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let wal_config = ConcurrentWalSystemConfig::new(&wal_dir);
+    let wal = ConcurrentWalSystem::new(wal_config).unwrap();
+
+    let mut manager = CheckpointManager::new(config).unwrap();
+    let (recovered_current, recovered_historical, _) = manager.recover(&wal).unwrap();
+
+    // Check 1: Orphaned Versions
+    // For every historical version that is current (valid_to is MAX), check if it exists in current
+    for version in recovered_historical.__test_get_node_versions_iterator() {
+        if version.temporal.valid_time().is_current() {
+            if recovered_current.get_node(version.node_id).is_err() {
+                panic!(
+                    "Found orphaned version: {:?} for node {:?} (exists in historical but not current)",
+                    version.id, version.node_id
+                );
+            }
+        }
+    }
+
+    // Check 2: Missing History
+    // For every node in current, check if it has a current version in historical
+    for node_id in recovered_current.get_all_node_ids() {
+        if recovered_historical
+            .get_current_node_version(node_id)
+            .is_none()
+        {
+            panic!(
+                "Found node without history: {:?} (exists in current but no current version in historical)",
+                node_id
+            );
+        }
+    }
+
+    // Cleanup
+    std::fs::remove_dir_all(data_path).unwrap();
 }
 
 /// Simpler test: Verify the ABSENCE of write coordination (documents current bug)
