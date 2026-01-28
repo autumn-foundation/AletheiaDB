@@ -723,6 +723,25 @@ impl CurrentIndexes {
     /// IDs are needed, as it avoids cloning the full Edge objects.
     pub fn iter_edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
         self.edges.iter().map(|entry| *entry.key())
+    /// Iterate over all node IDs.
+    ///
+    /// This is more efficient than `iter_nodes().map(|n| n.id)` when only
+    /// IDs are needed, as it avoids cloning the full Node objects.
+    pub fn iter_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.nodes.iter().map(|entry| *entry.key())
+    }
+
+    /// Iterate over all edges.
+    pub fn iter_edges(&self) -> impl Iterator<Item = Edge> + '_ {
+        self.edges.iter().map(|entry| entry.value().clone())
+    }
+
+    /// Iterate over all edge IDs.
+    ///
+    /// This is more efficient than `iter_edges().map(|e| e.id)` when only
+    /// IDs are needed, as it avoids cloning the full Edge objects.
+    pub fn iter_edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
+        self.edges.iter().map(|entry| *entry.key())
     }
 
     /// Export outgoing CSR data for persistence.
