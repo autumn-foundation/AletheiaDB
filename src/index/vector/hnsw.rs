@@ -895,10 +895,12 @@ impl VectorIndex for HnswIndex {
 
     fn save(&self, path: &Path) -> Result<()> {
         #[cfg(feature = "tokio")]
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-                return tokio::task::block_in_place(|| self.save_internal(path));
-            }
+        if let Some(result) = tokio::runtime::Handle::try_current()
+            .ok()
+            .filter(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+            .map(|_| tokio::task::block_in_place(|| self.save_internal(path)))
+        {
+            return result;
         }
 
         self.save_internal(path)
