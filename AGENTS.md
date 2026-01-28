@@ -255,7 +255,7 @@ historical.set_tiered_storage(Arc::new(tiered));
 
 **See [docs/guides/tiered-storage-guide.md](docs/guides/tiered-storage-guide.md) for complete guide.**
 
-### MCP Server (Claude Integration)
+### MCP Server (AI Agent Integration)
 
 Model Context Protocol server enabling LLMs to interact with GallifreyDB.
 
