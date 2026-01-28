@@ -11,6 +11,10 @@ use crate::utils::error::{Result, StorageError};
 
 use super::tracker::PersistenceTracker;
 
+#[cfg(test)]
+#[path = "operations_tests.rs"]
+mod tests;
+
 /// Persist vector indexes to disk.
 pub(crate) fn persist_vector_indexes(
     current: &Arc<CurrentStorage>,
