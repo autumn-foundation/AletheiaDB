@@ -479,10 +479,22 @@ impl HnswIndexBuilder {
             // 3. The data is properly aligned for f32
             let metric_wrapper: Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> =
                 Box::new(move |a: *const f32, b: *const f32| {
-                    // SAFETY: usearch guarantees pointers are valid for `dims` elements
-                    let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
-                    let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-                    distance_fn(slice_a, slice_b)
+                    // WARDEN: Defense against null pointers from FFI
+                    if a.is_null() || b.is_null() {
+                        return f32::INFINITY;
+                    }
+
+                    // WARDEN: Trap panics to prevent unwinding across FFI boundary (UB)
+                    // We must use AssertUnwindSafe because the raw pointers are not UnwindSafe,
+                    // but we are only using them to create temporary slices which don't escape.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // SAFETY: usearch guarantees pointers are valid for `dims` elements
+                        let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
+                        let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+                        distance_fn(slice_a, slice_b)
+                    }));
+
+                    result.unwrap_or(f32::INFINITY)
                 });
 
             index.change_metric(metric_wrapper);
