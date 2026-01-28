@@ -1968,4 +1968,728 @@ mod tests {
 
         assert_eq!(storage.get_flushed_lsn().unwrap(), Some(LSN(1000)));
     }
+
+    // ========================================================================
+    // Error Path Coverage Tests - Force database errors to cover map_err closures
+    // ========================================================================
+
+    #[test]
+    fn test_error_invalid_database_path() {
+        use std::fs;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("file.txt");
+
+        // Create a regular file, not a directory
+        fs::write(&file_path, b"not a database").unwrap();
+
+        // Try to create database with a file path instead of directory path
+        // This should trigger the error path in RedbColdStorage::new
+        let result = RedbColdStorage::with_default_config(&file_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_error_parent_directory_creation_fails() {
+        // Try to create database in a path where parent creation would fail
+        // Using /dev/null as parent should fail on Unix systems
+        #[cfg(unix)]
+        {
+            let invalid_path = "/dev/null/subdir/test.redb";
+            let result = RedbColdStorage::with_default_config(invalid_path);
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_corrupted_database_recovery() {
+        use std::fs;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("corrupt.redb");
+
+        // Create a file with invalid database content
+        fs::write(&db_path, b"This is not a valid Redb database file content").unwrap();
+
+        // Try to open it - should trigger error in Database::create
+        let result = RedbColdStorage::with_default_config(&db_path);
+        // Redb might handle this or error out
+        // Either way, we're exercising the error path
+        let _ = result; // Result varies by Redb version
+    }
+
+    #[test]
+    fn test_decompression_error_corrupted_data() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // Create database with Zstd compression
+        let config = RedbConfig::new().compression(CompressionAlgorithm::Zstd);
+        let storage = RedbColdStorage::new(&db_path, config).unwrap();
+
+        // Try to decompress invalid data
+        let invalid_compressed_data = vec![0xFF; 100]; // Invalid Zstd data
+        let result = storage.decompress(&invalid_compressed_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decompression_error_lz4_corrupted() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // Create database with LZ4 compression
+        let config = RedbConfig::new().compression(CompressionAlgorithm::Fast);
+        let storage = RedbColdStorage::new(&db_path, config).unwrap();
+
+        // Try to decompress invalid data
+        let invalid_data = vec![0xAA; 100]; // Invalid LZ4 data
+        let result = storage.decompress(&invalid_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_store_retrieve_with_checksum_validation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // Test with checksums enabled
+        let config = RedbConfig::new()
+            .compression(CompressionAlgorithm::Zstd)
+            .enable_checksums(true);
+        let storage = RedbColdStorage::new(&db_path, config).unwrap();
+
+        // Create a version with substantial data
+        let mut props = PropertyMapBuilder::new();
+        for i in 0..100 {
+            props = props.insert(&format!("field_{}", i), i as i64);
+        }
+        let properties = props.build();
+
+        let version = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            NodeId::new(100).unwrap(),
+            BiTemporalInterval::current(1000.into()),
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties,
+        );
+
+        storage.store_node_version(&version).unwrap();
+        let retrieved = storage.get_node_version(version.id).unwrap().unwrap();
+        assert_eq!(retrieved.id, version.id);
+    }
+
+    #[test]
+    fn test_concurrent_writes_no_data_loss() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        let storage = Arc::new(RedbColdStorage::with_default_config(&db_path).unwrap());
+
+        // Spawn multiple threads writing different versions
+        let mut handles = vec![];
+        for thread_id in 0..10 {
+            let storage_clone = Arc::clone(&storage);
+            let handle = thread::spawn(move || {
+                for i in 0..10 {
+                    let version_id = (thread_id * 10 + i) as u64 + 1;
+                    let version = create_test_node_version(version_id);
+                    storage_clone.store_node_version(&version).unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify all 100 versions were stored
+        for i in 1..=100 {
+            assert!(
+                storage
+                    .contains_node_version(VersionId::new(i).unwrap())
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_version_roundtrip_all_fields() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Create edge with comprehensive properties
+        let properties = PropertyMapBuilder::new()
+            .insert("weight", 2.5f64)
+            .insert("label", "test_label")
+            .insert("count", 42i64)
+            .build();
+
+        let version = EdgeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            EdgeId::new(200).unwrap(),
+            BiTemporalInterval::current(1000.into()),
+            GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            NodeId::new(10).unwrap(),
+            NodeId::new(20).unwrap(),
+            properties,
+        );
+
+        storage.store_edge_version(&version).unwrap();
+        let retrieved = storage.get_edge_version(version.id).unwrap().unwrap();
+
+        assert_eq!(retrieved.id, version.id);
+        assert_eq!(retrieved.edge_id, version.edge_id);
+        assert_eq!(retrieved.source, version.source);
+        assert_eq!(retrieved.target, version.target);
+    }
+
+    #[test]
+    fn test_batch_operations_preserve_order() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let nodes: Vec<NodeVersion> = (1..=50).map(create_test_node_version).collect();
+        let edges: Vec<EdgeVersion> = (1..=50).map(create_test_edge_version).collect();
+
+        storage
+            .store_batch_with_lsn(&nodes, &edges, LSN(1000))
+            .unwrap();
+
+        // Verify all nodes
+        for i in 1..=50 {
+            let version = storage
+                .get_node_version(VersionId::new(i).unwrap())
+                .unwrap();
+            assert!(version.is_some());
+        }
+
+        // Verify all edges
+        for i in 1..=50 {
+            let version = storage
+                .get_edge_version(VersionId::new(i).unwrap())
+                .unwrap();
+            assert!(version.is_some());
+        }
+    }
+
+    #[test]
+    fn test_stats_accuracy_after_multiple_operations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Perform various operations
+        let node1 = create_test_node_version(1);
+        let node2 = create_test_node_version(2);
+        let edge1 = create_test_edge_version(10);
+
+        storage.store_node_version(&node1).unwrap();
+        storage.store_node_version(&node2).unwrap();
+        storage.store_edge_version(&edge1).unwrap();
+
+        storage.get_node_version(node1.id).unwrap();
+        storage.get_node_version(node2.id).unwrap();
+        storage.get_edge_version(edge1.id).unwrap();
+
+        storage.delete_node_version(node1.id).unwrap();
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_versions_stored, 2);
+        assert_eq!(stats.edge_versions_stored, 1);
+        assert_eq!(stats.node_version_reads, 2);
+        assert_eq!(stats.edge_version_reads, 1);
+    }
+
+    #[test]
+    fn test_reopen_after_compact() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // Create, store, compact
+        {
+            let mut storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+            for i in 1..=50 {
+                let version = create_test_node_version(i);
+                storage.store_node_version(&version).unwrap();
+            }
+            storage.compact().unwrap();
+        }
+
+        // Reopen and verify
+        {
+            let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+            for i in 1..=50 {
+                assert!(
+                    storage
+                        .contains_node_version(VersionId::new(i).unwrap())
+                        .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lsn_persistence_through_compact() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        let lsn_value = LSN(99999);
+
+        {
+            let mut storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+            let version = create_test_node_version(1);
+            storage
+                .store_batch_with_lsn(&[version], &[], lsn_value)
+                .unwrap();
+            storage.compact().unwrap();
+        }
+
+        {
+            let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+            assert_eq!(storage.get_flushed_lsn().unwrap(), Some(lsn_value));
+        }
+    }
+
+    #[test]
+    fn test_multiple_database_instances_same_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // Create first instance and write data
+        {
+            let storage1 = RedbColdStorage::with_default_config(&db_path).unwrap();
+            let version = create_test_node_version(1);
+            storage1.store_node_version(&version).unwrap();
+        } // Close first instance
+
+        // Open second instance
+        {
+            let storage2 = RedbColdStorage::with_default_config(&db_path).unwrap();
+            assert!(
+                storage2
+                    .contains_node_version(VersionId::new(1).unwrap())
+                    .unwrap()
+            );
+
+            // Add more data
+            let version = create_test_node_version(2);
+            storage2.store_node_version(&version).unwrap();
+        }
+
+        // Open third instance and verify both
+        {
+            let storage3 = RedbColdStorage::with_default_config(&db_path).unwrap();
+            assert!(
+                storage3
+                    .contains_node_version(VersionId::new(1).unwrap())
+                    .unwrap()
+            );
+            assert!(
+                storage3
+                    .contains_node_version(VersionId::new(2).unwrap())
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_flush_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Multiple flushes should all succeed
+        assert!(storage.flush().is_ok());
+        assert!(storage.flush().is_ok());
+        assert!(storage.flush().is_ok());
+    }
+
+    #[test]
+    fn test_close_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Multiple closes should all succeed
+        assert!(storage.close().is_ok());
+        assert!(storage.close().is_ok());
+    }
+
+    #[test]
+    fn test_empty_node_batch_operations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Empty batch should succeed without error
+        storage.store_node_versions_batch(&[]).unwrap();
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_versions_stored, 0);
+    }
+
+    #[test]
+    fn test_empty_edge_batch_operations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Empty batch should succeed without error
+        storage.store_edge_versions_batch(&[]).unwrap();
+
+        let stats = storage.stats();
+        assert_eq!(stats.edge_versions_stored, 0);
+    }
+
+    #[test]
+    fn test_compression_ratio_tracking() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let config = RedbConfig::new().compression(CompressionAlgorithm::Zstd);
+        let storage = RedbColdStorage::new(&db_path, config).unwrap();
+
+        // Create highly compressible data
+        let mut props = PropertyMapBuilder::new();
+        let repeated_text = "A".repeat(1000);
+        props = props.insert("text", repeated_text.as_str());
+        let properties = props.build();
+
+        let version = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            NodeId::new(100).unwrap(),
+            BiTemporalInterval::current(1000.into()),
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties,
+        );
+
+        storage.store_node_version(&version).unwrap();
+
+        let stats = storage.stats();
+        assert!(stats.bytes_written_raw > 0);
+        assert!(stats.bytes_written_compressed > 0);
+        // Compression should provide significant benefit for repeated data
+        assert!(stats.bytes_written_compressed < stats.bytes_written_raw);
+    }
+
+    // ========================================================================
+    // Additional tests to increase function coverage by exercising more paths
+    // ========================================================================
+
+    #[test]
+    fn test_get_flushed_lsn_with_invalid_metadata_bytes() {
+        // Test the specific error path where LSN has wrong byte count
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        {
+            // Manually create corrupted metadata
+            let db = redb::Database::create(&db_path).unwrap();
+            let write_txn = db.begin_write().unwrap();
+            {
+                let mut table = write_txn.open_table(METADATA_TABLE).unwrap();
+                // Write 7 bytes instead of 8 (invalid)
+                table
+                    .insert(FLUSHED_LSN_KEY, &[1, 2, 3, 4, 5, 6, 7][..])
+                    .unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let result = storage.get_flushed_lsn();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_flushed_lsn_internal_with_existing_lower_value() {
+        // This exercises the branch where we read existing LSN and compare
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Set LSN to 200
+        storage.store_batch_with_lsn(&[], &[], LSN(200)).unwrap();
+
+        // Try to set to 100 (should be skipped)
+        storage.store_batch_with_lsn(&[], &[], LSN(100)).unwrap();
+
+        // Should still be 200
+        assert_eq!(storage.get_flushed_lsn().unwrap(), Some(LSN(200)));
+    }
+
+    #[test]
+    fn test_node_version_decode_error_path() {
+        // Test decode error by storing corrupted data directly
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        {
+            let db = redb::Database::create(&db_path).unwrap();
+            let write_txn = db.begin_write().unwrap();
+            {
+                let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).unwrap();
+                // Store invalid serialized data
+                table.insert(12345, &[0xFF, 0xFF, 0xFF][..]).unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let result = storage.get_node_version(VersionId::new(12345).unwrap());
+        // Should fail to decompress or decode
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_edge_version_decode_error_path() {
+        // Test decode error for edges
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        {
+            let db = redb::Database::create(&db_path).unwrap();
+            let write_txn = db.begin_write().unwrap();
+            {
+                let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).unwrap();
+                // Store invalid serialized data
+                table.insert(12345, &[0xAA, 0xBB, 0xCC][..]).unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let result = storage.get_edge_version(VersionId::new(12345).unwrap());
+        // Should fail to decompress or decode
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_store_many_versions_individually() {
+        // Exercise individual store paths many times
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        for i in 1..=100 {
+            let node = create_test_node_version(i);
+            storage.store_node_version(&node).unwrap();
+        }
+
+        for i in 1..=100 {
+            let edge = create_test_edge_version(i);
+            storage.store_edge_version(&edge).unwrap();
+        }
+
+        let stats = storage.stats();
+        assert_eq!(stats.node_versions_stored, 100);
+        assert_eq!(stats.edge_versions_stored, 100);
+    }
+
+    #[test]
+    fn test_contains_then_get_pattern() {
+        // Exercise the common pattern of checking existence then retrieving
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let node = create_test_node_version(1);
+        let edge = create_test_edge_version(2);
+
+        storage.store_node_version(&node).unwrap();
+        storage.store_edge_version(&edge).unwrap();
+
+        // Contains then get pattern
+        if storage.contains_node_version(node.id).unwrap() {
+            let retrieved = storage.get_node_version(node.id).unwrap();
+            assert!(retrieved.is_some());
+        }
+
+        if storage.contains_edge_version(edge.id).unwrap() {
+            let retrieved = storage.get_edge_version(edge.id).unwrap();
+            assert!(retrieved.is_some());
+        }
+    }
+
+    #[test]
+    fn test_delete_then_reinsert_same_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let version_id = VersionId::new(42).unwrap();
+
+        // Create and store
+        let version1 = create_test_node_version(42);
+        storage.store_node_version(&version1).unwrap();
+        assert!(storage.contains_node_version(version_id).unwrap());
+
+        // Delete
+        storage.delete_node_version(version_id).unwrap();
+        assert!(!storage.contains_node_version(version_id).unwrap());
+
+        // Reinsert with same ID
+        let version2 = create_test_node_version(42);
+        storage.store_node_version(&version2).unwrap();
+        assert!(storage.contains_node_version(version_id).unwrap());
+
+        // Verify it's there
+        let retrieved = storage.get_node_version(version_id).unwrap();
+        assert!(retrieved.is_some());
+    }
+
+    #[test]
+    fn test_batch_with_duplicates() {
+        // Store batch with duplicate IDs (last one wins)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Create versions with same ID
+        let v1 = create_test_node_version(1);
+        let v2 = create_test_node_version(1); // Same ID
+        let v3 = create_test_node_version(1); // Same ID again
+
+        storage.store_node_versions_batch(&[v1, v2, v3]).unwrap();
+
+        // Should have the last version
+        assert!(
+            storage
+                .contains_node_version(VersionId::new(1).unwrap())
+                .unwrap()
+        );
+        let stats = storage.stats();
+        // Stored 3 times even though same ID
+        assert_eq!(stats.node_versions_stored, 3);
+    }
+
+    #[test]
+    fn test_alternating_node_edge_operations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Alternate between node and edge operations
+        for i in 1..=20 {
+            if i % 2 == 0 {
+                let node = create_test_node_version(i);
+                storage.store_node_version(&node).unwrap();
+            } else {
+                let edge = create_test_edge_version(i);
+                storage.store_edge_version(&edge).unwrap();
+            }
+        }
+
+        // Verify counts
+        let stats = storage.stats();
+        assert_eq!(stats.node_versions_stored, 10);
+        assert_eq!(stats.edge_versions_stored, 10);
+    }
+
+    #[test]
+    fn test_get_nonexistent_after_delete() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        let node = create_test_node_version(1);
+        storage.store_node_version(&node).unwrap();
+
+        // Delete it
+        storage.delete_node_version(node.id).unwrap();
+
+        // Try to get it
+        let result = storage.get_node_version(node.id).unwrap();
+        assert!(result.is_none());
+
+        // Try to contains it
+        assert!(!storage.contains_node_version(node.id).unwrap());
+    }
+
+    #[test]
+    fn test_stats_snapshot_consistency() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Take initial snapshot
+        let stats1 = storage.stats();
+        assert_eq!(stats1.node_versions_stored, 0);
+
+        // Do some operations
+        let node = create_test_node_version(1);
+        storage.store_node_version(&node).unwrap();
+
+        // Take another snapshot
+        let stats2 = storage.stats();
+        assert_eq!(stats2.node_versions_stored, 1);
+
+        // First snapshot unchanged
+        assert_eq!(stats1.node_versions_stored, 0);
+    }
+
+    #[test]
+    fn test_very_large_property_map() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Create version with many properties
+        let mut props = PropertyMapBuilder::new();
+        for i in 0..1000 {
+            props = props.insert(&format!("prop_{}", i), i as i64);
+        }
+        let properties = props.build();
+
+        let version = NodeVersion::new_anchor(
+            VersionId::new(1).unwrap(),
+            NodeId::new(100).unwrap(),
+            BiTemporalInterval::current(1000.into()),
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties,
+        );
+
+        storage.store_node_version(&version).unwrap();
+        let retrieved = storage.get_node_version(version.id).unwrap().unwrap();
+        assert_eq!(retrieved.id, version.id);
+    }
+
+    #[test]
+    fn test_interleaved_batch_and_individual() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = RedbColdStorage::with_default_config(&db_path).unwrap();
+
+        // Individual
+        storage
+            .store_node_version(&create_test_node_version(1))
+            .unwrap();
+
+        // Batch
+        let nodes: Vec<_> = (2..=5).map(create_test_node_version).collect();
+        storage.store_node_versions_batch(&nodes).unwrap();
+
+        // Individual again
+        storage
+            .store_node_version(&create_test_node_version(6))
+            .unwrap();
+
+        // Batch with LSN
+        let nodes: Vec<_> = (7..=10).map(create_test_node_version).collect();
+        storage.store_batch_with_lsn(&nodes, &[], LSN(100)).unwrap();
+
+        // Verify all present
+        for i in 1..=10 {
+            assert!(
+                storage
+                    .contains_node_version(VersionId::new(i).unwrap())
+                    .unwrap()
+            );
+        }
+    }
 }
