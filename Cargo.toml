@@ -57,7 +57,7 @@ async-trait = { version = "0.1", optional = true }
 
 # HTTP client for API-based providers (OpenAI, HuggingFace, Ollama) and sharding RPC
 reqwest = { version = "0.11", features = ["json", "blocking"], optional = true }
-serde_json = { version = "1.0", optional = true }
+serde_json = { version = "1.0", optional = false }
 
 # ONNX runtime for local model inference
 ort = { version = "2.0.0-rc.0", optional = true }
@@ -111,7 +111,7 @@ tokio = ["dep:tokio"]
 config-toml = ["dep:serde", "dep:toml"]
 
 # Embedding generation features
-embeddings = ["dep:tokio", "dep:async-trait", "dep:serde_json"]
+embeddings = ["dep:tokio", "dep:async-trait"]
 
 # Individual provider features (each implies 'embeddings')
 embedding-openai = ["embeddings", "dep:reqwest"]
@@ -129,23 +129,23 @@ embedding-all = [
 ]
 
 # MCP server support
-mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base64"]
+mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:base64"]
 
 # Sharding RPC client support (uses blocking reqwest)
-sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+sharding-rpc = ["dep:reqwest", "dep:serde"]
 
 # SQL:2011 temporal syntax support
 sql = ["dep:sqlparser"]
 
 # HTTP server support (Issue #465)
-http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde", "dep:serde_json"]
+http-server = ["dep:actix-web", "dep:actix-cors", "dep:actix-rt", "dep:tokio", "dep:serde"]
 
 # MVCC snapshot TDD tests (not yet implemented)
 mvcc-snapshots-tdd = []
 
 # Custom Honeycomb client (replaces libhoney-rust git dependency)
 # This provides a minimal, security-focused client with modern dependencies
-honeycomb-client = ["dep:serde", "dep:serde_json"]
+honeycomb-client = ["dep:serde"]
 
 # Honeycomb client with HTTP transmission support
 honeycomb = ["honeycomb-client", "dep:reqwest"]
