@@ -375,6 +375,17 @@ impl_edge_iter_with_label!(
     "incoming"
 );
 
+/// Macro to generate direct methods that acquire a snapshot lock.
+macro_rules! impl_direct_method {
+    ($(#[$meta:meta])* pub fn $name:ident(&self, $($arg:ident: $type:ty),*) -> $ret:ty { $locked_name:ident }) => {
+        $(#[$meta])*
+        pub fn $name(&self, $($arg: $type),*) -> $ret {
+            let _guard = self.snapshot_lock.read();
+            self.$locked_name($($arg),*)
+        }
+    };
+}
+
 /// Current-state storage engine.
 ///
 /// This storage engine maintains the current version of all nodes and edges,
@@ -988,15 +999,15 @@ impl CurrentStorage {
     // Direct insert/update/delete methods for transaction commit
     // These methods are used by WriteTransaction to apply buffered changes
 
-    /// Insert a node directly (used by WriteTransaction).
-    /// Does not generate IDs - caller must provide them.
-    pub fn insert_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
-        let _guard = self.snapshot_lock.read();
-        self.insert_node_direct_locked(node, timestamp)
+    impl_direct_method! {
+        /// Insert a node directly (used by WriteTransaction).
+        /// Does not generate IDs - caller must provide them.
+        pub fn insert_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> { insert_node_direct_locked }
     }
 
     /// Internal locked version of insert_node_direct.
-    pub(crate) fn insert_node_direct_locked(&self, node: Node, timestamp: Timestamp) -> Result<()> {
+    #[doc(hidden)]
+    pub fn insert_node_direct_locked(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
         // we have not modified any graph state, so we can safely return error without rollback.
         // This prevents the VS-030 bug where transaction-created nodes bypassed indexing,
@@ -1012,27 +1023,27 @@ impl CurrentStorage {
         Ok(())
     }
 
-    /// Insert an edge directly (used by WriteTransaction).
-    /// Does not generate IDs or rebuild adjacency - caller must handle.
-    pub fn insert_edge_direct(&self, edge: Edge) -> Result<()> {
-        let _guard = self.snapshot_lock.read();
-        self.insert_edge_direct_locked(edge)
+    impl_direct_method! {
+        /// Insert an edge directly (used by WriteTransaction).
+        /// Does not generate IDs or rebuild adjacency - caller must handle.
+        pub fn insert_edge_direct(&self, edge: Edge) -> Result<()> { insert_edge_direct_locked }
     }
 
     /// Internal locked version of insert_edge_direct.
-    pub(crate) fn insert_edge_direct_locked(&self, edge: Edge) -> Result<()> {
+    #[doc(hidden)]
+    pub fn insert_edge_direct_locked(&self, edge: Edge) -> Result<()> {
         self.indexes.insert_edge(edge);
         Ok(())
     }
 
-    /// Update a node directly (used by WriteTransaction).
-    pub fn update_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
-        let _guard = self.snapshot_lock.read();
-        self.update_node_direct_locked(node, timestamp)
+    impl_direct_method! {
+        /// Update a node directly (used by WriteTransaction).
+        pub fn update_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> { update_node_direct_locked }
     }
 
     /// Internal locked version of update_node_direct.
-    pub(crate) fn update_node_direct_locked(&self, node: Node, timestamp: Timestamp) -> Result<()> {
+    #[doc(hidden)]
+    pub fn update_node_direct_locked(&self, node: Node, timestamp: Timestamp) -> Result<()> {
         // Save old node for potential rollback
         let old_node = self.indexes.get_node(node.id);
 
@@ -1054,27 +1065,27 @@ impl CurrentStorage {
         Ok(())
     }
 
-    /// Update an edge directly (used by WriteTransaction).
-    pub fn update_edge_direct(&self, edge: Edge) -> Result<()> {
-        let _guard = self.snapshot_lock.read();
-        self.update_edge_direct_locked(edge)
+    impl_direct_method! {
+        /// Update an edge directly (used by WriteTransaction).
+        pub fn update_edge_direct(&self, edge: Edge) -> Result<()> { update_edge_direct_locked }
     }
 
     /// Internal locked version of update_edge_direct.
-    pub(crate) fn update_edge_direct_locked(&self, edge: Edge) -> Result<()> {
+    #[doc(hidden)]
+    pub fn update_edge_direct_locked(&self, edge: Edge) -> Result<()> {
         // Remove old version and insert new
         self.indexes.insert_edge(edge);
         Ok(())
     }
 
-    /// Delete a node directly (used by WriteTransaction).
-    pub fn delete_node_direct(&self, id: NodeId, timestamp: Timestamp) -> Result<()> {
-        let _guard = self.snapshot_lock.read();
-        self.delete_node_direct_locked(id, timestamp)
+    impl_direct_method! {
+        /// Delete a node directly (used by WriteTransaction).
+        pub fn delete_node_direct(&self, id: NodeId, timestamp: Timestamp) -> Result<()> { delete_node_direct_locked }
     }
 
     /// Internal locked version of delete_node_direct.
-    pub(crate) fn delete_node_direct_locked(
+    #[doc(hidden)]
+    pub fn delete_node_direct_locked(
         &self,
         id: NodeId,
         timestamp: Timestamp,
@@ -1092,14 +1103,14 @@ impl CurrentStorage {
         Ok(())
     }
 
-    /// Delete an edge directly (used by WriteTransaction).
-    pub fn delete_edge_direct(&self, id: EdgeId) -> Result<()> {
-        let _guard = self.snapshot_lock.read();
-        self.delete_edge_direct_locked(id)
+    impl_direct_method! {
+        /// Delete an edge directly (used by WriteTransaction).
+        pub fn delete_edge_direct(&self, id: EdgeId) -> Result<()> { delete_edge_direct_locked }
     }
 
     /// Internal locked version of delete_edge_direct.
-    pub(crate) fn delete_edge_direct_locked(&self, id: EdgeId) -> Result<()> {
+    #[doc(hidden)]
+    pub fn delete_edge_direct_locked(&self, id: EdgeId) -> Result<()> {
         self.indexes
             .remove_edge(id)
             .ok_or(StorageError::EdgeNotFound(id))?;
