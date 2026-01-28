@@ -736,48 +736,10 @@ impl VectorIndex for HnswIndex {
         // Perform search with retry logic for transient errors
         let index = self.inner.read();
 
-        // Retry with exponential backoff to handle thread pool exhaustion
-        // Under heavy concurrent load, usearch may fail with "No available threads to lock"
-        for attempt in 0..MAX_SEARCH_ATTEMPTS {
-            match index.search(query, k_capped) {
-                Ok(matches) => {
-                    self.stats
-                        .searches_performed
-                        .fetch_add(1, Ordering::Relaxed);
-
-                    // Convert and sort results using helper function
-                    let results = self.convert_and_sort_matches(matches);
-                    return Ok(results);
-                }
-                Err(e) => {
-                    let error_msg = e.to_string();
-                    // Check if this is a transient thread pool exhaustion error
-                    if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
-                        // Track retry for observability
-                        self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
-
-                        // Yield to allow other threads to run (including usearch threads)
-                        // This avoids blocking the async executor if running in an async context
-                        std::thread::yield_now();
-                        continue;
-                    }
-                    // Non-retryable error or exhausted retries
-                    if attempt > 0 {
-                        // Track that we failed even after retries
-                        self.stats
-                            .search_retry_failures
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                    return Err(Error::Vector(VectorError::IndexError(format!(
-                        "Search failed: {}",
-                        e
-                    ))));
-                }
-            }
-        }
-
-        // Unreachable: loop always returns from inside
-        unreachable!("Search retry loop should always return from within the loop body")
+        self.search_with_retry(
+            || index.search(query, k_capped),
+            "Search failed",
+        )
     }
 
     fn search_with_filter<F>(
@@ -823,48 +785,10 @@ impl VectorIndex for HnswIndex {
             }
         };
 
-        // Retry with exponential backoff to handle thread pool exhaustion
-        // Under heavy concurrent load, usearch may fail with "No available threads to lock"
-        for attempt in 0..MAX_SEARCH_ATTEMPTS {
-            match index.filtered_search(query, k_capped, filter) {
-                Ok(matches) => {
-                    self.stats
-                        .searches_performed
-                        .fetch_add(1, Ordering::Relaxed);
-
-                    // Convert and sort results using helper function
-                    let results = self.convert_and_sort_matches(matches);
-                    return Ok(results);
-                }
-                Err(e) => {
-                    let error_msg = e.to_string();
-                    // Check if this is a transient thread pool exhaustion error
-                    if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
-                        // Track retry for observability
-                        self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
-
-                        // Yield to allow other threads to run (including usearch threads)
-                        // This avoids blocking the async executor if running in an async context
-                        std::thread::yield_now();
-                        continue;
-                    }
-                    // Non-retryable error or exhausted retries
-                    if attempt > 0 {
-                        // Track that we failed even after retries
-                        self.stats
-                            .search_retry_failures
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                    return Err(Error::Vector(VectorError::IndexError(format!(
-                        "Filtered search failed: {}",
-                        e
-                    ))));
-                }
-            }
-        }
-
-        // Unreachable: loop always returns from inside
-        unreachable!("Filtered search retry loop should always return from within the loop body")
+        self.search_with_retry(
+            || index.filtered_search(query, k_capped, filter),
+            "Filtered search failed",
+        )
     }
 
     fn len(&self) -> usize {
@@ -966,6 +890,68 @@ impl VectorIndex for HnswIndex {
 
 // Private helper methods for HnswIndex
 impl HnswIndex {
+    /// Retry logic for search operations to handle transient errors.
+    ///
+    /// This method encapsulates the retry logic for handling thread pool exhaustion
+    /// in usearch. It uses a combination of spin-wait and `yield_now` to avoid
+    /// blocking the async executor while waiting for resources.
+    fn search_with_retry<E, F>(
+        &self,
+        search_fn: F,
+        error_context: &str,
+    ) -> Result<Vec<(NodeId, f32)>>
+    where
+        E: std::fmt::Display,
+        F: Fn() -> std::result::Result<Matches, E>,
+    {
+        // Retry with exponential backoff to handle thread pool exhaustion
+        // Under heavy concurrent load, usearch may fail with "No available threads to lock"
+        for attempt in 0..MAX_SEARCH_ATTEMPTS {
+            match search_fn() {
+                Ok(matches) => {
+                    self.stats
+                        .searches_performed
+                        .fetch_add(1, Ordering::Relaxed);
+
+                    // Convert and sort results using helper function
+                    let results = self.convert_and_sort_matches(matches);
+                    return Ok(results);
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    // Check if this is a transient thread pool exhaustion error
+                    if is_retryable_usearch_error(&error_msg) && attempt + 1 < MAX_SEARCH_ATTEMPTS {
+                        // Track retry for observability
+                        self.stats.search_retries.fetch_add(1, Ordering::Relaxed);
+
+                        // Spin briefly to catch quick recoveries, then yield to avoid busy-waiting.
+                        // This prevents blocking the async executor if running in an async context.
+                        // 10 iterations is a small number to burn a few cycles without being a heavy busy-wait.
+                        for _ in 0..10 {
+                            std::hint::spin_loop();
+                        }
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    // Non-retryable error or exhausted retries
+                    if attempt > 0 {
+                        // Track that we failed even after retries
+                        self.stats
+                            .search_retry_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Err(Error::Vector(VectorError::IndexError(format!(
+                        "{}: {}",
+                        error_context, e
+                    ))));
+                }
+            }
+        }
+
+        // Unreachable: loop always returns from inside
+        unreachable!("Search retry loop should always return from within the loop body")
+    }
+
     /// Convert usearch matches to sorted vector of (NodeId, similarity) tuples.
     ///
     /// This helper function encapsulates the common logic of:
