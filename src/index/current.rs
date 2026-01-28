@@ -698,9 +698,19 @@ impl CurrentIndexes {
         self.nodes.iter().map(|entry| entry.value().clone())
     }
 
+    /// Iterate over all node IDs.
+    pub fn iter_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.nodes.iter().map(|entry| *entry.key())
+    }
+
     /// Iterate over all edges.
     pub fn iter_edges(&self) -> impl Iterator<Item = Edge> + '_ {
         self.edges.iter().map(|entry| entry.value().clone())
+    }
+
+    /// Iterate over all edge IDs.
+    pub fn iter_edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
+        self.edges.iter().map(|entry| *entry.key())
     }
 
     /// Export outgoing CSR data for persistence.
