@@ -899,9 +899,9 @@ fn test_parallel_loading_is_faster() {
     let handle2 = thread::spawn(move || load_indexes_parallel(&graph_path_clone2, None, vec![]));
     let handle3 = thread::spawn(move || load_indexes_parallel(&graph_path_clone3, None, vec![]));
 
-    let (data1_par, _) = handle1.join().expect("Thread 1 panicked").unwrap();
-    let (data2_par, _) = handle2.join().expect("Thread 2 panicked").unwrap();
-    let (data3_par, _) = handle3.join().expect("Thread 3 panicked").unwrap();
+    let (data1_par, _, _) = handle1.join().expect("Thread 1 panicked").unwrap();
+    let (data2_par, _, _) = handle2.join().expect("Thread 2 panicked").unwrap();
+    let (data3_par, _, _) = handle3.join().expect("Thread 3 panicked").unwrap();
 
     let parallel_duration = start.elapsed();
 

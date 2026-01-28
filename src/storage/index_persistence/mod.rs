@@ -179,13 +179,18 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
 pub fn load_indexes_parallel(
     graph_path: &std::path::Path,
     temporal_path: Option<&std::path::Path>,
-    _vector_paths: Vec<&std::path::Path>, // TODO: implement vector loading
-) -> Result<(formats::GraphIndexData, Option<formats::TemporalIndexData>)> {
+    vector_paths: Vec<&std::path::Path>,
+) -> Result<(
+    formats::GraphIndexData,
+    Option<formats::TemporalIndexData>,
+    Vec<formats::VectorIndexData>,
+)> {
     use std::thread;
 
     // Convert paths to owned PathBufs for thread safety
     let graph_path = graph_path.to_path_buf();
     let temporal_path_opt = temporal_path.map(|p| p.to_path_buf());
+    let vector_paths: Vec<_> = vector_paths.into_iter().map(|p| p.to_path_buf()).collect();
 
     // Spawn thread for graph loading
     let graph_handle = thread::spawn(move || graph::load_graph_index(&graph_path));
@@ -194,7 +199,11 @@ pub fn load_indexes_parallel(
     let temporal_handle =
         temporal_path_opt.map(|path| thread::spawn(move || temporal::load_temporal_index(&path)));
 
-    // TODO: Spawn threads for vector index loading
+    // Spawn threads for vector index loading
+    let vector_handles: Vec<_> = vector_paths
+        .into_iter()
+        .map(|path| thread::spawn(move || vector::load_vector_index(&path)))
+        .collect();
 
     // Join threads and collect results
     let graph_data = graph_handle
@@ -207,5 +216,10 @@ pub fn load_indexes_parallel(
         None
     };
 
-    Ok((graph_data, temporal_data))
+    let mut vector_data = Vec::with_capacity(vector_handles.len());
+    for handle in vector_handles {
+        vector_data.push(handle.join().expect("Vector loading thread panicked")?);
+    }
+
+    Ok((graph_data, temporal_data, vector_data))
 }
