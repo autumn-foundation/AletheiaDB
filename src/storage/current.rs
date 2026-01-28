@@ -1098,11 +1098,7 @@ impl CurrentStorage {
 
     /// Internal locked version of delete_node_direct.
     #[doc(hidden)] // Helper for tests
-    pub(crate) fn delete_node_direct_locked(
-        &self,
-        id: NodeId,
-        timestamp: Timestamp,
-    ) -> Result<()> {
+    pub(crate) fn delete_node_direct_locked(&self, id: NodeId, timestamp: Timestamp) -> Result<()> {
         self.indexes
             .remove_node(id)
             .ok_or(StorageError::NodeNotFound(id))?;

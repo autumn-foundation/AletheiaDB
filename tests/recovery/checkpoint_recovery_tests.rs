@@ -188,9 +188,7 @@ fn test_checkpoint_recovery_preserves_edges() -> Result<()> {
 
         let historical = HistoricalStorage::new();
         // Use LSN(0) which is valid for an empty WAL
-        manager.create_checkpoint(LSN(0), &current, || {
-            historical.create_snapshot(LSN(0))
-        })?;
+        manager.create_checkpoint(LSN(0), &current, || historical.create_snapshot(LSN(0)))?;
     }
 
     // When: Recover using the same WAL
@@ -241,9 +239,8 @@ fn test_checkpoint_recovery_id_generators_initialized() -> Result<()> {
 
         let historical = HistoricalStorage::new();
         // Use LSN(0) which is valid for an empty WAL
-        let stats = manager.create_checkpoint(LSN(0), &current, || {
-            historical.create_snapshot(LSN(0))
-        })?;
+        let stats =
+            manager.create_checkpoint(LSN(0), &current, || historical.create_snapshot(LSN(0)))?;
 
         // Verify checkpoint captured the nodes
         assert_eq!(stats.node_count, 5);
@@ -436,9 +433,8 @@ fn test_checkpoint_stats() -> Result<()> {
     let historical = HistoricalStorage::new();
 
     // When: Create checkpoint
-    let stats = manager.create_checkpoint(LSN(50), &current, || {
-        historical.create_snapshot(LSN(50))
-    })?;
+    let stats =
+        manager.create_checkpoint(LSN(50), &current, || historical.create_snapshot(LSN(50)))?;
 
     // Then: Stats should reflect the data
     assert_eq!(stats.node_count, 10);

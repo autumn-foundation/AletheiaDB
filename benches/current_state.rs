@@ -652,16 +652,16 @@ fn bench_node_update(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let storage = CurrentStorage::new();
-                let props = PropertyMapBuilder::new()
-                    .insert("name", "Alice")
-                    .build();
+                let props = PropertyMapBuilder::new().insert("name", "Alice").build();
                 let node_id = storage.create_node("Person", props).unwrap();
                 let node = storage.get_node(node_id).unwrap();
                 (storage, node)
             },
             |(storage, node)| {
                 // This acquires snapshot_lock.read()
-                storage.update_node_direct(node, gallifreydb::core::temporal::time::now()).unwrap();
+                storage
+                    .update_node_direct(node, gallifreydb::core::temporal::time::now())
+                    .unwrap();
             },
             criterion::BatchSize::SmallInput,
         );
@@ -683,12 +683,16 @@ fn bench_concurrent_node_updates(c: &mut Criterion) {
                     let start = std::time::Instant::now();
 
                     // Pre-create nodes
-                    let nodes: Vec<_> = (0..thread_count).map(|i| {
-                        storage.create_node(
-                            "Person",
-                            PropertyMapBuilder::new().insert("id", i as i64).build()
-                        ).unwrap()
-                    }).collect();
+                    let nodes: Vec<_> = (0..thread_count)
+                        .map(|i| {
+                            storage
+                                .create_node(
+                                    "Person",
+                                    PropertyMapBuilder::new().insert("id", i as i64).build(),
+                                )
+                                .unwrap()
+                        })
+                        .collect();
 
                     let nodes = Arc::new(nodes);
 
@@ -701,7 +705,12 @@ fn bench_concurrent_node_updates(c: &mut Criterion) {
                             let node = storage.get_node(my_node_id).unwrap();
                             for _ in 0..(iters / thread_count as u64) {
                                 // Simulate small update
-                                storage.update_node_direct(node.clone(), gallifreydb::core::temporal::time::now()).unwrap();
+                                storage
+                                    .update_node_direct(
+                                        node.clone(),
+                                        gallifreydb::core::temporal::time::now(),
+                                    )
+                                    .unwrap();
                             }
                         }));
                     }

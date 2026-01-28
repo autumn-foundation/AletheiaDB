@@ -125,16 +125,19 @@ fn test_snapshot_consistency_with_concurrent_writes() {
     let checkpoint_thread = thread::spawn(move || {
         barrier_clone.wait();
         let dir = tempdir().unwrap();
-        let mut manager = CheckpointManager::new(CheckpointConfig::with_data_dir(dir.path())).unwrap();
+        let mut manager =
+            CheckpointManager::new(CheckpointConfig::with_data_dir(dir.path())).unwrap();
 
         let mut checkpoints = 0;
         while running_clone.load(std::sync::atomic::Ordering::Relaxed) {
             // Create checkpoint
-            let _stats = manager.create_checkpoint(
-                LSN(checkpoints as u64),
-                &current_clone,
-                || historical_clone.read().create_snapshot(LSN(checkpoints as u64))
-            ).unwrap();
+            let _stats = manager
+                .create_checkpoint(LSN(checkpoints as u64), &current_clone, || {
+                    historical_clone
+                        .read()
+                        .create_snapshot(LSN(checkpoints as u64))
+                })
+                .unwrap();
 
             checkpoints += 1;
 
@@ -165,16 +168,20 @@ fn test_snapshot_consistency_with_concurrent_writes() {
             let node = Node::new(node_id, label, props.clone(), version_id);
 
             // Update current
-            current.insert_node_direct_locked(node, time::now()).unwrap();
+            current
+                .insert_node_direct_locked(node, time::now())
+                .unwrap();
 
             // Update historical
-            historical_guard.add_node_version(
-                node_id,
-                version_id,
-                gallifreydb::core::temporal::BiTemporalInterval::current(time::now()),
-                label,
-                props
-            ).unwrap();
+            historical_guard
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    gallifreydb::core::temporal::BiTemporalInterval::current(time::now()),
+                    label,
+                    props,
+                )
+                .unwrap();
         }
 
         // Stop checkpointing
@@ -231,15 +238,18 @@ fn test_concurrent_direct_writes_during_checkpoint() {
     let checkpoint_thread = thread::spawn(move || {
         barrier_clone.wait();
         let dir = tempdir().unwrap();
-        let mut manager = CheckpointManager::new(CheckpointConfig::with_data_dir(dir.path())).unwrap();
+        let mut manager =
+            CheckpointManager::new(CheckpointConfig::with_data_dir(dir.path())).unwrap();
 
         let mut checkpoints = 0;
         while running_clone.load(std::sync::atomic::Ordering::Relaxed) {
-            let _stats = manager.create_checkpoint(
-                LSN(checkpoints as u64),
-                &current_clone,
-                || historical_clone.read().create_snapshot(LSN(checkpoints as u64))
-            ).unwrap();
+            let _stats = manager
+                .create_checkpoint(LSN(checkpoints as u64), &current_clone, || {
+                    historical_clone
+                        .read()
+                        .create_snapshot(LSN(checkpoints as u64))
+                })
+                .unwrap();
             checkpoints += 1;
             thread::sleep(std::time::Duration::from_millis(1));
         }
