@@ -551,6 +551,17 @@ pub trait VectorIndex: Send + Sync {
         Ok(())
     }
 
+    /// Adds multiple vectors in a batch operation using references.
+    ///
+    /// This allows adding vectors without transferring ownership, avoiding clones.
+    /// Default implementation calls `add()` sequentially.
+    fn add_batch_ref(&self, items: &[(NodeId, &[f32])]) -> Result<()> {
+        for (id, vec) in items {
+            self.add(*id, vec)?;
+        }
+        Ok(())
+    }
+
     /// Removes multiple vectors in a batch operation.
     ///
     /// Default implementation calls `remove()` sequentially.
