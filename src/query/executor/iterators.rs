@@ -1048,7 +1048,9 @@ impl Ord for ScoredRow {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // SAFETY: compute_similarity() filters out non-finite values,
         // so scores are guaranteed to be finite here.
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
