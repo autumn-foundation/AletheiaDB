@@ -189,7 +189,7 @@ fn bench_vector_rerank(c: &mut Criterion) {
                         );
 
                         // Consume iterator
-                        while let Some(_) = baseline_iter.next() {}
+                        while baseline_iter.next().is_some() {}
                     })
                 },
             );

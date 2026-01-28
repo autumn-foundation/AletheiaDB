@@ -1032,7 +1032,7 @@ struct ScoredRow {
 
 impl PartialEq for ScoredRow {
     fn eq(&self, other: &Self) -> bool {
-        self.score == other.score
+        self.score.to_bits() == other.score.to_bits()
     }
 }
 impl Eq for ScoredRow {}
@@ -1045,6 +1045,8 @@ impl PartialOrd for ScoredRow {
 
 impl Ord for ScoredRow {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // SAFETY: compute_similarity() filters out non-finite values,
+        // so scores are guaranteed to be finite here.
         self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
     }
 }
@@ -1139,6 +1141,7 @@ impl ResultIterator for VectorRerankIterator {
                     Ok(row) => {
                         // Get vector from node and compute similarity
                         if let Some(similarity) = self.compute_similarity(&row, &vector_property) {
+                            debug_assert!(similarity.is_finite(), "Non-finite similarity score");
                             if heap.len() < self.k {
                                 heap.push(Reverse(ScoredRow {
                                     row,
