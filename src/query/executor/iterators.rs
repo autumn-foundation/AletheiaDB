@@ -1026,6 +1026,9 @@ impl ResultIterator for FilterIterator {
     }
 }
 
+/// Helper struct for maintaining query rows with similarity scores in a heap.
+/// Ordered by score (higher is better) via Ord implementation.
+#[derive(Clone)]
 struct ScoredRow {
     row: QueryRow,
     score: f32,
@@ -1046,8 +1049,8 @@ impl PartialOrd for ScoredRow {
 
 impl Ord for ScoredRow {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // SAFETY: compute_similarity() filters out non-finite values,
-        // so scores are guaranteed to be finite here.
+        // Invariant: compute_similarity() filters out non-finite values,
+        // so all scores in the heap are finite.
         self.score
             .partial_cmp(&other.score)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -2991,5 +2994,20 @@ mod tests {
         assert_eq!(results.len(), 5);
         assert_eq!(results[0].entity.node_id(), Some(n1));
         assert_eq!(results[4].entity.node_id(), Some(n5));
+
+        // Case 4: k=0. Expect 0 results.
+        let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
+        let mut rerank = VectorRerankIterator::new(
+            input,
+            query_embedding.clone(),
+            0,
+            current.clone(),
+            None
+        );
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = rerank.next() {
+            results.push(row);
+        }
+        assert_eq!(results.len(), 0);
     }
 }

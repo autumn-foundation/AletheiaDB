@@ -13,6 +13,9 @@ use std::sync::Arc;
 
 /// A baseline implementation of VectorRerankIterator that uses the old logic (Vec::new() + sort).
 /// This allows us to compare the performance improvement directly in the benchmark.
+///
+/// This is intentionally duplicated to allow direct performance comparison in benchmarks.
+/// DO NOT use this in production code - it exists solely for benchmark baseline comparison.
 struct BaselineVectorRerankIterator {
     sorted: Option<std::vec::IntoIter<(QueryRow, f32)>>,
     input: Option<Box<dyn ResultIterator>>,
