@@ -1730,7 +1730,7 @@ mod tests {
         let wrapper = create_metric_wrapper(4, distance_fn);
 
         // Create a valid pointer for one argument
-        let vec = vec![0.0f32; 4];
+        let vec = [0.0f32; 4];
         let valid_ptr = vec.as_ptr();
         let null_ptr = std::ptr::null();
 
