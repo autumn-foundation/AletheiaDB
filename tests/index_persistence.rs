@@ -2714,3 +2714,101 @@ fn test_parallel_loading_with_vectors() {
 
     println!("✓ Parallel loading with vectors test passed");
 }
+
+/// Test that errors in parallel loading are correctly propagated.
+#[test]
+fn test_parallel_loading_error_propagation() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::storage::index_persistence::formats::PersistedHnswConfig;
+    use gallifreydb::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
+    use gallifreydb::storage::index_persistence::load_indexes_parallel;
+    use gallifreydb::storage::index_persistence::vector::{
+        new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
+    };
+
+    let dir = tempdir().unwrap();
+    let graph_path = dir.path().join("graph.idx");
+
+    // Create minimal graph index
+    let graph_data = new_graph_index_data();
+    save_graph_index(&graph_data, &graph_path).unwrap();
+
+    // Create a valid vector index
+    let vector_dir1 = dir.path().join("vector_valid");
+    std::fs::create_dir_all(&vector_dir1).unwrap();
+
+    let hnsw_config = PersistedHnswConfig {
+        m: 16,
+        ef_construction: 128,
+        ef_search: 64,
+    };
+    let vector_meta = new_vector_meta("valid", 384, 0, hnsw_config);
+    let vector_mappings = new_vector_mappings();
+
+    save_vector_meta(&vector_meta, &vector_dir1.join("meta.idx")).unwrap();
+    save_vector_mappings(&vector_mappings, &vector_dir1.join("mappings.idx")).unwrap();
+
+    // Create a CORRUPTED vector index (missing mappings.idx)
+    let vector_dir2 = dir.path().join("vector_corrupted");
+    std::fs::create_dir_all(&vector_dir2).unwrap();
+
+    // Only save meta, missing mappings will cause load failure
+    save_vector_meta(&vector_meta, &vector_dir2.join("meta.idx")).unwrap();
+
+    // Call load_indexes_parallel with both valid and corrupted vector paths
+    let result = load_indexes_parallel(&graph_path, None, vec![&vector_dir1, &vector_dir2]);
+
+    // Should return an error
+    assert!(result.is_err());
+
+    // Verify the error is related to the missing file
+    let err = result.unwrap_err();
+    let err_str = format!("{}", err);
+    // On different OSs, the IO error message varies.
+    // Windows: "The system cannot find the file specified"
+    // Unix: "No such file or directory"
+    // The wrapped error might not contain the filename depending on how fs::read returned it.
+    assert!(
+        err_str.contains("mappings.idx")
+            || err_str.contains("No such file")
+            || err_str.contains("cannot find the file"),
+        "Error should indicate missing mappings file, got: {}",
+        err_str
+    );
+
+    println!("✓ Parallel loading error propagation test passed");
+}
+
+/// Test that graph loading errors are correctly propagated in parallel loading.
+#[test]
+fn test_parallel_loading_graph_error() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::storage::index_persistence::load_indexes_parallel;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let graph_path = dir.path().join("non_existent_graph.idx");
+
+    // Call load_indexes_parallel with a non-existent graph path
+    // This should cause the graph loading thread to return an error, which should be propagated
+    let result = load_indexes_parallel(&graph_path, None, vec![]);
+
+    // Should return an error
+    assert!(result.is_err());
+
+    // Verify the error
+    let err = result.unwrap_err();
+    let err_str = format!("{}", err);
+    // The exact error message depends on the OS, but it should be an IO error about missing file
+    assert!(
+        err_str.contains("No such file")
+            || err_str.contains("entity not found")
+            || err_str.contains("os error"),
+        "Error should indicate missing graph file, got: {}",
+        err_str
+    );
+
+    println!("✓ Parallel loading graph error test passed");
+}

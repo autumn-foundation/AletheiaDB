@@ -96,6 +96,7 @@ pub use api::{
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;
+use rayon::prelude::*;
 
 /// Current manifest format version.
 pub const MANIFEST_VERSION: u16 = 1;
@@ -214,11 +215,13 @@ pub fn load_indexes_parallel(
     let temporal_handle =
         temporal_path_opt.map(|path| thread::spawn(move || temporal::load_temporal_index(&path)));
 
-    // Spawn threads for vector index loading
-    let vector_handles: Vec<_> = vector_paths
-        .into_iter()
-        .map(|path| thread::spawn(move || vector::load_vector_index(&path)))
+    // Load vector indexes in parallel using Rayon (blocks current thread)
+    // We do this while graph and temporal indexes are loading in background threads
+    let vector_data: Result<Vec<_>> = vector_paths
+        .par_iter()
+        .map(|path| vector::load_vector_index(path))
         .collect();
+    let vector_data = vector_data?;
 
     // Join threads and collect results
     let graph_data = graph_handle
@@ -230,11 +233,6 @@ pub fn load_indexes_parallel(
     } else {
         None
     };
-
-    let mut vector_data = Vec::with_capacity(vector_handles.len());
-    for handle in vector_handles {
-        vector_data.push(handle.join().expect("Vector loading thread panicked")?);
-    }
 
     Ok((graph_data, temporal_data, vector_data))
 }
