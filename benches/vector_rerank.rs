@@ -1,11 +1,11 @@
-use criterion::{Criterion, criterion_group, criterion_main, BenchmarkId, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::index::vector::{DistanceMetric, HnswConfig};
 use gallifreydb::query::executor::QueryExecutor;
-use gallifreydb::{PhysicalOp, PhysicalPlan};
 use gallifreydb::storage::current::CurrentStorage;
 use gallifreydb::storage::historical::HistoricalStorage;
 use gallifreydb::storage::version::AnchorConfig;
+use gallifreydb::{PhysicalOp, PhysicalPlan};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
