@@ -359,52 +359,27 @@ fn is_retryable_usearch_error(error_msg: &str) -> bool {
 }
 
 /// Perform an async-aware sleep that yields to tokio runtime if available.
-#[inline]
+#[cfg(feature = "tokio")]
 fn async_aware_sleep(duration: std::time::Duration) {
-    #[cfg(feature = "tokio")]
-    {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-                tokio::task::block_in_place(|| {
-                    std::thread::sleep(duration);
-                });
-            } else {
-                // In current_thread runtime, block_in_place panics, so we must block directly
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            tokio::task::block_in_place(|| {
                 std::thread::sleep(duration);
-            }
+            });
         } else {
-            // Not in a tokio runtime
+            // In current_thread runtime, block_in_place panics, so we must block directly
             std::thread::sleep(duration);
         }
-    }
-
-    #[cfg(not(feature = "tokio"))]
-    {
+    } else {
+        // Not in a tokio runtime
         std::thread::sleep(duration);
     }
-// Helper to create the metric wrapper - extracted for testing
-fn create_metric_wrapper<F>(
-    dims: usize,
-    distance_fn: Arc<F>,
-) -> Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync>
-where
-    F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static + ?Sized,
-{
-    Box::new(move |a: *const f32, b: *const f32| {
-        // Check for null pointers to prevent UB
-        if a.is_null() || b.is_null() {
-            // This should never happen with a correct usearch implementation.
-            // If it does, we panic to prevent UB from dereferencing null.
-            // We cannot return an error here because the signature is fixed by usearch trait.
-            panic!("usearch passed null pointer to metric function");
-        }
+}
 
-        // SAFETY: usearch guarantees pointers are valid for `dims` elements.
-        // We verified they are not null above.
-        let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
-        let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-        distance_fn(slice_a, slice_b)
-    })
+/// Perform a standard sleep when tokio feature is disabled.
+#[cfg(not(feature = "tokio"))]
+fn async_aware_sleep(duration: std::time::Duration) {
+    std::thread::sleep(duration);
 }
 
 /// Builder for configuring and creating an `HnswIndex`.
@@ -526,7 +501,13 @@ impl HnswIndexBuilder {
             // 1. Both pointers are valid and point to `dims` contiguous f32 values
             // 2. The pointers remain valid for the duration of the function call
             // 3. The data is properly aligned for f32
-            let metric_wrapper = create_metric_wrapper(dims, distance_fn);
+            let metric_wrapper: Box<dyn Fn(*const f32, *const f32) -> f32 + Send + Sync> =
+                Box::new(move |a: *const f32, b: *const f32| {
+                    // SAFETY: usearch guarantees pointers are valid for `dims` elements
+                    let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
+                    let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
+                    distance_fn(slice_a, slice_b)
+                });
 
             index.change_metric(metric_wrapper);
         }
@@ -1745,22 +1726,5 @@ mod tests {
         assert_eq!(after_update - initial_adds, 3);
 
         Ok(())
-    }
-
-    #[test]
-    #[should_panic(expected = "usearch passed null pointer")]
-    fn test_metric_wrapper_panic_on_null() {
-        // This test ensures that the metric wrapper correctly detects null pointers
-        // and panics to prevent UB. This covers the safety check added for FFI.
-        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| 0.0);
-        let wrapper = create_metric_wrapper(4, distance_fn);
-
-        // Create a valid pointer for one argument
-        let vec = [0.0f32; 4];
-        let valid_ptr = vec.as_ptr();
-        let null_ptr = std::ptr::null();
-
-        // Pass null pointer - should panic
-        wrapper(valid_ptr, null_ptr);
     }
 }

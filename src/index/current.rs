@@ -698,25 +698,9 @@ impl CurrentIndexes {
         self.nodes.iter().map(|entry| entry.value().clone())
     }
 
-    /// Iterate over all node IDs.
-    ///
-    /// This is more efficient than `iter_nodes().map(|n| n.id)` when only
-    /// IDs are needed, as it avoids cloning the full Node objects.
-    pub fn iter_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes.iter().map(|entry| *entry.key())
-    }
-
     /// Iterate over all edges.
     pub fn iter_edges(&self) -> impl Iterator<Item = Edge> + '_ {
         self.edges.iter().map(|entry| entry.value().clone())
-    }
-
-    /// Iterate over all edge IDs.
-    ///
-    /// This is more efficient than `iter_edges().map(|e| e.id)` when only
-    /// IDs are needed, as it avoids cloning the full Edge objects.
-    pub fn iter_edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
-        self.edges.iter().map(|entry| *entry.key())
     }
 
     /// Export outgoing CSR data for persistence.
@@ -1936,39 +1920,5 @@ mod zero_copy_access_tests {
         for handle in handles {
             handle.join().expect("Thread should complete successfully");
         }
-    }
-
-    #[test]
-    fn test_iter_node_ids_optimization() {
-        let indexes = CurrentIndexes::new();
-
-        // Create nodes with properties to verify we're not cloning them
-        let n1 = create_test_node(1, "Person");
-        let n2 = create_test_node(2, "Person");
-        indexes.insert_node(n1);
-        indexes.insert_node(n2);
-
-        // Collect IDs using new optimized method
-        let ids: Vec<NodeId> = indexes.iter_node_ids().collect();
-
-        assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&NodeId::new(1).unwrap()));
-        assert!(ids.contains(&NodeId::new(2).unwrap()));
-    }
-
-    #[test]
-    fn test_iter_edge_ids_optimization() {
-        let indexes = CurrentIndexes::new();
-
-        let e1 = create_test_edge(1, 0, 1, "KNOWS");
-        let e2 = create_test_edge(2, 1, 2, "FOLLOWS");
-        indexes.insert_edge(e1);
-        indexes.insert_edge(e2);
-
-        let ids: Vec<EdgeId> = indexes.iter_edge_ids().collect();
-
-        assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&EdgeId::new(1).unwrap()));
-        assert!(ids.contains(&EdgeId::new(2).unwrap()));
     }
 }

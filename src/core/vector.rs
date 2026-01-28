@@ -1403,7 +1403,7 @@ pub fn cosine_similarity_normalized(a: &[f32], b: &[f32]) -> Result<f32> {
 
     // For unit vectors, cosine similarity = dot product
     // We reuse the SIMD infrastructure but only need the dot product
-    let dot = dot_product_sum(a, b);
+    let (dot, _, _) = dot_and_magnitudes(a, b);
 
     // Clamp to handle floating-point inaccuracies
     Ok(dot.clamp(-1.0, 1.0))

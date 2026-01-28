@@ -639,17 +639,6 @@ impl VectorIndex for ShardedVectorIndex {
     }
 
     fn add_batch(&self, items: &[(NodeId, Vec<f32>)]) -> Result<()> {
-        // Optimization: Use add_batch_ref to avoid cloning vectors
-        // We create references to the vectors in the input items
-        let refs: Vec<(NodeId, &[f32])> = items
-            .iter()
-            .map(|(id, vec)| (*id, vec.as_slice()))
-            .collect();
-
-        self.add_batch_ref(&refs)
-    }
-
-    fn add_batch_ref(&self, items: &[(NodeId, &[f32])]) -> Result<()> {
         // Group item indices by shard first
         let mut shard_indices: Vec<Vec<usize>> = vec![Vec::new(); self.shards.len()];
 
@@ -661,11 +650,13 @@ impl VectorIndex for ShardedVectorIndex {
         // Add to each shard
         for (shard_idx, indices) in shard_indices.into_iter().enumerate() {
             if !indices.is_empty() {
-                let shard_items: Vec<(NodeId, &[f32])> = indices
+                // TODO: HnswIndex::add_batch requires owned Vec<f32>, so we must clone here.
+                // A future optimization could add a add_batch_ref method that accepts &[f32].
+                let shard_items: Vec<(NodeId, Vec<f32>)> = indices
                     .iter()
-                    .map(|&idx| (items[idx].0, items[idx].1))
+                    .map(|&idx| (items[idx].0, items[idx].1.clone()))
                     .collect();
-                self.shards[shard_idx].add_batch_ref(&shard_items)?;
+                self.shards[shard_idx].add_batch(&shard_items)?;
             }
         }
 
@@ -1544,28 +1535,5 @@ mod tests {
         // NaN should be less than normal values
         assert!(nan < normal);
         assert!(normal > nan);
-    }
-
-    // ============================================================
-    // Add Batch Ref Tests
-    // ============================================================
-
-    #[test]
-    fn test_add_batch_ref() -> Result<()> {
-        let index = ShardedVectorIndex::with_defaults(4, DistanceMetric::Cosine, 4)?;
-
-        let vectors: Vec<Vec<f32>> = (1..=10).map(|i| vec![i as f32, 0.0, 0.0, 0.0]).collect();
-
-        let items: Vec<(NodeId, &[f32])> = vectors
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (NodeId::new((i + 1) as u64).unwrap(), v.as_slice()))
-            .collect();
-
-        index.add_batch_ref(&items)?;
-
-        assert_eq!(index.len(), 10);
-
-        Ok(())
     }
 }
