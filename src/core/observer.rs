@@ -25,7 +25,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use gallifreydb::storage::observer::{StorageObserver, StorageEvent};
+//! use gallifreydb::core::observer::{StorageObserver, StorageEvent};
 //! use gallifreydb::storage::historical::HistoricalStorage;
 //! use std::sync::Arc;
 //!
@@ -143,7 +143,7 @@
 //!
 //! ```rust
 //! # use gallifreydb::storage::historical::{HistoricalStorage, PreAnchorHook};
-//! # use gallifreydb::storage::observer::{StorageObserver, StorageEvent};
+//! # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
 //! # use gallifreydb::index::vector::temporal::{TemporalVectorIndex, TemporalVectorConfig};
 //! # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
 //! # use std::sync::Arc;
@@ -310,7 +310,7 @@ pub trait StorageObserver: Send + Sync {
     ///
     /// # Example
     /// ```no_run
-    /// # use gallifreydb::storage::observer::{StorageObserver, StorageEvent};
+/// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
     /// struct VectorIndexObserver;
     ///
     /// impl StorageObserver for VectorIndexObserver {
@@ -339,7 +339,7 @@ pub trait StorageObserver: Send + Sync {
     ///
     /// # Example
     /// ```no_run
-    /// # use gallifreydb::storage::observer::{StorageObserver, StorageEvent};
+    /// # use gallifreydb::core::observer::{StorageObserver, StorageEvent};
     /// struct AnchorOnlyObserver;
     ///
     /// impl StorageObserver for AnchorOnlyObserver {

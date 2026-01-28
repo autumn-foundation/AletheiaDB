@@ -31,7 +31,7 @@
 //! ```
 
 use super::types::ShardId;
-use crate::api::TxId;
+use crate::core::id::TxId;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};

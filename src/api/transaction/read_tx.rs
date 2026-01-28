@@ -12,7 +12,7 @@ use crate::core::id::{EdgeId, NodeId};
 use crate::core::temporal::time;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::storage::version::VersionMetadata;
+use crate::core::version::VersionMetadata;
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::RwLockExt;
 use parking_lot::RwLock;

@@ -1080,8 +1080,8 @@ impl CheckpointManager {
         mut historical: HistoricalStorage,
         start_lsn: LSN,
     ) -> Result<(CurrentStorage, HistoricalStorage, LSN)> {
-        use crate::api::transaction::types::TxId;
-        use crate::storage::version::VersionMetadata;
+        use crate::core::id::TxId;
+        use crate::core::version::VersionMetadata;
         use crate::storage::wal::WalOperation;
 
         const RECOVERY_TX_ID: u64 = 0;

@@ -7,6 +7,7 @@ pub mod graph;
 pub mod hlc;
 pub mod id;
 pub mod interning;
+pub mod observer;
 pub mod property;
 pub mod temporal;
 pub mod vector;
@@ -45,3 +46,4 @@ pub use vector::{
     validate_vector,
     validate_vector_with_bounds,
 };
+pub mod version;

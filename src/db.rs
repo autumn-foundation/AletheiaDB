@@ -983,7 +983,7 @@ impl GallifreyDB {
                 use crate::storage::index_persistence::graph::{
                     load_graph_index, restore_property_map,
                 };
-                use crate::storage::version::VersionMetadata;
+                use crate::core::version::VersionMetadata;
 
                 match load_graph_index(&graph_path) {
                     Ok(graph_data) => {
