@@ -693,14 +693,20 @@ impl CurrentIndexes {
         self.incoming.compact();
     }
 
-    /// Iterate over all nodes.
+    /// Iterate over all nodes with zero-copy access.
+    ///
+    /// Returns an iterator over `Deref<Target = Node>` to avoid cloning overhead.
+    /// Callers needing owned nodes should explicitly clone: `.map(|n| n.clone())`.
     pub fn iter_nodes(&self) -> impl Iterator<Item = impl std::ops::Deref<Target = Node> + '_> + '_ {
         self.nodes.iter()
     }
 
-    /// Iterate over all edges.
-    pub fn iter_edges(&self) -> impl Iterator<Item = Edge> + '_ {
-        self.edges.iter().map(|entry| entry.value().clone())
+    /// Iterate over all edges with zero-copy access.
+    ///
+    /// Returns an iterator over `Deref<Target = Edge>` to avoid cloning overhead.
+    /// Callers needing owned edges should explicitly clone: `.map(|e| e.clone())`.
+    pub fn iter_edges(&self) -> impl Iterator<Item = impl std::ops::Deref<Target = Edge> + '_> + '_ {
+        self.edges.iter()
     }
 
     /// Export outgoing CSR data for persistence.

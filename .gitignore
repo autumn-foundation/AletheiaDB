@@ -68,4 +68,4 @@ run-benchmarks.bat
 
 # Cleanup scripts
 final_cleanup.sh
-*_cleanup.sh
+*_cleanup.shtest_syntax
