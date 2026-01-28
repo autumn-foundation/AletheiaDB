@@ -15,7 +15,7 @@ use super::tracker::PersistenceTracker;
 pub(crate) fn persist_vector_indexes(
     current: &Arc<CurrentStorage>,
     manager: &Arc<IndexPersistenceManager>,
-    tracker: &Arc<PersistenceTracker>,
+    tracker: Option<&Arc<PersistenceTracker>>,
 ) -> Result<()> {
     use crate::storage::index_persistence::formats::PersistedHnswConfig;
     use crate::storage::index_persistence::vector::{
