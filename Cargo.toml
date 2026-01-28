@@ -13,7 +13,7 @@ categories = ["database-implementations"]
 dashmap = "6.1"
 crc32fast = "1.4"
 parking_lot = "0.12"
-usearch = { git = "https://github.com/madmax983/USearch", branch = "fix/rust-move-semantics" }
+usearch = { git = "https://github.com/madmax983/USearch", rev = "ca8a0213cc56f43354b35ffc83e12f033993fd4a" }
 arc-swap = "1.7"
 quick_cache = "0.6"
 crossbeam-channel = "0.5"
