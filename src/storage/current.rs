@@ -2298,14 +2298,14 @@ impl CurrentStorage {
     ///
     /// Used by recovery property tests to verify invariants.
     pub fn get_all_nodes(&self) -> Vec<crate::Node> {
-        self.indexes.iter_nodes().collect()
+        self.indexes.iter_nodes().map(|n| n.clone()).collect()
     }
 
     /// Get all edges in the current storage.
     ///
     /// Used by recovery property tests to verify invariants.
     pub fn get_all_edges(&self) -> Vec<crate::Edge> {
-        self.indexes.iter_edges().collect()
+        self.indexes.iter_edges().map(|e| e.clone()).collect()
     }
 
     /// Get nodes by label.
@@ -2320,6 +2320,7 @@ impl CurrentStorage {
         self.indexes
             .iter_nodes()
             .filter(|n| n.label == label_id)
+            .map(|n| n.clone())
             .collect()
     }
 
@@ -2423,7 +2424,7 @@ impl CurrentStorage {
     /// Returns an iterator to avoid allocating a Vec for large graphs,
     /// improving memory efficiency during persistence operations.
     pub(crate) fn all_nodes(&self) -> impl Iterator<Item = Node> + '_ {
-        self.indexes.iter_nodes()
+        self.indexes.iter_nodes().map(|n| n.clone())
     }
 
     /// Iterate over all edges (for persistence).
@@ -2434,7 +2435,7 @@ impl CurrentStorage {
     /// Returns an iterator to avoid allocating a Vec for large graphs,
     /// improving memory efficiency during persistence operations.
     pub(crate) fn all_edges(&self) -> impl Iterator<Item = Edge> + '_ {
-        self.indexes.iter_edges()
+        self.indexes.iter_edges().map(|e| e.clone())
     }
 
     /// Create an MVCC snapshot at the specified LSN.
@@ -2487,10 +2488,18 @@ impl CurrentStorage {
         use std::sync::Arc;
 
         // Collect Arc references to all nodes (cheap, ~8 bytes per node)
-        let nodes: Vec<Arc<Node>> = self.indexes.iter_nodes().map(Arc::new).collect();
+        let nodes: Vec<Arc<Node>> = self
+            .indexes
+            .iter_nodes()
+            .map(|n| Arc::new(n.clone()))
+            .collect();
 
         // Collect Arc references to all edges (cheap, ~8 bytes per edge)
-        let edges: Vec<Arc<Edge>> = self.indexes.iter_edges().map(Arc::new).collect();
+        let edges: Vec<Arc<Edge>> = self
+            .indexes
+            .iter_edges()
+            .map(|e| Arc::new(e.clone()))
+            .collect();
 
         CurrentStorageSnapshot::new(lsn, nodes, edges)
     }
