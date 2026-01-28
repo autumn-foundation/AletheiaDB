@@ -1111,15 +1111,6 @@ mod tests {
                     checksum = checksum.wrapping_add(val);
                 }
 
-                // If producers are done and buffer is empty, we might be done,
-                // but we check drained_count to be sure we got everything.
-                if done_flag.load(Ordering::Acquire)
-                    && buf_clone.is_empty_approx()
-                    && drained_count == total_items
-                {
-                    break;
-                }
-
                 thread::yield_now();
             }
             (drained_count, checksum)
