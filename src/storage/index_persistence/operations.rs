@@ -106,7 +106,9 @@ pub(crate) fn persist_vector_indexes(
         })?;
     }
 
-    tracker.reset_vector_mutations();
+    if let Some(tracker) = tracker {
+        tracker.reset_vector_mutations();
+    }
     Ok(())
 }
 

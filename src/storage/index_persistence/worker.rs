@@ -61,7 +61,7 @@ pub(crate) fn spawn_background_persistence_thread(
                 let vector_seconds = tracker.seconds_since_vector_persist();
                 if (vector_mutations >= policies.vector.mutation_threshold as u64
                     || vector_seconds >= policies.vector.time_interval_secs as u64)
-                    && let Err(e) = persist_vector_indexes(&current, &manager, &tracker)
+                    && let Err(e) = persist_vector_indexes(&current, &manager, Some(&tracker))
                 {
                     eprintln!(
                         "Background persistence: Failed to persist vector indexes: {}",

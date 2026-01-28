@@ -499,7 +499,7 @@ impl GallifreyDB {
             }
 
             // Load vector indexes
-            if let Err(e) = load_vector_indexes(&db.current, manager) {
+    if let Err(e) = persist_vector_indexes(current, manager, Some(tracker)) {
                 eprintln!("Warning: Failed to load vector indexes: {}", e);
             }
         }
