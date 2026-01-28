@@ -894,6 +894,38 @@ impl VectorIndex for HnswIndex {
     }
 
     fn save(&self, path: &Path) -> Result<()> {
+        #[cfg(feature = "tokio")]
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                return tokio::task::block_in_place(|| self.save_internal(path));
+            }
+        }
+
+        self.save_internal(path)
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.inner.read().memory_usage()
+    }
+
+    fn quantization(&self) -> Quantization {
+        self.config.quantization
+    }
+
+    fn compact(&self) -> Result<()> {
+        // usearch native deletes don't require compaction
+        Ok(())
+    }
+}
+
+// Private helper methods for HnswIndex
+impl HnswIndex {
+    /// Internal implementation of index saving.
+    ///
+    /// This method performs the actual blocking I/O operations for saving the index
+    /// and its mappings. It is separated from `save()` to allow the latter to use
+    /// `tokio::task::block_in_place` when running within a Tokio runtime.
+    fn save_internal(&self, path: &Path) -> Result<()> {
         let index = self.inner.read();
         index
             .save(path.to_str().ok_or_else(|| {
@@ -950,22 +982,6 @@ impl VectorIndex for HnswIndex {
         Ok(())
     }
 
-    fn memory_usage(&self) -> usize {
-        self.inner.read().memory_usage()
-    }
-
-    fn quantization(&self) -> Quantization {
-        self.config.quantization
-    }
-
-    fn compact(&self) -> Result<()> {
-        // usearch native deletes don't require compaction
-        Ok(())
-    }
-}
-
-// Private helper methods for HnswIndex
-impl HnswIndex {
     /// Convert usearch matches to sorted vector of (NodeId, similarity) tuples.
     ///
     /// This helper function encapsulates the common logic of:
