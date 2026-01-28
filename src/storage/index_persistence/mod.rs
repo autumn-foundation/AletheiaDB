@@ -71,9 +71,15 @@ pub mod formats;
 pub mod graph;
 pub mod loader;
 pub mod manifest;
+/// Persistence operations implementation.
+pub mod operations;
 pub mod strings;
 pub mod temporal;
+/// Persistence mutation tracking.
+pub mod tracker;
 pub mod vector;
+/// Background persistence worker thread.
+pub mod worker;
 
 pub use api::{
     IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus,
