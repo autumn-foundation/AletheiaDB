@@ -417,14 +417,20 @@ fn test_replay_preserves_temporal_interval() -> Result<()> {
     let node_versions = all_versions
         .get(&node_id)
         .expect("Node should exist in historical storage");
-    assert_eq!(node_versions.len(), 1, "Should have exactly one version");
 
-    let version = node_versions[0];
-    assert_eq!(
-        version.temporal(),
-        &temporal,
-        "Temporal interval should match"
-    );
+    if let [version] = node_versions.as_slice() {
+        assert_eq!(
+            version.temporal(),
+            &temporal,
+            "Temporal interval should match"
+        );
+    } else {
+        panic!(
+            "Expected exactly one version for node {}, but found {}",
+            node_id,
+            node_versions.len()
+        );
+    }
 
     Ok(())
 }
