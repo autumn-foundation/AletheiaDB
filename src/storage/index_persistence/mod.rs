@@ -66,21 +66,30 @@
 //! - Unsupported version: returns `UnsupportedVersion` error
 
 pub mod api;
+pub mod background;
 mod error;
 pub mod formats;
 pub mod graph;
 pub mod loader;
 pub mod manifest;
+pub mod operations;
 pub mod strings;
 pub mod temporal;
+pub mod tracker;
 pub mod vector;
 
 pub use api::{
     IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus,
 };
+pub use background::spawn_background_persistence_thread;
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;
+pub use operations::{
+    load_vector_indexes, persist_all_indexes, persist_graph_index, persist_string_interner,
+    persist_temporal_index, persist_vector_indexes,
+};
+pub use tracker::PersistenceTracker;
 
 /// Current manifest format version.
 pub const MANIFEST_VERSION: u16 = 1;
