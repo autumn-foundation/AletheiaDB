@@ -4,7 +4,8 @@
 //! has a corresponding iterator that lazily produces results.
 
 use parking_lot::RwLock;
-use std::collections::{HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 use std::sync::Arc;
 
 #[cfg(feature = "observability")]
@@ -111,6 +112,7 @@ pub struct NodeScanIterator {
 }
 
 impl NodeScanIterator {
+    /// Create a new NodeScanIterator.
     pub fn new(label: Option<String>, current: Arc<CurrentStorage>) -> Self {
         NodeScanIterator {
             label,
@@ -1024,6 +1026,37 @@ impl ResultIterator for FilterIterator {
     }
 }
 
+/// Helper struct for maintaining query rows with similarity scores in a heap.
+/// Ordered by score (higher is better) via Ord implementation.
+#[derive(Clone)]
+struct ScoredRow {
+    row: QueryRow,
+    score: f32,
+}
+
+impl PartialEq for ScoredRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.to_bits() == other.score.to_bits()
+    }
+}
+impl Eq for ScoredRow {}
+
+impl PartialOrd for ScoredRow {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoredRow {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Invariant: compute_similarity() filters out non-finite values,
+        // so all scores in the heap are finite.
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
 /// Iterator for vector reranking.
 pub struct VectorRerankIterator {
     sorted: Option<std::vec::IntoIter<(QueryRow, f32)>>,
@@ -1106,25 +1139,51 @@ impl ResultIterator for VectorRerankIterator {
             };
 
             let mut input = self.input.take().unwrap();
-            let mut scored: Vec<(QueryRow, f32)> = Vec::new();
+            // Use a min-heap to keep the top-k results
+            let mut heap = BinaryHeap::with_capacity(self.k);
 
             while let Some(result) = input.next() {
                 match result {
                     Ok(row) => {
                         // Get vector from node and compute similarity
                         if let Some(similarity) = self.compute_similarity(&row, &vector_property) {
-                            scored.push((row, similarity));
+                            debug_assert!(similarity.is_finite(), "Non-finite similarity score");
+                            if heap.len() < self.k {
+                                heap.push(Reverse(ScoredRow {
+                                    row,
+                                    score: similarity,
+                                }));
+                            } else {
+                                #[allow(clippy::collapsible_if)]
+                                if let Some(Reverse(min_row)) = heap.peek() {
+                                    if similarity > min_row.score {
+                                        heap.pop();
+                                        heap.push(Reverse(ScoredRow {
+                                            row,
+                                            score: similarity,
+                                        }));
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(e) => return Some(Err(e)),
                 }
             }
 
-            // Sort by similarity descending
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(self.k);
+            // Convert heap to sorted vector (descending score)
+            // BinaryHeap::into_sorted_vec() returns elements in ascending order of T.
+            // Since T is Reverse<ScoredRow>, the order is:
+            // [Smallest Reverse<ScoredRow>, ..., Largest Reverse<ScoredRow>]
+            // Smallest Reverse<ScoredRow> corresponds to Largest ScoredRow (highest score).
+            // So the result is [Highest Score, ..., Lowest Score], which is exactly what we want.
+            let sorted_rows: Vec<(QueryRow, f32)> = heap
+                .into_sorted_vec()
+                .into_iter()
+                .map(|Reverse(item)| (item.row, item.score))
+                .collect();
 
-            self.sorted = Some(scored.into_iter());
+            self.sorted = Some(sorted_rows.into_iter());
         }
 
         self.sorted.as_mut()?.next().map(|(mut row, score)| {
@@ -2858,5 +2917,92 @@ mod tests {
             TemporalNodeScanIterator::new(vec![], timestamp, timestamp, historical, None);
 
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_vector_rerank_heap_logic() {
+        use crate::core::property::PropertyMapBuilder;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        // This test verifies that the heap logic correctly maintains the top-k items
+        // and orders them correctly (descending score).
+
+        let current = Arc::new(CurrentStorage::new());
+        // Enable vector index
+        current
+            .enable_vector_index("embedding", HnswConfig::new(4, DistanceMetric::Cosine))
+            .unwrap();
+
+        // Create 5 nodes with predictable embeddings/scores relative to query [1,0,0,0]
+        // Node 1: [1,0,0,0] -> score 1.0 (Best)
+        // Node 2: [0,1,0,0] -> score 0.0
+        // Node 3: [0.5, 0.866, 0, 0] -> score 0.5
+        // Node 4: [0.8, 0.6, 0, 0] -> score 0.8
+        // Node 5: [-1, 0, 0, 0] -> score -1.0 (Worst)
+
+        let create_node = |name: &str, vec: Vec<f32>| {
+            let props = PropertyMapBuilder::new()
+                .insert("name", name)
+                .insert_vector("embedding", &vec)
+                .build();
+            current.create_node("Person", props).unwrap()
+        };
+
+        let n1 = create_node("N1", vec![1.0, 0.0, 0.0, 0.0]);
+        let n2 = create_node("N2", vec![0.0, 1.0, 0.0, 0.0]);
+        let n3 = create_node("N3", vec![0.5, 0.866, 0.0, 0.0]);
+        let n4 = create_node("N4", vec![0.8, 0.6, 0.0, 0.0]);
+        let n5 = create_node("N5", vec![-1.0, 0.0, 0.0, 0.0]);
+
+        // Case 1: k=3. Expect top 3: N1 (1.0), N4 (0.8), N3 (0.5)
+        let nodes = vec![n1, n2, n3, n4, n5];
+        let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
+        let query_embedding: Arc<[f32]> = vec![1.0, 0.0, 0.0, 0.0].into();
+
+        let mut rerank =
+            VectorRerankIterator::new(input, query_embedding.clone(), 3, current.clone(), None);
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = rerank.next() {
+            results.push(row);
+        }
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].entity.node_id(), Some(n1)); // 1.0
+        assert_eq!(results[1].entity.node_id(), Some(n4)); // 0.8
+        assert_eq!(results[2].entity.node_id(), Some(n3)); // 0.5
+
+        // Case 2: k=1. Expect top 1: N1
+        let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
+        let mut rerank =
+            VectorRerankIterator::new(input, query_embedding.clone(), 1, current.clone(), None);
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = rerank.next() {
+            results.push(row);
+        }
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entity.node_id(), Some(n1));
+
+        // Case 3: k=10 (more than available). Expect all 5 sorted.
+        let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
+        let mut rerank =
+            VectorRerankIterator::new(input, query_embedding.clone(), 10, current.clone(), None);
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = rerank.next() {
+            results.push(row);
+        }
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0].entity.node_id(), Some(n1));
+        assert_eq!(results[4].entity.node_id(), Some(n5));
+
+        // Case 4: k=0. Expect 0 results.
+        let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
+        let mut rerank =
+            VectorRerankIterator::new(input, query_embedding.clone(), 0, current.clone(), None);
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = rerank.next() {
+            results.push(row);
+        }
+        assert_eq!(results.len(), 0);
     }
 }

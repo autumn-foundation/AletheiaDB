@@ -329,6 +329,12 @@ name = "incremental_adjacency"
 harness = false
 path = "benches/incremental_adjacency.rs"
 
+[[bench]]
+name = "vector_rerank"
+harness = false
+path = "benches/vector_rerank.rs"
+required-features = []
+
 # MCP server binary
 [[bin]]
 name = "gallifrey-mcp"
