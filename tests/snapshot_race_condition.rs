@@ -18,7 +18,7 @@ use std::thread;
 use tempfile::tempdir;
 
 #[test]
-#[ignore] // Will fail until fix is implemented
+#[ignore] // Will fail until fix is implemented (Issue #XXX - Race Condition)
 fn test_concurrent_write_during_snapshot_creation() {
     // Setup: Create storage with initial data
     let current = Arc::new(CurrentStorage::new());
@@ -56,9 +56,10 @@ fn test_concurrent_write_during_snapshot_creation() {
             barrier_clone.wait(); // Synchronize start
 
             let dir = tempdir().unwrap();
-            let path = dir.keep().expect("Failed to persist temp dir"); // Persist directory to allow main thread access
+            let path = dir.keep(); // Persist directory to allow main thread access
             let config = CheckpointConfig::with_data_dir(&path);
-            let mut manager = CheckpointManager::new(config).expect("Failed to create checkpoint manager");
+            let mut manager =
+                CheckpointManager::new(config).expect("Failed to create checkpoint manager");
 
             // Acquire read lock on historical storage.
             // Note: In this test scenario, this lock actually helps REPRODUCE the "missing history" bug.
@@ -70,9 +71,11 @@ fn test_concurrent_write_during_snapshot_creation() {
             // 6. Checkpoint finishes.
             // 7. Writer unblocks and writes to `historical`.
             // Result: Checkpoint has node in `current` but no version in `historical`. Inconsistent!
-            let historical_guard = historical_clone.read().unwrap();
+            let historical_guard = historical_clone
+                .read()
+                .expect("Failed to acquire read lock on historical storage");
             let stats = manager
-                .create_checkpoint(LSN(1), &current_clone, &*historical_guard)
+                .create_checkpoint(LSN(1), &current_clone, &historical_guard)
                 .expect("Failed to create checkpoint");
 
             (stats, path)
@@ -85,6 +88,8 @@ fn test_concurrent_write_during_snapshot_creation() {
 
         // Small delay to ensure checkpoint thread has time to acquire the lock first
         // and create the "torn read" condition described above.
+        // Intentional delay to increase probability of checkpoint thread
+        // acquiring lock before writer, creating the "torn read" condition
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Try to write many times to increase chance of hitting the race window
@@ -179,8 +184,8 @@ fn test_concurrent_write_during_snapshot_creation() {
         }
     }
 
-    // Cleanup
-    std::fs::remove_dir_all(data_path).unwrap();
+    // Cleanup - ignore errors as test has already passed/failed
+    let _ = std::fs::remove_dir_all(data_path);
 }
 
 /// Simpler test: Verify the ABSENCE of write coordination (documents current bug)
