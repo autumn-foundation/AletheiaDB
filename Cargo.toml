@@ -235,6 +235,13 @@ harness = false
 path = "benches/gallifreydb.rs"
 required-features = []
 
+# Storage layer benchmarks
+[[bench]]
+name = "storage_current"
+harness = false
+path = "benches/storage/current.rs"
+required-features = []
+
 # Persistence layer - durability modes and checkpoint operations
 [[bench]]
 name = "durability_modes"
