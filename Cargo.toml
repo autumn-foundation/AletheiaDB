@@ -96,6 +96,9 @@ observability-prometheus = ["observability", "dep:metrics", "dep:metrics-exporte
 # Default features
 default = ["config-toml"]
 
+# Async runtime support
+tokio = ["dep:tokio"]
+
 # Configuration file support (TOML)
 config-toml = ["dep:serde", "dep:toml"]
 

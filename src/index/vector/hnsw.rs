@@ -912,7 +912,56 @@ impl VectorIndex for HnswIndex {
         Ok(())
     }
 
+    /// Save the index to disk.
+    ///
+    /// # Async Runtime Behavior
+    ///
+    /// This method performs blocking I/O operations (`std::fs::write` and `usearch::Index::save`).
+    /// When running within a multi-threaded Tokio runtime (enabled via `tokio` or `embeddings` features),
+    /// it automatically uses `tokio::task::block_in_place` to offload this work from the async worker thread.
+    ///
+    /// This prevents the blocking operation from stalling the async reactor, maintaining responsiveness
+    /// for other tasks running on the same thread.
+    ///
+    /// # Fallback
+    ///
+    /// If executed outside a Tokio runtime, or in a single-threaded runtime (where `block_in_place`
+    /// would panic), it falls back to standard synchronous execution.
     fn save(&self, path: &Path) -> Result<()> {
+        #[cfg(any(feature = "tokio", feature = "embeddings"))]
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Note: Clippy suggests collapsing this if, but 'let chains' are unstable in this context
+            #[allow(clippy::collapsible_if)]
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                return tokio::task::block_in_place(|| self.save_internal(path));
+            }
+        }
+
+        self.save_internal(path)
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.inner.read().memory_usage()
+    }
+
+    fn quantization(&self) -> Quantization {
+        self.config.quantization
+    }
+
+    fn compact(&self) -> Result<()> {
+        // usearch native deletes don't require compaction
+        Ok(())
+    }
+}
+
+// Private helper methods for HnswIndex
+impl HnswIndex {
+    /// Internal implementation of index saving.
+    ///
+    /// This method performs the actual blocking I/O operations for saving the index
+    /// and its mappings. It is separated from `save()` to allow the latter to use
+    /// `tokio::task::block_in_place` when running within a Tokio runtime.
+    fn save_internal(&self, path: &Path) -> Result<()> {
         let index = self.inner.read();
         index
             .save(path.to_str().ok_or_else(|| {
@@ -969,22 +1018,6 @@ impl VectorIndex for HnswIndex {
         Ok(())
     }
 
-    fn memory_usage(&self) -> usize {
-        self.inner.read().memory_usage()
-    }
-
-    fn quantization(&self) -> Quantization {
-        self.config.quantization
-    }
-
-    fn compact(&self) -> Result<()> {
-        // usearch native deletes don't require compaction
-        Ok(())
-    }
-}
-
-// Private helper methods for HnswIndex
-impl HnswIndex {
     /// Convert usearch matches to sorted vector of (NodeId, similarity) tuples.
     ///
     /// This helper function encapsulates the common logic of:
