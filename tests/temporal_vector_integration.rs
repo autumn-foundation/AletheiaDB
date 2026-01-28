@@ -322,7 +322,7 @@ fn test_vector_snapshot_id_stored_in_anchors() {
     let mut anchor_count = 0;
     let mut anchors_with_snapshot_id = 0;
 
-    for version in historical_read.__test_get_node_versions_iterator() {
+    for version in historical_read.iter_node_versions() {
         if version.is_anchor() {
             anchor_count += 1;
             if let Some(snapshot_id) = version.data.get_vector_snapshot_id() {

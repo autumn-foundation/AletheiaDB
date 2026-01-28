@@ -194,9 +194,7 @@ fn test_streaming_with_temporal_versions() {
     let (_, recovered_historical, _) = manager.recover(&wal).unwrap();
 
     // Verify version count matches by iterating
-    let recovered_version_count = recovered_historical
-        .__test_get_node_versions_iterator()
-        .count();
+    let recovered_version_count = recovered_historical.iter_node_versions().count();
     assert_eq!(recovered_version_count, stats.version_count);
 }
 

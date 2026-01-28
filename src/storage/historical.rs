@@ -2005,7 +2005,7 @@ impl HistoricalStorage {
     /// **Warning**: This method exposes internal implementation details and
     /// should only be used in tests.
     #[doc(hidden)]
-    pub fn __test_get_node_versions_iterator(&self) -> impl Iterator<Item = &NodeVersion> {
+    pub fn iter_node_versions(&self) -> impl Iterator<Item = &NodeVersion> {
         self.node_versions.values()
     }
 

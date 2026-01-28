@@ -2479,7 +2479,7 @@ fn test_version_chain_reconstruction() {
 
     // Now verify the version chains are correctly reconstructed using public APIs
     // Use the test iterator to access versions
-    let versions: Vec<_> = historical.__test_get_node_versions_iterator().collect();
+    let versions: Vec<_> = historical.iter_node_versions().collect();
     assert_eq!(versions.len(), 3, "Should have 3 versions");
 
     // Get versions by ID using public method
