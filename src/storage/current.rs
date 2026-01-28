@@ -625,16 +625,15 @@ impl CurrentStorage {
     ) -> crate::storage::persistence::VectorIndexCheckpointData {
         use crate::storage::persistence::VectorIndexCheckpointData;
 
-        if let Some(property_name) = self.get_default_vector_property_name() {
-            if let Some(entry) = self.vector_indexes.get(&property_name) {
-                return VectorIndexCheckpointData::enabled(
+        self.get_default_vector_property_name()
+            .and_then(|property_name| {
+                let entry = self.vector_indexes.get(&property_name)?;
+                Some(VectorIndexCheckpointData::enabled(
                     property_name,
                     entry.value().config.clone(),
-                );
-            }
-        }
-
-        VectorIndexCheckpointData::disabled()
+                ))
+            })
+            .unwrap_or_else(VectorIndexCheckpointData::disabled)
     }
 
     /// Register a vector index (used during index loading from disk).
@@ -2396,12 +2395,10 @@ impl CurrentStorage {
     ///
     /// Used by the query planner for statistics.
     pub fn vector_count(&self) -> usize {
-        if let Some(prop_name) = self.get_default_vector_property_name() {
-            if let Some(entry) = self.vector_indexes.get(&prop_name) {
-                return entry.value().index.len();
-            }
-        }
-        0
+        self.get_default_vector_property_name()
+            .and_then(|prop_name| self.vector_indexes.get(&prop_name))
+            .map(|entry| entry.value().index.len())
+            .unwrap_or(0)
     }
 
     /// Iterate over all nodes (for persistence).
