@@ -211,3 +211,54 @@ fn test_snapshots_created_sequentially_without_coordination() {
 
     // The LSN values match, but the ACTUAL DATA may not be from the same point in time!
 }
+
+#[test]
+fn test_concurrent_direct_writes_during_checkpoint() {
+    use parking_lot::RwLock;
+
+    // Setup
+    let current = Arc::new(CurrentStorage::new());
+    let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+
+    let current_clone = current.clone();
+    let historical_clone = historical.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_clone = barrier.clone();
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let running_clone = running.clone();
+
+    // Thread 1: Checkpointing
+    let checkpoint_thread = thread::spawn(move || {
+        barrier_clone.wait();
+        let dir = tempdir().unwrap();
+        let mut manager = CheckpointManager::new(CheckpointConfig::with_data_dir(dir.path())).unwrap();
+
+        let mut checkpoints = 0;
+        while running_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            let _stats = manager.create_checkpoint(
+                LSN(checkpoints as u64),
+                &current_clone,
+                || historical_clone.read().create_snapshot(LSN(checkpoints as u64))
+            ).unwrap();
+            checkpoints += 1;
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        checkpoints
+    });
+
+    // Thread 2: Direct writes (create_node)
+    let writer_thread = thread::spawn(move || {
+        barrier.wait();
+
+        for i in 1..=1000 {
+            let props = PropertyMapBuilder::new().insert("id", i as i64).build();
+            // This acquires snapshot_lock.read() internally
+            current.create_node("Person", props).unwrap();
+        }
+
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+    });
+
+    checkpoint_thread.join().unwrap();
+    writer_thread.join().unwrap();
+}

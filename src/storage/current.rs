@@ -376,11 +376,24 @@ impl_edge_iter_with_label!(
 );
 
 /// Macro to generate direct methods that acquire a snapshot lock.
+///
+/// This macro reduces boilerplate for methods that need to:
+/// 1. Acquire a read lock on `snapshot_lock` (to coordinate with checkpoints)
+/// 2. Call an internal `_locked` implementation
+///
+/// # Usage
+///
+/// ```ignore
+/// impl_direct_method! {
+///     /// Documentation for the public method
+///     pub fn method_name(&self, arg1: Type1, arg2: Type2) -> Result<()> { internal_method_locked }
+/// }
+/// ```
 macro_rules! impl_direct_method {
     ($(#[$meta:meta])* pub fn $name:ident(&self, $($arg:ident: $type:ty),*) -> $ret:ty { $locked_name:ident }) => {
         $(#[$meta])*
         pub fn $name(&self, $($arg: $type),*) -> $ret {
-            let _guard = self.snapshot_lock.read();
+            let _snapshot_guard = self.snapshot_lock.read();
             self.$locked_name($($arg),*)
         }
     };
@@ -806,7 +819,7 @@ impl CurrentStorage {
     ///
     /// Returns the ID of the newly created node.
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
-        let _guard = self.snapshot_lock.read();
+        let _snapshot_guard = self.snapshot_lock.read();
 
         let node_id = NodeId::new_unchecked(self.node_id_gen.next()?);
         let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
@@ -835,7 +848,7 @@ impl CurrentStorage {
         label: &str,
         properties: PropertyMap,
     ) -> Result<EdgeId> {
-        let _guard = self.snapshot_lock.read();
+        let _snapshot_guard = self.snapshot_lock.read();
 
         // Verify nodes exist
         if !self.indexes.contains_node(source) {
@@ -964,7 +977,7 @@ impl CurrentStorage {
     /// Only use this method if you explicitly need to preserve edges for some
     /// specialized use case (e.g., maintaining edge history for audit purposes).
     pub fn delete_node(&self, id: NodeId) -> Result<Node> {
-        let _guard = self.snapshot_lock.read();
+        let _snapshot_guard = self.snapshot_lock.read();
 
         let node = self
             .indexes
@@ -983,7 +996,7 @@ impl CurrentStorage {
 
     /// Delete an edge.
     pub fn delete_edge(&self, id: EdgeId) -> Result<Edge> {
-        let _guard = self.snapshot_lock.read();
+        let _snapshot_guard = self.snapshot_lock.read();
 
         let edge = self
             .indexes

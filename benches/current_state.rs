@@ -640,6 +640,80 @@ criterion_group!(
     bench_string_serialization,
     bench_string_arc_overhead,
     bench_string_hot_path,
+    bench_node_update,
+    bench_concurrent_node_updates,
 );
 
 criterion_main!(benches);
+
+/// Benchmark node update (write lock overhead).
+fn bench_node_update(c: &mut Criterion) {
+    c.bench_function("node_update", |b| {
+        b.iter_batched(
+            || {
+                let storage = CurrentStorage::new();
+                let props = PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .build();
+                let node_id = storage.create_node("Person", props).unwrap();
+                let node = storage.get_node(node_id).unwrap();
+                (storage, node)
+            },
+            |(storage, node)| {
+                // This acquires snapshot_lock.read()
+                storage.update_node_direct(node, gallifreydb::core::temporal::time::now()).unwrap();
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+}
+
+/// Benchmark concurrent node updates (contention on read lock).
+fn bench_concurrent_node_updates(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_updates");
+
+    for thread_count in [1, 4, 8] {
+        group.bench_with_input(
+            BenchmarkId::new("threads", thread_count),
+            &thread_count,
+            |b, &thread_count| {
+                b.iter_custom(|iters| {
+                    let storage = Arc::new(CurrentStorage::new());
+                    let mut handles = Vec::new();
+                    let start = std::time::Instant::now();
+
+                    // Pre-create nodes
+                    let nodes: Vec<_> = (0..thread_count).map(|i| {
+                        storage.create_node(
+                            "Person",
+                            PropertyMapBuilder::new().insert("id", i as i64).build()
+                        ).unwrap()
+                    }).collect();
+
+                    let nodes = Arc::new(nodes);
+
+                    for t in 0..thread_count {
+                        let storage = storage.clone();
+                        let nodes = nodes.clone();
+                        let my_node_id = nodes[t];
+
+                        handles.push(thread::spawn(move || {
+                            let node = storage.get_node(my_node_id).unwrap();
+                            for _ in 0..(iters / thread_count as u64) {
+                                // Simulate small update
+                                storage.update_node_direct(node.clone(), gallifreydb::core::temporal::time::now()).unwrap();
+                            }
+                        }));
+                    }
+
+                    for h in handles {
+                        h.join().unwrap();
+                    }
+
+                    start.elapsed()
+                });
+            },
+        );
+    }
+    group.finish();
+}
