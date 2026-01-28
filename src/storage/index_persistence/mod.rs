@@ -179,8 +179,12 @@ pub(crate) fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
 pub fn load_indexes_parallel(
     graph_path: &std::path::Path,
     temporal_path: Option<&std::path::Path>,
-    _vector_paths: Vec<&std::path::Path>, // TODO: implement vector loading
-) -> Result<(formats::GraphIndexData, Option<formats::TemporalIndexData>)> {
+    vector_paths: Vec<&std::path::Path>,
+) -> Result<(
+    formats::GraphIndexData,
+    Option<formats::TemporalIndexData>,
+    Vec<formats::VectorIndexData>,
+)> {
     use std::thread;
 
     // Convert paths to owned PathBufs for thread safety
@@ -194,7 +198,26 @@ pub fn load_indexes_parallel(
     let temporal_handle =
         temporal_path_opt.map(|path| thread::spawn(move || temporal::load_temporal_index(&path)));
 
-    // TODO: Spawn threads for vector index loading
+    // Spawn threads for vector index loading
+    let mut vector_handles = Vec::new();
+    for path in vector_paths {
+        let path = path.to_path_buf();
+        let handle = thread::spawn(move || -> Result<formats::VectorIndexData> {
+            let meta_path = path.join("meta.idx");
+            let mappings_path = path.join("mappings.idx");
+            let index_path = path.join("current.usearch");
+
+            let meta = vector::load_vector_meta(&meta_path)?;
+            let mappings = vector::load_vector_mappings(&mappings_path)?;
+
+            Ok(formats::VectorIndexData {
+                meta,
+                mappings,
+                index_path,
+            })
+        });
+        vector_handles.push(handle);
+    }
 
     // Join threads and collect results
     let graph_data = graph_handle
@@ -207,5 +230,11 @@ pub fn load_indexes_parallel(
         None
     };
 
-    Ok((graph_data, temporal_data))
+    let mut vector_data = Vec::with_capacity(vector_handles.len());
+    for handle in vector_handles {
+        let data = handle.join().expect("Vector loading thread panicked")?;
+        vector_data.push(data);
+    }
+
+    Ok((graph_data, temporal_data, vector_data))
 }

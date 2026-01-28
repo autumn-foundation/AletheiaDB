@@ -899,9 +899,9 @@ fn test_parallel_loading_is_faster() {
     let handle2 = thread::spawn(move || load_indexes_parallel(&graph_path_clone2, None, vec![]));
     let handle3 = thread::spawn(move || load_indexes_parallel(&graph_path_clone3, None, vec![]));
 
-    let (data1_par, _) = handle1.join().expect("Thread 1 panicked").unwrap();
-    let (data2_par, _) = handle2.join().expect("Thread 2 panicked").unwrap();
-    let (data3_par, _) = handle3.join().expect("Thread 3 panicked").unwrap();
+    let (data1_par, _, _) = handle1.join().expect("Thread 1 panicked").unwrap();
+    let (data2_par, _, _) = handle2.join().expect("Thread 2 panicked").unwrap();
+    let (data3_par, _, _) = handle3.join().expect("Thread 3 panicked").unwrap();
 
     let parallel_duration = start.elapsed();
 
@@ -2636,4 +2636,69 @@ fn test_persist_indexes_uses_actual_wal_lsn() {
         manifest.lsn, expected_lsn
     );
     println!("✓ Issue #410 fix verified: No hardcoded LSN, exact match confirmed");
+}
+
+#[test]
+fn test_load_indexes_parallel_includes_vectors() {
+    let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
+
+    use gallifreydb::storage::index_persistence::IndexPersistenceManager;
+    use gallifreydb::storage::index_persistence::load_indexes_parallel;
+    use gallifreydb::storage::index_persistence::vector::{
+        new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
+    };
+    use gallifreydb::storage::index_persistence::formats::PersistedHnswConfig;
+    use gallifreydb::storage::index_persistence::graph::{
+        new_graph_index_data, save_graph_index,
+    };
+
+    let dir = tempdir().unwrap();
+    let manager = IndexPersistenceManager::new(dir.path());
+    manager.ensure_directories().unwrap();
+
+    // Create a minimal graph index so the function doesn't fail on graph loading
+    let graph_path = manager.graph_path().join("adjacency.idx");
+    let graph_data = new_graph_index_data();
+    save_graph_index(&graph_data, &graph_path).unwrap();
+
+    // Setup vector index for "test_embedding"
+    let prop_name = "test_embedding";
+    let vec_path = manager.vector_path(prop_name);
+    std::fs::create_dir_all(&vec_path).unwrap();
+
+    // Save metadata
+    let hnsw_config = PersistedHnswConfig {
+        m: 16,
+        ef_construction: 100,
+        ef_search: 50,
+    };
+    let meta = new_vector_meta(prop_name, 128, 0, hnsw_config);
+    save_vector_meta(&meta, &vec_path.join("meta.idx")).unwrap();
+
+    // Save mappings
+    let mappings = new_vector_mappings();
+    save_vector_mappings(&mappings, &vec_path.join("mappings.idx")).unwrap();
+
+    // Prepare paths
+    let vector_paths = vec![vec_path.as_path()];
+
+    // Execute parallel loading
+    let (graph_loaded, temporal_loaded, vectors_loaded) = load_indexes_parallel(
+        &graph_path,
+        None,
+        vector_paths,
+    ).unwrap();
+
+    // Verify graph loaded
+    assert_eq!(graph_loaded.node_count, 0);
+    assert!(temporal_loaded.is_none());
+
+    // Verify vectors loaded
+    assert_eq!(vectors_loaded.len(), 1, "Should have loaded 1 vector index");
+
+    let vec_data = &vectors_loaded[0];
+    assert_eq!(vec_data.meta.property_name, prop_name);
+    assert_eq!(vec_data.meta.dimensions, 128);
+    assert_eq!(vec_data.index_path, vec_path.join("current.usearch"));
+    assert_eq!(vec_data.mappings.count, 0);
 }

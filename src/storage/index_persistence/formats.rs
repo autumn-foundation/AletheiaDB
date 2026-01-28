@@ -423,6 +423,22 @@ pub enum PersistedSnapshotType {
     },
 }
 
+/// Loaded vector index data (runtime structure).
+///
+/// This struct aggregates the various components of a loaded vector index:
+/// - Metadata (dimensions, metric, etc.)
+/// - ID mappings (NodeId <-> usearch key)
+/// - Path to the memory-mapped usearch index file
+#[derive(Debug, Clone)]
+pub struct VectorIndexData {
+    /// Vector index metadata
+    pub meta: VectorIndexMeta,
+    /// Vector ID mappings
+    pub mappings: VectorMappingsData,
+    /// Path to the usearch index file
+    pub index_path: std::path::PathBuf,
+}
+
 // ============================================================================
 // Persistence Policies
 // ============================================================================
