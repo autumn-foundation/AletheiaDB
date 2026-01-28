@@ -63,8 +63,7 @@ impl ResultIterator for BaselineVectorRerankIterator {
                 None => {
                     return Some(Err(gallifreydb::utils::Error::Vector(
                         gallifreydb::utils::error::VectorError::IndexError(
-                            "VectorRerank requires a vector index to be enabled."
-                                .to_string(),
+                            "VectorRerank requires a vector index to be enabled.".to_string(),
                         ),
                     )));
                 }
@@ -165,7 +164,8 @@ fn bench_vector_rerank(c: &mut Criterion) {
                         let results = executor.execute(plan).expect("Execution failed");
                         let _count = results.collect_all().expect("Collection failed").len();
                     })
-            });
+                },
+            );
 
             // 2. Benchmark Baseline Implementation (using local struct)
             group.bench_with_input(
@@ -175,10 +175,11 @@ fn bench_vector_rerank(c: &mut Criterion) {
                     // We can't use QueryExecutor for the baseline as it's hardcoded to use the new iterators.
                     // We have to manually construct the iterator chain.
                     b.iter(|| {
-                        let input_iter = Box::new(gallifreydb::query::executor::NodeScanIterator::new(
-                            Some("Person".to_string()),
-                            current.clone(),
-                        ));
+                        let input_iter =
+                            Box::new(gallifreydb::query::executor::NodeScanIterator::new(
+                                Some("Person".to_string()),
+                                current.clone(),
+                            ));
 
                         let mut baseline_iter = BaselineVectorRerankIterator::new(
                             input_iter,

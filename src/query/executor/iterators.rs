@@ -2912,8 +2912,8 @@ mod tests {
 
     #[test]
     fn test_vector_rerank_heap_logic() {
-        use crate::index::vector::{DistanceMetric, HnswConfig};
         use crate::core::property::PropertyMapBuilder;
+        use crate::index::vector::{DistanceMetric, HnswConfig};
 
         // This test verifies that the heap logic correctly maintains the top-k items
         // and orders them correctly (descending score).
@@ -2950,13 +2950,8 @@ mod tests {
         let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
         let query_embedding: Arc<[f32]> = vec![1.0, 0.0, 0.0, 0.0].into();
 
-        let mut rerank = VectorRerankIterator::new(
-            input,
-            query_embedding.clone(),
-            3,
-            current.clone(),
-            None
-        );
+        let mut rerank =
+            VectorRerankIterator::new(input, query_embedding.clone(), 3, current.clone(), None);
 
         let mut results = Vec::new();
         while let Some(Ok(row)) = rerank.next() {
@@ -2970,13 +2965,8 @@ mod tests {
 
         // Case 2: k=1. Expect top 1: N1
         let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
-        let mut rerank = VectorRerankIterator::new(
-            input,
-            query_embedding.clone(),
-            1,
-            current.clone(),
-            None
-        );
+        let mut rerank =
+            VectorRerankIterator::new(input, query_embedding.clone(), 1, current.clone(), None);
         let mut results = Vec::new();
         while let Some(Ok(row)) = rerank.next() {
             results.push(row);
@@ -2986,13 +2976,8 @@ mod tests {
 
         // Case 3: k=10 (more than available). Expect all 5 sorted.
         let input = Box::new(NodeLookupIterator::new(nodes.clone(), current.clone()));
-        let mut rerank = VectorRerankIterator::new(
-            input,
-            query_embedding.clone(),
-            10,
-            current.clone(),
-            None
-        );
+        let mut rerank =
+            VectorRerankIterator::new(input, query_embedding.clone(), 10, current.clone(), None);
         let mut results = Vec::new();
         while let Some(Ok(row)) = rerank.next() {
             results.push(row);
