@@ -57,7 +57,7 @@ fn test_wal_ring_buffer_stress_dos() {
     }
 
     // Stop consumer
-    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    running.store(false, std::sync::atomic::Ordering::Release);
     let total_drained = consumer.join().unwrap();
 
     println!("Produced: {}, Drained: {}", total_produced, total_drained);
