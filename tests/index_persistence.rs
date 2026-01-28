@@ -2648,13 +2648,11 @@ fn test_parallel_loading_with_vectors() {
     let _guard = INTERNER_TEST_MUTEX.lock().unwrap();
 
     use gallifreydb::storage::index_persistence::formats::PersistedHnswConfig;
-    use gallifreydb::storage::index_persistence::graph::{
-        new_graph_index_data, save_graph_index,
-    };
+    use gallifreydb::storage::index_persistence::graph::{new_graph_index_data, save_graph_index};
+    use gallifreydb::storage::index_persistence::load_indexes_parallel;
     use gallifreydb::storage::index_persistence::vector::{
         new_vector_mappings, new_vector_meta, save_vector_mappings, save_vector_meta,
     };
-    use gallifreydb::storage::index_persistence::load_indexes_parallel;
 
     let dir = tempdir().unwrap();
     let graph_path = dir.path().join("graph.idx");
@@ -2694,11 +2692,8 @@ fn test_parallel_loading_with_vectors() {
     save_vector_mappings(&vector_mappings2, &vector_dir2.join("mappings.idx")).unwrap();
 
     // Call load_indexes_parallel with vector paths
-    let (_, _, mut vector_data) = load_indexes_parallel(
-        &graph_path,
-        None,
-        vec![&vector_dir1, &vector_dir2],
-    ).unwrap();
+    let (_, _, mut vector_data) =
+        load_indexes_parallel(&graph_path, None, vec![&vector_dir1, &vector_dir2]).unwrap();
 
     // Sort vector data by property name to ensure deterministic assertions (threads might finish in any order)
     vector_data.sort_by(|a, b| a.meta.property_name.cmp(&b.meta.property_name));
