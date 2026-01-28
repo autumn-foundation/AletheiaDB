@@ -180,7 +180,6 @@ pub struct VectorIndexInfo {
     pub distance_metric: DistanceMetric,
 }
 
-
 /// Entry for a temporal vector index (multi-property support).
 struct TemporalVectorIndexEntry {
     /// The temporal vector index for this property
@@ -657,7 +656,6 @@ impl CurrentStorage {
                 config: config.clone(),
             },
         );
-
     }
 
     /// Get a reference to the HNSW index and its config for a specific property.
@@ -1319,10 +1317,7 @@ impl CurrentStorage {
 
         // Find min key alphabetically
         // Note: DashMap iteration order is not guaranteed, so we must scan all keys
-        self.vector_indexes
-            .iter()
-            .map(|r| r.key().clone())
-            .min()
+        self.vector_indexes.iter().map(|r| r.key().clone()).min()
     }
 
     /// Helper method to prepare for vector search.
