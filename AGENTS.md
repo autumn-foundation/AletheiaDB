@@ -415,7 +415,7 @@ cargo test
 2. Navigate to worktree: `cd agents/feature-descriptive-name`
 3. Work, commit, and create PR: `just worktree-pr "Title" "Description"`
 
-This enables multiple Claude instances to work in parallel without conflicts.
+This enables multiple AI agent instances to work in parallel without conflicts.
 
 **Skip worktree creation only if:**
 - You're already in a worktree (check with `git worktree list`)
