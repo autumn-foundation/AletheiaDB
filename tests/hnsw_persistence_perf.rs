@@ -2,7 +2,6 @@ use gallifreydb::core::id::NodeId;
 use gallifreydb::index::vector::hnsw::HnswConfig;
 use gallifreydb::index::vector::hnsw::HnswIndex;
 use gallifreydb::index::vector::{DistanceMetric, VectorIndex};
-use std::sync::Arc;
 use std::time::Instant;
 use tempfile::tempdir;
 
@@ -54,6 +53,8 @@ fn test_save_performance_and_correctness() {
 #[cfg(any(feature = "tokio", feature = "embeddings"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_save_in_tokio_context() {
+    use std::sync::Arc;
+
     let dimensions = 128;
     let count = 500;
 
