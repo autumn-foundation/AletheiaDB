@@ -1797,9 +1797,7 @@ mod tests {
 
         // Write same version multiple times
         for i in 0..5 {
-            let props = PropertyMapBuilder::new()
-                .insert("iteration", i)
-                .build();
+            let props = PropertyMapBuilder::new().insert("iteration", i).build();
 
             let version = NodeVersion::new_anchor(
                 version_id,
