@@ -32,8 +32,6 @@ use crate::utils::lock::{MutexExt, RwLockExt};
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
-
-
 /// Main GallifreyDB database.
 ///
 /// This is the primary entry point for interacting with the database.

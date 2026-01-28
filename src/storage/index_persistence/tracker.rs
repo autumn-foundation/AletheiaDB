@@ -189,3 +189,7 @@ impl PersistenceTracker {
         self.shutdown.load(Ordering::Acquire)
     }
 }
+
+#[cfg(test)]
+#[path = "tracker_tests.rs"]
+mod tests;
