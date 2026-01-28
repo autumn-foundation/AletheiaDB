@@ -1334,7 +1334,7 @@ impl CurrentStorage {
     }
 
     /// Helper method to prepare for vector search.
-    /// Returns the Arc<HnswIndex> and the query vector.
+    /// Returns the `Arc<HnswIndex>` and the query vector.
     ///
     /// This uses the "default" property (first enabled) for backward compatibility.
     /// For multi-property searches, use `find_similar_in` instead.
@@ -1845,7 +1845,7 @@ impl CurrentStorage {
     }
 
     /// Helper method to prepare for raw embedding vector search.
-    /// Returns the Arc<HnswIndex> and validates the embedding.
+    /// Returns the `Arc<HnswIndex>` and validates the embedding.
     ///
     /// This uses the "default" property (first enabled) for backward compatibility.
     /// For multi-property searches, use `search_vectors_in` instead.

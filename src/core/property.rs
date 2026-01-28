@@ -709,7 +709,7 @@ impl PropertyValue {
 /// * `v` - The vector data to serialize
 ///
 /// # Returns
-/// A Vec<u8> containing the serialized vector
+/// A `Vec<u8>` containing the serialized vector
 ///
 /// # Example
 /// ```ignore
@@ -926,7 +926,7 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
 /// * `sv` - The sparse vector to serialize
 ///
 /// # Returns
-/// A Vec<u8> containing the serialized sparse vector
+/// A `Vec<u8>` containing the serialized sparse vector
 pub fn serialize_sparse_vector(sv: &SparseVec) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(1 + 4 + 4 + sv.nnz() * 8);
     serialize_sparse_vector_into(sv, &mut buffer);

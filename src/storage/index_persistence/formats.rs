@@ -1,4 +1,20 @@
 //! Bitcode-serializable format structs for index persistence.
+//!
+//! This module defines the schema for all persisted index files. These structs are
+//! serialized using [bitcode](https://github.com/llogiq/bitcode), a fast and compact
+//! binary serialization format.
+//!
+//! # Schema Overview
+//!
+//! | Struct | Corresponding File | Description |
+//! |--------|-------------------|-------------|
+//! | [`IndexManifest`] | `manifest.idx` | Root registry of all indexes |
+//! | [`StringInternerData`] | `strings/interner.idx` | Interned strings table |
+//! | [`GraphIndexData`] | `graph/adjacency.idx` | Graph structure and properties |
+//! | [`GraphIndexDelta`] | `graph/delta.idx` | Incremental graph changes |
+//! | [`TemporalIndexData`] | `temporal/versions.idx` | Historical version chains |
+//! | [`VectorIndexMeta`] | `vector/{prop}/meta.idx` | Vector index metadata |
+//! | [`VectorMappingsData`] | `vector/{prop}/mappings.idx` | Vector ID mappings |
 
 use bitcode::{Decode, Encode};
 
