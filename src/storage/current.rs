@@ -505,6 +505,14 @@ impl CurrentStorage {
     ///
     /// Plan capacity accordingly when enabling multiple property indexes.
     ///
+    /// # Persistence Limitation
+    ///
+    /// **Warning**: Currently, the checkpoint format only supports persisting a single
+    /// vector index configuration (the "default" one, which is alphabetically first).
+    /// If you enable multiple vector indexes, **only one will be persisted** in checkpoints.
+    /// The others will be lost upon recovery from a checkpoint. This limitation will be
+    /// addressed in a future update to the checkpoint format.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -620,6 +628,12 @@ impl CurrentStorage {
     ///
     /// Returns the current vector index configuration if enabled, or disabled
     /// checkpoint data if no index is active.
+    ///
+    /// # Limitation
+    ///
+    /// Currently, this only returns the configuration for the "default" vector index
+    /// (alphabetically first property name). If multiple vector indexes are enabled,
+    /// only the default one will be included in the checkpoint.
     pub fn get_vector_index_config(
         &self,
     ) -> crate::storage::persistence::VectorIndexCheckpointData {
