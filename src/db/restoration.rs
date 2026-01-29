@@ -60,14 +60,20 @@ pub(super) fn restore_indexes(
                 }
 
                 // Initialize ID generators BEFORE inserting entities to prevent collisions
-                if max_node_id > 0 && let Ok(mut node_gen) = db.node_id_gen.lock_or_err() {
+                if max_node_id > 0
+                    && let Ok(mut node_gen) = db.node_id_gen.lock_or_err()
+                {
                     *node_gen = crate::core::id::IdGenerator::with_start(max_node_id + 1);
                 }
-                if max_edge_id > 0 && let Ok(mut edge_gen) = db.edge_id_gen.lock_or_err() {
+                if max_edge_id > 0
+                    && let Ok(mut edge_gen) = db.edge_id_gen.lock_or_err()
+                {
                     *edge_gen = crate::core::id::IdGenerator::with_start(max_edge_id + 1);
                 }
                 // Initialize version ID generator from max persisted version_id
-                if max_version_id > 0 && let Ok(mut version_gen) = db.version_id_gen.lock_or_err() {
+                if max_version_id > 0
+                    && let Ok(mut version_gen) = db.version_id_gen.lock_or_err()
+                {
                     *version_gen = crate::core::id::IdGenerator::with_start(max_version_id + 1);
                 }
 
