@@ -23,10 +23,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use gallifreydb::{GallifreyDB, properties};
+//! ```rust,no_run
+//! use gallifreydb::{GallifreyDB, properties, WriteOps};
+//! use gallifreydb::core::temporal::time;
 //!
-//! let db = GallifreyDB::new();
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = GallifreyDB::new()?;
 //!
 //! // Create a node
 //! let alice = db.create_node("Person", properties! {
@@ -35,15 +37,19 @@
 //! })?;
 //!
 //! // Later, update a property
-//! db.update_node(alice, properties! {
+//! db.write(|tx| tx.update_node(alice, properties! {
 //!     "age" => 31,
-//! })?;
+//! }))?;
 //!
 //! // Query current state
 //! let current = db.get_node(alice)?;
 //!
 //! // Time-travel to see historical state
-//! let historical = db.as_of(timestamp).get_node(alice)?;
+//! // Use current time as a placeholder for the point in time we want to query
+//! let now = time::now();
+//! let historical = db.get_node_at_time(alice, now, now)?;
+//! # Ok(())
+//! # }
 //! ```
 
 #![warn(missing_docs)]
@@ -72,6 +78,9 @@ pub mod honeycomb;
 // Optional SQL:2011 temporal syntax support
 #[cfg(feature = "sql")]
 pub mod sql;
+// Optional Cypher Query Language support
+#[cfg(feature = "cypher")]
+pub mod cypher;
 // Optional HTTP server module
 #[cfg(feature = "http-server")]
 pub mod http;
