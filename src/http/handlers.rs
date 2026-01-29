@@ -164,13 +164,21 @@ pub async fn handle_query(
             match builder.limit(100).execute(db) {
                 Ok(results) => {
                     let mut nodes = Vec::new();
-                    for row in results.flatten() {
-                        if let crate::query::executor::EntityResult::Node(node) = row.entity {
-                            nodes.push(json!({
-                                "id": node.id.as_u64(),
-                                "label": interned_to_string(node.label),
-                                "properties": property_map_to_json(&node.properties)
-                            }));
+                    for row_result in results {
+                        match row_result {
+                            Ok(row) => {
+                                if let crate::query::executor::EntityResult::Node(node) = row.entity {
+                                    nodes.push(json!({
+                                        "id": node.id.as_u64(),
+                                        "label": interned_to_string(node.label),
+                                        "properties": property_map_to_json(&node.properties)
+                                    }));
+                                }
+                            }
+                            Err(e) => {
+                                return HttpResponse::InternalServerError()
+                                    .json(ApiResponse::error(e.to_string()));
+                            }
                         }
                     }
                     HttpResponse::Ok().json(ApiResponse::success(json!(nodes)))
