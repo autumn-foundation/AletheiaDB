@@ -51,17 +51,22 @@ use std::sync::{Arc, Mutex};
 ///
 /// # Examples
 ///
-/// ```rust,no_run
+/// ```rust
 /// use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+/// # use gallifreydb::WalConfigBuilder;
+/// # use tempfile::tempdir;
 ///
 /// # fn main() -> gallifreydb::Result<()> {
+/// # let dir = tempdir()?;
+/// # let config = WalConfigBuilder::new().wal_dir(dir.path().to_path_buf()).build();
 /// // 1. Initialize the database
-/// let db = GallifreyDB::new().expect("Failed to open database");
+/// // (In a real app, use GallifreyDB::new()?)
+/// let db = GallifreyDB::with_wal_config(config).expect("Failed to open database");
 ///
 /// // 2. Enable vector indexing (optional)
 /// db.vector_index("embedding")
-///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+///     .hnsw(HnswConfig::new(3, DistanceMetric::Cosine))
 ///     .enable()?;
 ///
 /// // 3. Create nodes
