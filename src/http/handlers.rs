@@ -121,7 +121,7 @@ pub async fn handle_query(
                                 "label": interned_to_string(node.label),
                                 "properties": property_map_to_json(&node.properties)
                             });
-                            HttpResponse::Ok().json(ApiResponse::success(json!([node_json])))
+                            HttpResponse::Ok().json(ApiResponse::success(node_json))
                         }
                         Err(e) => HttpResponse::InternalServerError()
                             .json(ApiResponse::error(e.to_string())),
