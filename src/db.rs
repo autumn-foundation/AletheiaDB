@@ -261,16 +261,15 @@ impl GallifreyDB {
         // Load indexes on startup if enabled
         if let Some(ref manager) = persistence_manager
             && config.persistence.load_on_startup
-            && let Err(e) = crate::storage::index_persistence::operations::load_indexes_startup(
+        {
+            crate::storage::index_persistence::operations::load_indexes_startup(
                 manager,
                 &db.current,
                 &db.historical,
                 &db.node_id_gen,
                 &db.edge_id_gen,
                 &db.version_id_gen,
-            )
-        {
-            eprintln!("Warning: Failed to load indexes: {}", e);
+            );
         }
 
         // Start background persistence thread if enabled

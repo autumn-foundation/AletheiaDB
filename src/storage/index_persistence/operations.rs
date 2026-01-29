@@ -460,14 +460,27 @@ pub(crate) fn persist_all_indexes(
 }
 
 /// Load all indexes on startup.
-pub fn load_indexes_startup(
+///
+/// This function attempts to load:
+/// 1. Manifest and string interner
+/// 2. Graph index (nodes and edges)
+/// 3. Temporal index (history)
+/// 4. Vector indexes
+///
+/// # Error Handling
+///
+/// This function is designed to be **best-effort**. It swallows most errors
+/// (logging them as warnings) to allow the database to start up even if
+/// some indexes are corrupted or missing. It does not return a Result
+/// because it handles all errors internally.
+pub(crate) fn load_indexes_startup(
     manager: &IndexPersistenceManager,
     current: &Arc<CurrentStorage>,
     historical: &Arc<RwLock<HistoricalStorage>>,
     node_id_gen: &Arc<Mutex<IdGenerator>>,
     edge_id_gen: &Arc<Mutex<IdGenerator>>,
     version_id_gen: &Arc<Mutex<IdGenerator>>,
-) -> Result<()> {
+) {
     // Try to load manifest and string interner, but don't fail if manifest doesn't exist yet
     // (manifest is only saved on shutdown, not during background persistence)
     match manager.load_manifest_and_strings() {
@@ -733,6 +746,4 @@ pub fn load_indexes_startup(
     if let Err(e) = load_vector_indexes(current, manager) {
         eprintln!("Warning: Failed to load vector indexes: {}", e);
     }
-
-    Ok(())
 }
