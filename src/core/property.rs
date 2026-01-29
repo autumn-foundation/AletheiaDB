@@ -1466,26 +1466,6 @@ impl PropertyMap {
     pub fn serialized_size(&self) -> usize {
         self.cached_size
     }
-
-    /// Calculate the serialized size by iterating over all properties (O(N)).
-    /// Used for debug verification of the cached size.
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    fn serialized_size_calculated(&self) -> usize {
-        if self.is_empty() {
-            return 4; // Count field
-        }
-
-        let mut size = 4; // Count field
-        for (key, value) in self.inner.iter() {
-            // Key: length prefix (4) + key bytes
-            // Use with_str to avoid Arc cloning overhead
-            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
-            size += 4 + key_len;
-            size += value.serialized_size();
-        }
-        size
-    }
 }
 
 impl Default for PropertyMap {
