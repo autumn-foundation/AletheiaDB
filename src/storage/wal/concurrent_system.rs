@@ -755,26 +755,11 @@ mod tests {
 
         assert_eq!(wal.total_appends(), 10);
 
-        // Explicit flush - ensure all entries are durable.
-        // Note: The background flush thread may have already flushed some/all
-        // entries, so we check total_flushed() rather than the return stats.
-        // This makes the test deterministic regardless of timing.
-        wal.flush().unwrap();
-
-        // Wait for background flush to complete if it raced with our manual flush
-        // The background thread might have drained entries but not yet flushed them
-        // to the coordinator when we called flush().
-        // Retry for up to 5 seconds (500 * 10ms)
-        for _ in 0..500 {
-            if wal.total_flushed() >= 10 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // Shutdown guarantees all pending entries are flushed.
+        // This avoids race conditions between manual flush and background flush thread.
+        wal.shutdown();
 
         assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");
-
-        wal.shutdown();
     }
 
     #[test]
