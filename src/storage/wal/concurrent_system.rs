@@ -740,11 +740,11 @@ mod tests {
     #[test]
     fn test_append_async_mode() {
         let dir = tempdir().unwrap();
-        let config = ConcurrentWalSystemConfig::new(dir.path()).with_durability_mode(
-            DurabilityMode::Async {
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_flush_interval_ms(10_000) // Explicitly set config interval to avoid racing with default 10ms
+            .with_durability_mode(DurabilityMode::Async {
                 flush_interval_ms: 10_000,
-            },
-        );
+            });
         let mut wal = ConcurrentWalSystem::new(config).unwrap();
 
         // Append several entries
