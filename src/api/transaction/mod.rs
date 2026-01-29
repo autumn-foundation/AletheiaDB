@@ -11,27 +11,52 @@
 //! # API Styles
 //!
 //! **Closure-based (recommended)**:
-//! ```ignore
+//! ```rust,no_run
+//! # use gallifreydb::{GallifreyDB, PropertyMapBuilder, properties};
+//! # use gallifreydb::core::NodeId;
+//! # use gallifreydb::api::transaction::{ReadOps, WriteOps};
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = GallifreyDB::new()?;
+//! # let id = NodeId::new(1)?;
+//! # let other = NodeId::new(2)?;
+//! # let props = PropertyMapBuilder::new().build();
+//! # let edge_props = PropertyMapBuilder::new().build();
 //! // Read-only
-//! db.read(|tx| {
-//!     let node = tx.get_node(id)?;
-//!     Ok(node.get_property("name"))
+//! let result = db.read(|tx| {
+//!     // get_node might fail if node doesn't exist
+//!     if let Ok(node) = tx.get_node(id) {
+//!         Ok(node.get_property("name").cloned())
+//!     } else {
+//!         Ok(None)
+//!     }
 //! })?;
 //!
 //! // Read-write (auto-commit on Ok, auto-rollback on Err)
-//! db.write(|tx| {
+//! let node_id = db.write(|tx| {
 //!     let node_id = tx.create_node("Person", props)?;
 //!     tx.create_edge(node_id, other, "KNOWS", edge_props)?;
 //!     Ok(node_id)
 //! })?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! **Explicit handles**:
-//! ```ignore
-//! let mut tx = db.write_transaction();
-//! tx.create_node("Person", props)?;
+//! ```rust,no_run
+//! # use gallifreydb::{GallifreyDB, PropertyMapBuilder};
+//! # use gallifreydb::core::NodeId;
+//! # use gallifreydb::api::transaction::WriteOps;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = GallifreyDB::new()?;
+//! # let n1 = NodeId::new(1)?;
+//! # let n2 = NodeId::new(2)?;
+//! # let props = PropertyMapBuilder::new().build();
+//! let mut tx = db.write_transaction()?;
+//! tx.create_node("Person", props.clone())?;
 //! tx.create_edge(n1, n2, "KNOWS", props)?;
 //! tx.commit()?;  // or tx.rollback()
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod read_tx;
@@ -122,12 +147,19 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::{GallifreyDB, properties};
+    /// # use gallifreydb::api::transaction::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
+    /// # let properties = properties! { "name" => "DeleteMe" };
     /// let mut tx = db.write_transaction()?;
     /// let node_id = tx.create_node("Person", properties)?;
     /// // ... create edges ...
     /// tx.delete_node_cascade(node_id)?; // Deletes node and all connected edges
     /// tx.commit()?;
+    /// # Ok(())
+    /// # }
     /// ```
     fn delete_node_cascade(&mut self, node_id: NodeId) -> Result<()>;
 
