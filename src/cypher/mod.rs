@@ -19,7 +19,7 @@ pub mod transform;
 /// # Example
 ///
 /// ```ignore
-/// use gallifreydb::cypher::params;
+/// use gallifreydb::params;
 ///
 /// let p = params! {
 ///     "name" => "Alice",
