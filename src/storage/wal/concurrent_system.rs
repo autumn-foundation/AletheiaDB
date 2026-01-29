@@ -764,10 +764,9 @@ mod tests {
         // Wait for background flush to complete if it raced with our manual flush
         // The background thread might have drained entries but not yet flushed them
         // to the coordinator when we called flush().
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(5);
-        while wal.total_flushed() < 10 {
-            if start.elapsed() > timeout {
+        // Retry for up to 5 seconds (500 * 10ms)
+        for _ in 0..500 {
+            if wal.total_flushed() >= 10 {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
