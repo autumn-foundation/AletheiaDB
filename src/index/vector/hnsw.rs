@@ -977,7 +977,6 @@ impl HnswIndex {
             })?;
 
         // Save mappings to companion file with integrity checks
-        // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
         let mappings_path = path.with_extension("usearch.mappings");
 
         let file = std::fs::File::create(&mappings_path).map_err(|e| {
@@ -987,7 +986,13 @@ impl HnswIndex {
             )))
         })?;
 
-        let mut writer = std::io::BufWriter::new(file);
+        let writer = std::io::BufWriter::new(file);
+        self.save_mappings_to_writer(writer)
+    }
+
+    /// Helper to save mappings to any writer.
+    /// Extracted for testing write error handling.
+    fn save_mappings_to_writer<W: Write>(&self, mut writer: W) -> Result<()> {
         let mut hasher = Hasher::new();
 
         // Write header: MAGIC (4) + VERSION (1)
@@ -1149,7 +1154,7 @@ fn load_mappings_with_integrity(
 ) -> Result<(DashMap<NodeId, u64>, DashMap<u64, NodeId>, u64)> {
     let id_mapping = DashMap::new();
     let reverse_mapping = DashMap::new();
-    let mut max_key = 0u64;
+    let max_key = 0u64;
 
     if !mappings_path.exists() {
         return Ok((id_mapping, reverse_mapping, max_key));
@@ -1162,7 +1167,19 @@ fn load_mappings_with_integrity(
         )))
     })?;
 
-    let mut reader = std::io::BufReader::new(file);
+    let reader = std::io::BufReader::new(file);
+    load_mappings_from_reader(reader)
+}
+
+/// Helper to load mappings from any reader.
+/// Extracted for testing read error handling.
+#[allow(clippy::type_complexity)]
+fn load_mappings_from_reader<R: Read>(
+    mut reader: R,
+) -> Result<(DashMap<NodeId, u64>, DashMap<u64, NodeId>, u64)> {
+    let id_mapping = DashMap::new();
+    let reverse_mapping = DashMap::new();
+    let mut max_key = 0u64;
     let mut hasher = Hasher::new();
 
     // Read and verify magic bytes (4 bytes)
@@ -1924,7 +1941,12 @@ mod tests {
             std::fs::write(&file_path, &data).unwrap();
             let result = load_mappings_with_integrity(&file_path);
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("Unsupported mapping file version"));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Unsupported mapping file version")
+            );
         }
 
         // 4. Truncated File (In header)
@@ -1966,9 +1988,194 @@ mod tests {
             std::fs::write(&file_path, &data).unwrap();
             let result = load_mappings_with_integrity(&file_path);
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("Unexpected data after CRC"));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Unexpected data after CRC")
+            );
         }
 
         Ok(())
+    }
+
+    struct MockWriter {
+        fail_after_bytes: usize,
+        written: usize,
+    }
+
+    impl MockWriter {
+        fn new(fail_after_bytes: usize) -> Self {
+            Self {
+                fail_after_bytes,
+                written: 0,
+            }
+        }
+    }
+
+    impl std::io::Write for MockWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.written + buf.len() > self.fail_after_bytes {
+                // Determine how many bytes we can write before failing
+                let allowed = self.fail_after_bytes.saturating_sub(self.written);
+                if allowed == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Mock write failure",
+                    ));
+                }
+                self.written += allowed;
+                return Ok(allowed);
+            }
+            self.written += buf.len();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.written >= self.fail_after_bytes {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Mock flush failure",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_save_mappings_write_errors() -> Result<()> {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        let node_id = NodeId::new(1).unwrap();
+        index.add(node_id, &[1.0, 0.0, 0.0, 0.0])?;
+
+        // Format: Magic(4) + Version(1) + Count(8) + (NodeId(8) + Key(8)) + CRC(4) = 33 bytes
+
+        // Fail during Magic (bytes 0-4)
+        let writer = MockWriter::new(0);
+        assert!(index.save_mappings_to_writer(writer).is_err());
+
+        // Fail during Version (byte 4-5)
+        let writer = MockWriter::new(4);
+        assert!(index.save_mappings_to_writer(writer).is_err());
+
+        // Fail during Count (bytes 5-13)
+        let writer = MockWriter::new(5);
+        assert!(index.save_mappings_to_writer(writer).is_err());
+
+        // Fail during Data (bytes 13-29)
+        let writer = MockWriter::new(13);
+        assert!(index.save_mappings_to_writer(writer).is_err());
+
+        // Fail during CRC (bytes 29-33)
+        let writer = MockWriter::new(29);
+        assert!(index.save_mappings_to_writer(writer).is_err());
+
+        // Fail during Flush (simulated by having limit just exactly at end but flush failing check)
+        // Note: MockWriter.flush fails if written >= fail_after_bytes.
+        // Total bytes = 33.
+        let writer = MockWriter::new(33);
+        // The write_all calls will succeed (total 33 bytes written), then flush calls.
+        // written (33) >= fail_after (33) -> flush fails.
+        let res = index.save_mappings_to_writer(writer);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Failed to flush"));
+
+        Ok(())
+    }
+
+    struct MockReader {
+        data: Vec<u8>,
+        fail_at_offset: usize,
+    }
+
+    impl MockReader {
+        fn new(data: Vec<u8>, fail_at_offset: usize) -> Self {
+            Self {
+                data,
+                fail_at_offset,
+            }
+        }
+    }
+
+    impl std::io::Read for MockReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            // Check if we have data to read
+            if self.data.is_empty() {
+                return Ok(0);
+            }
+
+            // Simple implementation: return up to buf.len() or fail if we hit offset
+            // Actually, for read_exact coverage, we need to return fewer bytes than requested
+            // OR return an error.
+            // Let's implement simulated UnexpectedEof by truncating the effective data.
+
+            let available = std::cmp::min(self.data.len(), self.fail_at_offset);
+            let to_copy = std::cmp::min(buf.len(), available);
+
+            if to_copy == 0 && buf.len() > 0 && self.fail_at_offset == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Mock read failure",
+                ));
+            }
+
+            buf[..to_copy].copy_from_slice(&self.data[..to_copy]);
+
+            // Advance state (drain data)
+            self.data.drain(0..to_copy);
+            self.fail_at_offset = self.fail_at_offset.saturating_sub(to_copy);
+
+            Ok(to_copy)
+        }
+    }
+
+    #[test]
+    fn test_load_mappings_read_errors() {
+        // Construct valid data: Magic(4) + Version(1) + Count(8) + 1 entry(16) + CRC(4) = 33 bytes
+        let mut valid_data = Vec::new();
+        valid_data.extend_from_slice(MAPPING_MAGIC);
+        valid_data.push(MAPPING_VERSION);
+        valid_data.extend_from_slice(&1u64.to_le_bytes()); // Count 1
+        valid_data.extend_from_slice(&1u64.to_le_bytes()); // NodeId
+        valid_data.extend_from_slice(&100u64.to_le_bytes()); // Key
+
+        let mut hasher = Hasher::new();
+        hasher.update(&valid_data);
+        let crc = hasher.finalize();
+        valid_data.extend_from_slice(&crc.to_le_bytes());
+
+        // Test failure during Magic read (request 4, fail at 2)
+        let reader = MockReader::new(valid_data.clone(), 2);
+        assert!(load_mappings_from_reader(reader).is_err());
+
+        // Test failure during Version read (request 1, offset 4, fail at 4)
+        // fail_at_offset is relative to start of *current* buffer in MockReader?
+        // No, in our MockReader it drains. So we construct new reader each time.
+        // Magic read consumes 4.
+
+        // Fail at Version (byte 4): Magic(4) ok, then next read fails
+        // We can just construct a reader with truncated data to simulate UnexpectedEof
+        // which read_exact converts to Error.
+
+        // Actually, the previous "Truncated File" tests already covered UnexpectedEof.
+        // The MockReader is useful if we want to return a specific IO error (like Interrupted)
+        // but read_exact handles Interrupted.
+
+        // Let's stick to checking we covered all *logic* paths.
+        // The annotations showed lines 1204-1208 (read entry loop) missed.
+        // That implies we didn't test truncation *exactly* in the middle of an entry.
+
+        // Truncate in middle of entry (entry starts at 13, ends at 29).
+        // Let's truncate at 20.
+        let mut truncated = valid_data.clone();
+        truncated.truncate(20);
+        let reader = std::io::Cursor::new(truncated); // Cursor implements Read
+        assert!(load_mappings_from_reader(reader).is_err());
+
+        // Truncate at CRC (starts at 29). Truncate at 30.
+        let mut truncated_crc = valid_data.clone();
+        truncated_crc.truncate(30);
+        let reader = std::io::Cursor::new(truncated_crc);
+        assert!(load_mappings_from_reader(reader).is_err());
     }
 }
