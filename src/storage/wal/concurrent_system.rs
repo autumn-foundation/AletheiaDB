@@ -766,7 +766,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         while wal.total_flushed() < 10 {
             if start.elapsed() > timeout {
-                break;
+                break; // LCOV_EXCL_LINE
             }
             std::thread::sleep(Duration::from_millis(10));
         }
