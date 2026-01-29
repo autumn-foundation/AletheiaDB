@@ -9,6 +9,6 @@
 2. Moved `VersionMetadata` to `core::version` to break `core` <-> `storage`.
 3. Updated `storage` to use `core::id::TxId` directly instead of `api::TxId` to respect layering.
 
-## 2025-01-29 - The Blob in Temporal Vector Index
+## 2026-01-29 - The Blob in Temporal Vector Index
 **Tangle:** `src/index/vector/temporal.rs` grew to 1400+ lines, mixing configuration, snapshot logic, statistics, and the core index implementation. This made it hard to navigate and maintain.
 **Blueprint:** Split into `src/index/vector/temporal/` module. Extracted `config.rs`, `snapshot.rs` (internal), `stats.rs`, and `observer.rs`. Kept core logic and tests in `mod.rs` (for now) but significantly reduced noise.
