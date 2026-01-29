@@ -760,6 +760,19 @@ mod tests {
         // entries, so we check total_flushed() rather than the return stats.
         // This makes the test deterministic regardless of timing.
         wal.flush().unwrap();
+
+        // Wait for background flush to complete if it raced with our manual flush
+        // The background thread might have drained entries but not yet flushed them
+        // to the coordinator when we called flush().
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+        while wal.total_flushed() < 10 {
+            if start.elapsed() > timeout {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
         assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");
 
         wal.shutdown();
