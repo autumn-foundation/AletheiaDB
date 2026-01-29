@@ -1348,22 +1348,21 @@ impl PropertyMap {
         buffer.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
         for (key, value) in self.inner.iter() {
             // Serialize key: resolve InternedString to actual string
-            // Use with_str to avoid Arc cloning overhead (Issue #405)
-            let success = GLOBAL_INTERNER.with_str(*key, |key_str| {
-                let key_bytes = key_str.as_bytes();
-                buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
-                buffer.extend_from_slice(key_bytes);
-            });
-
-            if success.is_none() {
-                return Err(StorageError::InconsistentState {
-                    reason: format!(
-                        "PropertyKey {} not found in interner - data corruption detected",
-                        key.as_u32()
-                    ),
-                }
-                .into());
-            }
+            // Use with_str to avoid Arc cloning overhead
+            GLOBAL_INTERNER
+                .with_str(*key, |key_str| {
+                    let key_bytes = key_str.as_bytes();
+                    buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(key_bytes);
+                })
+                .ok_or_else(|| {
+                    crate::utils::error::Error::Storage(StorageError::InconsistentState {
+                        reason: format!(
+                            "PropertyKey {} not found in interner - data corruption detected",
+                            key.as_u32()
+                        ),
+                    })
+                })?;
 
             // Serialize value
             value.serialize_into(buffer);
@@ -2706,6 +2705,36 @@ mod tests {
                 );
             }
             _ => panic!("Expected StorageError::InconsistentState"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_with_invalid_key() {
+        // This explicitly verifies the error path when the interner is missing a key
+        // Uses the same logic as test_invalid_interned_string_serialization but
+        // ensures the new `ok_or_else` path is hit correctly.
+
+        let invalid_key = InternedString::from_raw(888888);
+        let mut inner_map = HashMap::new();
+        inner_map.insert(invalid_key, PropertyValue::Bool(true));
+        let map = PropertyMap {
+            inner: Arc::new(inner_map),
+        };
+
+        let mut buffer = Vec::new();
+        let result = map.serialize_into(&mut buffer);
+
+        assert!(result.is_err(), "Should return error for missing key");
+        match result {
+            Err(crate::utils::error::Error::Storage(StorageError::InconsistentState {
+                reason,
+            })) => {
+                assert!(
+                    reason.contains("888888"),
+                    "Error message should contain the invalid key ID"
+                );
+            }
+            _ => panic!("Expected InconsistentState error"),
         }
     }
 
