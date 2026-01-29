@@ -1270,7 +1270,13 @@ fn load_mappings_from_reader<R: Read>(
 
     // Ensure we reached EOF
     let mut check_buf = [0u8; 1];
-    if reader.read(&mut check_buf).unwrap_or(0) > 0 {
+    let bytes_read = reader.read(&mut check_buf).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to check for EOF after CRC: {}",
+            e
+        )))
+    })?;
+    if bytes_read > 0 {
         return Err(Error::Vector(VectorError::IndexError(
             "Mapping file corrupted: Unexpected data after CRC".to_string(),
         )));
