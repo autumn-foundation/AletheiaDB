@@ -315,6 +315,8 @@ impl QueryBuilder<state::HasNodes> {
     ///         .property("custom_embedding")
     ///         .finish()
     ///     .build();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn rank_by_similarity_builder(
         self,
@@ -607,6 +609,8 @@ impl<S: QueryState> QueryBuilder<S> {
     ///     .traverse("KNOWS")
     ///     .with_provenance()
     ///     .build();
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_provenance(mut self) -> Self {
@@ -709,6 +713,8 @@ impl<S: QueryState> QueryBuilder<S> {
 ///         .label_filter("Person")
 ///         .finish()
 ///     .build();
+/// # Ok(())
+/// # }
 /// ```
 #[must_use = "builders do nothing unless you call finish()"]
 pub struct SimilarToBuilder<S: QueryState> {
@@ -800,6 +806,8 @@ impl<S: QueryState> SimilarToBuilder<S> {
 ///         .property("custom_embedding")
 ///         .finish()
 ///     .build();
+/// # Ok(())
+/// # }
 /// ```
 #[must_use = "builders do nothing unless you call finish()"]
 pub struct RankBySimilarityBuilder<S: QueryState> {
@@ -866,6 +874,7 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
 ///         .metric(DistanceMetric::Euclidean)
 ///         .finish()
 ///     .build();
+/// # }
 /// ```
 #[must_use = "builders do nothing unless you call finish()"]
 pub struct FindSimilarBuilder {

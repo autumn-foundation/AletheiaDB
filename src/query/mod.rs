@@ -12,19 +12,31 @@
 //!
 //! # Example Usage
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # use gallifreydb::GallifreyDB;
+//! # use gallifreydb::core::NodeId;
+//! # use gallifreydb::core::temporal::Timestamp;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = GallifreyDB::new()?;
+//! # let alice_id = NodeId::new(1)?;
+//! # let bob_embedding = vec![0.1, 0.2, 0.3];
+//! # let embedding = vec![0.1, 0.2, 0.3];
+//! # let timestamp_2023 = Timestamp::new(1672531200000000, 0)?;
+//! # let tx_time = gallifreydb::core::temporal::time::now();
 //! // Graph + Vector: "Who does Alice know that's similar to Bob?"
 //! let results = db.query()
 //!     .start(alice_id)
 //!     .traverse("KNOWS")
 //!     .rank_by_similarity(&bob_embedding, 10)
-//!     .execute()?;
+//!     .execute(&db)?;
 //!
 //! // Temporal + Vector: "What was similar to this in 2023?"
 //! let results = db.query()
 //!     .as_of(timestamp_2023, tx_time)
 //!     .find_similar(&embedding, 10)
-//!     .execute()?;
+//!     .execute(&db)?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod ast;

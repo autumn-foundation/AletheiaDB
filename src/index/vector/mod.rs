@@ -43,7 +43,7 @@
 //!
 //! # Examples
 //!
-//! ```ignore
+//! ```rust
 //! use gallifreydb::index::VectorIndex;
 //! use gallifreydb::core::id::NodeId;
 //!
@@ -315,10 +315,12 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
-    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let node_id = NodeId::new(123).unwrap();
     /// let embedding = vec![0.1, 0.2, 0.3, 0.4];
     /// index.add(node_id, &embedding)?;
@@ -342,10 +344,12 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
-    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let node_id = NodeId::new(123).unwrap();
     /// index.remove(node_id)?;
     /// # Ok(())
@@ -378,9 +382,11 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust
     /// # use gallifreydb::index::VectorIndex;
-    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
     /// let results = index.search(&query, 10)?;
     ///
@@ -426,11 +432,13 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust
     /// # use gallifreydb::index::VectorIndex;
     /// # use gallifreydb::core::id::NodeId;
     /// # use std::collections::HashSet;
-    /// # fn example(index: &impl VectorIndex) -> gallifreydb::utils::Result<()> {
+    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let query = vec![0.5, 0.3, 0.1, 0.9];
     /// let allowed = HashSet::from([NodeId::new(1).unwrap(), NodeId::new(5).unwrap(), NodeId::new(10).unwrap()]);
     ///
@@ -452,10 +460,13 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust
     /// # use gallifreydb::index::VectorIndex;
-    /// # fn example(index: &impl VectorIndex) {
+    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// println!("Index contains {} vectors", index.len());
+    /// # Ok(())
     /// # }
     /// ```
     #[must_use]
@@ -467,11 +478,14 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust
     /// # use gallifreydb::index::VectorIndex;
-    /// # fn example(index: &impl VectorIndex) {
+    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// let dims = index.dimensions();
     /// println!("This index accepts {}-dimensional vectors", dims);
+    /// # Ok(())
     /// # }
     /// ```
     #[must_use]
@@ -494,9 +508,11 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust
     /// # use gallifreydb::index::{VectorIndex, DistanceMetric};
-    /// # fn example(index: &impl VectorIndex) {
+    /// # use gallifreydb::index::vector::HnswIndexBuilder;
+    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// match index.distance_metric() {
     ///     DistanceMetric::Cosine => println!("Using cosine similarity"),
     ///     DistanceMetric::Euclidean => println!("Using Euclidean distance"),
@@ -505,6 +521,7 @@ pub trait VectorIndex: Send + Sync {
     ///     DistanceMetric::Hamming => println!("Using Hamming distance"),
     ///     DistanceMetric::Tanimoto => println!("Using Tanimoto similarity"),
     /// }
+    /// # Ok(())
     /// # }
     /// ```
     #[must_use]
@@ -516,12 +533,15 @@ pub trait VectorIndex: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust
     /// # use gallifreydb::index::VectorIndex;
-    /// # fn example(index: &impl VectorIndex) {
+    /// # use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
+    /// # fn main() -> gallifreydb::utils::Result<()> {
+    /// # let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
     /// if index.is_empty() {
     ///     println!("No vectors indexed yet");
     /// }
+    /// # Ok(())
     /// # }
     /// ```
     #[must_use]
