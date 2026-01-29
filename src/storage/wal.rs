@@ -114,16 +114,713 @@ pub mod ring_buffer;
 pub mod segment_reader;
 pub mod stripe;
 
-// New modules for data structures and serialization
-pub mod entry;
-pub mod serialization;
-
 // Re-export key types
 pub use durability::{DurabilityMode, WriteOptions};
 pub use group_commit::GroupCommitCoordinator;
 
-// Re-export types from entry
-pub use entry::{LSN, WalEntry, WalOperation};
+use crate::core::{
+    id::{EdgeId, NodeId, VersionId},
+    interning::InternedString,
+    property::PropertyMap,
+    temporal::{BiTemporalInterval, Timestamp, time},
+};
 
-// Re-export serialization helpers (needed by concurrent.rs via super::)
-pub(crate) use serialization::{estimate_entry_capacity, serialize_entry_into};
+/// Log Sequence Number - monotonically increasing identifier for WAL entries
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LSN(pub u64);
+
+impl LSN {
+    /// Create the first LSN
+    pub fn initial() -> Self {
+        LSN(1)
+    }
+
+    /// Get the next LSN
+    pub fn next(&self) -> Self {
+        LSN(self.0 + 1)
+    }
+}
+
+/// WAL operation types
+#[derive(Debug, Clone)]
+pub enum WalOperation {
+    /// Create a new node
+    CreateNode {
+        /// The node ID
+        node_id: NodeId,
+        /// The node label (interned for efficiency)
+        label: InternedString,
+        /// The node properties
+        properties: PropertyMap,
+        /// The bi-temporal interval
+        temporal: BiTemporalInterval,
+    },
+    /// Create a new edge
+    CreateEdge {
+        /// The edge ID
+        edge_id: EdgeId,
+        /// The source node ID
+        source: NodeId,
+        /// The target node ID
+        target: NodeId,
+        /// The edge label (interned for efficiency)
+        label: InternedString,
+        /// The edge properties
+        properties: PropertyMap,
+        /// The bi-temporal interval
+        temporal: BiTemporalInterval,
+    },
+    /// Update node (creates new version)
+    UpdateNode {
+        /// The node ID
+        node_id: NodeId,
+        /// The version ID
+        version_id: VersionId,
+        /// The new label (interned for efficiency)
+        label: InternedString,
+        /// The new properties
+        properties: PropertyMap,
+        /// The bi-temporal interval
+        temporal: BiTemporalInterval,
+    },
+    /// Update edge (creates new version)
+    UpdateEdge {
+        /// The edge ID
+        edge_id: EdgeId,
+        /// The version ID
+        version_id: VersionId,
+        /// The new label (interned for efficiency)
+        label: InternedString,
+        /// The new properties
+        properties: PropertyMap,
+        /// The bi-temporal interval
+        temporal: BiTemporalInterval,
+    },
+    /// Delete a node
+    DeleteNode {
+        /// The node ID
+        node_id: NodeId,
+        /// The bi-temporal interval
+        temporal: BiTemporalInterval,
+    },
+    /// Delete an edge
+    DeleteEdge {
+        /// The edge ID
+        edge_id: EdgeId,
+        /// The bi-temporal interval
+        temporal: BiTemporalInterval,
+    },
+    /// Checkpoint marker - indicates a snapshot was taken
+    Checkpoint {
+        /// The LSN at checkpoint
+        lsn: LSN,
+        /// When the checkpoint was created
+        timestamp: Timestamp,
+    },
+}
+
+/// A single WAL entry
+#[derive(Debug, Clone)]
+pub struct WalEntry {
+    /// Log sequence number
+    pub lsn: LSN,
+    /// Timestamp when logged
+    pub timestamp: Timestamp,
+    /// The operation to log
+    pub operation: WalOperation,
+    /// CRC32 checksum for corruption detection
+    pub checksum: u32,
+}
+
+impl WalEntry {
+    /// Create a new WAL entry with computed checksum
+    pub fn new(lsn: LSN, operation: WalOperation) -> Self {
+        let timestamp = time::now();
+        // Checksum will be computed during serialization
+        WalEntry {
+            lsn,
+            timestamp,
+            operation,
+            checksum: 0, // Will be set during serialization
+        }
+    }
+
+    /// Verify the checksum against serialized data
+    pub fn verify_checksum(&self, serialized_data: &[u8]) -> bool {
+        // Phase 2: Checksum now at bytes 20-24 (LSN=8 + HybridTimestamp=12)
+        if serialized_data.len() < 24 {
+            return false;
+        }
+        let stored_checksum = u32::from_le_bytes([
+            serialized_data[20],
+            serialized_data[21],
+            serialized_data[22],
+            serialized_data[23],
+        ]);
+
+        // Compute checksum over everything except the checksum field itself
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&serialized_data[0..20]); // LSN + timestamp
+        hasher.update(&serialized_data[24..]); // Operation data
+        let computed = hasher.finalize();
+
+        stored_checksum == computed
+    }
+}
+
+// =============================================================================
+// Serialization Helpers
+// =============================================================================
+
+use crate::utils::error::Result;
+
+/// Helper to serialize an InternedString into the buffer (4-byte ID)
+#[inline(always)]
+fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
+    buffer.extend_from_slice(&s.as_u32().to_le_bytes());
+}
+
+/// Estimate the required buffer capacity for serializing a WAL entry.
+///
+/// This function provides an upper-bound estimate of the buffer size needed
+/// to serialize a WAL entry, allowing pre-allocation to avoid reallocations
+/// during the hot-path serialization process.
+///
+/// # Size Breakdown
+///
+/// Fixed overhead (per entry):
+/// - LSN: 8 bytes
+/// - Timestamp (HybridTimestamp): 12 bytes
+/// - Checksum: 4 bytes
+/// - Total fixed: 24 bytes
+///
+/// Variable sizes by operation:
+/// - `CreateNode`: 1 (op type) + 8 (node_id) + 4 (label len) + label bytes +
+///   properties size + 48 (BiTemporalInterval)
+/// - `CreateEdge`: 1 (op type) + 8 (edge_id) + 8 (source) + 8 (target) +
+///   4 (label len) + label bytes + properties size + 48 (BiTemporalInterval)
+/// - `UpdateNode`: 1 (op type) + 8 (node_id) + 8 (version_id) + 4 (label len) +
+///   label bytes + properties size + 48 (BiTemporalInterval)
+/// - `UpdateEdge`: 1 (op type) + 8 (edge_id) + 8 (version_id) + 4 (label len) +
+///   label bytes + properties size + 48 (BiTemporalInterval)
+/// - `DeleteNode`: 1 (op type) + 8 (node_id) + 48 (BiTemporalInterval) = 57 bytes
+/// - `DeleteEdge`: 1 (op type) + 8 (edge_id) + 48 (BiTemporalInterval) = 57 bytes
+/// - `Checkpoint`: 1 (op type) + 8 (lsn) + 12 (timestamp) = 21 bytes
+///
+/// # Returns
+///
+/// An estimated capacity in bytes. The estimate is conservative (may slightly
+/// over-allocate) to ensure the buffer doesn't need to grow during serialization.
+///
+/// # Performance Impact
+///
+/// Pre-allocating the correct capacity eliminates dynamic reallocation overhead,
+/// which is especially important for the high-throughput WAL write path. Typical
+/// savings are 10-30% reduction in allocation overhead for property-heavy operations.
+pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
+    // Fixed overhead: LSN (8) + Timestamp (12) + Checksum (4)
+    const FIXED_OVERHEAD: usize = 24;
+    // BiTemporalInterval is always 48 bytes (2 * TimeRange, each 24 bytes)
+    const TEMPORAL_SIZE: usize = 48;
+
+    let variable_size = match operation {
+        WalOperation::CreateNode { properties, .. } => {
+            // op type (1) + node_id (8) + label (4-byte InternedString ID) + properties + temporal (48)
+            let base = 1 + 8 + 4 + TEMPORAL_SIZE;
+            base + estimate_property_map_size(properties)
+        }
+        WalOperation::CreateEdge { properties, .. } => {
+            // op type (1) + edge_id (8) + source (8) + target (8) + label (4-byte InternedString ID) + properties + temporal (48)
+            let base = 1 + 8 + 8 + 8 + 4 + TEMPORAL_SIZE;
+            base + estimate_property_map_size(properties)
+        }
+        WalOperation::UpdateNode { properties, .. } => {
+            // op type (1) + node_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + temporal (48)
+            let base = 1 + 8 + 8 + 4 + TEMPORAL_SIZE;
+            base + estimate_property_map_size(properties)
+        }
+        WalOperation::UpdateEdge { properties, .. } => {
+            // op type (1) + edge_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + temporal (48)
+            let base = 1 + 8 + 8 + 4 + TEMPORAL_SIZE;
+            base + estimate_property_map_size(properties)
+        }
+        WalOperation::DeleteNode { .. } => {
+            // op type (1) + node_id (8) + temporal (48)
+            1 + 8 + TEMPORAL_SIZE
+        }
+        WalOperation::DeleteEdge { .. } => {
+            // op type (1) + edge_id (8) + temporal (48)
+            1 + 8 + TEMPORAL_SIZE
+        }
+        WalOperation::Checkpoint { .. } => {
+            // op type (1) + lsn (8) + timestamp (12)
+            1 + 8 + 12
+        }
+    };
+
+    FIXED_OVERHEAD + variable_size
+}
+
+/// Estimate the serialized size of a PropertyMap.
+///
+/// This provides an upper-bound estimate for pre-allocation purposes.
+/// The actual serialized size is:
+/// - Map count: 4 bytes
+/// - For each property:
+///   - Key length prefix: 4 bytes
+///   - Key bytes: key.len()
+///   - Value: depends on type (see `estimate_property_value_size`)
+fn estimate_property_map_size(properties: &PropertyMap) -> usize {
+    use crate::core::interning::GLOBAL_INTERNER;
+
+    if properties.is_empty() {
+        return 4; // Just the count field
+    }
+
+    let mut size = 4; // Count field
+    for (key, value) in properties.iter() {
+        // Key: length prefix (4) + key bytes
+        // Resolve the key to get accurate size.
+        // If resolve fails (corrupted interner state), use a conservative upper bound
+        // to ensure we never under-allocate. 256 is a reasonable maximum key length.
+        let key_len = GLOBAL_INTERNER
+            .resolve(*key)
+            .map(|s| s.len())
+            .unwrap_or(256); // Conservative fallback: max reasonable key size
+        size += 4 + key_len;
+        // Value: type tag + data
+        size += estimate_property_value_size(value);
+    }
+    size
+}
+
+/// Estimate the serialized size of a single PropertyValue.
+///
+/// Size breakdown:
+/// - Null: 1 byte (tag)
+/// - Bool: 2 bytes (tag + value)
+/// - Int: 9 bytes (tag + 8 bytes)
+/// - Float: 9 bytes (tag + 8 bytes)
+/// - String: 1 + 4 + len (tag + length prefix + bytes)
+/// - Bytes: 1 + 4 + len (tag + length prefix + bytes)
+/// - Array: 1 + 4 + sum of element sizes (tag + count + elements)
+/// - Vector: 1 + 4 + (dims * 4) (tag + dims + f32 array)
+/// - SparseVector: 1 + 4 + 4 + (nnz * 8) (tag + dims + nnz + indices + values)
+fn estimate_property_value_size(value: &crate::core::property::PropertyValue) -> usize {
+    use crate::core::property::PropertyValue;
+
+    match value {
+        PropertyValue::Null => 1,
+        PropertyValue::Bool(_) => 2,
+        PropertyValue::Int(_) => 9,
+        PropertyValue::Float(_) => 9,
+        PropertyValue::String(s) => 1 + 4 + s.len(),
+        PropertyValue::Bytes(b) => 1 + 4 + b.len(),
+        PropertyValue::Array(arr) => {
+            // tag (1) + count (4) + sum of element sizes
+            let elements_size: usize = arr.iter().map(estimate_property_value_size).sum();
+            1 + 4 + elements_size
+        }
+        PropertyValue::Vector(v) => {
+            // tag (1) + dims (4) + f32 array (dims * 4)
+            // Serialization: TAG_VECTOR + dimension(u32) + f32_values
+            1 + 4 + (v.len() * 4)
+        }
+        PropertyValue::SparseVector(sv) => {
+            // tag (1) + dims (4) + nnz (4) + indices (nnz * 4) + values (nnz * 4)
+            // Serialization: TAG_SPARSE_VECTOR + dimension(u32) + nnz(u32) + indices[] + values[]
+            let nnz = sv.indices().len();
+            1 + 4 + 4 + (nnz * 4) + (nnz * 4)
+        }
+    }
+}
+
+/// Serialize a WAL entry with CRC32 checksum into the provided buffer
+///
+/// This function reuses the provided buffer to avoid per-entry allocation.
+/// The caller should clear the buffer before calling this function to maintain its capacity.
+pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Result<()> {
+    // Write LSN (8 bytes)
+    buffer.extend_from_slice(&entry.lsn.0.to_le_bytes());
+
+    // Write timestamp (12 bytes: Phase 2 HybridTimestamp)
+    entry.timestamp.serialize_into(buffer);
+
+    // Reserve space for checksum (4 bytes) - will fill in later
+    let checksum_offset = buffer.len();
+    buffer.extend_from_slice(&[0u8; 4]);
+
+    // Write operation type and data with full serialization
+    match &entry.operation {
+        WalOperation::CreateNode {
+            node_id,
+            label,
+            properties,
+            temporal,
+        } => {
+            buffer.push(1); // operation type
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            serialize_interned_string(*label, buffer);
+            properties.serialize_into(buffer)?;
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::CreateEdge {
+            edge_id,
+            source,
+            target,
+            label,
+            properties,
+            temporal,
+        } => {
+            buffer.push(2); // operation type
+            buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+            buffer.extend_from_slice(&source.as_u64().to_le_bytes());
+            buffer.extend_from_slice(&target.as_u64().to_le_bytes());
+            serialize_interned_string(*label, buffer);
+            properties.serialize_into(buffer)?;
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::UpdateNode {
+            node_id,
+            version_id,
+            label,
+            properties,
+            temporal,
+        } => {
+            buffer.push(3); // operation type
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
+            serialize_interned_string(*label, buffer);
+            properties.serialize_into(buffer)?;
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::UpdateEdge {
+            edge_id,
+            version_id,
+            label,
+            properties,
+            temporal,
+        } => {
+            buffer.push(4); // operation type
+            buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+            buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
+            serialize_interned_string(*label, buffer);
+            properties.serialize_into(buffer)?;
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::DeleteNode { node_id, temporal } => {
+            buffer.push(6); // operation type
+            buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::DeleteEdge { edge_id, temporal } => {
+            buffer.push(7); // operation type
+            buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
+            temporal.serialize_into(buffer);
+        }
+        WalOperation::Checkpoint { lsn, timestamp } => {
+            buffer.push(5); // operation type
+            buffer.extend_from_slice(&lsn.0.to_le_bytes());
+            // Phase 2: Use HybridTimestamp serialization
+            timestamp.serialize_into(buffer);
+        }
+    }
+
+    // Compute CRC32 over everything except the checksum field
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&buffer[0..checksum_offset]); // LSN + timestamp
+    hasher.update(&buffer[checksum_offset + 4..]); // Operation data
+    let checksum = hasher.finalize();
+
+    // Write the checksum into the reserved space
+    buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::EdgeId;
+    use crate::core::NodeId;
+    use crate::core::interning::GLOBAL_INTERNER;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::BiTemporalInterval;
+
+    /// Helper to create a test temporal interval
+    fn test_temporal() -> BiTemporalInterval {
+        use crate::core::hlc::HybridTimestamp;
+        let timestamp = HybridTimestamp::new_unchecked(1000000, 0);
+        BiTemporalInterval::current(timestamp)
+    }
+
+    /// Helper to create a test timestamp
+    fn test_timestamp() -> Timestamp {
+        use crate::core::hlc::HybridTimestamp;
+        HybridTimestamp::new_unchecked(1000000, 0)
+    }
+
+    #[test]
+    fn test_estimate_capacity_checkpoint() {
+        // Checkpoint: op type (1) + lsn (8) + timestamp (12) = 21 bytes
+        // Fixed overhead: LSN (8) + Timestamp (12) + Checksum (4) = 24 bytes
+        // Total: 45 bytes
+        let op = WalOperation::Checkpoint {
+            lsn: LSN(1),
+            timestamp: test_timestamp(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+        assert_eq!(estimated, 45, "Checkpoint should be exactly 45 bytes");
+
+        // Verify by actually serializing
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_delete_node() {
+        // DeleteNode: op type (1) + node_id (8) + temporal (48) = 57 bytes
+        // Fixed overhead: 24 bytes
+        // Total: 81 bytes
+        let op = WalOperation::DeleteNode {
+            node_id: NodeId::new(1).unwrap(),
+            temporal: test_temporal(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+        assert_eq!(estimated, 81, "DeleteNode should be exactly 81 bytes");
+
+        // Verify by actually serializing
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_delete_edge() {
+        // DeleteEdge: op type (1) + edge_id (8) + temporal (48) = 57 bytes
+        // Fixed overhead: 24 bytes
+        // Total: 81 bytes
+        let op = WalOperation::DeleteEdge {
+            edge_id: EdgeId::new(1).unwrap(),
+            temporal: test_temporal(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+        assert_eq!(estimated, 81, "DeleteEdge should be exactly 81 bytes");
+
+        // Verify by actually serializing
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_create_node_empty_properties() {
+        // CreateNode with empty properties:
+        // Fixed: 24 bytes (LSN + Timestamp + Checksum)
+        // op type (1) + node_id (8) + label (4-byte InternedString) + properties (4 for empty count) + temporal (48)
+        // = 24 + 1 + 8 + 4 + 4 + 48 = 89 bytes
+        let op = WalOperation::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            label: GLOBAL_INTERNER.intern("test").unwrap(),
+            properties: PropertyMapBuilder::new().build(),
+            temporal: test_temporal(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+        assert_eq!(
+            estimated, 89,
+            "CreateNode with empty properties should be 89 bytes"
+        );
+
+        // Verify by actually serializing
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_create_node_with_properties() {
+        // CreateNode with properties
+        let properties = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30)
+            .insert("score", 95.5)
+            .build();
+
+        let op = WalOperation::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            label: GLOBAL_INTERNER.intern("Person").unwrap(),
+            properties,
+            temporal: test_temporal(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+
+        // Verify by actually serializing
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+
+        // The estimate should be reasonably close (not wildly over-allocated)
+        let overhead_ratio = estimated as f64 / buffer.len() as f64;
+        assert!(
+            overhead_ratio <= 1.5,
+            "Estimate {} should not be more than 50% over actual size {}",
+            estimated,
+            buffer.len()
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_create_edge() {
+        // CreateEdge with properties
+        let properties = PropertyMapBuilder::new()
+            .insert("weight", 1.5)
+            .insert("type", "FRIEND")
+            .build();
+
+        let op = WalOperation::CreateEdge {
+            edge_id: EdgeId::new(1).unwrap(),
+            source: NodeId::new(1).unwrap(),
+            target: NodeId::new(2).unwrap(),
+            label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+            properties,
+            temporal: test_temporal(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+
+        // Verify by actually serializing
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+
+        let overhead_ratio = estimated as f64 / buffer.len() as f64;
+        assert!(
+            overhead_ratio <= 1.5,
+            "Estimate {} should not be more than 50% over actual size {}",
+            estimated,
+            buffer.len()
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_with_vector_property() {
+        // CreateNode with vector property
+        let embedding = vec![0.1, 0.2, 0.3, 0.4];
+        let properties = PropertyMapBuilder::new()
+            .insert_vector("embedding", &embedding)
+            .build();
+
+        let op = WalOperation::CreateNode {
+            node_id: NodeId::new(1).unwrap(),
+            label: GLOBAL_INTERNER.intern("Document").unwrap(),
+            properties,
+            temporal: test_temporal(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+
+        // Verify by actually serializing
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+
+        let overhead_ratio = estimated as f64 / buffer.len() as f64;
+        assert!(
+            overhead_ratio <= 1.5,
+            "Estimate {} should not be more than 50% over actual size {}",
+            estimated,
+            buffer.len()
+        );
+    }
+
+    #[test]
+    fn test_estimate_capacity_large_properties() {
+        // Test with large property map to ensure estimate handles it
+        let mut builder = PropertyMapBuilder::new();
+        for i in 0..50 {
+            builder = builder.insert(&format!("key_{}", i), i);
+        }
+        let properties = builder.build();
+
+        let op = WalOperation::UpdateNode {
+            node_id: NodeId::new(1).unwrap(),
+            version_id: crate::core::VersionId::new(1).unwrap(),
+            label: GLOBAL_INTERNER.intern("LargeNode").unwrap(),
+            properties,
+            temporal: test_temporal(),
+        };
+
+        let estimated = estimate_entry_capacity(&op);
+
+        // Verify by actually serializing
+        let entry = WalEntry::new(LSN(1), op);
+        let mut buffer = Vec::new();
+        serialize_entry_into(&entry, &mut buffer).unwrap();
+
+        assert!(
+            buffer.len() <= estimated,
+            "Actual size {} should not exceed estimate {}",
+            buffer.len(),
+            estimated
+        );
+
+        let overhead_ratio = estimated as f64 / buffer.len() as f64;
+        assert!(
+            overhead_ratio <= 1.5,
+            "Estimate {} should not be more than 50% over actual size {}",
+            estimated,
+            buffer.len()
+        );
+    }
+}

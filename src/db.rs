@@ -265,16 +265,11 @@ impl GallifreyDB {
         // Load indexes on startup if enabled
         if let Some(ref manager) = persistence_manager
             && config.persistence.load_on_startup
-            && let Err(e) = restoration::restore_indexes(&db, manager)
         {
-            crate::storage::index_persistence::operations::load_indexes_startup(
-                manager,
-                &db.current,
-                &db.historical,
-                &db.node_id_gen,
-                &db.edge_id_gen,
-                &db.version_id_gen,
-            );
+            #[allow(clippy::collapsible_if)]
+            if let Err(e) = restoration::restore_indexes(&db, manager) {
+                eprintln!("Warning: Failed to restore indexes: {}", e);
+            }
         }
 
         // Start background persistence thread if enabled
@@ -2518,39 +2513,6 @@ impl GallifreyDB {
     pub fn should_compress_by_exception_count(&self, threshold_exceptions: usize) -> bool {
         self.visibility_manager
             .should_compress_by_exception_count(threshold_exceptions)
-    }
-
-    /// Execute a Cypher query.
-    ///
-    /// This is a placeholder for future Cypher support.
-    #[cfg(feature = "cypher")]
-    pub fn cypher(&self, _query: &str) -> Result<QueryResults> {
-        use crate::query::executor::{QueryRow, ResultIterator};
-
-        // Minimal empty iterator to satisfy the return type
-        struct EmptyCypherIterator;
-        impl ResultIterator for EmptyCypherIterator {
-            fn next(&mut self) -> Option<Result<QueryRow>> {
-                None
-            }
-            fn size_hint(&self) -> (usize, Option<usize>) {
-                (0, Some(0))
-            }
-        }
-
-        Ok(QueryResults::new(Box::new(EmptyCypherIterator)))
-    }
-
-    /// Execute a Cypher query with parameters.
-    ///
-    /// This is a placeholder for future Cypher support.
-    #[cfg(feature = "cypher")]
-    pub fn cypher_with_params(
-        &self,
-        query: &str,
-        _params: crate::core::property::PropertyMap,
-    ) -> Result<QueryResults> {
-        self.cypher(query)
     }
 }
 
