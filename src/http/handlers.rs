@@ -141,7 +141,7 @@ pub async fn handle_query(
                         });
                         HttpResponse::Ok().json(ApiResponse::success(node_json))
                     }
-                    Err(e) => HttpResponse::Ok().json(ApiResponse::error(e.to_string())), // Or 404? API says success: false
+                    Err(e) => HttpResponse::NotFound().json(ApiResponse::error(e.to_string())),
                 },
                 Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
             }
