@@ -10,7 +10,7 @@ use actix_web::{
 use tokio::sync::oneshot;
 
 use super::config::{CorsConfig, ServerConfig};
-use super::handlers::configure_health_routes;
+use super::handlers::{configure_health_routes, handle_query};
 
 /// Handle for gracefully shutting down the server.
 #[derive(Debug)]
@@ -56,6 +56,7 @@ impl ShutdownHandle {
 /// ```
 pub fn configure_app(cfg: &mut web::ServiceConfig) {
     configure_health_routes(cfg);
+    cfg.route("/query", web::post().to(handle_query));
 }
 
 /// Build security headers middleware.
