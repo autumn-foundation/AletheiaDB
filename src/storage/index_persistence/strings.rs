@@ -303,4 +303,70 @@ mod tests {
         assert!(err.to_string().contains("Size limit exceeded"));
         assert!(err.to_string().contains("String length"));
     }
+
+    #[test]
+    fn test_restore_string_interner_mismatch() {
+        // This test verifies that we catch inconsistencies where the restored interner
+        // indices don't match the expected order (e.g. if GLOBAL_INTERNER already
+        // contains strings in a different order).
+
+        // Construct data where index 0 is "type" (which has ID 2 in COMMON_STRINGS).
+        // Since GLOBAL_INTERNER is pre-warmed, intern("type") will return 2.
+        // restore_string_interner will expect 0.
+        // 2 != 0 => Mismatch.
+        let data = StringInternerData {
+            magic: INTERNER_MAGIC,
+            version: MANIFEST_VERSION,
+            string_count: 1,
+            strings: vec!["type".to_string()],
+        };
+
+        let result = restore_string_interner(&data);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            IndexPersistenceError::InternerMismatch { expected, got } => {
+                assert_eq!(expected, 0, "Expected index 0 (from data position)");
+                // "type" is usually index 2 in COMMON_STRINGS, but we just verify mismatch
+                assert_ne!(got, 0, "Got index should not be 0");
+            }
+            err => panic!("Expected InternerMismatch, got: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_restore_string_interner_mismatch_with_new_string() {
+        // This test verifies mismatch with a completely new string.
+        // Since GLOBAL_INTERNER is pre-warmed (len > 0), a new string will get ID > 0.
+        // If we put it at index 0 in data, it should fail.
+
+        let unique_string = format!(
+            "unique_string_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        let data = StringInternerData {
+            magic: INTERNER_MAGIC,
+            version: MANIFEST_VERSION,
+            string_count: 1,
+            strings: vec![unique_string],
+        };
+
+        let result = restore_string_interner(&data);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            IndexPersistenceError::InternerMismatch { expected, got } => {
+                assert_eq!(expected, 0, "Expected index 0 (from data position)");
+                assert!(
+                    got > 0,
+                    "Got index should be > 0 (because interner is pre-warmed)"
+                );
+            }
+            err => panic!("Expected InternerMismatch, got: {:?}", err),
+        }
+    }
 }
