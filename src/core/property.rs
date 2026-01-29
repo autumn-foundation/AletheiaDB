@@ -1337,7 +1337,7 @@ impl PropertyMap {
         for (key, value) in self.inner.iter() {
             // Key size: length (4) + bytes
             if let Some(key_str) = GLOBAL_INTERNER.resolve(*key) {
-                size += 4 + key_str.as_bytes().len();
+                size += 4 + key_str.len();
             } else {
                 // Should not happen, but assume minimum overhead if key missing (safe fallback)
                 size += 4;
@@ -3242,7 +3242,7 @@ mod tests {
             PropertyValue::Null,
             PropertyValue::Bool(true),
             PropertyValue::Int(12345),
-            PropertyValue::Float(3.14159),
+            PropertyValue::Float(std::f64::consts::PI),
             PropertyValue::string("test string"),
             PropertyValue::bytes(vec![1, 2, 3, 4]),
             PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]),
