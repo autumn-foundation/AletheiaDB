@@ -7,7 +7,9 @@ pub mod key_provider;
 pub use key_provider::*;
 
 /// File-based key provider.
+#[cfg(feature = "tokio")]
 pub mod file_provider;
+#[cfg(feature = "tokio")]
 pub use file_provider::*;
 
 /// Environment variable key provider.

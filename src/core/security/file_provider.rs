@@ -1,3 +1,5 @@
+#![cfg(feature = "tokio")]
+
 use super::{KeyError, KeyProvider, MasterKey};
 use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
@@ -63,8 +65,9 @@ impl KeyProvider for FileKeyProvider {
 
         // 3. Derive KEK
         // Use explicitly configured params: 64MB memory, 3 iterations, 4 threads
+        // Panic on invalid params as these are hardcoded constants.
         let params = Params::new(64 * 1024, 3, 4, Some(32))
-            .map_err(|e| KeyError::ConfigError(format!("Invalid Argon2 params: {}", e)))?;
+            .expect("Hardcoded Argon2 parameters should be valid");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
         let mut kek = Zeroizing::new([0u8; 32]);

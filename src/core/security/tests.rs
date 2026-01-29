@@ -7,9 +7,9 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use rand::RngCore;
+use serial_test::serial;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use serial_test::serial;
 
 #[test]
 fn test_master_key_properties() {
@@ -62,11 +62,9 @@ fn create_test_key_file(passphrase: &str, master_key_bytes: &[u8; 32]) -> NamedT
     // Must match implementation params: 64MB, 3 iters, 4 threads
     let params = argon2::Params::new(64 * 1024, 3, 4, Some(32)).unwrap();
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    argon2.hash_password_into(
-        passphrase.as_bytes(),
-        &salt,
-        &mut kek
-    ).unwrap();
+    argon2
+        .hash_password_into(passphrase.as_bytes(), &salt, &mut kek)
+        .unwrap();
 
     // 3. Encrypt
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&kek));
@@ -84,6 +82,7 @@ fn create_test_key_file(passphrase: &str, master_key_bytes: &[u8; 32]) -> NamedT
     file
 }
 
+#[cfg(feature = "tokio")]
 #[tokio::test]
 async fn test_file_provider() {
     let passphrase = "correct-horse-battery-staple";
@@ -96,16 +95,20 @@ async fn test_file_provider() {
     assert_eq!(key.as_bytes(), &master_key_data);
 
     // Test get_key_version
-    let key_v1 = provider.get_key_version(1).await.expect("Should load version 1");
+    let key_v1 = provider
+        .get_key_version(1)
+        .await
+        .expect("Should load version 1");
     assert_eq!(key_v1.as_bytes(), &master_key_data);
 
     // Test get_key_version mismatch
     match provider.get_key_version(99).await {
-        Err(KeyError::NotFound) => {},
+        Err(KeyError::NotFound) => {}
         _ => panic!("Expected NotFound for version 99"),
     }
 }
 
+#[cfg(feature = "tokio")]
 #[tokio::test]
 async fn test_file_provider_errors() {
     let passphrase = "correct-horse-battery-staple";
@@ -114,7 +117,7 @@ async fn test_file_provider_errors() {
     // 1. File Not Found
     let provider = FileKeyProvider::new("non_existent_file.key", passphrase);
     match provider.get_master_key().await {
-        Err(KeyError::NotFound) => {},
+        Err(KeyError::NotFound) => {}
         _ => panic!("Expected NotFound for missing file"),
     }
 
@@ -122,7 +125,7 @@ async fn test_file_provider_errors() {
     let key_file = create_test_key_file(passphrase, &master_key_data);
     let provider = FileKeyProvider::new(key_file.path(), "wrong-passphrase");
     match provider.get_master_key().await {
-        Err(KeyError::DecryptionFailed) => {},
+        Err(KeyError::DecryptionFailed) => {}
         _ => panic!("Expected DecryptionFailed for wrong passphrase"),
     }
 
@@ -131,7 +134,7 @@ async fn test_file_provider_errors() {
     short_file.write_all(&[0u8; 10]).unwrap();
     let provider = FileKeyProvider::new(short_file.path(), passphrase);
     match provider.get_master_key().await {
-        Err(KeyError::ConfigError(msg)) if msg.contains("too short") => {},
+        Err(KeyError::ConfigError(msg)) if msg.contains("too short") => {}
         _ => panic!("Expected ConfigError for short file"),
     }
 }
@@ -156,12 +159,15 @@ async fn test_env_provider() {
     assert_eq!(key.as_bytes(), &master_key_data);
 
     // Test get_key_version
-    let key_v1 = provider.get_key_version(1).await.expect("Should load version 1");
+    let key_v1 = provider
+        .get_key_version(1)
+        .await
+        .expect("Should load version 1");
     assert_eq!(key_v1.as_bytes(), &master_key_data);
 
     // Test get_key_version mismatch
     match provider.get_key_version(99).await {
-        Err(KeyError::NotFound) => {},
+        Err(KeyError::NotFound) => {}
         _ => panic!("Expected NotFound for version 99"),
     }
 
@@ -178,30 +184,38 @@ async fn test_env_provider_errors() {
     let provider = EnvKeyProvider::new(var_name);
 
     // 1. Missing Env Var
-    unsafe { std::env::remove_var(var_name); }
+    unsafe {
+        std::env::remove_var(var_name);
+    }
     match provider.get_master_key().await {
-        Err(KeyError::NotFound) => {},
+        Err(KeyError::NotFound) => {}
         _ => panic!("Expected NotFound for missing env var"),
     }
 
     // 2. Invalid Base64
-    unsafe { std::env::set_var(var_name, "not-base-64!!!"); }
+    unsafe {
+        std::env::set_var(var_name, "not-base-64!!!");
+    }
     match provider.get_master_key().await {
-        Err(KeyError::ConfigError(msg)) if msg.contains("Invalid base64") => {},
+        Err(KeyError::ConfigError(msg)) if msg.contains("Invalid base64") => {}
         _ => panic!("Expected ConfigError for invalid base64"),
     }
 
     // 3. Invalid Length
     let short_key = [0u8; 10];
     let encoded = BASE64.encode(short_key);
-    unsafe { std::env::set_var(var_name, encoded); }
+    unsafe {
+        std::env::set_var(var_name, encoded);
+    }
     match provider.get_master_key().await {
-        Err(KeyError::ConfigError(msg)) if msg.contains("Invalid key length") => {},
+        Err(KeyError::ConfigError(msg)) if msg.contains("Invalid key length") => {}
         _ => panic!("Expected ConfigError for invalid key length"),
     }
 
     // Cleanup
-    unsafe { std::env::remove_var(var_name); }
+    unsafe {
+        std::env::remove_var(var_name);
+    }
 }
 
 #[cfg(feature = "aws-kms")]
