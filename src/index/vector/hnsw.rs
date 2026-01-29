@@ -979,37 +979,83 @@ impl HnswIndex {
         // Save mappings to companion file with integrity checks
         // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
         let mappings_path = path.with_extension("usearch.mappings");
-        let mut mappings = Vec::with_capacity(self.id_mapping.len());
-        for entry in self.id_mapping.iter() {
-            mappings.push((*entry.key(), *entry.value()));
-        }
 
-        let count = mappings.len() as u64;
-
-        // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
-        let total_size = 4 + 1 + 8 + (mappings.len() * 16) + 4;
-        let mut file_data = Vec::with_capacity(total_size);
-
-        // Write header
-        file_data.extend_from_slice(MAPPING_MAGIC);
-        file_data.push(MAPPING_VERSION);
-        file_data.extend_from_slice(&count.to_le_bytes());
-
-        // Write data directly
-        for (node_id, key) in &mappings {
-            file_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
-            file_data.extend_from_slice(&key.to_le_bytes());
-        }
-
-        // Calculate CRC32 over all data (header + mappings)
-        let mut hasher = Hasher::new();
-        hasher.update(&file_data);
-        let crc = hasher.finalize();
-        file_data.extend_from_slice(&crc.to_le_bytes());
-
-        std::fs::write(&mappings_path, &file_data).map_err(|e| {
+        let file = std::fs::File::create(&mappings_path).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
-                "Failed to save mappings: {}",
+                "Failed to create mappings file: {}",
+                e
+            )))
+        })?;
+
+        let mut writer = std::io::BufWriter::new(file);
+        let mut hasher = Hasher::new();
+
+        // Write header: MAGIC (4) + VERSION (1)
+        writer.write_all(MAPPING_MAGIC).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to write magic bytes: {}",
+                e
+            )))
+        })?;
+        hasher.update(MAPPING_MAGIC);
+
+        writer.write_all(&[MAPPING_VERSION]).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to write version: {}",
+                e
+            )))
+        })?;
+        hasher.update(&[MAPPING_VERSION]);
+
+        // Write count (8 bytes)
+        let count = self.id_mapping.len() as u64;
+        let count_bytes = count.to_le_bytes();
+        writer.write_all(&count_bytes).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to write count: {}",
+                e
+            )))
+        })?;
+        hasher.update(&count_bytes);
+
+        // Write data directly from DashMap iteration
+        // This avoids allocating a temporary Vec containing all mappings
+        for entry in self.id_mapping.iter() {
+            let node_id = entry.key();
+            let key = entry.value();
+
+            let node_id_bytes = node_id.as_u64().to_le_bytes();
+            writer.write_all(&node_id_bytes).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to write node id: {}",
+                    e
+                )))
+            })?;
+            hasher.update(&node_id_bytes);
+
+            let key_bytes = key.to_le_bytes();
+            writer.write_all(&key_bytes).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to write key: {}",
+                    e
+                )))
+            })?;
+            hasher.update(&key_bytes);
+        }
+
+        // Calculate and write CRC32 (4 bytes)
+        let crc = hasher.finalize();
+        writer.write_all(&crc.to_le_bytes()).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to write CRC: {}",
+                e
+            )))
+        })?;
+
+        // Flush ensuring all data is written
+        writer.flush().map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to flush mappings file: {}",
                 e
             )))
         })?;
@@ -1078,8 +1124,17 @@ impl HnswIndex {
             }
         }
 
-        // Results should already be sorted by usearch, but ensure descending order by similarity
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Results are already sorted by usearch by distance (ascending).
+        // For all our metrics, this corresponds to similarity (descending).
+        // - Cosine: sim = 1 - dist
+        // - Euclidean: sim = -dist
+        // - DotProduct: sim = -dist
+        // - Haversine: sim = -dist
+        // - Hamming: sim = -dist
+        // - Tanimoto: sim = 1 - dist
+        //
+        // Thus, no explicit sorting is needed. This avoids O(k log k) operations.
+        // We verify this behavior in tests/hnsw_sort_verification.rs.
 
         results
     }
@@ -1100,41 +1155,93 @@ fn load_mappings_with_integrity(
         return Ok((id_mapping, reverse_mapping, max_key));
     }
 
-    let file_data = std::fs::read(mappings_path).map_err(|e| {
+    let file = std::fs::File::open(mappings_path).map_err(|e| {
         Error::Vector(VectorError::IndexError(format!(
-            "Failed to read mappings: {}",
+            "Failed to open mappings file: {}",
             e
         )))
     })?;
 
-    // Minimum size: magic(4) + version(1) + count(8) + crc(4) = 17 bytes
-    if file_data.len() < 17 {
-        return Err(Error::Vector(VectorError::IndexError(
-            "Mapping file too small or corrupted".to_string(),
-        )));
-    }
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = Hasher::new();
 
-    // Verify magic bytes
-    if &file_data[0..4] != MAPPING_MAGIC {
+    // Read and verify magic bytes (4 bytes)
+    let mut magic_buf = [0u8; 4];
+    reader.read_exact(&mut magic_buf).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to read magic bytes: {}",
+            e
+        )))
+    })?;
+    hasher.update(&magic_buf);
+
+    if &magic_buf != MAPPING_MAGIC {
         return Err(Error::Vector(VectorError::IndexError(
             "Invalid mapping file: bad magic bytes".to_string(),
         )));
     }
 
-    // Check version
-    let version = file_data[4];
-    if version != MAPPING_VERSION {
+    // Read and verify version (1 byte)
+    let mut version_buf = [0u8; 1];
+    reader.read_exact(&mut version_buf).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to read version: {}",
+            e
+        )))
+    })?;
+    hasher.update(&version_buf);
+
+    if version_buf[0] != MAPPING_VERSION {
         return Err(Error::Vector(VectorError::IndexError(format!(
             "Unsupported mapping file version: {} (expected {})",
-            version, MAPPING_VERSION
+            version_buf[0], MAPPING_VERSION
         ))));
     }
 
-    // Extract and verify CRC32
-    let crc_offset = file_data.len() - 4;
-    let stored_crc = u32::from_le_bytes(file_data[crc_offset..].try_into().unwrap());
-    let mut hasher = Hasher::new();
-    hasher.update(&file_data[..crc_offset]);
+    // Read count (8 bytes)
+    let mut count_buf = [0u8; 8];
+    reader.read_exact(&mut count_buf).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to read count: {}",
+            e
+        )))
+    })?;
+    hasher.update(&count_buf);
+
+    let count = u64::from_le_bytes(count_buf) as usize;
+
+    // Read mappings (16 bytes * count)
+    // We stream this to avoid loading the whole file into memory
+    let mut entry_buf = [0u8; 16];
+    for _ in 0..count {
+        reader.read_exact(&mut entry_buf).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to read mapping entry: {}",
+                e
+            )))
+        })?;
+        hasher.update(&entry_buf);
+
+        let node_id_raw = u64::from_le_bytes(entry_buf[0..8].try_into().unwrap());
+        let key = u64::from_le_bytes(entry_buf[8..16].try_into().unwrap());
+
+        if let Ok(node_id) = NodeId::new(node_id_raw) {
+            id_mapping.insert(node_id, key);
+            reverse_mapping.insert(key, node_id);
+            max_key = max_key.max(key);
+        }
+    }
+
+    // Read stored CRC (4 bytes) - do NOT update hasher
+    let mut crc_buf = [0u8; 4];
+    reader.read_exact(&mut crc_buf).map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to read CRC: {}",
+            e
+        )))
+    })?;
+
+    let stored_crc = u32::from_le_bytes(crc_buf);
     let computed_crc = hasher.finalize();
 
     if stored_crc != computed_crc {
@@ -1144,31 +1251,12 @@ fn load_mappings_with_integrity(
         ))));
     }
 
-    // Parse count
-    let count = u64::from_le_bytes(file_data[5..13].try_into().unwrap()) as usize;
-
-    // Verify data size
-    let expected_size = 4 + 1 + 8 + (count * 16) + 4;
-    if file_data.len() != expected_size {
-        return Err(Error::Vector(VectorError::IndexError(format!(
-            "Mapping file size mismatch: expected {} bytes, got {}",
-            expected_size,
-            file_data.len()
-        ))));
-    }
-
-    // Parse mappings
-    let data_start = 13;
-    let data_end = crc_offset;
-    for chunk in file_data[data_start..data_end].chunks_exact(16) {
-        let node_id_raw = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-        let key = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
-
-        if let Ok(node_id) = NodeId::new(node_id_raw) {
-            id_mapping.insert(node_id, key);
-            reverse_mapping.insert(key, node_id);
-            max_key = max_key.max(key);
-        }
+    // Ensure we reached EOF
+    let mut check_buf = [0u8; 1];
+    if reader.read(&mut check_buf).unwrap_or(0) > 0 {
+        return Err(Error::Vector(VectorError::IndexError(
+            "Mapping file corrupted: Unexpected data after CRC".to_string(),
+        )));
     }
 
     Ok((id_mapping, reverse_mapping, max_key))
