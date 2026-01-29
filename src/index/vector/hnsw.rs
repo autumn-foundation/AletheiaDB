@@ -987,7 +987,19 @@ impl HnswIndex {
         let count = mappings.len() as u64;
 
         // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
-        let total_size = 4 + 1 + 8 + (mappings.len() * 16) + 4;
+        let data_size = mappings.len()
+            .checked_mul(16)
+            .ok_or_else(|| Error::Vector(VectorError::IndexError(
+                "Mapping count too large for serialization".to_string(),
+            )))?;
+        let total_size = 4usize
+            .checked_add(1)
+            .and_then(|s| s.checked_add(8))
+            .and_then(|s| s.checked_add(data_size))
+            .and_then(|s| s.checked_add(4))
+            .ok_or_else(|| Error::Vector(VectorError::IndexError(
+                "Mapping file size calculation overflow".to_string(),
+            )))?;
         let mut file_data = Vec::with_capacity(total_size);
 
         // Write header
@@ -1147,8 +1159,21 @@ fn load_mappings_with_integrity(
     // Parse count
     let count = u64::from_le_bytes(file_data[5..13].try_into().unwrap()) as usize;
 
-    // Verify data size
-    let expected_size = 4 + 1 + 8 + (count * 16) + 4;
+    // Verify data size with overflow protection
+    let data_size = count
+        .checked_mul(16)
+        .ok_or_else(|| Error::Vector(VectorError::IndexError(
+            "Mapping file count causes overflow".to_string(),
+        )))?;
+    let expected_size = 4usize
+        .checked_add(1)
+        .and_then(|s| s.checked_add(8))
+        .and_then(|s| s.checked_add(data_size))
+        .and_then(|s| s.checked_add(4))
+        .ok_or_else(|| Error::Vector(VectorError::IndexError(
+            "Mapping file size calculation overflow".to_string(),
+        )))?;
+
     if file_data.len() != expected_size {
         return Err(Error::Vector(VectorError::IndexError(format!(
             "Mapping file size mismatch: expected {} bytes, got {}",
@@ -1768,5 +1793,57 @@ mod tests {
 
         // Pass null pointer - should panic
         wrapper(valid_ptr, null_ptr);
+    }
+
+    #[test]
+    fn test_load_mappings_overflow() -> Result<()> {
+        use std::io::Write;
+        use crc32fast::Hasher;
+
+        // Create a temporary file
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("overflow.usearch.mappings");
+
+        // Construct malicious file
+        // Count = 0x1000000000000000 (huge).
+        // count * 16 wraps to 0.
+        // Expected size calculation: 4+1+8 + (0) + 4 = 17.
+        // We will provide exactly 17 bytes.
+
+        let count: u64 = 0x1000000000000000;
+        let mut file_data = Vec::new();
+        file_data.extend_from_slice(b"GMAP");
+        file_data.push(1); // Version
+        file_data.extend_from_slice(&count.to_le_bytes());
+
+        // No data payload (since wrapped size expects none)
+
+        // CRC
+        let mut hasher = Hasher::new();
+        hasher.update(&file_data);
+        let crc = hasher.finalize();
+        file_data.extend_from_slice(&crc.to_le_bytes());
+
+        // Write to file
+        let mut file = std::fs::File::create(&path)?;
+        file.write_all(&file_data)?;
+
+        // Try to load
+        // After fix: This should FAIL.
+        let result = load_mappings_with_integrity(&path);
+
+        assert!(result.is_err(), "Overflowed file should be rejected");
+        if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
+            // Check for either overflow message depending on which check failed first
+            assert!(
+                msg.contains("overflow"),
+                "Expected overflow error message, got: {}",
+                msg
+            );
+        } else {
+            panic!("Expected IndexError with overflow message, got: {:?}", result);
+        }
+
+        Ok(())
     }
 }
