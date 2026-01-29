@@ -29,7 +29,7 @@ Created `scripts/security_audit.sh` to automatically check for and run `cargo-au
 The `unsafe` SIMD functions in `src/core/vector.rs` rely on the caller to ensure input slices have equal lengths. If this contract is violated, pointer arithmetic could read past the end of the second buffer (Undefined Behavior).
 
 **Defense:** Assertion Hardening
-Added `debug_assert_eq!(a.len(), b.len())` to all `unsafe` functions in `src/core/vector.rs` (`dot_and_magnitudes_avx2`, etc.). This enforces the safety contract during testing and debug builds without performance penalty in release.
+Added `debug_assert_eq!(a.len(), b.len())` to all `unsafe` SIMD functions in `src/core/vector.rs` that operate on two input slices (`dot_and_magnitudes_avx2`, etc.). This enforces the safety contract during testing and debug builds without performance penalty in release.
 
 **Threat:** Resource Exhaustion via Public API
 Public HTTP and MCP endpoints could be vectors for DoS attacks via large inputs (e.g., massive vectors, deep traversals).
