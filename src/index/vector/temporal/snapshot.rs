@@ -229,6 +229,7 @@ impl VectorSnapshot {
     /// Collect all vectors in this snapshot into a Vec.
     ///
     /// For delta snapshots, this reconstructs the full set.
+    #[allow(dead_code)]
     pub(crate) fn to_vec(
         &self,
         all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,

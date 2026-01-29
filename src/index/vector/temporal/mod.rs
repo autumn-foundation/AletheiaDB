@@ -3388,7 +3388,7 @@ mod tests {
         if let Err(err) = result {
             let err_msg = err.to_string();
             assert!(
-                err_msg.contains("not found") || err_msg.contains("corrupted"),
+                err_msg.contains("not found") || err_msg.contains("corrupted") || err_msg.contains("missing"),
                 "Error should mention missing base or corrupted state, got: {}",
                 err_msg
             );
@@ -3404,7 +3404,7 @@ mod tests {
         if let Err(err) = result {
             let err_msg = err.to_string();
             assert!(
-                err_msg.contains("not found") || err_msg.contains("corrupted"),
+                err_msg.contains("not found") || err_msg.contains("corrupted") || err_msg.contains("missing"),
                 "Error should mention missing base or corrupted state, got: {}",
                 err_msg
             );

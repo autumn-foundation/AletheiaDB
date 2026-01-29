@@ -54,13 +54,20 @@ impl StorageObserver for VectorIndexObserver {
                 // Trigger snapshot creation aligned with this anchor
                 let snapshot_id = self.index.create_snapshot_for_anchor(*timestamp)?;
 
+                #[cfg(feature = "observability")]
                 if let Some(id) = snapshot_id {
-                    #[cfg(feature = "observability")]
                     tracing::info!(
                         "Created vector snapshot {} aligned with anchor version {}",
                         id,
                         version_id
                     );
+                }
+
+                // Suppress unused variable warnings when observability is disabled
+                #[cfg(not(feature = "observability"))]
+                {
+                    let _ = version_id;
+                    let _ = snapshot_id;
                 }
 
                 Ok(())
