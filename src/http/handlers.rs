@@ -1,14 +1,14 @@
 //! HTTP request handlers.
 
+use crate::core::NodeId;
+use crate::http::converters::{interned_to_string, json_to_property_map, property_map_to_json};
+use crate::http::state::AppState;
+use crate::query::QueryBuilder;
+use crate::query::ir::{Predicate, PredicateValue};
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use crate::http::state::AppState;
-use crate::http::converters::{json_to_property_map, property_map_to_json, interned_to_string};
-use crate::core::NodeId;
-use crate::query::QueryBuilder;
-use crate::query::ir::{Predicate, PredicateValue};
 
 /// Health check response structure.
 #[derive(Debug, Serialize)]
@@ -129,7 +129,8 @@ pub async fn handle_query(
                             // Issue 5: Return single object, not array
                             HttpResponse::Ok().json(ApiResponse::success(node_json))
                         }
-                        Err(e) => HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string())),
+                        Err(e) => HttpResponse::InternalServerError()
+                            .json(ApiResponse::error(e.to_string())),
                     }
                 }
                 Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
@@ -147,12 +148,18 @@ pub async fn handle_query(
                         HttpResponse::Ok().json(ApiResponse::success(node_json))
                     }
                     // Issue 1: Return 404 for node not found
-                    Err(_) => HttpResponse::NotFound().json(ApiResponse::error(format!("Node {} not found", node_id))),
+                    Err(_) => HttpResponse::NotFound()
+                        .json(ApiResponse::error(format!("Node {} not found", node_id))),
                 },
                 Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
             }
         }
-        QueryRequest::FindNode { label, properties, limit, offset } => {
+        QueryRequest::FindNode {
+            label,
+            properties,
+            limit,
+            offset,
+        } => {
             let mut builder = if let Some(lbl) = label {
                 QueryBuilder::new().scan_label(&lbl)
             } else {
@@ -187,7 +194,9 @@ pub async fn handle_query(
                     }
                     HttpResponse::Ok().json(ApiResponse::success(json!(nodes)))
                 }
-                Err(e) => HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string())),
+                Err(e) => {
+                    HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()))
+                }
             }
         }
         QueryRequest::FindNeighbors { node_id } => {
@@ -201,7 +210,10 @@ pub async fn handle_query(
                     // Outgoing
                     let outgoing = db.get_outgoing_edges(nid);
                     for edge_id in outgoing {
-                        if let Ok(node) = db.get_edge_target(edge_id).and_then(|target| db.get_node(target)) {
+                        if let Ok(node) = db
+                            .get_edge_target(edge_id)
+                            .and_then(|target| db.get_node(target))
+                        {
                             let id = node.id.as_u64();
                             if seen_ids.insert(id) {
                                 neighbors.push(json!({
@@ -216,7 +228,10 @@ pub async fn handle_query(
                     // Incoming
                     let incoming = db.get_incoming_edges(nid);
                     for edge_id in incoming {
-                        if let Ok(node) = db.get_edge_source(edge_id).and_then(|source| db.get_node(source)) {
+                        if let Ok(node) = db
+                            .get_edge_source(edge_id)
+                            .and_then(|source| db.get_node(source))
+                        {
                             let id = node.id.as_u64();
                             if seen_ids.insert(id) {
                                 neighbors.push(json!({
