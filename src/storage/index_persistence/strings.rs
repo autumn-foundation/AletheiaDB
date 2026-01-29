@@ -340,7 +340,7 @@ mod tests {
         // Since GLOBAL_INTERNER is pre-warmed (len > 0), a new string will get ID > 0.
         // If we put it at index 0 in data, it should fail.
 
-        let unique_string = format!("unique_string_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let unique_string = "test_unique_mismatch_string_12345".to_string();
 
         let data = StringInternerData {
             magic: INTERNER_MAGIC,
