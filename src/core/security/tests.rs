@@ -7,9 +7,9 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use rand::RngCore;
-use serial_test::serial;
 use std::io::Write;
 use tempfile::NamedTempFile;
+use serial_test::serial;
 
 #[test]
 fn test_master_key_properties() {
@@ -155,25 +155,34 @@ async fn test_env_provider() {
     let provider = EnvKeyProvider::new(var_name);
     let result = provider.get_master_key().await;
 
-    let key = result.expect("Should load key from env");
-    assert_eq!(key.as_bytes(), &master_key_data);
-
-    // Test get_key_version
-    let key_v1 = provider
-        .get_key_version(1)
-        .await
-        .expect("Should load version 1");
-    assert_eq!(key_v1.as_bytes(), &master_key_data);
-
-    // Test get_key_version mismatch
-    match provider.get_key_version(99).await {
-        Err(KeyError::NotFound) => {}
-        _ => panic!("Expected NotFound for version 99"),
-    }
-
     // Clean up
     unsafe {
         std::env::remove_var(var_name);
+    }
+
+    let key = result.expect("Should load key from env");
+    assert_eq!(key.as_bytes(), &master_key_data);
+}
+
+// New test for logic without environment variables (bypasses serial execution issue for coverage?)
+#[tokio::test]
+async fn test_env_provider_logic() {
+    let master_key_data = [44u8; 32];
+    let encoded = BASE64.encode(master_key_data);
+
+    let provider = EnvKeyProvider::new_test(encoded);
+
+    // Test get_master_key
+    let key = provider.get_master_key().await.expect("Should load key from override");
+    assert_eq!(key.as_bytes(), &master_key_data);
+
+    // Test get_key_version logic specifically
+    let key_v1 = provider.get_key_version(1).await.expect("Should get version 1");
+    assert_eq!(key_v1.as_bytes(), &master_key_data);
+
+    match provider.get_key_version(99).await {
+        Err(KeyError::NotFound) => {},
+        _ => panic!("Expected NotFound for version 99"),
     }
 }
 
@@ -184,38 +193,30 @@ async fn test_env_provider_errors() {
     let provider = EnvKeyProvider::new(var_name);
 
     // 1. Missing Env Var
-    unsafe {
-        std::env::remove_var(var_name);
-    }
+    unsafe { std::env::remove_var(var_name); }
     match provider.get_master_key().await {
-        Err(KeyError::NotFound) => {}
+        Err(KeyError::NotFound) => {},
         _ => panic!("Expected NotFound for missing env var"),
     }
 
     // 2. Invalid Base64
-    unsafe {
-        std::env::set_var(var_name, "not-base-64!!!");
-    }
+    unsafe { std::env::set_var(var_name, "not-base-64!!!"); }
     match provider.get_master_key().await {
-        Err(KeyError::ConfigError(msg)) if msg.contains("Invalid base64") => {}
+        Err(KeyError::ConfigError(msg)) if msg.contains("Invalid base64") => {},
         _ => panic!("Expected ConfigError for invalid base64"),
     }
 
     // 3. Invalid Length
     let short_key = [0u8; 10];
     let encoded = BASE64.encode(short_key);
-    unsafe {
-        std::env::set_var(var_name, encoded);
-    }
+    unsafe { std::env::set_var(var_name, encoded); }
     match provider.get_master_key().await {
-        Err(KeyError::ConfigError(msg)) if msg.contains("Invalid key length") => {}
+        Err(KeyError::ConfigError(msg)) if msg.contains("Invalid key length") => {},
         _ => panic!("Expected ConfigError for invalid key length"),
     }
 
     // Cleanup
-    unsafe {
-        std::env::remove_var(var_name);
-    }
+    unsafe { std::env::remove_var(var_name); }
 }
 
 #[cfg(feature = "aws-kms")]

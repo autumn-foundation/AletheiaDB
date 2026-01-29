@@ -6,6 +6,7 @@ use std::env;
 /// Provider that loads the master key from a base64-encoded environment variable.
 pub struct EnvKeyProvider {
     var_name: String,
+    test_override: Option<String>,
 }
 
 impl EnvKeyProvider {
@@ -13,6 +14,16 @@ impl EnvKeyProvider {
     pub fn new(var_name: impl Into<String>) -> Self {
         Self {
             var_name: var_name.into(),
+            test_override: None,
+        }
+    }
+
+    /// Create a new EnvKeyProvider with a direct value for testing (bypassing env vars).
+    #[cfg(test)]
+    pub fn new_test(val: impl Into<String>) -> Self {
+        Self {
+            var_name: "TEST".to_string(),
+            test_override: Some(val.into()),
         }
     }
 }
@@ -20,7 +31,11 @@ impl EnvKeyProvider {
 #[async_trait]
 impl KeyProvider for EnvKeyProvider {
     async fn get_master_key(&self) -> Result<MasterKey, KeyError> {
-        let val = env::var(&self.var_name).map_err(|_| KeyError::NotFound)?;
+        let val = if let Some(ref v) = self.test_override {
+            v.clone()
+        } else {
+            env::var(&self.var_name).map_err(|_| KeyError::NotFound)?
+        };
 
         let bytes = BASE64
             .decode(val.trim())
