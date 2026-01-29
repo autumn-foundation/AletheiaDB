@@ -740,11 +740,11 @@ mod tests {
     #[test]
     fn test_append_async_mode() {
         let dir = tempdir().unwrap();
-        let config = ConcurrentWalSystemConfig::new(dir.path()).with_durability_mode(
-            DurabilityMode::Async {
+        let config = ConcurrentWalSystemConfig::new(dir.path())
+            .with_flush_interval_ms(10_000) // Explicitly set config interval to avoid racing with default 10ms
+            .with_durability_mode(DurabilityMode::Async {
                 flush_interval_ms: 10_000,
-            },
-        );
+            });
         let mut wal = ConcurrentWalSystem::new(config).unwrap();
 
         // Append several entries
@@ -755,8 +755,22 @@ mod tests {
 
         assert_eq!(wal.total_appends(), 10);
 
-        // Shutdown guarantees all pending entries are flushed.
-        // This avoids race conditions between manual flush and background flush thread.
+        // Explicit flush - ensure all entries are durable.
+        // We use a loop to wait for persistence because even with wal.flush(),
+        // the background thread might have stolen some entries and be in the process
+        // of flushing them (race condition).
+        let start = std::time::Instant::now();
+        while wal.total_flushed() < 10 {
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                break; // Let assertion fail with detailed error
+            }
+            // Trigger flush to ensure any remaining buffered entries are processed
+            let _ = wal.flush();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");
+
         wal.shutdown();
 
         assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");
