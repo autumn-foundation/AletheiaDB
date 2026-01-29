@@ -2987,8 +2987,8 @@ impl<'a> VectorIndexBuilder<'a> {
 mod tests {
     use super::*;
     use crate::api::transaction::ReadOps;
-    use crate::core::property::{PropertyMapBuilder, PropertyValue};
     use crate::core::GLOBAL_INTERNER;
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
 
     #[test]
     fn test_create_node() {

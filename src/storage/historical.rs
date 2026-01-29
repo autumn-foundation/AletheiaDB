@@ -2510,7 +2510,7 @@ mod tests {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::observer::{StorageEvent, StorageObserver};
     use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
+    use crate::core::temporal::TIMESTAMP_MAX;
 
     #[test]
     fn test_create_first_version() {

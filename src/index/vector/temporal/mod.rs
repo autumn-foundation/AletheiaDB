@@ -86,9 +86,6 @@ use crate::index::vector::hnsw::HnswIndex;
 use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
 use crate::utils::{Error, Result, TemporalError, VectorError};
 
-#[cfg(feature = "observability")]
-use tracing;
-
 // Submodules
 /// Configuration types for temporal vector indexing.
 pub mod config;

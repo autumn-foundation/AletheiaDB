@@ -841,9 +841,9 @@ mod iso8601_parsing {
 
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.as_ref().unwrap();
-        assert!(ctx.as_of.is_some());
+        assert!(ctx.as_of_tuple().is_some());
 
-        let (_valid_time, tx_time) = ctx.as_of.unwrap();
+        let (_valid_time, tx_time) = ctx.as_of_tuple().unwrap();
         assert_eq!(tx_time.wallclock(), 1705312800000000);
     }
 
@@ -854,7 +854,7 @@ mod iso8601_parsing {
 
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.as_ref().unwrap();
-        let (valid_time, _tx_time) = ctx.as_of.unwrap();
+        let (valid_time, _tx_time) = ctx.as_of_tuple().unwrap();
         assert_eq!(valid_time.wallclock(), 1705276800000000);
     }
 
@@ -867,7 +867,7 @@ mod iso8601_parsing {
 
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.as_ref().unwrap();
-        let (_valid_time, tx_time) = ctx.as_of.unwrap();
+        let (_valid_time, tx_time) = ctx.as_of_tuple().unwrap();
         assert_eq!(tx_time.wallclock(), 1705312800000000);
     }
 
@@ -879,7 +879,7 @@ mod iso8601_parsing {
 
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.as_ref().unwrap();
-        let (_valid_time, tx_time) = ctx.as_of.unwrap();
+        let (_valid_time, tx_time) = ctx.as_of_tuple().unwrap();
         assert_eq!(tx_time.wallclock(), 1705312800000000);
     }
 }
