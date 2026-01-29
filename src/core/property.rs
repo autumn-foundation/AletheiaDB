@@ -3255,17 +3255,19 @@ mod tests {
             PropertyValue::Float(123.456),
             PropertyValue::string("test string"),
             PropertyValue::bytes([1, 2, 3]),
-            PropertyValue::array(vec![
-                PropertyValue::Int(1),
-                PropertyValue::string("nested"),
-            ]),
+            PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::string("nested")]),
             PropertyValue::vector([1.0f32, 2.0, 3.0]),
         ];
 
         for value in values {
             let predicted = value.serialized_size();
             let actual = value.serialize().len();
-            assert_eq!(predicted, actual, "Size mismatch for {:?}", value.type_name());
+            assert_eq!(
+                predicted,
+                actual,
+                "Size mismatch for {:?}",
+                value.type_name()
+            );
         }
     }
 

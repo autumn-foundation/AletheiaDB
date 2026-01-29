@@ -1,8 +1,8 @@
 //! Serialization logic for WAL entries.
 
-use crate::utils::error::Result;
 use super::entry::{WalEntry, WalOperation};
 use crate::core::interning::InternedString;
+use crate::utils::error::Result;
 
 /// Helper to serialize an InternedString into the buffer (4-byte ID)
 #[inline(always)]
@@ -197,12 +197,12 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::wal::entry::LSN; // Imported only for tests
     use crate::core::EdgeId;
     use crate::core::NodeId;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::{BiTemporalInterval, Timestamp};
+    use crate::storage::wal::entry::LSN; // Imported only for tests
 
     /// Helper to create a test temporal interval
     fn test_temporal() -> BiTemporalInterval {
