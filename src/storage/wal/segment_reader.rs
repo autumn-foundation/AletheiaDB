@@ -5,18 +5,17 @@
 //!
 //! # Memory Efficiency
 //!
-//! This module uses memory-mapped I/O (`memmap2`) to read WAL segments efficiently.
-//! Instead of loading entire segment files (default 64MB) into memory, memory-mapped
-//! files allow the OS to handle paging automatically. This provides several benefits:
+//! This module reads WAL segments into memory buffers.
 //!
-//! - **Lower memory usage**: OS pages in data as needed, not all at once
-//! - **Better caching**: OS can cache frequently accessed pages
-//! - **Automatic eviction**: OS evicts pages under memory pressure
-//! - **Reduced recovery memory**: With 10 segments, peak memory drops from 640MB+ to O(working set)
+//! Previously, this module used memory-mapped I/O (`memmap2`), but this was removed
+//! to eliminate the risk of SIGBUS crashes if the file is truncated externally.
+//! Given that WAL segments are capped at a reasonable size (default 64MB, max 1GB),
+//! reading the file into memory is a safe and performant trade-off during recovery.
 //!
 //! See issue #216 for details.
 
 use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use crate::core::hlc::HybridTimestamp;
@@ -86,9 +85,7 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 
 /// Read WAL entries from a single segment file.
 ///
-/// This function uses memory-mapped I/O for efficient reading without loading
-/// the entire file into memory. The OS handles paging automatically, which is
-/// especially important for large segment files (default 64MB).
+/// This function reads the segment file into memory and parses entries.
 ///
 /// # Arguments
 ///
@@ -99,13 +96,14 @@ pub fn read_entries_from_dir(wal_dir: &Path, start_lsn: LSN) -> Result<Vec<WalEn
 ///
 /// A vector of WAL entries from this segment.
 ///
-/// # Memory Efficiency
+/// # Safety
 ///
-/// Uses `memmap2` for memory-mapped I/O. Peak memory usage is O(working set)
-/// rather than O(file size). See issue #216.
+/// This implementation avoids `mmap` to prevent SIGBUS crashes if the file is
+/// truncated externally. Instead, it reads the file into a heap-allocated buffer.
+/// File size is strictly validated to prevent memory exhaustion DoS.
 pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     // Open file, only treating NotFound as "empty" - all other errors are propagated
-    let file = match File::open(path) {
+    let mut file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
@@ -117,7 +115,7 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         }
     };
 
-    // Validate file size before mapping to prevent DoS attacks with huge files
+    // Validate file size before reading to prevent DoS attacks with huge files
     let metadata = file
         .metadata()
         .map_err(|e| StorageError::IoError(format!("Failed to get file metadata: {}", e)))?;
@@ -134,18 +132,12 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
         .into());
     }
 
-    // Memory-map the file for efficient reading without loading entire file into memory.
-    // SAFETY: We only read from the memory map, never write. The file is opened read-only.
-    // The mapping is valid for the lifetime of this function and is automatically unmapped
-    // when dropped. We have verified the file size above to prevent out-of-bounds reads.
-    let mmap = unsafe {
-        memmap2::Mmap::map(&file).map_err(|e| {
-            StorageError::IoError(format!("Failed to memory-map WAL segment: {}", e))
-        })?
-    };
-
-    // Use the memory-mapped region as a byte slice
-    let buffer = &mmap[..];
+    // Read file content into memory buffer.
+    // This avoids unsafe mmap usage and potential SIGBUS crashes.
+    let mut buffer = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut buffer).map_err(|e| {
+        StorageError::IoError(format!("Failed to read WAL segment: {}", e))
+    })?;
 
     let mut entries = Vec::new();
 
@@ -174,7 +166,7 @@ pub fn read_segment(path: &Path, start_lsn: LSN) -> Result<Vec<WalEntry>> {
     // Parse entries using the extracted helper function (issue #218)
     while offset < buffer.len() {
         // Try to parse an entry at the current offset
-        match parse_entry_at(buffer, offset, version) {
+        match parse_entry_at(&buffer, offset, version) {
             Ok((entry, bytes_consumed)) => {
                 // Only include entries >= start_lsn
                 if entry.lsn >= start_lsn {
