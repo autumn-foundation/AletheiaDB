@@ -5347,7 +5347,6 @@ mod simd_tests {
     }
 
     #[test]
-    #[should_panic]
     #[cfg(debug_assertions)]
     fn test_simd_length_mismatch_check() {
         // This test verifies that the debug_assert_eq! we added works.
@@ -5359,13 +5358,19 @@ mod simd_tests {
             let a = vec![1.0f32; 8];
             let b = vec![1.0f32; 4]; // Mismatched length
 
-            unsafe {
+            let result = std::panic::catch_unwind(|| unsafe {
                 // This should trigger the debug_assert_eq!
                 simd::dot_product_sse2(&a, &b);
-            }
+            });
+
+            assert!(
+                result.is_err(),
+                "The function should have panicked on length mismatch, but it did not."
+            );
         } else {
-            // If SSE2 not available, we can't test this, so panic to satisfy should_panic
-            panic!("Skipping SSE2 test, panicking to pass should_panic");
+            // If SSE2 is not available, we can't run the test.
+            // This is fine, the test will just pass without doing anything.
+            println!("Skipping SSE2 length mismatch test: SSE2 not supported on this machine.");
         }
     }
 }
