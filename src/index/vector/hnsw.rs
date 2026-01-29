@@ -1857,4 +1857,118 @@ mod tests {
         // Pass null pointer - should panic
         wrapper(valid_ptr, null_ptr);
     }
+
+    #[test]
+    fn test_mappings_integrity_checks() -> Result<()> {
+        use std::io::Write;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("test.mappings");
+
+        // Helper to create a valid mapping file
+        let create_valid_file = |path: &Path| -> Result<()> {
+            let file = std::fs::File::create(path).unwrap();
+            let mut writer = std::io::BufWriter::new(file);
+            let mut hasher = Hasher::new();
+
+            // Magic
+            writer.write_all(MAPPING_MAGIC).unwrap();
+            hasher.update(MAPPING_MAGIC);
+
+            // Version
+            writer.write_all(&[MAPPING_VERSION]).unwrap();
+            hasher.update(&[MAPPING_VERSION]);
+
+            // Count (1 entry)
+            let count = 1u64;
+            writer.write_all(&count.to_le_bytes()).unwrap();
+            hasher.update(&count.to_le_bytes());
+
+            // Data (1 entry)
+            let node_id = 1u64;
+            let key = 100u64;
+            writer.write_all(&node_id.to_le_bytes()).unwrap();
+            hasher.update(&node_id.to_le_bytes());
+            writer.write_all(&key.to_le_bytes()).unwrap();
+            hasher.update(&key.to_le_bytes());
+
+            // CRC
+            let crc = hasher.finalize();
+            writer.write_all(&crc.to_le_bytes()).unwrap();
+            writer.flush().unwrap();
+            Ok(())
+        };
+
+        // 1. Valid file should load correctly
+        create_valid_file(&file_path)?;
+        let result = load_mappings_with_integrity(&file_path);
+        assert!(result.is_ok());
+        let (id_map, _, _) = result.unwrap();
+        assert_eq!(id_map.len(), 1);
+
+        // 2. Corrupted Magic Bytes
+        {
+            let mut data = std::fs::read(&file_path).unwrap();
+            data[0] = b'X'; // Corrupt first byte
+            std::fs::write(&file_path, &data).unwrap();
+            let result = load_mappings_with_integrity(&file_path);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("bad magic bytes"));
+        }
+
+        // 3. Unsupported Version
+        create_valid_file(&file_path)?;
+        {
+            let mut data = std::fs::read(&file_path).unwrap();
+            data[4] = 99; // Corrupt version byte (offset 4)
+            std::fs::write(&file_path, &data).unwrap();
+            let result = load_mappings_with_integrity(&file_path);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Unsupported mapping file version"));
+        }
+
+        // 4. Truncated File (In header)
+        {
+            let data = vec![0u8; 3]; // Less than magic bytes
+            std::fs::write(&file_path, &data).unwrap();
+            let result = load_mappings_with_integrity(&file_path);
+            assert!(result.is_err());
+            // Should fail reading magic bytes
+        }
+
+        // 5. Truncated File (In data)
+        create_valid_file(&file_path)?;
+        {
+            let mut data = std::fs::read(&file_path).unwrap();
+            let len = data.len();
+            std::fs::write(&file_path, &data[..len - 2]).unwrap(); // Cut off part of CRC
+            let result = load_mappings_with_integrity(&file_path);
+            assert!(result.is_err());
+        }
+
+        // 6. CRC Mismatch
+        create_valid_file(&file_path)?;
+        {
+            let mut data = std::fs::read(&file_path).unwrap();
+            // Corrupt a data byte (offset 4+1+8 = 13 is start of data)
+            data[13] = data[13].wrapping_add(1);
+            std::fs::write(&file_path, &data).unwrap();
+            let result = load_mappings_with_integrity(&file_path);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("CRC mismatch"));
+        }
+
+        // 7. Trailing Data
+        create_valid_file(&file_path)?;
+        {
+            let mut data = std::fs::read(&file_path).unwrap();
+            data.push(0xFF); // Add extra byte at end
+            std::fs::write(&file_path, &data).unwrap();
+            let result = load_mappings_with_integrity(&file_path);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Unexpected data after CRC"));
+        }
+
+        Ok(())
+    }
 }
