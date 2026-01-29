@@ -1470,6 +1470,7 @@ impl PropertyMap {
     /// Calculate the serialized size by iterating over all properties (O(N)).
     /// Used for debug verification of the cached size.
     #[cfg(debug_assertions)]
+    #[allow(dead_code)]
     fn serialized_size_calculated(&self) -> usize {
         if self.is_empty() {
             return 4; // Count field
