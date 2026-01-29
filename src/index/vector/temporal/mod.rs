@@ -72,7 +72,7 @@
 //! - `docs/adr/0017-temporal-vector-strategy.md` - Design decisions
 //! - `docs/VECTOR_SEARCH_DESIGN.md` - Overall vector search architecture
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,29 +83,31 @@ use crate::core::id::NodeId;
 use crate::core::temporal::{TimeRange, Timestamp};
 use crate::core::vector::{cosine_similarity, euclidean_distance};
 use crate::index::vector::hnsw::HnswIndex;
-use crate::index::vector::{DistanceMetric, HnswConfig, TemporalSearchResults, VectorIndex};
+use crate::index::vector::{DistanceMetric, TemporalSearchResults, VectorIndex};
 use crate::utils::{Error, Result, TemporalError, VectorError};
 
 #[cfg(feature = "observability")]
 use tracing;
 
 // Submodules
+/// Configuration types for temporal vector indexing.
 pub mod config;
+/// Observers for reacting to storage events.
 pub mod observer;
 pub(crate) mod snapshot;
+/// Statistics and monitoring types.
 pub mod stats;
 
 // Re-exports
 pub use config::{DriftMetric, RetentionPolicy, SnapshotStrategy, TemporalVectorConfig};
 pub use observer::VectorIndexObserver;
-pub use stats::SnapshotInfo;
+pub use stats::{MemoryStats, SnapshotInfo};
 
 // Internal imports
 use config::{MAX_ACCUMULATED_CHANGES, MAX_SNAPSHOT_RETRIES};
 use snapshot::{
     DeltaIndex, SnapshotData, SnapshotIndex, SnapshotMetadata, VectorSnapshot, VectorState,
 };
-use stats::MemoryStats;
 
 /// # Thread Safety
 ///
@@ -1336,6 +1338,7 @@ impl TemporalVectorIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::vector::HnswConfig;
 
     fn create_test_index() -> Result<TemporalVectorIndex> {
         let config = TemporalVectorConfig {

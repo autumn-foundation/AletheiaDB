@@ -50,7 +50,7 @@ impl MemoryStats {
     /// Returns true if `changes_accumulated_size` exceeds 100,000 entries,
     /// which could indicate excessive memory usage.
     pub fn is_high_memory_usage(&self) -> bool {
-        self.changes_accumulated_size > 100_000
+        self.changes_accumulated_size > MAX_ACCUMULATED_CHANGES
     }
 
     /// Estimates memory overhead from accumulated changes in bytes.
