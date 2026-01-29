@@ -23,27 +23,33 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use gallifreydb::{GallifreyDB, properties};
+//! ```rust,no_run
+//! use gallifreydb::{GallifreyDB, properties, WriteOps};
 //!
-//! let db = GallifreyDB::new();
+//! # fn main() -> gallifreydb::Result<()> {
+//! let db = GallifreyDB::new()?;
 //!
 //! // Create a node
-//! let alice = db.create_node("Person", properties! {
+//! let alice_id = db.create_node("Person", properties! {
 //!     "name" => "Alice",
 //!     "age" => 30,
 //! })?;
 //!
+//! # let timestamp = gallifreydb::core::temporal::time::now();
 //! // Later, update a property
-//! db.update_node(alice, properties! {
-//!     "age" => 31,
+//! db.write(|tx| {
+//!     tx.update_node(alice_id, properties! {
+//!         "age" => 31,
+//!     })
 //! })?;
 //!
 //! // Query current state
-//! let current = db.get_node(alice)?;
+//! let current = db.get_node(alice_id)?;
 //!
 //! // Time-travel to see historical state
-//! let historical = db.as_of(timestamp).get_node(alice)?;
+//! let historical = db.get_node_at_time(alice_id, timestamp, timestamp)?;
+//! # Ok(())
+//! # }
 //! ```
 
 #![warn(missing_docs)]

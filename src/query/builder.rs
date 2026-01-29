@@ -6,7 +6,17 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # use gallifreydb::query::QueryBuilder;
+//! # use gallifreydb::core::NodeId;
+//! # use gallifreydb::core::temporal::time;
+//! # fn main() {
+//! # let alice_id = NodeId::new(1).unwrap();
+//! # let bob_id = NodeId::new(2).unwrap();
+//! # let node_id = NodeId::new(3).unwrap();
+//! # let embedding = vec![0.0; 384];
+//! # let valid_time = time::now();
+//! # let tx_time = time::now();
 //! // Build a graph + vector query
 //! let query = QueryBuilder::new()
 //!     .start(alice_id)
@@ -34,6 +44,7 @@
 //!         .label_filter("Person")
 //!         .finish()
 //!     .build();
+//! # }
 //! ```
 
 use std::marker::PhantomData;
@@ -184,7 +195,10 @@ impl QueryBuilder<state::Initial> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::index::vector::DistanceMetric;
+    /// # let embedding = vec![0.0; 384];
     /// let query = QueryBuilder::new()
     ///     .find_similar_builder(&embedding, 10)
     ///         .property("title_embedding")
@@ -289,7 +303,11 @@ impl QueryBuilder<state::HasNodes> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::core::NodeId;
+    /// # let alice_id = NodeId::new(1).unwrap();
+    /// # let embedding = vec![0.0; 384];
     /// let query = QueryBuilder::new()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
@@ -334,11 +352,19 @@ impl QueryBuilder<state::HasNodes> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::core::NodeId;
+    /// # fn main() -> gallifreydb::Result<()> {
+    /// # let db = GallifreyDB::new()?;
+    /// # let node_id = NodeId::new(1).unwrap();
+    /// # let bob_id = NodeId::new(2).unwrap();
     /// let results = db.query()
     ///     .start(node_id)
     ///     .similar_to(bob_id, 10)
-    ///     .execute()?;
+    ///     .execute(&db)?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # See Also
@@ -375,7 +401,13 @@ impl QueryBuilder<state::HasNodes> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::core::NodeId;
+    /// # fn main() -> gallifreydb::Result<()> {
+    /// # let db = GallifreyDB::new()?;
+    /// # let alice_id = NodeId::new(1).unwrap();
+    /// # let bob_id = NodeId::new(2).unwrap();
     /// // Find similar documents using custom embedding
     /// let results = db.query()
     ///     .start(alice_id)
@@ -383,7 +415,9 @@ impl QueryBuilder<state::HasNodes> {
     ///         .property("custom_embedding")
     ///         .label_filter("Document")
     ///         .finish()
-    ///     .execute()?;
+    ///     .execute(&db)?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Panics
@@ -443,7 +477,11 @@ impl QueryBuilder<state::HasTraversalResults> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::core::NodeId;
+    /// # let alice_id = NodeId::new(1).unwrap();
+    /// # let embedding = vec![0.0; 384];
     /// let query = QueryBuilder::new()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
@@ -556,7 +594,13 @@ impl<S: QueryState> QueryBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::core::NodeId;
+    /// # let db = GallifreyDB::new().unwrap();
+    /// # let node_id = NodeId::new(1).unwrap();
+    /// # let timestamp = gallifreydb::core::temporal::time::now();
+    /// # let tx_time = timestamp;
     /// let results = db.query()
     ///     .as_of(timestamp, tx_time)
     ///     .start(node_id)
@@ -593,10 +637,13 @@ impl<S: QueryState> QueryBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
     /// use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::core::NodeId;
     ///
-    /// let db = GallifreyDB::new();
+    /// # fn main() -> gallifreydb::Result<()> {
+    /// let db = GallifreyDB::new()?;
+    /// # let alice_id = NodeId::new(1).unwrap();
     /// let results = db.query()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
@@ -606,6 +653,8 @@ impl<S: QueryState> QueryBuilder<S> {
     ///     let row = row?;
     ///     println!("Found: {:?}", row.entity);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn execute(
         self,
@@ -648,7 +697,11 @@ impl<S: QueryState> QueryBuilder<S> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust,no_run
+/// # use gallifreydb::query::QueryBuilder;
+/// # use gallifreydb::core::NodeId;
+/// # let alice_id = NodeId::new(1).unwrap();
+/// # let bob_id = NodeId::new(2).unwrap();
 /// let query = QueryBuilder::new()
 ///     .start(alice_id)
 ///     .similar_to_builder(bob_id, 10)
@@ -686,10 +739,14 @@ impl<S: QueryState> SimilarToBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .similar_to_builder(node_id, 10)
+    /// ```rust,no_run
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::core::NodeId;
+    /// # let node_id = NodeId::new(1).unwrap();
+    /// # let builder = QueryBuilder::new().start(node_id);
+    /// builder.similar_to_builder(node_id, 10)
     ///     .property("custom_embedding")
-    ///     .finish()
+    ///     .finish();
     /// ```
     pub fn property(mut self, key: impl Into<String>) -> Self {
         self.property_key = Some(key.into());
@@ -700,10 +757,14 @@ impl<S: QueryState> SimilarToBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .similar_to_builder(node_id, 10)
+    /// ```rust,no_run
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::core::NodeId;
+    /// # let node_id = NodeId::new(1).unwrap();
+    /// # let builder = QueryBuilder::new().start(node_id);
+    /// builder.similar_to_builder(node_id, 10)
     ///     .label_filter("Document")
-    ///     .finish()
+    ///     .finish();
     /// ```
     pub fn label_filter(mut self, label: impl Into<String>) -> Self {
         self.label_filter = Some(label.into());
@@ -727,7 +788,11 @@ impl<S: QueryState> SimilarToBuilder<S> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust,no_run
+/// # use gallifreydb::query::QueryBuilder;
+/// # use gallifreydb::core::NodeId;
+/// # let alice_id = NodeId::new(1).unwrap();
+/// # let embedding = vec![0.0; 384];
 /// let query = QueryBuilder::new()
 ///     .start(alice_id)
 ///     .traverse("KNOWS")
@@ -760,10 +825,15 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .rank_by_similarity_builder(&embedding, 10)
+    /// ```rust,no_run
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::core::NodeId;
+    /// # let node_id = NodeId::new(1).unwrap();
+    /// # let embedding = vec![0.0; 384];
+    /// # let builder = QueryBuilder::new().start(node_id);
+    /// builder.rank_by_similarity_builder(&embedding, 10)
     ///     .property("custom_embedding")
-    ///     .finish()
+    ///     .finish();
     /// ```
     pub fn property(mut self, key: impl Into<String>) -> Self {
         self.property_key = Some(key.into());
@@ -786,7 +856,10 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust,no_run
+/// # use gallifreydb::query::QueryBuilder;
+/// # use gallifreydb::index::vector::DistanceMetric;
+/// # let embedding = vec![0.0; 384];
 /// let query = QueryBuilder::new()
 ///     .find_similar_builder(&embedding, 10)
 ///         .property("title_embedding")
@@ -820,10 +893,13 @@ impl FindSimilarBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .find_similar_builder(&embedding, 10)
+    /// ```rust,no_run
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # let embedding = vec![0.0; 384];
+    /// # let builder = QueryBuilder::new();
+    /// builder.find_similar_builder(&embedding, 10)
     ///     .property("body_embedding")
-    ///     .finish()
+    ///     .finish();
     /// ```
     pub fn property(mut self, key: impl Into<String>) -> Self {
         self.property_key = Some(key.into());
@@ -836,10 +912,14 @@ impl FindSimilarBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .find_similar_builder(&embedding, 10)
+    /// ```rust,no_run
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::index::vector::DistanceMetric;
+    /// # let embedding = vec![0.0; 384];
+    /// # let builder = QueryBuilder::new();
+    /// builder.find_similar_builder(&embedding, 10)
     ///     .metric(DistanceMetric::Euclidean)
-    ///     .finish()
+    ///     .finish();
     /// ```
     pub fn metric(mut self, metric: DistanceMetric) -> Self {
         self.metric = metric;

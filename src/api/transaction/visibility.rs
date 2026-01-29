@@ -710,10 +710,13 @@ impl TxVisibilityManager {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust
+    /// use gallifreydb::api::transaction::TxVisibilityManager;
+    ///
+    /// let manager = TxVisibilityManager::new();
     /// // Compress if commit log uses > 1MB
-    /// if db.should_compress_commit_log(1024 * 1024) {
-    ///     db.compress_commit_log();
+    /// if manager.should_compress_commit_log(1024 * 1024) {
+    ///     manager.compress_commit_log();
     /// }
     /// ```
     pub fn should_compress_commit_log(&self, threshold_bytes: usize) -> bool {
@@ -735,10 +738,13 @@ impl TxVisibilityManager {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust
+    /// use gallifreydb::api::transaction::TxVisibilityManager;
+    ///
+    /// let manager = TxVisibilityManager::new();
     /// // Compress if there are > 10K uncompressed exceptions
-    /// if db.should_compress_by_exception_count(10_000) {
-    ///     db.compress_commit_log();
+    /// if manager.should_compress_by_exception_count(10_000) {
+    ///     manager.compress_commit_log();
     /// }
     /// ```
     pub fn should_compress_by_exception_count(&self, threshold_exceptions: usize) -> bool {

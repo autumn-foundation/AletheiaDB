@@ -1,9 +1,21 @@
+//! Persistence mutation tracking.
+//!
+//! This module provides the `PersistenceTracker` which monitors database mutations
+//! (vector, graph, temporal) to determine when indexes should be persisted to disk.
+//! It serves as the input signal for the background persistence worker.
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Tracks persistence state for automatic index persistence.
 ///
-/// This struct maintains mutation counters and last persist timestamps for each index type,
-/// enabling policy-based automatic persistence triggers.
+/// This struct maintains atomic mutation counters and last persist timestamps for each
+/// index type (Vector, Graph, Temporal, Strings). It is shared between the main database
+/// operations (which increment counters) and the background persistence thread (which
+/// reads counters and resets them upon successful persistence).
+///
+/// # Concurrency
+///
+/// All fields are atomic, allowing lock-free tracking of high-frequency operations.
 #[derive(Debug)]
 pub(crate) struct PersistenceTracker {
     /// Vector index mutation counter (total across all vector properties)
