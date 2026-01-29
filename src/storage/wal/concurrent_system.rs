@@ -755,8 +755,26 @@ mod tests {
 
         assert_eq!(wal.total_appends(), 10);
 
-        // Shutdown guarantees all pending entries are flushed.
-        // This avoids race conditions between manual flush and background flush thread.
+        // Explicit flush - ensure all entries are durable.
+        // Note: The background flush thread may have already flushed some/all
+        // entries, so we check total_flushed() rather than the return stats.
+        // This makes the test deterministic regardless of timing.
+        wal.flush().unwrap();
+
+        // Wait for flush to complete (handle race with background thread)
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(5);
+        while wal.total_flushed() < 10 {
+            // LCOV_EXCL_START
+            if start.elapsed() > timeout {
+                break;
+            }
+            // LCOV_EXCL_STOP
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");
+
         wal.shutdown();
 
         assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");

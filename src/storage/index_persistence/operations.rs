@@ -252,7 +252,7 @@ pub(crate) fn load_vector_indexes(
 pub(crate) fn persist_graph_index(
     current: &Arc<CurrentStorage>,
     manager: &Arc<IndexPersistenceManager>,
-    tracker: &Arc<PersistenceTracker>,
+    tracker: Option<&Arc<PersistenceTracker>>,
 ) -> Result<()> {
     use crate::storage::index_persistence::graph::{
         new_graph_index_data, persist_property_map, save_graph_index,
@@ -315,7 +315,9 @@ pub(crate) fn persist_graph_index(
         StorageError::PersistenceError(format!("Failed to save graph index: {}", e))
     })?;
 
-    tracker.reset_graph_mutations();
+    if let Some(tracker) = tracker {
+        tracker.reset_graph_mutations();
+    }
     Ok(())
 }
 
@@ -410,7 +412,7 @@ pub(crate) fn persist_all_indexes(
     if let Err(e) = persist_string_interner(manager, tracker) {
         eprintln!("Failed to persist string interner: {}", e);
     }
-    if let Err(e) = persist_graph_index(current, manager, tracker) {
+    if let Err(e) = persist_graph_index(current, manager, Some(tracker)) {
         eprintln!("Failed to persist graph index: {}", e);
     }
     if let Err(e) = persist_temporal_index(historical, temporal_indexes, manager, tracker) {

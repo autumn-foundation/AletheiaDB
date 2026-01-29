@@ -878,6 +878,42 @@ impl HistoricalStorage {
         self.reconstruct_node_properties_with_depth(version_id, 0)
     }
 
+    /// Get a node version from hot or cold storage.
+    ///
+    /// This is a helper for reconstruction that checks hot storage first (fast path),
+    /// then falls back to tiered storage for cold data access.
+    ///
+    /// Returns `Err(VersionNotFound)` if the version doesn't exist in any tier.
+    #[inline]
+    fn get_node_version_any_tier(&self, version_id: VersionId) -> Result<Arc<NodeVersion>> {
+        if let Some(v) = self.node_versions.get(&version_id) {
+            // Fast path: version in hot storage
+            Ok(Arc::new(v.clone()))
+        } else {
+            // Slow path: check cold storage via tiered layer
+            self.get_node_version_tiered(version_id)?
+                .ok_or(StorageError::VersionNotFound(version_id).into())
+        }
+    }
+
+    /// Get an edge version from hot or cold storage.
+    ///
+    /// This is a helper for reconstruction that checks hot storage first (fast path),
+    /// then falls back to tiered storage for cold data access.
+    ///
+    /// Returns `Err(VersionNotFound)` if the version doesn't exist in any tier.
+    #[inline]
+    fn get_edge_version_any_tier(&self, version_id: VersionId) -> Result<Arc<EdgeVersion>> {
+        if let Some(v) = self.edge_versions.get(&version_id) {
+            // Fast path: version in hot storage
+            Ok(Arc::new(v.clone()))
+        } else {
+            // Slow path: check cold storage via tiered layer
+            self.get_edge_version_tiered(version_id)?
+                .ok_or(StorageError::VersionNotFound(version_id).into())
+        }
+    }
+
     /// Iterative property reconstruction helper for nodes (Issue #211).
     ///
     /// This function implements the core iterative reconstruction algorithm.
@@ -920,10 +956,7 @@ impl HistoricalStorage {
                 .into());
             }
 
-            let version = self
-                .node_versions
-                .get(&current_id)
-                .ok_or(StorageError::VersionNotFound(current_id))?;
+            let version = self.get_node_version_any_tier(current_id)?;
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;
@@ -956,10 +989,7 @@ impl HistoricalStorage {
                     reason: "Empty version chain during reconstruction".to_string(),
                 })?;
 
-        let anchor_version = self
-            .node_versions
-            .get(&anchor_id)
-            .ok_or(StorageError::VersionNotFound(anchor_id))?;
+        let anchor_version = self.get_node_version_any_tier(anchor_id)?;
 
         let mut properties = match &anchor_version.data {
             VersionData::Anchor { properties, .. } => properties.clone(),
@@ -976,10 +1006,7 @@ impl HistoricalStorage {
         // Apply deltas in forward order (reverse of collection order)
         // Skip the last element (anchor) since we already have its properties
         for &vid in version_ids.iter().rev().skip(1) {
-            let version = self
-                .node_versions
-                .get(&vid)
-                .ok_or(StorageError::VersionNotFound(vid))?;
+            let version = self.get_node_version_any_tier(vid)?;
 
             match &version.data {
                 VersionData::Delta { delta } => {
@@ -1027,10 +1054,7 @@ impl HistoricalStorage {
                 .into());
             }
 
-            let version = self
-                .edge_versions
-                .get(&current_id)
-                .ok_or(StorageError::VersionNotFound(current_id))?;
+            let version = self.get_edge_version_any_tier(current_id)?;
 
             let is_anchor = version.is_anchor();
             let prev_id = version.prev_version;
@@ -1063,10 +1087,7 @@ impl HistoricalStorage {
                     reason: "Empty version chain during reconstruction".to_string(),
                 })?;
 
-        let anchor_version = self
-            .edge_versions
-            .get(&anchor_id)
-            .ok_or(StorageError::VersionNotFound(anchor_id))?;
+        let anchor_version = self.get_edge_version_any_tier(anchor_id)?;
 
         let mut properties = match &anchor_version.data {
             VersionData::Anchor { properties, .. } => properties.clone(),
@@ -1083,10 +1104,7 @@ impl HistoricalStorage {
         // Apply deltas in forward order (reverse of collection order)
         // Skip the last element (anchor) since we already have its properties
         for &vid in version_ids.iter().rev().skip(1) {
-            let version = self
-                .edge_versions
-                .get(&vid)
-                .ok_or(StorageError::VersionNotFound(vid))?;
+            let version = self.get_edge_version_any_tier(vid)?;
 
             match &version.data {
                 VersionData::Delta { delta } => {
@@ -2324,6 +2342,35 @@ impl HistoricalStorage {
             .collect();
 
         HistoricalStorageSnapshot::new(lsn, node_versions, edge_versions)
+    }
+
+    /// **Test-only helper**: Remove a node version from hot storage.
+    ///
+    /// This is used in tests to simulate version migration to cold storage.
+    /// In production, versions are migrated by the `MigrationService` which
+    /// atomically moves versions from hot to cold storage.
+    ///
+    /// # Safety
+    /// This method directly modifies internal state and should only be used
+    /// in tests. It does not update caches or notify observers.
+    #[doc(hidden)]
+    pub fn __test_remove_node_version(&mut self, version_id: VersionId) {
+        self.node_versions.remove(&version_id);
+    }
+
+    /// **Test-only helper**: Clear the property reconstruction cache.
+    ///
+    /// This is used in tests to force actual property reconstruction instead
+    /// of returning cached values. This is essential for testing that reconstruction
+    /// works correctly when versions are in cold storage.
+    ///
+    /// # Safety
+    /// This method clears caches and should only be used in tests where you
+    /// want to verify reconstruction behavior without cache interference.
+    #[doc(hidden)]
+    pub fn __test_clear_property_cache(&self) {
+        self.node_property_cache.clear();
+        self.node_anchor_cache.clear();
     }
 }
 
