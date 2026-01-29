@@ -439,6 +439,29 @@ impl PropertyValue {
         buffer
     }
 
+    /// Calculate the serialized size of this PropertyValue in bytes.
+    ///
+    /// This is useful for pre-allocating buffers before serialization.
+    pub fn serialized_size(&self) -> usize {
+        match self {
+            PropertyValue::Null => 1,
+            PropertyValue::Bool(_) => 2,
+            PropertyValue::Int(_) => 9,
+            PropertyValue::Float(_) => 9,
+            PropertyValue::String(s) => 1 + 4 + s.len(),
+            PropertyValue::Bytes(b) => 1 + 4 + b.len(),
+            PropertyValue::Array(arr) => {
+                let mut size = 1 + 4;
+                for item in arr.iter() {
+                    size += item.serialized_size();
+                }
+                size
+            }
+            PropertyValue::Vector(v) => 1 + 4 + v.len() * 4,
+            PropertyValue::SparseVector(sv) => 1 + 4 + 4 + sv.nnz() * 8,
+        }
+    }
+
     /// Serialize this PropertyValue into an existing buffer.
     ///
     /// This is more efficient when serializing multiple values as it avoids
@@ -1306,6 +1329,25 @@ impl PropertyMap {
         Ok(buffer)
     }
 
+    /// Calculate the serialized size of this PropertyMap in bytes.
+    ///
+    /// This is useful for pre-allocating buffers before serialization.
+    pub fn serialized_size(&self) -> usize {
+        let mut size = 4; // count
+        for (key, value) in self.inner.iter() {
+            // Key size: length (4) + bytes
+            if let Some(key_str) = GLOBAL_INTERNER.resolve(*key) {
+                size += 4 + key_str.as_bytes().len();
+            } else {
+                // Should not happen, but assume minimum overhead if key missing (safe fallback)
+                size += 4;
+            }
+            // Value size
+            size += value.serialized_size();
+        }
+        size
+    }
+
     /// Serialize this PropertyMap into an existing buffer.
     ///
     /// # Errors
@@ -1316,22 +1358,18 @@ impl PropertyMap {
         buffer.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
         for (key, value) in self.inner.iter() {
             // Serialize key: resolve InternedString to actual string
-            // Use with_str to avoid Arc cloning overhead
-            GLOBAL_INTERNER
-                .with_str(*key, |key_str| {
-                    let key_bytes = key_str.as_bytes();
-                    buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
-                    buffer.extend_from_slice(key_bytes);
-                })
-                .ok_or_else(|| {
-                    crate::utils::error::Error::Storage(StorageError::InconsistentState {
+            let key_str =
+                GLOBAL_INTERNER
+                    .resolve(*key)
+                    .ok_or_else(|| StorageError::InconsistentState {
                         reason: format!(
                             "PropertyKey {} not found in interner - data corruption detected",
                             key.as_u32()
                         ),
-                    })
-                })?;
-
+                    })?;
+            let key_bytes = key_str.as_bytes();
+            buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(key_bytes);
             // Serialize value
             value.serialize_into(buffer);
         }
@@ -1416,27 +1454,6 @@ impl PropertyMap {
             size += value.estimated_heap_size();
         }
 
-        size
-    }
-
-    /// Calculate the number of bytes required for serialization.
-    ///
-    /// This is used to pre-allocate buffers for serialization, avoiding reallocation
-    /// overhead during high-throughput operations.
-    pub fn serialized_size(&self) -> usize {
-        if self.is_empty() {
-            return 4; // Count field
-        }
-
-        let mut size = 4; // Count field
-        for (key, value) in self.inner.iter() {
-            // Key: length prefix (4) + key bytes
-            // Use with_str to avoid Arc cloning overhead (Issue #405)
-            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256); // Conservative fallback if key missing (corruption)
-
-            size += 4 + key_len;
-            size += value.serialized_size();
-        }
         size
     }
 }
@@ -2673,36 +2690,6 @@ mod tests {
                 );
             }
             _ => panic!("Expected StorageError::InconsistentState"),
-        }
-    }
-
-    #[test]
-    fn test_serialize_with_invalid_key() {
-        // This explicitly verifies the error path when the interner is missing a key
-        // Uses the same logic as test_invalid_interned_string_serialization but
-        // ensures the new `ok_or_else` path is hit correctly.
-
-        let invalid_key = InternedString::from_raw(888888);
-        let mut inner_map = HashMap::new();
-        inner_map.insert(invalid_key, PropertyValue::Bool(true));
-        let map = PropertyMap {
-            inner: Arc::new(inner_map),
-        };
-
-        let mut buffer = Vec::new();
-        let result = map.serialize_into(&mut buffer);
-
-        assert!(result.is_err(), "Should return error for missing key");
-        match result {
-            Err(crate::utils::error::Error::Storage(StorageError::InconsistentState {
-                reason,
-            })) => {
-                assert!(
-                    reason.contains("888888"),
-                    "Error message should contain the invalid key ID"
-                );
-            }
-            _ => panic!("Expected InconsistentState error"),
         }
     }
 
