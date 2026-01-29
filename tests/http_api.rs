@@ -36,7 +36,7 @@ mod tests {
 
         let resp = test::call_service(&app, req).await;
 
-        // Assert success - this should FAIL initially (404)
+        // Assert success: endpoint should return 200 OK
         assert_eq!(resp.status().as_u16(), 200, "Create node request failed");
 
         let body: serde_json::Value = test::read_body_json(resp).await;
