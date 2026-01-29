@@ -26,3 +26,6 @@ Created `scripts/security_audit.sh` to automatically check for and run `cargo-au
 ## Open Risks
 - `usearch` FFI boundaries rely on the C++ library behaving correctly regarding pointer validity. We added panic guards for null pointers, but full memory safety depends on `usearch` correctness.
 - The `usearch` dependency points to a fork (`madmax983/USearch`). This fork contains Rust-specific fixes (move semantics) not yet in upstream. We have pinned the specific commit to ensure stability, but future upstream security patches will need manual cherry-picking.
+## 2026-03-22 - [Integer Overflow]
+**Threat:** Malicious mapping files with forged counts causing integer overflow in size calculations, allowing validation bypass.
+**Defense:** Used `checked_mul` and `checked_add` in `load_mappings_with_integrity` and `save_internal` to prevent overflow and reject invalid files.
