@@ -1,5 +1,4 @@
 use super::*;
-use crate::api::transaction::ReadOps;
 use crate::core::property::PropertyMapBuilder;
 
 #[test]
