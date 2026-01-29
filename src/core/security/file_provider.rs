@@ -2,12 +2,19 @@ use super::{KeyProvider, MasterKey, KeyError};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use zeroize::Zeroizing;
-use std::fs;
-use argon2::Argon2;
+use tokio::fs;
+use argon2::{Argon2, Params, Algorithm, Version};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce
 };
+
+const SALT_SIZE: usize = 16;
+const NONCE_SIZE: usize = 12;
+const TAG_SIZE: usize = 16;
+// Key is 32 bytes
+const HEADER_SIZE: usize = SALT_SIZE + NONCE_SIZE;
+const MIN_FILE_SIZE: usize = HEADER_SIZE + TAG_SIZE;
 
 /// Provider that loads the master key from an encrypted file.
 ///
@@ -35,7 +42,7 @@ impl FileKeyProvider {
 impl KeyProvider for FileKeyProvider {
     async fn get_master_key(&self) -> Result<MasterKey, KeyError> {
         // 1. Read file
-        let data = fs::read(&self.path).map_err(|e| {
+        let data = fs::read(&self.path).await.map_err(|e: std::io::Error| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 KeyError::NotFound
             } else {
@@ -43,40 +50,43 @@ impl KeyProvider for FileKeyProvider {
             }
         })?;
 
-        // 2. Validate length (Salt 16 + Nonce 12 + Tag 16 + Data 32 = 76 bytes)
-        // ChaCha20Poly1305 tag is 16 bytes.
-        if data.len() < 16 + 12 + 16 {
+        // 2. Validate length
+        if data.len() < MIN_FILE_SIZE {
              return Err(KeyError::ConfigError("Key file corrupted (too short)".to_string()));
         }
 
-        let salt = &data[0..16];
-        let nonce_bytes = &data[16..28];
-        let ciphertext = &data[28..];
+        let salt = &data[0..SALT_SIZE];
+        let nonce_bytes = &data[SALT_SIZE..HEADER_SIZE];
+        let ciphertext = &data[HEADER_SIZE..];
 
         // 3. Derive KEK
+        // Use explicitly configured params: 64MB memory, 3 iterations, 4 threads
+        let params = Params::new(64 * 1024, 3, 4, Some(32))
+            .map_err(|e| KeyError::ConfigError(format!("Invalid Argon2 params: {}", e)))?;
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+
         let mut kek = Zeroizing::new([0u8; 32]);
-        let argon2 = Argon2::default();
-        if argon2.hash_password_into(
+        argon2.hash_password_into(
             self.passphrase.as_bytes(),
             salt,
             &mut *kek
-        ).is_err() {
-            return Err(KeyError::DecryptionFailed);
-        }
+        ).map_err(|e| KeyError::ConfigError(format!("Argon2 KDF failed: {}", e)))?;
 
         // 4. Decrypt
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&*kek));
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        let plaintext = cipher.decrypt(nonce, ciphertext)
-            .map_err(|_| KeyError::DecryptionFailed)?;
+        let plaintext = Zeroizing::new(
+            cipher.decrypt(nonce, ciphertext)
+                .map_err(|_| KeyError::DecryptionFailed)?
+        );
 
         if plaintext.len() != 32 {
             return Err(KeyError::ConfigError("Decrypted key has invalid length".to_string()));
         }
 
         let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&plaintext);
+        key_bytes.copy_from_slice(&*plaintext);
 
         Ok(MasterKey::new(key_bytes, 1))
     }

@@ -3,7 +3,8 @@
 use super::{KeyProvider, MasterKey, KeyError};
 use async_trait::async_trait;
 use std::path::PathBuf;
-use std::fs;
+use tokio::fs;
+use zeroize::Zeroizing;
 use aws_sdk_kms::types::DataKeySpec;
 use aws_sdk_kms::primitives::Blob;
 
@@ -105,13 +106,13 @@ impl KeyProvider for AwsKmsProvider {
         // 1. Check if storage file exists
         if self.storage_path.exists() {
             // Load and decrypt
-            let ciphertext = fs::read(&self.storage_path).map_err(|e| {
+            let ciphertext = fs::read(&self.storage_path).await.map_err(|e| {
                 KeyError::ConfigError(format!("Failed to read key file: {}", e))
             })?;
 
-            let plaintext = self.ops.decrypt(&ciphertext).await.map_err(|e| {
+            let plaintext = Zeroizing::new(self.ops.decrypt(&ciphertext).await.map_err(|e| {
                 KeyError::ProviderError(e)
-            })?;
+            })?);
 
             if plaintext.len() != 32 {
                  // AES-256 is 32 bytes
@@ -119,7 +120,7 @@ impl KeyProvider for AwsKmsProvider {
             }
 
             let mut key = [0u8; 32];
-            key.copy_from_slice(&plaintext);
+            key.copy_from_slice(&*plaintext);
 
             Ok(MasterKey::new(key, 1))
         } else {
@@ -128,17 +129,19 @@ impl KeyProvider for AwsKmsProvider {
                 KeyError::ProviderError(e)
             })?;
 
+            let plaintext = Zeroizing::new(plaintext);
+
              if plaintext.len() != 32 {
                  return Err(KeyError::ConfigError("Generated key has invalid length".to_string()));
             }
 
             // Save ciphertext
-            fs::write(&self.storage_path, &ciphertext).map_err(|e| {
+            fs::write(&self.storage_path, &ciphertext).await.map_err(|e| {
                  KeyError::ConfigError(format!("Failed to write key file: {}", e))
             })?;
 
             let mut key = [0u8; 32];
-            key.copy_from_slice(&plaintext);
+            key.copy_from_slice(&*plaintext);
 
             Ok(MasterKey::new(key, 1))
         }

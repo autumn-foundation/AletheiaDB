@@ -61,7 +61,8 @@ vaultrs = { version = "0.7", optional = true }
 
 # Embedding generation dependencies (all optional via feature flags)
 # Async runtime for API-based embedding providers
-tokio = { version = "1.35", features = ["rt-multi-thread", "macros"], optional = true }
+# Added 'fs' and 'io-util' for async file I/O in key providers
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "fs", "io-util"], optional = true }
 async-trait = "0.1"
 
 # HTTP client for API-based providers (OpenAI, HuggingFace, Ollama) and sharding RPC
@@ -87,8 +88,9 @@ criterion = "0.5"
 proptest = "1.4"
 rand = "0.8"
 tempfile = "3.8"
+serial_test = "3.2"
 # Tokio for async tests
-tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util"] }
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "test-util", "fs", "io-util"] }
 # Mutex for serializing env var tests
 lazy_static = "1.4"
 
