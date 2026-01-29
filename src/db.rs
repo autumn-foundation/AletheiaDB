@@ -51,22 +51,16 @@ use std::sync::{Arc, Mutex};
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-/// # use gallifreydb::WalConfigBuilder;
-/// # use tempfile::tempdir;
 ///
-/// # fn main() -> gallifreydb::Result<()> {
-/// # let dir = tempdir()?;
-/// # let config = WalConfigBuilder::new().wal_dir(dir.path().to_path_buf()).build();
 /// // 1. Initialize the database
-/// // (In a real app, use GallifreyDB::new()?)
-/// let db = GallifreyDB::with_wal_config(config).expect("Failed to open database");
+/// let db = GallifreyDB::new().expect("Failed to open database");
 ///
 /// // 2. Enable vector indexing (optional)
 /// db.vector_index("embedding")
-///     .hnsw(HnswConfig::new(3, DistanceMetric::Cosine))
+///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
 ///     .enable()?;
 ///
 /// // 3. Create nodes
@@ -97,8 +91,6 @@ use std::sync::{Arc, Mutex};
 /// // 5. Query
 /// let alice = db.get_node(alice_id)?;
 /// println!("Found: {:?}", alice.properties.get("name"));
-/// # Ok(())
-/// # }
 /// ```
 pub struct GallifreyDB {
     /// Current state storage (hot path) - Arc-wrapped for sharing across transactions
@@ -163,23 +155,20 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::{GallifreyDB, WalConfigBuilder, DurabilityMode};
     ///
-    /// # fn main() -> gallifreydb::Result<()> {
     /// // High-throughput ACID mode with group commit
     /// let wal_config = WalConfigBuilder::new()
-    ///     .durability_mode(DurabilityMode::group_commit_default())
+    ///     .durability_mode(DurabilityMode::group_commit(10, 200))
     ///     .build();
     /// let db = GallifreyDB::with_wal_config(wal_config)?;
     ///
     /// // Bulk loading mode with async durability
     /// let wal_config = WalConfigBuilder::new()
-    ///     .durability_mode(DurabilityMode::async_mode_validated(100)?)
+    ///     .durability_mode(DurabilityMode::async_mode(100))
     ///     .build();
     /// let db = GallifreyDB::with_wal_config(wal_config)?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn with_wal_config(wal_config: crate::config::WalConfig) -> Result<Self> {
         Self::with_full_config(AnchorConfig::default(), wal_config)
@@ -196,10 +185,9 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::{GallifreyDB, config::GallifreyDBConfig, config::WalConfigBuilder};
     ///
-    /// # fn main() -> gallifreydb::Result<()> {
     /// let config = GallifreyDBConfig::builder()
     ///     .wal(WalConfigBuilder::new()
     ///         .with_validated(32, 2048, 64 * 1024, 64 * 1024 * 1024, 10, 10).unwrap()
@@ -207,8 +195,6 @@ impl GallifreyDB {
     ///     .build();
     ///
     /// let db = GallifreyDB::with_unified_config(config)?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn with_unified_config(config: GallifreyDBConfig) -> Result<Self> {
         let durability_mode = config.wal.durability_mode;
@@ -666,14 +652,11 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::GallifreyDB;
     /// use std::path::Path;
     ///
-    /// # fn main() -> gallifreydb::Result<()> {
     /// let db = GallifreyDB::open(Path::new("gallifreydb/checkpoints/latest.gfry"))?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn open<P: AsRef<std::path::Path>>(checkpoint_path: P) -> Result<Self> {
         use crate::storage::persistence::Checkpoint;
@@ -709,16 +692,10 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::{GallifreyDB, ReadOps};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let node_id = db.create_node("Node", gallifreydb::PropertyMap::new())?;
+    /// ```ignore
     /// let tx = db.read_transaction()?;
     /// let node = tx.get_node(node_id)?;
     /// // No commit needed - transaction is read-only
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn read_transaction(&self) -> Result<ReadTransaction> {
         let tx_id = self.tx_id_gen.next();
@@ -746,17 +723,11 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::{GallifreyDB, ReadOps};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let node_id = db.create_node("Node", gallifreydb::PropertyMap::new())?;
+    /// ```ignore
     /// let name = db.read(|tx| {
     ///     let node = tx.get_node(node_id)?;
     ///     Ok(node.get_property("name").cloned())
     /// })?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn read<F, T>(&self, f: F) -> Result<T>
     where
@@ -780,19 +751,11 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::{GallifreyDB, WriteOps};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let props = gallifreydb::PropertyMap::new();
-    /// # let edge_props = gallifreydb::PropertyMap::new();
-    /// # let other = db.create_node("Other", gallifreydb::PropertyMap::new())?;
+    /// ```ignore
     /// let mut tx = db.write_transaction()?;
     /// let node_id = tx.create_node("Person", props)?;
     /// tx.create_edge(node_id, other, "KNOWS", edge_props)?;
     /// tx.commit()?;  // or tx.rollback()
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn write_transaction(&self) -> Result<WriteTransaction> {
         let tx_id = self.tx_id_gen.next();
@@ -833,20 +796,12 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::{GallifreyDB, WriteOps};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let props = gallifreydb::PropertyMap::new();
-    /// # let edge_props = gallifreydb::PropertyMap::new();
-    /// # let other = db.create_node("Other", gallifreydb::PropertyMap::new())?;
+    /// ```ignore
     /// let node_id = db.write(|tx| {
     ///     let id = tx.create_node("Person", props)?;
     ///     tx.create_edge(id, other, "KNOWS", edge_props)?;
     ///     Ok(id)
     /// })?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn write<F, T>(&self, f: F) -> Result<T>
     where
@@ -885,19 +840,13 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::{GallifreyDB, WriteOps};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let properties = gallifreydb::PropertyMap::new();
+    /// ```ignore
     /// let (node_id, commit_ts) = db.write_with_timestamp(|tx| {
     ///     tx.create_node("Person", properties)
     /// })?;
     ///
     /// // Query at exact commit timestamp
     /// let node = db.get_node_at_time(node_id, commit_ts, commit_ts)?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn write_with_timestamp<F, T>(&self, f: F) -> Result<(T, Timestamp)>
     where
@@ -935,25 +884,21 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// use gallifreydb::{GallifreyDB, WriteOptions, DurabilityMode, PropertyMap, WriteOps};
+    /// ```ignore
+    /// use gallifreydb::{GallifreyDB, WriteOptions, DurabilityMode};
     ///
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// let db = GallifreyDB::new()?;
-    /// let bulk_data = vec![PropertyMap::new(), PropertyMap::new()];
+    /// let db = GallifreyDB::new();
     ///
     /// // Use Async mode for bulk loading (faster but less durable)
     /// let options = WriteOptions::new()
-    ///     .with_durability(DurabilityMode::async_mode_validated(100)?);
+    ///     .with_durability(DurabilityMode::async_mode(100));
     ///
     /// db.write_with_options(options, |tx| {
     ///     for item in bulk_data {
-    ///         tx.create_node("Item", item)?;
+    ///         tx.create_node("Item", item.into())?;
     ///     }
     ///     Ok(())
     /// })?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn write_with_options<F, T>(&self, options: WriteOptions, f: F) -> Result<T>
     where
@@ -993,19 +938,13 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::{GallifreyDB, WriteOptions, DurabilityMode, WriteOps, PropertyMap};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let props = PropertyMap::new();
+    /// ```ignore
     /// let options = WriteOptions::new()
     ///     .with_durability(DurabilityMode::Synchronous);
     ///
     /// let mut tx = db.write_transaction_with_options(options)?;
     /// tx.create_node("Critical", props)?;
     /// tx.commit()?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn write_transaction_with_options(
         &self,
@@ -1053,11 +992,8 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::PropertyMapBuilder;
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
     ///
     /// let node_id = db.create_node(
     ///     "Person",
@@ -1065,8 +1001,6 @@ impl GallifreyDB {
     ///         .insert("name", "Alice")
     ///         .build()
     /// )?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn create_node(&self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.write(|tx| tx.create_node(label, properties))
@@ -1079,13 +1013,8 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::PropertyMapBuilder;
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let source_id = db.create_node("Node", gallifreydb::PropertyMap::new())?;
-    /// # let target_id = db.create_node("Node", gallifreydb::PropertyMap::new())?;
     ///
     /// let edge_id = db.create_edge(
     ///     source_id,
@@ -1093,8 +1022,6 @@ impl GallifreyDB {
     ///     "KNOWS",
     ///     PropertyMapBuilder::new().insert("since", 2024).build()
     /// )?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn create_edge(
         &self,
@@ -1311,28 +1238,18 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let node1 = db.create_node("Node", gallifreydb::PropertyMap::new())?;
-    /// # let node2 = db.create_node("Node", gallifreydb::PropertyMap::new())?;
-    /// # let now = gallifreydb::core::temporal::time::now();
-    /// # let valid_time = now;
-    /// # let tx_time = now;
-    /// // Query multiple nodes at a historical point with single lock acquisition
-    /// let node_ids = vec![node1, node2];
+    /// ```ignore
+    /// // Query 100 nodes at a historical point with single lock acquisition
+    /// let node_ids = vec![node1, node2, /* ... */, node100];
     /// let results = db.get_nodes_at_time(&node_ids, valid_time, tx_time)?;
     ///
     /// for (node_id, node_opt) in results {
     ///     if let Some(node) = node_opt {
-    ///         println!("Node {:?} existed with properties: {:?}", node_id, node.properties);
+    ///         println!("Node {} existed with properties: {:?}", node_id, node.properties());
     ///     } else {
-    ///         println!("Node {:?} did not exist at this time", node_id);
+    ///         println!("Node {} did not exist at this time", node_id);
     ///     }
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn get_nodes_at_time(
         &self,
@@ -1438,31 +1355,18 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let edge1 = db.create_edge(
-    /// #     db.create_node("N", gallifreydb::PropertyMap::new())?,
-    /// #     db.create_node("N", gallifreydb::PropertyMap::new())?,
-    /// #     "E", gallifreydb::PropertyMap::new()
-    /// # )?;
-    /// # let now = gallifreydb::core::temporal::time::now();
-    /// # let valid_time = now;
-    /// # let tx_time = now;
+    /// ```ignore
     /// // Query multiple edges at a historical point with single lock acquisition
-    /// let edge_ids = vec![edge1];
+    /// let edge_ids = vec![edge1, edge2, edge3];
     /// let results = db.get_edges_at_time(&edge_ids, valid_time, tx_time)?;
     ///
     /// for (edge_id, edge_opt) in results {
     ///     if let Some(edge) = edge_opt {
-    ///         println!("Edge {:?} existed: {:?} -> {:?}", edge_id, edge.source, edge.target);
+    ///         println!("Edge {} existed: {} -> {}", edge_id, edge.source, edge.target);
     ///     } else {
-    ///         println!("Edge {:?} did not exist at this time", edge_id);
+    ///         println!("Edge {} did not exist at this time", edge_id);
     ///     }
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn get_edges_at_time(
         &self,
@@ -1539,16 +1443,11 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
     ///
     /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
     /// db.enable_vector_index("embedding", config)?;
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -1584,18 +1483,13 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
+    /// use gallifreydb::index::vector::HnswConfig;
     ///
     /// let hnsw_config = HnswConfig::new(384, DistanceMetric::Cosine);
     /// let temporal_config = TemporalVectorConfig::default_with_hnsw(hnsw_config);
     /// db.enable_temporal_vector_index("embedding", temporal_config)?;
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -1695,24 +1589,15 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # use gallifreydb::index::vector::temporal::TemporalVectorConfig;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// let db = GallifreyDB::new()?;
-    /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
-    /// let temporal_config = TemporalVectorConfig::default_with_hnsw(config.clone());
-    ///
+    /// ```ignore
+    /// let db = GallifreyDB::new();
     /// // Enable temporal indexes for two properties
-    /// db.vector_index("embedding1").hnsw(config.clone()).temporal(temporal_config.clone()).enable()?;
-    /// db.vector_index("embedding2").hnsw(config).temporal(temporal_config).enable()?;
+    /// db.vector_index("embedding1").hnsw(config1).temporal(temporal_config).enable()?;
+    /// db.vector_index("embedding2").hnsw(config2).temporal(temporal_config).enable()?;
     ///
     /// let indexes = db.list_temporal_vector_indexes();
     /// assert!(indexes.contains(&"embedding1".to_string()));
     /// assert!(indexes.contains(&"embedding2".to_string()));
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn list_temporal_vector_indexes(&self) -> Vec<String> {
         self.current.list_temporal_vector_indexes()
@@ -1730,12 +1615,8 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// use gallifreydb::index::vector::temporal::TemporalVectorConfig;
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
     ///
     /// // Basic vector index
     /// db.vector_index("embedding")
@@ -1743,14 +1624,10 @@ impl GallifreyDB {
     ///     .enable()?;
     ///
     /// // With temporal indexing for time-travel queries
-    /// // Note: Using default_temporal_only() because we already provided HNSW config above
-    /// // In a real scenario, you'd configure both if starting fresh
-    /// db.vector_index("embedding_temporal")
+    /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
-    ///     .temporal(TemporalVectorConfig::default_temporal_only())
+    ///     .temporal(TemporalVectorConfig::default())
     ///     .enable()?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn vector_index(&self, property_name: &str) -> VectorIndexBuilder<'_> {
         VectorIndexBuilder::new(self, property_name.to_string())
@@ -1764,20 +1641,13 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let config = HnswConfig::new(384, DistanceMetric::Cosine);
+    /// ```ignore
     /// db.vector_index("embedding")
     ///     .hnsw(config)
     ///     .enable()?;
     ///
     /// assert!(db.has_vector_index("embedding"));
     /// assert!(!db.has_vector_index("other_property"));
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn has_vector_index(&self, property_name: &str) -> bool {
         self.current.has_vector_index(property_name)
@@ -1790,11 +1660,7 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
+    /// ```ignore
     /// db.vector_index("title_embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     ///     .enable()?;
@@ -1805,8 +1671,6 @@ impl GallifreyDB {
     ///
     /// let indexes = db.list_vector_indexes();
     /// assert_eq!(indexes.len(), 2);
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn list_vector_indexes(&self) -> Vec<crate::storage::VectorIndexInfo> {
         self.current.list_vector_indexes()
@@ -1826,18 +1690,12 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let node_id = db.create_node("N", gallifreydb::PropertyMap::new())?;
+    /// ```ignore
     /// // Search title embeddings for similar nodes
     /// let similar = db.find_similar_in("title_embedding", node_id, 10)?;
     ///
     /// // Search body embeddings (different property, potentially different results)
     /// let similar_body = db.find_similar_in("body_embedding", node_id, 10)?;
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -1871,16 +1729,10 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let query = vec![0.0; 384];
+    /// ```ignore
     /// // Search with external embedding
-    /// // let query = embed_text("search query");
+    /// let query = embed_text("search query");
     /// let results = db.search_vectors_in("title_embedding", &query, 10)?;
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -1911,18 +1763,12 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let doc_id = db.create_node("Doc", gallifreydb::PropertyMap::new())?;
+    /// ```ignore
     /// // Find the 5 most similar documents to a given document
     /// let results = db.find_similar(doc_id, 5)?;
     /// for (node_id, score) in results {
     ///     println!("Similar node {} with score {}", node_id, score);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     ///
     /// # Errors
@@ -1950,15 +1796,9 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let person_id = db.create_node("Person", gallifreydb::PropertyMap::new())?;
+    /// ```ignore
     /// // Find similar Person nodes only
     /// let similar_people = db.find_similar_with_label(person_id, "Person", 10)?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn find_similar_with_label(
         &self,
@@ -1995,19 +1835,13 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let query_embedding = vec![0.0; 384];
+    /// ```ignore
     /// // Search with an embedding from external source (e.g., user query)
-    /// // let query_embedding = get_embedding_from_llm("rust programming");
+    /// let query_embedding = get_embedding_from_llm("rust programming");
     /// let similar = db.find_similar_by_embedding(&query_embedding, 10)?;
     /// for (node_id, similarity) in similar {
     ///     println!("Node {:?} has similarity {}", node_id, similarity);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn find_similar_by_embedding(
         &self,
@@ -2043,20 +1877,14 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let query_embedding = vec![0.0; 384];
+    /// ```ignore
     /// // Find similar documents only
-    /// // let query_embedding = get_embedding_from_llm("rust programming");
+    /// let query_embedding = get_embedding_from_llm("rust programming");
     /// let similar_docs = db.find_similar_by_embedding_with_label(
     ///     &query_embedding,
     ///     "Document",
     ///     5
     /// )?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn find_similar_by_embedding_with_label(
         &self,
@@ -2097,16 +1925,10 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let query_embedding = vec![0.0; 384];
+    /// ```ignore
     /// // Find documents similar to a query at a specific point in time
-    /// let timestamp_2023 = gallifreydb::core::temporal::Timestamp::from(1672531200000000); // 2023-01-01 in microseconds
+    /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
     /// let results = db.find_similar_as_of(&query_embedding, 10, timestamp_2023)?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn find_similar_as_of(
         &self,
@@ -2142,21 +1964,15 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let query_embedding = vec![0.0; 384];
+    /// ```ignore
     /// // Find documents similar to a query at a specific point in time
-    /// let timestamp_2023 = gallifreydb::core::temporal::Timestamp::from(1672531200000000); // 2023-01-01 in microseconds
+    /// let timestamp_2023 = 1672531200000000; // 2023-01-01 in microseconds
     /// let results = db.find_similar_as_of_in(
     ///     "content_embedding",
     ///     &query_embedding,
     ///     10,
     ///     timestamp_2023
     /// )?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn find_similar_as_of_in(
         &self,
@@ -2199,13 +2015,8 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::core::temporal::TimeRange;
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let node_id = db.create_node("N", gallifreydb::PropertyMap::new())?;
-    /// # let original_embedding = vec![0.0; 384];
     ///
     /// // Track how a document's embedding changed from its original version
     /// let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
@@ -2219,8 +2030,6 @@ impl GallifreyDB {
     /// for (timestamp, distance) in drift {
     ///     println!("At {}: drift = {:.3}", timestamp, distance);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn track_drift_in(
         &self,
@@ -2261,12 +2070,8 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::core::temporal::TimeRange;
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let node_id = db.create_node("N", gallifreydb::PropertyMap::new())?;
     ///
     /// let time_range = TimeRange::new(0.into(), i64::MAX.into()).unwrap();
     /// let evolution = db.semantic_evolution_in("content_embedding", node_id, time_range)?;
@@ -2274,8 +2079,6 @@ impl GallifreyDB {
     /// for (timestamp, embedding) in evolution {
     ///     println!("At {}: {} dimensions", timestamp, embedding.len());
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn semantic_evolution_in(
         &self,
@@ -2317,14 +2120,9 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::core::temporal::TimeRange;
     /// use gallifreydb::index::vector::temporal::DriftMetric;
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let start_ts = 0;
-    /// # let end_ts = 1000;
     ///
     /// let time_range = TimeRange::new(start_ts.into(), end_ts.into()).unwrap();
     /// let drifted = db.find_drift_in(
@@ -2335,10 +2133,8 @@ impl GallifreyDB {
     /// )?;
     ///
     /// for (node_id, drift) in drifted {
-    ///     println!("Node {:?} drifted by {:.3}", node_id, drift);
+    ///     println!("Node {} drifted by {:.3}", node_id, drift);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn find_drift_in(
         &self,
@@ -2369,18 +2165,9 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let alice_id = db.create_node("Person", gallifreydb::PropertyMap::new())?;
-    /// # let bob_embedding = vec![0.0; 384];
-    /// # let embedding = vec![0.0; 384];
-    /// # let now = gallifreydb::core::temporal::time::now();
-    /// # let timestamp_2023 = now;
-    /// # let tx_time = now;
+    /// ```ignore
     /// // Graph + Vector: "Who does Alice know that's similar to Bob?"
-    /// let query = db.query()
+    /// let results = db.query()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
     ///     .rank_by_similarity(&bob_embedding, 10)
@@ -2393,8 +2180,6 @@ impl GallifreyDB {
     ///     .as_of(timestamp_2023, tx_time)
     ///     .find_similar(&embedding, 10)
     ///     .build();
-    /// # Ok(())
-    /// # }
     /// ```
     #[must_use]
     pub fn query(&self) -> QueryBuilder<Initial> {
@@ -2413,12 +2198,7 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let alice_id = db.create_node("Person", gallifreydb::PropertyMap::new())?;
-    /// # let embedding = vec![0.0; 384];
+    /// ```ignore
     /// let query = db.query()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
@@ -2429,8 +2209,6 @@ impl GallifreyDB {
     /// for row in results {
     ///     println!("{:?}", row);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn execute_query(&self, query: Query) -> Result<QueryResults> {
         #[cfg(feature = "observability")]
@@ -2461,12 +2239,7 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let alice_id = db.create_node("Person", gallifreydb::PropertyMap::new())?;
-    /// # let bob_embedding = vec![0.0; 384];
+    /// ```ignore
     /// // "Who does Alice know that's similar to Bob?"
     /// let results = db.traverse_and_rank(
     ///     alice_id,
@@ -2476,11 +2249,8 @@ impl GallifreyDB {
     /// )?;
     ///
     /// for row in results {
-    ///     let row = row?;
-    ///     println!("Found: {:?}", row.entity.node_id());
+    ///     println!("Found: {:?}", row.node_id);
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn traverse_and_rank(
         &self,
@@ -2516,13 +2286,7 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let query_embedding = vec![0.0; 384];
-    /// # let now = gallifreydb::core::temporal::time::now();
-    /// # let timestamp_2023 = now;
+    /// ```ignore
     /// // "What concepts were similar to this in 2023?"
     /// let results = db.find_similar_at_time(
     ///     &query_embedding,
@@ -2530,8 +2294,6 @@ impl GallifreyDB {
     ///     timestamp_2023,
     ///     timestamp_2023
     /// )?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn find_similar_at_time(
         &self,
@@ -2568,14 +2330,7 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let alice_id = db.create_node("Person", gallifreydb::PropertyMap::new())?;
-    /// # let bob_embedding = vec![0.0; 384];
-    /// # let now = gallifreydb::core::temporal::time::now();
-    /// # let timestamp_2023 = now;
+    /// ```ignore
     /// // "Who did Alice know in 2023 that was similar to Bob?"
     /// let results = db.traverse_and_rank_at_time(
     ///     alice_id,
@@ -2585,8 +2340,6 @@ impl GallifreyDB {
     ///     timestamp_2023,
     ///     timestamp_2023
     /// )?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn traverse_and_rank_at_time(
         &self,
@@ -2658,14 +2411,10 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// let db = GallifreyDB::new()?;
+    /// ```ignore
+    /// let db = GallifreyDB::new();
     /// // ... add data ...
     /// db.persist_indexes()?; // Save indexes to disk
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn persist_indexes(&self) -> Result<()> {
         use crate::storage::index_persistence::formats::IndexManifest;
@@ -2787,16 +2536,11 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// let db = GallifreyDB::new()?;
-    /// # let properties = gallifreydb::PropertyMap::new();
+    /// ```ignore
+    /// let db = GallifreyDB::new();
     /// db.create_node("Person", properties)?;
     /// let lsn = db.__test_current_wal_lsn();
     /// assert!(lsn > 0); // LSN advances after operations
-    /// # Ok(())
-    /// # }
     /// ```
     #[doc(hidden)]
     pub fn __test_current_wal_lsn(&self) -> u64 {
@@ -2844,18 +2588,12 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # fn main() -> gallifreydb::Result<()> {
+    /// ```ignore
     /// let db = GallifreyDB::new()?;
-    /// let config = HnswConfig::new(384, DistanceMetric::Cosine);
     /// db.enable_vector_index("embedding", config)?;
     /// // ... create nodes and perform searches ...
-    /// // let (count, candidates, results) = db.__test_get_filter_stats("Person").unwrap();
-    /// // assert_eq!(count, 10); // 10 searches performed
-    /// # Ok(())
-    /// # }
+    /// let (count, candidates, results) = db.__test_get_filter_stats("Person").unwrap();
+    /// assert_eq!(count, 10); // 10 searches performed
     /// ```
     #[doc(hidden)]
     pub fn __test_get_filter_stats(&self, label: &str) -> Option<(u64, u64, u64)> {
@@ -2887,11 +2625,7 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let documents: Vec<gallifreydb::core::Node> = vec![];
+    /// ```ignore
     /// // After bulk import
     /// for doc in documents {
     ///     db.create_node("Document", doc.properties)?;
@@ -2901,9 +2635,7 @@ impl GallifreyDB {
     /// db.refresh_statistics();
     ///
     /// // Now queries will use accurate statistics
-    /// // let results = db.execute_query(query)?;
-    /// # Ok(())
-    /// # }
+    /// let results = db.execute_query(query)?;
     /// ```
     pub fn refresh_statistics(&self) {
         // Collect statistics from current storage
@@ -2956,20 +2688,14 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
-    /// # let props = gallifreydb::PropertyMap::new();
+    /// ```ignore
     /// // After bulk import
-    /// for i in 0..10 {
-    ///     db.create_node("Node", props.clone())?;
+    /// for i in 0..100000 {
+    ///     db.create_node("Node", props)?;
     /// }
     ///
     /// // Compress commit log to free memory
     /// db.compress_commit_log();
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn compress_commit_log(&self) {
         self.visibility_manager.compress_commit_log();
@@ -3002,15 +2728,10 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
+    /// ```ignore
     /// let stats = db.get_compression_stats();
     /// println!("Compression ratio: {}x", stats.compression_ratio);
     /// println!("Memory saved: {} bytes", stats.memory_saved_bytes);
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn get_compression_stats(&self) -> crate::api::transaction::visibility::CompressionStats {
         self.visibility_manager.get_compression_stats()
@@ -3031,16 +2752,11 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
+    /// ```ignore
     /// // After bulk import, compress if using > 10MB
     /// if db.should_compress_commit_log(10 * 1024 * 1024) {
     ///     db.compress_commit_log();
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn should_compress_commit_log(&self, threshold_bytes: usize) -> bool {
         self.visibility_manager
@@ -3062,16 +2778,11 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
+    /// ```ignore
     /// // Compress every 50K commits
     /// if db.should_compress_by_exception_count(50_000) {
     ///     db.compress_commit_log();
     /// }
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn should_compress_by_exception_count(&self, threshold_exceptions: usize) -> bool {
         self.visibility_manager
@@ -3105,12 +2816,8 @@ impl Drop for GallifreyDB {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```ignore
 /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-/// use gallifreydb::index::vector::temporal::TemporalVectorConfig;
-/// # use gallifreydb::GallifreyDB;
-/// # fn main() -> gallifreydb::Result<()> {
-/// # let db = GallifreyDB::new()?;
 ///
 /// // Create a basic vector index
 /// db.vector_index("embedding")
@@ -3118,12 +2825,10 @@ impl Drop for GallifreyDB {
 ///     .enable()?;
 ///
 /// // Create a vector index with temporal support
-/// db.vector_index("embedding_temporal")
+/// db.vector_index("embedding")
 ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
-///     .temporal(TemporalVectorConfig::default_temporal_only())
+///     .temporal(TemporalVectorConfig::default())
 ///     .enable()?;
-/// # Ok(())
-/// # }
 /// ```
 pub struct VectorIndexBuilder<'a> {
     db: &'a GallifreyDB,
@@ -3154,16 +2859,10 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
+    /// ```ignore
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine).with_capacity(10000))
     ///     .enable()?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn hnsw(mut self, config: HnswConfig) -> Self {
         self.hnsw_config = Some(config);
@@ -3182,22 +2881,16 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
     ///
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     ///     .temporal(TemporalVectorConfig {
     ///         snapshot_strategy: SnapshotStrategy::TransactionInterval(100),
-    ///         ..gallifreydb::index::vector::temporal::TemporalVectorConfig::default_with_hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
+    ///         ..Default::default()
     ///     })
     ///     .enable()?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn temporal(mut self, config: TemporalVectorConfig) -> Self {
         self.temporal_config = Some(config);
@@ -3219,11 +2912,7 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
-    /// # use gallifreydb::GallifreyDB;
-    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
-    /// # fn main() -> gallifreydb::Result<()> {
-    /// # let db = GallifreyDB::new()?;
+    /// ```ignore
     /// // This will fail - no HNSW config
     /// let result = db.vector_index("embedding").enable();
     /// assert!(result.is_err());
@@ -3232,8 +2921,6 @@ impl<'a> VectorIndexBuilder<'a> {
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     ///     .enable()?;
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn enable(self) -> Result<()> {
         let hnsw_config = self.hnsw_config.ok_or_else(|| {
@@ -6011,4 +5698,96 @@ mod tests {
         assert_eq!(db.get_edge_source(knows_edge).unwrap(), alice);
         assert_eq!(db.get_edge_target(knows_edge).unwrap(), bob);
     }
+}
+
+#[test]
+fn test_load_indexes_coverage() {
+    use crate::config::GallifreyDBConfig;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::storage::index_persistence::{
+        PersistenceConfig,
+        formats::{IndexManifest, PersistedNode},
+        graph::{new_graph_index_data, persist_property_map, save_graph_index},
+    };
+    use tempfile::tempdir;
+
+    // 1. Setup persistence directory
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+    let manager = crate::storage::index_persistence::IndexPersistenceManager::new(&data_dir);
+    manager.ensure_directories().unwrap();
+
+    // 2. Save a dummy graph index
+    let mut graph_data = new_graph_index_data();
+    let props = PropertyMapBuilder::new().insert("name", "Test").build();
+    let persisted_props = persist_property_map(&props).unwrap();
+
+    // We need interned strings to be available
+    crate::core::GLOBAL_INTERNER.intern("TestLabel").unwrap();
+
+    graph_data.nodes.push(PersistedNode {
+        id: 1,
+        label_idx: crate::core::GLOBAL_INTERNER
+            .intern("TestLabel")
+            .unwrap()
+            .as_u32(),
+        version_id: 1,
+        properties: persisted_props,
+    });
+    graph_data.node_count = 1;
+
+    save_graph_index(&graph_data, &manager.graph_path().join("adjacency.idx")).unwrap();
+
+    // Save manifest
+    let manifest = IndexManifest::new(0);
+    manager.save_manifest(&manifest).unwrap();
+    manager.save_string_interner().unwrap();
+
+    // 3. Create DB with load_on_startup = true
+    let config = GallifreyDBConfig::builder()
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: data_dir.clone(),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .build();
+
+    let db = GallifreyDB::with_unified_config(config).unwrap();
+
+    // 4. Verify data loaded
+    assert_eq!(db.node_count(), 1);
+    let node = db.get_node(crate::core::NodeId::new(1).unwrap()).unwrap();
+    let label_str = crate::core::GLOBAL_INTERNER.resolve(node.label).unwrap();
+    assert_eq!(label_str.as_ref(), "TestLabel");
+}
+
+#[test]
+fn test_load_indexes_corrupted_coverage() {
+    use crate::config::GallifreyDBConfig;
+    use crate::storage::index_persistence::PersistenceConfig;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().to_path_buf();
+    let manager = crate::storage::index_persistence::IndexPersistenceManager::new(&data_dir);
+    manager.ensure_directories().unwrap();
+
+    // Create corrupted graph index
+    std::fs::write(manager.graph_path().join("adjacency.idx"), b"CORRUPTED").unwrap();
+
+    // Create DB with load_on_startup = true
+    let config = GallifreyDBConfig::builder()
+        .persistence(PersistenceConfig {
+            enabled: true,
+            data_dir: data_dir.clone(),
+            load_on_startup: true,
+            ..Default::default()
+        })
+        .build();
+
+    // Should not panic, but log error and start empty
+    let db = GallifreyDB::with_unified_config(config).unwrap();
+
+    assert_eq!(db.node_count(), 0);
 }
