@@ -78,6 +78,9 @@ pub mod honeycomb;
 // Optional SQL:2011 temporal syntax support
 #[cfg(feature = "sql")]
 pub mod sql;
+// Optional Cypher Query Language support
+#[cfg(feature = "cypher")]
+pub mod cypher;
 // Optional HTTP server module
 #[cfg(feature = "http-server")]
 pub mod http;
