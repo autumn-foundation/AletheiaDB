@@ -3232,4 +3232,48 @@ mod tests {
             "Map with vector should include vector heap size"
         );
     }
+
+    #[test]
+    fn test_serialized_size_correctness() {
+        use crate::core::vector::SparseVec;
+
+        // Test all variants
+        let values = vec![
+            PropertyValue::Null,
+            PropertyValue::Bool(true),
+            PropertyValue::Int(12345),
+            PropertyValue::Float(3.14159),
+            PropertyValue::string("test string"),
+            PropertyValue::bytes(vec![1, 2, 3, 4]),
+            PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]),
+            PropertyValue::vector(vec![1.0f32, 2.0, 3.0]),
+            PropertyValue::sparse_vector(
+                SparseVec::new(vec![0, 2], vec![1.0, 2.0], 10).unwrap(),
+            ),
+        ];
+
+        for value in values {
+            let expected_size = value.serialize().len();
+            let calculated_size = value.serialized_size();
+            assert_eq!(
+                calculated_size,
+                expected_size,
+                "Serialized size mismatch for {:?}",
+                value.type_name()
+            );
+        }
+
+        // Test PropertyMap serialized size
+        let map = PropertyMapBuilder::new()
+            .insert("key1", "value1")
+            .insert("key2", 42i64)
+            .build();
+
+        let expected_map_size = map.serialize().unwrap().len();
+        let calculated_map_size = map.serialized_size();
+        assert_eq!(
+            calculated_map_size, expected_map_size,
+            "PropertyMap serialized size mismatch"
+        );
+    }
 }
