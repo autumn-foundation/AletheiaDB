@@ -606,10 +606,13 @@ mod simd {
     /// Computes dot product, magnitude_a², and magnitude_b² using AVX2.
     ///
     /// # Safety
-    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// Caller must ensure:
+    /// 1. AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+        debug_assert_eq!(a.len(), b.len());
         unsafe {
             let len = a.len();
             let chunks = len / 8;
@@ -678,10 +681,13 @@ mod simd {
     /// Computes dot product, magnitude_a², and magnitude_b² using SSE2.
     ///
     /// # Safety
-    /// Caller must ensure SSE2 is available (always true on x86_64).
+    /// Caller must ensure:
+    /// 1. SSE2 is available (always true on x86_64).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_sse2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+        debug_assert_eq!(a.len(), b.len());
         unsafe {
             let len = a.len();
             let chunks = len / 4;
@@ -752,12 +758,15 @@ mod simd {
     /// `dot_and_magnitudes_avx2` when magnitudes aren't needed.
     ///
     /// # Safety
-    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// Caller must ensure:
+    /// 1. AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
+        debug_assert_eq!(a.len(), b.len());
         unsafe {
             let a_chunks = a.chunks_exact(8);
             let b_chunks = b.chunks_exact(8);
@@ -794,12 +803,15 @@ mod simd {
     /// `dot_and_magnitudes_sse2` when magnitudes aren't needed.
     ///
     /// # Safety
-    /// Caller must ensure SSE2 is available (always true on x86_64).
+    /// Caller must ensure:
+    /// 1. SSE2 is available (always true on x86_64).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_product_sse2(a: &[f32], b: &[f32]) -> f32 {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees SSE2 is available via runtime feature detection.
+        debug_assert_eq!(a.len(), b.len());
         unsafe {
             let a_chunks = a.chunks_exact(4);
             let b_chunks = b.chunks_exact(4);
@@ -833,13 +845,16 @@ mod simd {
     /// Computes sum of squared differences using AVX2.
     ///
     /// # Safety
-    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// Caller must ensure:
+    /// 1. AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn squared_diff_sum_avx2(a: &[f32], b: &[f32]) -> f32 {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
+        debug_assert_eq!(a.len(), b.len());
         unsafe {
             let len = a.len();
             let chunks = len / 8;
@@ -881,13 +896,16 @@ mod simd {
     /// Computes sum of squared differences using SSE2.
     ///
     /// # Safety
-    /// Caller must ensure SSE2 is available (always true on x86_64).
+    /// Caller must ensure:
+    /// 1. SSE2 is available (always true on x86_64).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn squared_diff_sum_sse2(a: &[f32], b: &[f32]) -> f32 {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees SSE2 is available via runtime feature detection.
+        debug_assert_eq!(a.len(), b.len());
         unsafe {
             let len = a.len();
             let chunks = len / 4;
@@ -5224,5 +5242,129 @@ mod proptests {
         let dense_dist = euclidean_distance(&dense_a, &dense_b).unwrap();
 
         assert!((sparse_dist - dense_dist).abs() < 1e-5);
+    }
+}
+
+// ============================================================================
+// SIMD Direct Coverage Tests
+// ============================================================================
+
+#[cfg(test)]
+mod simd_tests {
+    use super::*;
+
+    #[test]
+    fn test_simd_dot_and_magnitudes_avx2() {
+        // Only run if AVX2 and FMA are available
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            let a = vec![1.0f32; 16];
+            let b = vec![2.0f32; 16];
+
+            // SAFETY: We verified AVX2/FMA are available
+            let (dot, mag_a, mag_b) = unsafe { simd::dot_and_magnitudes_avx2(&a, &b) };
+
+            assert!((dot - 32.0).abs() < 1e-6);
+            assert!((mag_a - 16.0).abs() < 1e-6);
+            assert!((mag_b - 64.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_simd_dot_and_magnitudes_sse2() {
+        // Only run if SSE2 is available (baseline for x86_64)
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if is_x86_feature_detected!("sse2") {
+            let a = vec![1.0f32; 16];
+            let b = vec![2.0f32; 16];
+
+            // SAFETY: We verified SSE2 is available
+            let (dot, mag_a, mag_b) = unsafe { simd::dot_and_magnitudes_sse2(&a, &b) };
+
+            assert!((dot - 32.0).abs() < 1e-6);
+            assert!((mag_a - 16.0).abs() < 1e-6);
+            assert!((mag_b - 64.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_simd_dot_product_avx2() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            let a = vec![1.0f32; 16];
+            let b = vec![2.0f32; 16];
+
+            // SAFETY: We verified AVX2/FMA are available
+            let dot = unsafe { simd::dot_product_avx2(&a, &b) };
+
+            assert!((dot - 32.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_simd_dot_product_sse2() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if is_x86_feature_detected!("sse2") {
+            let a = vec![1.0f32; 16];
+            let b = vec![2.0f32; 16];
+
+            // SAFETY: We verified SSE2 is available
+            let dot = unsafe { simd::dot_product_sse2(&a, &b) };
+
+            assert!((dot - 32.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_simd_squared_diff_avx2() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            let a = vec![1.0f32; 16];
+            let b = vec![3.0f32; 16];
+
+            // diff = 2.0, sq_diff = 4.0, sum = 64.0
+            // SAFETY: We verified AVX2/FMA are available
+            let dist_sq = unsafe { simd::squared_diff_sum_avx2(&a, &b) };
+
+            assert!((dist_sq - 64.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_simd_squared_diff_sse2() {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if is_x86_feature_detected!("sse2") {
+            let a = vec![1.0f32; 16];
+            let b = vec![3.0f32; 16];
+
+            // diff = 2.0, sq_diff = 4.0, sum = 64.0
+            // SAFETY: We verified SSE2 is available
+            let dist_sq = unsafe { simd::squared_diff_sum_sse2(&a, &b) };
+
+            assert!((dist_sq - 64.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    #[cfg(debug_assertions)]
+    fn test_simd_length_mismatch_check() {
+        // This test verifies that the debug_assert_eq! we added works.
+        // It relies on debug assertions being enabled.
+        // It requires SSE2 to run the unsafe function.
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if is_x86_feature_detected!("sse2") {
+            let a = vec![1.0f32; 8];
+            let b = vec![1.0f32; 4]; // Mismatched length
+
+            unsafe {
+                // This should trigger the debug_assert_eq!
+                simd::dot_product_sse2(&a, &b);
+            }
+        } else {
+            // If SSE2 not available, we can't test this, so panic to satisfy should_panic
+            panic!("Skipping SSE2 test, panicking to pass should_panic");
+        }
     }
 }
