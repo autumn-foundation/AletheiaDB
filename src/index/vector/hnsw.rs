@@ -1961,7 +1961,7 @@ mod tests {
         // 5. Truncated File (In data)
         create_valid_file(&file_path)?;
         {
-            let mut data = std::fs::read(&file_path).unwrap();
+            let data = std::fs::read(&file_path).unwrap();
             let len = data.len();
             std::fs::write(&file_path, &data[..len - 2]).unwrap(); // Cut off part of CRC
             let result = load_mappings_with_integrity(&file_path);
@@ -2019,10 +2019,7 @@ mod tests {
                 // Determine how many bytes we can write before failing
                 let allowed = self.fail_after_bytes.saturating_sub(self.written);
                 if allowed == 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Mock write failure",
-                    ));
+                    return Err(std::io::Error::other("Mock write failure"));
                 }
                 self.written += allowed;
                 return Ok(allowed);
@@ -2033,10 +2030,7 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             if self.written >= self.fail_after_bytes {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Mock flush failure",
-                ));
+                return Err(std::io::Error::other("Mock flush failure"));
             }
             Ok(())
         }
@@ -2112,7 +2106,7 @@ mod tests {
             let available = std::cmp::min(self.data.len(), self.fail_at_offset);
             let to_copy = std::cmp::min(buf.len(), available);
 
-            if to_copy == 0 && buf.len() > 0 && self.fail_at_offset == 0 {
+            if to_copy == 0 && !buf.is_empty() && self.fail_at_offset == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "Mock read failure",
