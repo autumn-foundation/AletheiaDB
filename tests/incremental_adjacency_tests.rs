@@ -971,11 +971,30 @@ mod phase5_background_compaction {
             );
         }
 
-        // Wait for successful compaction
-        thread::sleep(Duration::from_millis(150));
+        // Wait for successful compaction (poll instead of fixed sleep for CI reliability)
+        // The scheduler checks every 50ms, so we need to account for:
+        // - The scheduler might be mid-sleep when we add edges
+        // - The compaction itself takes time
+        // - CI machines might be slow
+        let mut attempts = 0;
+        let max_attempts = 100; // 5 seconds total (generous for slow CI)
+        while index.delta_edge_count() > 0 && attempts < max_attempts {
+            thread::sleep(Duration::from_millis(50));
+            attempts += 1;
+        }
 
         // Verify normal compaction worked after panic
-        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(
+            index.delta_edge_count(),
+            0,
+            "Expected compaction to succeed after {} attempts ({} ms). \
+             Delta edges: {}, Frozen edges: {}, Panic count: {}",
+            attempts,
+            attempts * 50,
+            index.delta_edge_count(),
+            index.frozen_edge_count(),
+            scheduler.panic_count()
+        );
         assert_eq!(index.frozen_edge_count(), 12);
 
         // Panic count should still be 1 (no new panics)
