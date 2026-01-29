@@ -340,7 +340,13 @@ mod tests {
         // Since GLOBAL_INTERNER is pre-warmed (len > 0), a new string will get ID > 0.
         // If we put it at index 0 in data, it should fail.
 
-        let unique_string = "test_unique_mismatch_string_12345".to_string();
+        let unique_string = format!(
+            "unique_string_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
 
         let data = StringInternerData {
             magic: INTERNER_MAGIC,
@@ -355,7 +361,10 @@ mod tests {
         match result.unwrap_err() {
             IndexPersistenceError::InternerMismatch { expected, got } => {
                 assert_eq!(expected, 0, "Expected index 0 (from data position)");
-                assert!(got > 0, "Got index should be > 0 (because interner is pre-warmed)");
+                assert!(
+                    got > 0,
+                    "Got index should be > 0 (because interner is pre-warmed)"
+                );
             }
             err => panic!("Expected InternerMismatch, got: {:?}", err),
         }
