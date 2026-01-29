@@ -41,7 +41,7 @@ pub(crate) fn spawn_background_persistence_thread(
     tracker: Arc<PersistenceTracker>,
     policies: PersistencePolicies,
     stopped_flag: Arc<AtomicBool>,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // Wrap entire thread in panic handler to prevent silent failures
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -138,5 +138,5 @@ pub(crate) fn spawn_background_persistence_thread(
                 eprintln!("You MUST restart the database to restore automatic persistence.");
             }
         }
-    });
+    })
 }

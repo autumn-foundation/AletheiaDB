@@ -124,6 +124,8 @@ pub struct GallifreyDB {
     persistence_tracker: Option<Arc<PersistenceTracker>>,
     /// Background persistence thread health flag - set to true if thread panics or stops
     persistence_thread_stopped: Arc<std::sync::atomic::AtomicBool>,
+    /// Background persistence thread handle (if enabled) - used to join thread on shutdown
+    persistence_thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl GallifreyDB {
@@ -237,7 +239,7 @@ impl GallifreyDB {
             None
         };
 
-        let db = GallifreyDB {
+        let mut db = GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
                 config.historical,
@@ -256,6 +258,7 @@ impl GallifreyDB {
             persistence_manager: persistence_manager.clone(),
             persistence_tracker: persistence_tracker.clone(),
             persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            persistence_thread_handle: None,
         };
 
         // Load indexes on startup if enabled
@@ -276,7 +279,7 @@ impl GallifreyDB {
         if let Some(ref tracker) = persistence_tracker
             && let Some(ref manager) = persistence_manager
         {
-            spawn_background_persistence_thread(
+            let handle = spawn_background_persistence_thread(
                 Arc::clone(&db.current),
                 Arc::clone(&db.historical),
                 Arc::clone(&db.temporal_indexes),
@@ -286,6 +289,7 @@ impl GallifreyDB {
                 config.persistence.policies.clone(),
                 Arc::clone(&db.persistence_thread_stopped),
             );
+            db.persistence_thread_handle = Some(handle);
         }
 
         // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
@@ -347,6 +351,7 @@ impl GallifreyDB {
             persistence_manager: None,
             persistence_tracker: None,
             persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            persistence_thread_handle: None,
         };
 
         // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
@@ -2555,9 +2560,12 @@ impl Drop for GallifreyDB {
         if let Some(ref tracker) = self.persistence_tracker {
             tracker.signal_shutdown();
 
-            // Give the thread a moment to finish and persist on shutdown
-            // The background thread will call persist_all_indexes() before exiting
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Wait for the background thread to fully exit and release all resources
+            // This ensures the thread drops its Arc references to TieredStorage/RedbColdStorage
+            // before Drop returns, preventing file locking issues when reopening Redb.
+            if let Some(handle) = self.persistence_thread_handle.take() {
+                let _ = handle.join();
+            }
         }
     }
 }
