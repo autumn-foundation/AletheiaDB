@@ -755,14 +755,10 @@ mod tests {
 
         assert_eq!(wal.total_appends(), 10);
 
-        // Explicit flush - ensure all entries are durable.
-        // Note: The background flush thread may have already flushed some/all
-        // entries, so we check total_flushed() rather than the return stats.
-        // This makes the test deterministic regardless of timing.
-        //
-        // We shutdown first to ensure any in-flight background flushes are completed
-        // before we check the total.
+        // Shutdown guarantees all pending entries are flushed.
+        // This avoids race conditions between manual flush and background flush thread.
         wal.shutdown();
+
         assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");
     }
 

@@ -688,38 +688,6 @@ impl PropertyValue {
             }
         }
     }
-
-    /// Calculate the number of bytes required for serialization.
-    ///
-    /// This is used to pre-allocate buffers for serialization, avoiding reallocation
-    /// overhead during high-throughput operations (like WAL writing).
-    ///
-    /// # Size Breakdown
-    /// - Null: 1 byte
-    /// - Bool: 2 bytes
-    /// - Int: 9 bytes
-    /// - Float: 9 bytes
-    /// - String: 1 + 4 + len
-    /// - Bytes: 1 + 4 + len
-    /// - Array: 1 + 4 + sum(elements)
-    /// - Vector: 1 + 4 + (dims * 4)
-    /// - SparseVector: 1 + 4 + 4 + (nnz * 8)
-    pub fn serialized_size(&self) -> usize {
-        match self {
-            PropertyValue::Null => 1,
-            PropertyValue::Bool(_) => 2,
-            PropertyValue::Int(_) => 9,
-            PropertyValue::Float(_) => 9,
-            PropertyValue::String(s) => 1 + 4 + s.len(),
-            PropertyValue::Bytes(b) => 1 + 4 + b.len(),
-            PropertyValue::Array(arr) => {
-                let elements_size: usize = arr.iter().map(|v| v.serialized_size()).sum();
-                1 + 4 + elements_size
-            }
-            PropertyValue::Vector(v) => 1 + 4 + (v.len() * 4),
-            PropertyValue::SparseVector(sv) => 1 + 4 + 4 + (sv.nnz() * 8),
-        }
-    }
 }
 
 // ============================================================================
@@ -1444,29 +1412,6 @@ impl PropertyMap {
             size += value.estimated_heap_size();
         }
 
-        size
-    }
-
-    /// Calculate the number of bytes required for serialization.
-    ///
-    /// This is used to pre-allocate buffers for serialization, avoiding reallocation
-    /// overhead during high-throughput operations.
-    pub fn serialized_size(&self) -> usize {
-        if self.is_empty() {
-            return 4; // Count field
-        }
-
-        let mut size = 4; // Count field
-        for (key, value) in self.inner.iter() {
-            // Key: length prefix (4) + key bytes
-            let key_len = GLOBAL_INTERNER
-                .resolve(*key)
-                .map(|s| s.len())
-                .unwrap_or(256); // Conservative fallback if key missing (corruption)
-
-            size += 4 + key_len;
-            size += value.serialized_size();
-        }
         size
     }
 }
@@ -3244,42 +3189,5 @@ mod tests {
             size >= 384 * std::mem::size_of::<f32>(),
             "Map with vector should include vector heap size"
         );
-    }
-
-    #[test]
-    fn test_serialized_size_matches_actual() {
-        let values = vec![
-            PropertyValue::Null,
-            PropertyValue::Bool(true),
-            PropertyValue::Int(123),
-            PropertyValue::Float(123.456),
-            PropertyValue::string("test string"),
-            PropertyValue::bytes([1, 2, 3]),
-            PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::string("nested")]),
-            PropertyValue::vector([1.0f32, 2.0, 3.0]),
-        ];
-
-        for value in values {
-            let predicted = value.serialized_size();
-            let actual = value.serialize().len();
-            assert_eq!(
-                predicted,
-                actual,
-                "Size mismatch for {:?}",
-                value.type_name()
-            );
-        }
-    }
-
-    #[test]
-    fn test_property_map_serialized_size() {
-        let map = PropertyMapBuilder::new()
-            .insert("name", "Alice")
-            .insert("age", 30)
-            .build();
-
-        let predicted = map.serialized_size();
-        let actual = map.serialize().unwrap().len();
-        assert_eq!(predicted, actual);
     }
 }
