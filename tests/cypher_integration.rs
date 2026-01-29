@@ -9,11 +9,11 @@ use gallifreydb::params;
 fn test_cypher_api_surface() {
     let db = GallifreyDB::new().unwrap();
 
-    // Test basic query - should fail compilation initially
+    // Test basic cypher query
     let results = db.cypher("MATCH (n:Person) RETURN n");
     assert!(results.is_ok());
 
-    // Test query with params - should fail compilation initially
+    // Test query with params
     // We expect params! to be available when feature is enabled
     let params_map = gallifreydb::params! {
         "name" => "Alice",
