@@ -772,6 +772,7 @@ mod tests {
         assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");
 
         wal.shutdown();
+        assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");
     }
 
     #[test]
