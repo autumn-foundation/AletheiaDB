@@ -298,10 +298,13 @@ mod phase2_temporal {
 
         // Verify the temporal context is as_of
         let ctx = query.temporal_context.as_ref().unwrap();
-        assert!(ctx.as_of.is_some(), "Should have as_of temporal context");
+        assert!(
+            ctx.as_of_tuple().is_some(),
+            "Should have as_of temporal context"
+        );
 
         // Verify the timestamp (system time should be in transaction time position)
-        let (_valid_time, tx_time) = ctx.as_of.unwrap();
+        let (_valid_time, tx_time) = ctx.as_of_tuple().unwrap();
         assert_eq!(tx_time.wallclock(), 1705315200000000);
     }
 
@@ -357,12 +360,12 @@ mod phase2_temporal {
         // Verify the temporal context is between
         let ctx = query.temporal_context.as_ref().unwrap();
         assert!(
-            ctx.between.is_some(),
+            ctx.transaction_time_between.is_some(),
             "Should have between temporal context"
         );
 
         // Verify the time range
-        let range = ctx.between.as_ref().unwrap();
+        let range = ctx.transaction_time_between.as_ref().unwrap();
         assert_eq!(range.start().wallclock(), 1000000);
         assert_eq!(range.end().wallclock(), 2000000);
     }
@@ -376,7 +379,7 @@ mod phase2_temporal {
 
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.as_ref().unwrap();
-        assert!(ctx.between.is_some());
+        assert!(ctx.transaction_time_between.is_some());
 
         // Should have filter operation
         let has_filter = query.ops.iter().any(|op| matches!(op, QueryOp::Filter(_)));
@@ -402,10 +405,13 @@ mod phase2_temporal {
 
         // Verify the temporal context is as_of with valid time
         let ctx = query.temporal_context.as_ref().unwrap();
-        assert!(ctx.as_of.is_some(), "Should have as_of temporal context");
+        assert!(
+            ctx.as_of_tuple().is_some(),
+            "Should have as_of temporal context"
+        );
 
         // Verify the timestamp (valid time should be in valid time position)
-        let (valid_time, _tx_time) = ctx.as_of.unwrap();
+        let (valid_time, _tx_time) = ctx.as_of_tuple().unwrap();
         assert_eq!(valid_time.wallclock(), 1705315200000000);
     }
 
@@ -436,10 +442,10 @@ mod phase2_temporal {
 
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.as_ref().unwrap();
-        assert!(ctx.between.is_some());
+        assert!(ctx.valid_time_between.is_some());
 
         // Verify the time range
-        let range = ctx.between.as_ref().unwrap();
+        let range = ctx.valid_time_between.as_ref().unwrap();
         assert_eq!(range.start().wallclock(), 1000000);
         assert_eq!(range.end().wallclock(), 2000000);
     }
@@ -457,10 +463,10 @@ mod phase2_temporal {
 
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.as_ref().unwrap();
-        assert!(ctx.as_of.is_some());
+        assert!(ctx.as_of_tuple().is_some());
 
         // Both timestamps should be set
-        let (valid_time, tx_time) = ctx.as_of.unwrap();
+        let (valid_time, tx_time) = ctx.as_of_tuple().unwrap();
         assert_eq!(valid_time.wallclock(), 1500000);
         assert_eq!(tx_time.wallclock(), 2000000);
     }
@@ -474,9 +480,9 @@ mod phase2_temporal {
 
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.as_ref().unwrap();
-        assert!(ctx.as_of.is_some());
+        assert!(ctx.as_of_tuple().is_some());
 
-        let (valid_time, tx_time) = ctx.as_of.unwrap();
+        let (valid_time, tx_time) = ctx.as_of_tuple().unwrap();
         assert_eq!(valid_time.wallclock(), 1500000);
         assert_eq!(tx_time.wallclock(), 2000000);
     }

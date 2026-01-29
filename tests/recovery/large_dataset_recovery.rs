@@ -13,7 +13,7 @@ use gallifreydb::{
     core::{
         id::{EdgeId, NodeId},
         property::{PropertyMap, PropertyMapBuilder},
-        temporal::{BiTemporalInterval, time},
+        temporal::time,
     },
     storage::{
         persistence::{CheckpointConfig, PersistenceManager},
@@ -57,7 +57,7 @@ fn test_large_dataset_recovery_10k_nodes() -> Result<()> {
                 .insert("index", i as i64)
                 .insert("batch", (i / 1000) as i64)
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         if i % 1000 == 0 {
@@ -146,7 +146,7 @@ fn test_large_dataset_recovery_50k_edges() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -164,7 +164,7 @@ fn test_large_dataset_recovery_50k_edges() -> Result<()> {
             target: NodeId::new(target).unwrap(),
             label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMapBuilder::new().insert("index", i as i64).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         if i % 10000 == 0 {
@@ -263,7 +263,7 @@ fn test_large_dataset_full_recovery() -> Result<()> {
                 .insert("id", i as i64)
                 .insert("type", "node")
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         if i % 2000 == 0 {
@@ -290,7 +290,7 @@ fn test_large_dataset_full_recovery() -> Result<()> {
             properties: PropertyMapBuilder::new()
                 .insert("weight", (i % 100) as i64)
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         if i % 10000 == 0 {
@@ -408,7 +408,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
                 .insert("version", 0_i64)
                 .insert("value", (i * 10) as i64)
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -424,7 +424,7 @@ fn test_large_dataset_with_updates() -> Result<()> {
                     .insert("version", update_round as i64)
                     .insert("value", (i * 10 + update_round) as i64)
                     .build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             })?;
             version_id += 1;
         }
@@ -508,7 +508,7 @@ fn test_large_dataset_with_deletions() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMapBuilder::new().insert("index", i as i64).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -518,7 +518,7 @@ fn test_large_dataset_with_deletions() -> Result<()> {
         let node_id = i * 2; // Delete even-numbered nodes
         wal.append(WalOperation::DeleteNode {
             node_id: NodeId::new(node_id).unwrap(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -610,7 +610,7 @@ fn bench_recovery_throughput() -> Result<()> {
                 node_id: NodeId::new(i as u64).unwrap(),
                 label: GLOBAL_INTERNER.intern("BenchNode").unwrap(),
                 properties: PropertyMapBuilder::new().insert("i", i as i64).build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             })?;
         }
         wal.flush()?;

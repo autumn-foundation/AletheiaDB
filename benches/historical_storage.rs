@@ -9,7 +9,7 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use gallifreydb::core::id::{NodeId, VersionId};
 use gallifreydb::core::interning::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::BiTemporalInterval;
+use gallifreydb::core::temporal::time;
 use gallifreydb::storage::historical::HistoricalStorage;
 use gallifreydb::storage::version::AnchorConfig;
 
@@ -49,14 +49,14 @@ fn bench_add_node_version_with_varying_anchor_intervals(c: &mut Criterion) {
                         let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
                         for i in 0..100u64 {
                             let version_id = VersionId::new(i).unwrap();
-                            let temporal =
-                                BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+                            let valid_from = (1000 + (i as i64) * 100).into();
+                            let tx_time = time::now();
                             let properties = PropertyMapBuilder::new()
                                 .insert("version", i as i64)
                                 .build();
 
                             black_box(storage.add_node_version(
-                                node_id, version_id, temporal, label, properties,
+                                node_id, version_id, valid_from, tx_time, label, properties,
                             ))
                             .unwrap();
                         }
@@ -100,14 +100,16 @@ fn bench_single_add_at_chain_positions(c: &mut Criterion) {
                         // Pre-populate with 'pos' versions
                         for i in 0..pos {
                             let version_id = VersionId::new(i as u64).unwrap();
-                            let temporal =
-                                BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+                            let valid_from = (1000 + (i as i64) * 100).into();
+                            let tx_time = time::now();
                             let properties = PropertyMapBuilder::new()
                                 .insert("version", i as i64)
                                 .build();
 
                             storage
-                                .add_node_version(node_id, version_id, temporal, label, properties)
+                                .add_node_version(
+                                    node_id, version_id, valid_from, tx_time, label, properties,
+                                )
                                 .unwrap();
                         }
 
@@ -117,16 +119,15 @@ fn bench_single_add_at_chain_positions(c: &mut Criterion) {
                         // Benchmark: Add one more version at this position
                         let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
                         let version_id = VersionId::new(pos as u64).unwrap();
-                        let temporal =
-                            BiTemporalInterval::current((1000 + (pos as i64) * 100).into());
+                        let valid_from = (1000 + (pos as i64) * 100).into();
+                        let tx_time = time::now();
                         let properties = PropertyMapBuilder::new()
                             .insert("version", pos as i64)
                             .build();
 
-                        black_box(
-                            storage
-                                .add_node_version(node_id, version_id, temporal, label, properties),
-                        )
+                        black_box(storage.add_node_version(
+                            node_id, version_id, valid_from, tx_time, label, properties,
+                        ))
                         .unwrap();
                     },
                     criterion::BatchSize::SmallInput,
@@ -164,16 +165,15 @@ fn bench_bulk_insert_multiple_entities(c: &mut Criterion) {
                             for version in 0..20u64 {
                                 let version_id =
                                     VersionId::new(entity_id * 1000 + version).unwrap();
-                                let temporal = BiTemporalInterval::current(
-                                    (1000 + (version as i64) * 100).into(),
-                                );
+                                let valid_from = (1000 + (version as i64) * 100).into();
+                                let tx_time = time::now();
                                 let properties = PropertyMapBuilder::new()
                                     .insert("entity_id", entity_id as i64)
                                     .insert("version", version as i64)
                                     .build();
 
                                 black_box(storage.add_node_version(
-                                    node_id, version_id, temporal, label, properties,
+                                    node_id, version_id, valid_from, tx_time, label, properties,
                                 ))
                                 .unwrap();
                             }
@@ -220,11 +220,14 @@ fn bench_stats_with_varying_version_counts(c: &mut Criterion) {
                     let node_idx = i / 100; // 100 versions per node
                     let node_id = NodeId::new(node_idx).unwrap();
                     let version_id = VersionId::new(i).unwrap();
-                    let temporal = BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+                    let valid_from = (1000 + (i as i64) * 100).into();
+                    let tx_time = time::now();
                     let properties = PropertyMapBuilder::new().insert("value", i as i64).build();
 
                     storage
-                        .add_node_version(node_id, version_id, temporal, label, properties)
+                        .add_node_version(
+                            node_id, version_id, valid_from, tx_time, label, properties,
+                        )
                         .unwrap();
                 }
 
@@ -276,15 +279,15 @@ fn bench_delta_creation_with_caching(c: &mut Criterion) {
                         let label = GLOBAL_INTERNER.intern("TestLabel").unwrap();
                         for i in 0..count {
                             let version_id = VersionId::new(i).unwrap();
-                            let temporal =
-                                BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+                            let valid_from = (1000 + (i as i64) * 100).into();
+                            let tx_time = time::now();
                             let properties = PropertyMapBuilder::new()
                                 .insert("data", format!("version_{}", i))
                                 .insert("counter", i as i64)
                                 .build();
 
                             black_box(storage.add_node_version(
-                                node_id, version_id, temporal, label, properties,
+                                node_id, version_id, valid_from, tx_time, label, properties,
                             ))
                             .unwrap();
                         }
@@ -336,16 +339,15 @@ fn bench_interleaved_multi_entity_updates(c: &mut Criterion) {
                                 let node_id = NodeId::new(entity_id).unwrap();
                                 let version_id =
                                     VersionId::new(round * count + entity_id).unwrap();
-                                let temporal = BiTemporalInterval::current(
-                                    (1000 + (round as i64) * 100).into(),
-                                );
+                                let valid_from = (1000 + (round as i64) * 100).into();
+                                let tx_time = time::now();
                                 let properties = PropertyMapBuilder::new()
                                     .insert("sensor_id", entity_id as i64)
                                     .insert("reading", (round * 10 + entity_id) as i64)
                                     .build();
 
                                 black_box(storage.add_node_version(
-                                    node_id, version_id, temporal, label, properties,
+                                    node_id, version_id, valid_from, tx_time, label, properties,
                                 ))
                                 .unwrap();
                             }

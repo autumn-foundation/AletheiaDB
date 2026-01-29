@@ -1260,7 +1260,7 @@ fn test_async_batched_with_segment_rotation() {
 fn test_recovery_after_concurrent_writes() {
     use gallifreydb::core::id::NodeId;
     use gallifreydb::core::property::PropertyMap;
-    use gallifreydb::core::temporal::{BiTemporalInterval, time};
+    use gallifreydb::core::temporal::time;
     use gallifreydb::storage::wal::concurrent_system::{
         ConcurrentWalSystem, ConcurrentWalSystemConfig,
     };
@@ -1312,7 +1312,7 @@ fn test_recovery_after_concurrent_writes() {
                             node_id,
                             label: GLOBAL_INTERNER.intern("CrashTest").unwrap(),
                             properties: PropertyMap::new(),
-                            temporal: BiTemporalInterval::current(time::now()),
+                            valid_from: time::now(),
                         };
 
                         // Retry with backoff on backpressure
@@ -1403,7 +1403,7 @@ fn test_recovery_after_concurrent_writes() {
 fn test_recovery_partial_flush_ordering() {
     use gallifreydb::core::id::NodeId;
     use gallifreydb::core::property::PropertyMap;
-    use gallifreydb::core::temporal::{BiTemporalInterval, time};
+    use gallifreydb::core::temporal::time;
     use gallifreydb::storage::wal::concurrent_system::{
         ConcurrentWalSystem, ConcurrentWalSystemConfig,
     };
@@ -1446,7 +1446,7 @@ fn test_recovery_partial_flush_ordering() {
                             node_id,
                             label: GLOBAL_INTERNER.intern("PartialCrashTest").unwrap(),
                             properties: PropertyMap::new(),
-                            temporal: BiTemporalInterval::current(time::now()),
+                            valid_from: time::now(),
                         };
                         let _ = wal_ref.append_async(operation);
                     }

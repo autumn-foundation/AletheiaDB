@@ -43,6 +43,13 @@ const MAX_BACKWARD_DRIFT_US: i64 = 5 * 60 * 1_000_000; // 5 minutes
 /// break temporal query semantics.
 const MAX_FORWARD_JUMP_US: i64 = 60 * 60 * 1_000_000; // 1 hour
 
+/// Maximum offset for valid_from timestamps in the future.
+///
+/// Users can backdate facts (valid_from < transaction_time) for historical corrections,
+/// but we limit how far into the future they can set valid_from to prevent abuse and
+/// maintain query semantics.
+const MAX_VALID_TIME_FUTURE_OFFSET_US: i64 = 365 * 24 * 60 * 60 * 1_000_000; // 1 year
+
 /// Write transaction with full ACID guarantees.
 ///
 /// Write transactions buffer all operations in memory and apply them
@@ -470,6 +477,54 @@ impl WriteTransaction {
         self.buffer.has_vector_operations()
     }
 
+    // =========================================================================
+    // Bi-Temporal Validation (Phase 5)
+    // =========================================================================
+
+    /// Validate that valid_from is not too far in the future.
+    ///
+    /// Limits how far users can set valid_from into the future to prevent
+    /// abuse and maintain temporal query semantics.
+    fn validate_valid_from_future(&self, valid_from: Timestamp) -> Result<()> {
+        let current = time::now();
+        let future_offset = valid_from.wallclock() as i128 - current.wallclock() as i128;
+
+        if future_offset > MAX_VALID_TIME_FUTURE_OFFSET_US as i128 {
+            return Err(
+                crate::utils::error::TemporalError::ValidTimeTooFarInFuture {
+                    valid_from,
+                    current_time: current,
+                    max_future_offset_us: MAX_VALID_TIME_FUTURE_OFFSET_US,
+                }
+                .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Validate that valid_from is not before entity creation for updates/deletes.
+    ///
+    /// For updates and deletes, valid_from must be >= the entity's original
+    /// creation time to maintain temporal consistency.
+    fn validate_valid_from_not_before_creation(
+        &self,
+        entity_id: &str,
+        entity_creation_time: Timestamp,
+        valid_from: Timestamp,
+    ) -> Result<()> {
+        if valid_from < entity_creation_time {
+            return Err(
+                crate::utils::error::TemporalError::ValidTimeBeforeEntityCreation {
+                    valid_from,
+                    entity_creation_time,
+                    entity_id: entity_id.to_string(),
+                }
+                .into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Validate all buffered writes.
     ///
     /// Checks:
@@ -581,7 +636,7 @@ impl WriteTransaction {
                 }
 
                 // DeleteNode: check if node was modified after our snapshot
-                super::BufferedWrite::DeleteNode { node_id } => {
+                super::BufferedWrite::DeleteNode { node_id, .. } => {
                     // Get current version from storage
                     if let Ok(current_node) = self.current.get_node(*node_id)
                         && let Some(commit_ts) = current_node.metadata.commit_timestamp
@@ -599,7 +654,7 @@ impl WriteTransaction {
                 }
 
                 // DeleteEdge: check if edge was modified after our snapshot
-                super::BufferedWrite::DeleteEdge { edge_id } => {
+                super::BufferedWrite::DeleteEdge { edge_id, .. } => {
                     // Get current version from storage
                     if let Ok(current_edge) = self.current.get_edge(*edge_id)
                         && let Some(commit_ts) = current_edge.metadata.commit_timestamp
@@ -629,15 +684,14 @@ impl WriteTransaction {
     ///
     /// This ensures durability - operations are logged before being applied.
     /// Uses lock-free appends to the concurrent WAL system.
-    fn log_operations_to_wal(&self, commit_timestamp: Timestamp) -> Result<()> {
-        let temporal = BiTemporalInterval::current(commit_timestamp);
-
+    fn log_operations_to_wal(&self, _commit_timestamp: Timestamp) -> Result<()> {
         for write in self.buffer.operations() {
             let operation = match write {
                 super::BufferedWrite::CreateNode {
                     node_id,
                     label,
                     properties,
+                    valid_from,
                     ..
                 } => {
                     // No allocation! Just copy the 4-byte InternedString ID
@@ -645,7 +699,7 @@ impl WriteTransaction {
                         node_id: *node_id,
                         label: *label,
                         properties: properties.clone(),
-                        temporal,
+                        valid_from: *valid_from,
                     }
                 }
                 super::BufferedWrite::CreateEdge {
@@ -654,6 +708,7 @@ impl WriteTransaction {
                     target,
                     label,
                     properties,
+                    valid_from,
                     ..
                 } => {
                     // No allocation! Just copy the 4-byte InternedString ID
@@ -663,7 +718,7 @@ impl WriteTransaction {
                         target: *target,
                         label: *label,
                         properties: properties.clone(),
-                        temporal,
+                        valid_from: *valid_from,
                     }
                 }
                 super::BufferedWrite::UpdateNode {
@@ -671,6 +726,7 @@ impl WriteTransaction {
                     version_id,
                     label,
                     properties,
+                    valid_from,
                     ..
                 } => {
                     // No allocation! Just copy the 4-byte InternedString ID
@@ -679,7 +735,7 @@ impl WriteTransaction {
                         version_id: *version_id,
                         label: *label,
                         properties: properties.clone(),
-                        temporal,
+                        valid_from: *valid_from,
                     }
                 }
                 super::BufferedWrite::UpdateEdge {
@@ -687,6 +743,7 @@ impl WriteTransaction {
                     version_id,
                     label,
                     properties,
+                    valid_from,
                     ..
                 } => {
                     // No allocation! Just copy the 4-byte InternedString ID
@@ -695,16 +752,22 @@ impl WriteTransaction {
                         version_id: *version_id,
                         label: *label,
                         properties: properties.clone(),
-                        temporal,
+                        valid_from: *valid_from,
                     }
                 }
-                super::BufferedWrite::DeleteNode { node_id } => WalOperation::DeleteNode {
+                super::BufferedWrite::DeleteNode {
+                    node_id,
+                    valid_from,
+                } => WalOperation::DeleteNode {
                     node_id: *node_id,
-                    temporal,
+                    valid_from: *valid_from,
                 },
-                super::BufferedWrite::DeleteEdge { edge_id } => WalOperation::DeleteEdge {
+                super::BufferedWrite::DeleteEdge {
+                    edge_id,
+                    valid_from,
+                } => WalOperation::DeleteEdge {
                     edge_id: *edge_id,
-                    temporal,
+                    valid_from: *valid_from,
                 },
             };
 
@@ -755,8 +818,8 @@ impl WriteTransaction {
     /// * `version_id` - The version ID for this write
     /// * `label` - The node label
     /// * `properties` - The node properties
-    /// * `commit_timestamp` - The commit timestamp
-    /// * `temporal` - The bi-temporal interval
+    /// * `valid_from` - When the fact became valid in reality
+    /// * `commit_timestamp` - The commit timestamp (transaction time)
     /// * `historical` - Mutable reference to historical storage
     #[allow(clippy::too_many_arguments)]
     fn apply_node_write(
@@ -766,8 +829,8 @@ impl WriteTransaction {
         version_id: VersionId,
         label: InternedString,
         properties: PropertyMap,
+        valid_from: Timestamp,
         commit_timestamp: Timestamp,
-        temporal: BiTemporalInterval,
         historical: &mut HistoricalStorage,
     ) -> Result<()> {
         // Create node with proper transaction metadata
@@ -811,9 +874,17 @@ impl WriteTransaction {
         }
 
         // Store in historical storage (consume properties, avoiding second clone)
-        historical.add_node_version(node_id, version_id, temporal, label, properties)?;
+        historical.add_node_version(
+            node_id,
+            version_id,
+            valid_from,
+            commit_timestamp,
+            label,
+            properties,
+        )?;
 
-        // Index in temporal indexes
+        // Index in temporal indexes with bi-temporal interval
+        let temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
         self.temporal_indexes
             .insert_node_version(node_id, version_id, temporal)?;
 
@@ -831,8 +902,8 @@ impl WriteTransaction {
     /// * `target` - The target node ID
     /// * `label` - The edge label
     /// * `properties` - The edge properties
-    /// * `commit_timestamp` - The commit timestamp
-    /// * `temporal` - The bi-temporal interval
+    /// * `valid_from` - When the fact became valid in reality
+    /// * `commit_timestamp` - The commit timestamp (transaction time)
     /// * `historical` - Mutable reference to historical storage
     #[allow(clippy::too_many_arguments)]
     fn apply_edge_write(
@@ -844,8 +915,8 @@ impl WriteTransaction {
         target: NodeId,
         label: InternedString,
         properties: PropertyMap,
+        valid_from: Timestamp,
         commit_timestamp: Timestamp,
-        temporal: BiTemporalInterval,
         historical: &mut HistoricalStorage,
     ) -> Result<()> {
         // Create edge with proper transaction metadata
@@ -898,10 +969,18 @@ impl WriteTransaction {
 
         // Store in historical storage (consume properties, avoiding second clone)
         historical.add_edge_version(
-            edge_id, version_id, temporal, label, source, target, properties,
+            edge_id,
+            version_id,
+            valid_from,
+            commit_timestamp,
+            label,
+            source,
+            target,
+            properties,
         )?;
 
-        // Index in temporal indexes
+        // Index in temporal indexes with bi-temporal interval
+        let temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
         self.temporal_indexes
             .insert_edge_version(edge_id, version_id, temporal)?;
 
@@ -919,6 +998,7 @@ impl WriteTransaction {
     fn apply_node_delete(
         &self,
         node_id: NodeId,
+        valid_from: Timestamp,
         commit_timestamp: Timestamp,
         tombstone_id: VersionId,
         historical: &mut HistoricalStorage,
@@ -932,24 +1012,20 @@ impl WriteTransaction {
             historical.close_node_version_transaction_time(current_version_id, commit_timestamp)?;
         }
 
-        // Create tombstone temporal interval
-        // The tombstone marks when the deletion occurred. Its transaction_time
-        // starts at commit_timestamp and remains open (we know about the deletion
-        // from now on). Its valid_time is closed immediately since the entity
-        // no longer exists.
-        let tombstone_temporal =
-            BiTemporalInterval::current(commit_timestamp).close_valid_time(commit_timestamp);
-
         // Add tombstone version to historical storage
+        // Tombstones use the provided valid_from (when deletion became valid)
+        // and commit_timestamp (when deletion was recorded)
         historical.add_node_version(
             node_id,
             tombstone_id,
-            tombstone_temporal,
+            valid_from,
+            commit_timestamp,
             node.label,
             node.properties.clone(),
         )?;
 
         // Index the tombstone version
+        let tombstone_temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
         self.temporal_indexes
             .insert_node_version(node_id, tombstone_id, tombstone_temporal)?;
 
@@ -970,6 +1046,7 @@ impl WriteTransaction {
     fn apply_edge_delete(
         &self,
         edge_id: EdgeId,
+        valid_from: Timestamp,
         commit_timestamp: Timestamp,
         tombstone_id: VersionId,
         historical: &mut HistoricalStorage,
@@ -983,24 +1060,22 @@ impl WriteTransaction {
             historical.close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
         }
 
-        // Create tombstone temporal interval
-        // The tombstone marks when the deletion occurred. Its transaction_time
-        // starts at commit_timestamp and remains open (we know about the deletion
-        // from now on). Its valid_time is closed immediately since the entity
-        // no longer exists.
-        let tombstone_temporal =
-            BiTemporalInterval::current(commit_timestamp).close_valid_time(commit_timestamp);
-
         // Add tombstone version to historical storage
+        // Tombstones use the provided valid_from (when deletion became valid)
+        // and commit_timestamp (when deletion was recorded)
         historical.add_edge_version(
             edge_id,
             tombstone_id,
-            tombstone_temporal,
+            valid_from,
+            commit_timestamp,
             edge.label,
             edge.source,
             edge.target,
             edge.properties.clone(),
         )?;
+
+        // Create bi-temporal interval for tombstone (valid_from user-controlled, tx_time = commit)
+        let tombstone_temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
 
         // Index the tombstone version
         self.temporal_indexes
@@ -1019,7 +1094,7 @@ impl WriteTransaction {
         // However, this means the auto-closing logic in add_node_version won't work
         // for multiple updates in the same transaction (since new_tx_time == prev_tx_time).
         // Therefore, we explicitly close previous versions before adding new ones.
-        let temporal = BiTemporalInterval::current(commit_timestamp);
+        let _temporal = BiTemporalInterval::current(commit_timestamp);
 
         // Acquire lock on historical storage once before processing all operations.
         // TemporalIndexes uses DashMap internally, so no outer lock needed.
@@ -1059,7 +1134,7 @@ impl WriteTransaction {
                     version_id,
                     label,
                     properties,
-                    ..
+                    valid_from,
                 } => {
                     self.apply_node_write(
                         true, // is_create
@@ -1067,8 +1142,8 @@ impl WriteTransaction {
                         *version_id,
                         *label,
                         properties.clone(),
+                        *valid_from,
                         commit_timestamp,
-                        temporal,
                         &mut historical,
                     )?;
                 }
@@ -1079,7 +1154,7 @@ impl WriteTransaction {
                     target,
                     label,
                     properties,
-                    ..
+                    valid_from,
                 } => {
                     self.apply_edge_write(
                         true, // is_create
@@ -1089,8 +1164,8 @@ impl WriteTransaction {
                         *target,
                         *label,
                         properties.clone(),
+                        *valid_from,
                         commit_timestamp,
-                        temporal,
                         &mut historical,
                     )?;
                 }
@@ -1099,7 +1174,7 @@ impl WriteTransaction {
                     version_id,
                     label,
                     properties,
-                    ..
+                    valid_from,
                 } => {
                     self.apply_node_write(
                         false, // is_create
@@ -1107,8 +1182,8 @@ impl WriteTransaction {
                         *version_id,
                         *label,
                         properties.clone(),
+                        *valid_from,
                         commit_timestamp,
-                        temporal,
                         &mut historical,
                     )?;
                 }
@@ -1119,7 +1194,7 @@ impl WriteTransaction {
                     target,
                     label,
                     properties,
-                    ..
+                    valid_from,
                 } => {
                     self.apply_edge_write(
                         false, // is_create
@@ -1129,12 +1204,15 @@ impl WriteTransaction {
                         *target,
                         *label,
                         properties.clone(),
+                        *valid_from,
                         commit_timestamp,
-                        temporal,
                         &mut historical,
                     )?;
                 }
-                super::BufferedWrite::DeleteNode { node_id } => {
+                super::BufferedWrite::DeleteNode {
+                    node_id,
+                    valid_from,
+                } => {
                     // Use pre-generated tombstone version ID (no lock needed)
                     // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
                     let tombstone_version_id = VersionId::new_unchecked(
@@ -1150,12 +1228,16 @@ impl WriteTransaction {
 
                     self.apply_node_delete(
                         *node_id,
+                        *valid_from,
                         commit_timestamp,
                         tombstone_version_id,
                         &mut historical,
                     )?;
                 }
-                super::BufferedWrite::DeleteEdge { edge_id } => {
+                super::BufferedWrite::DeleteEdge {
+                    edge_id,
+                    valid_from,
+                } => {
                     // Use pre-generated tombstone version ID (no lock needed)
                     // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
                     let tombstone_version_id = VersionId::new_unchecked(
@@ -1171,6 +1253,7 @@ impl WriteTransaction {
 
                     self.apply_edge_delete(
                         *edge_id,
+                        *valid_from,
                         commit_timestamp,
                         tombstone_version_id,
                         &mut historical,
@@ -1365,7 +1448,12 @@ impl ReadOps for WriteTransaction {
 }
 
 impl WriteOps for WriteTransaction {
-    fn create_node(&mut self, label: &str, properties: PropertyMap) -> Result<NodeId> {
+    fn create_node_with_valid_time(
+        &mut self,
+        label: &str,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<NodeId> {
         // Check transaction state
         if self.state != TxState::Active {
             return Err(TransactionError::InvalidState {
@@ -1380,9 +1468,12 @@ impl WriteOps for WriteTransaction {
         let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
         let label_interned = GLOBAL_INTERNER.intern(label)?;
 
-        // Get timestamp for temporal interval
+        // Get timestamp: use provided valid_from or default to transaction start time
         let timestamp = self.start_timestamp;
-        let temporal = BiTemporalInterval::current(timestamp);
+        let valid_from = valid_from.unwrap_or(timestamp);
+
+        // Validate valid_from is not too far in future
+        self.validate_valid_from_future(valid_from)?;
 
         // Buffer the write
         self.buffer.add(super::BufferedWrite::CreateNode {
@@ -1390,18 +1481,19 @@ impl WriteOps for WriteTransaction {
             version_id,
             label: label_interned,
             properties,
-            temporal,
+            valid_from,
         })?;
 
         Ok(node_id)
     }
 
-    fn create_edge(
+    fn create_edge_with_valid_time(
         &mut self,
         source: NodeId,
         target: NodeId,
         label: &str,
         properties: PropertyMap,
+        valid_from: Option<Timestamp>,
     ) -> Result<EdgeId> {
         // Check transaction state
         if self.state != TxState::Active {
@@ -1417,9 +1509,9 @@ impl WriteOps for WriteTransaction {
         let version_id = VersionId::new_unchecked(self.version_id_gen.lock_or_err()?.next()?);
         let label_interned = GLOBAL_INTERNER.intern(label)?;
 
-        // Get timestamp for temporal interval
+        // Get timestamp: use provided valid_from or default to transaction start time
         let timestamp = self.start_timestamp;
-        let temporal = BiTemporalInterval::current(timestamp);
+        let valid_from = valid_from.unwrap_or(timestamp);
 
         // Buffer the write
         self.buffer.add(super::BufferedWrite::CreateEdge {
@@ -1429,13 +1521,18 @@ impl WriteOps for WriteTransaction {
             target,
             label: label_interned,
             properties,
-            temporal,
+            valid_from,
         })?;
 
         Ok(edge_id)
     }
 
-    fn update_node(&mut self, node_id: NodeId, properties: PropertyMap) -> Result<()> {
+    fn update_node_with_valid_time(
+        &mut self,
+        node_id: NodeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
         // Check transaction state
         if self.state != TxState::Active {
             return Err(TransactionError::InvalidState {
@@ -1461,9 +1558,26 @@ impl WriteOps for WriteTransaction {
         // Build the final merged property map
         let merged_properties = builder.build();
 
-        // Get timestamp for temporal interval
+        // Get timestamp: use provided valid_from or default to transaction start time
         let timestamp = self.start_timestamp;
-        let temporal = BiTemporalInterval::current(timestamp);
+        let valid_from = valid_from.unwrap_or(timestamp);
+
+        // Validate valid_from is not too far in future
+        self.validate_valid_from_future(valid_from)?;
+
+        // Validate valid_from is not before entity creation
+        let historical = self.historical.read_or_err()?;
+        if let Some(current_version_id) = historical.get_current_node_version(node_id)
+            && let Some(current_version) = historical.get_node_version(current_version_id)
+        {
+            let creation_time = current_version.temporal.valid_time().start();
+            drop(historical); // Release lock before calling validation
+            self.validate_valid_from_not_before_creation(
+                &format!("node:{}", node_id.as_u64()),
+                creation_time,
+                valid_from,
+            )?;
+        }
 
         // Buffer the write with merged properties
         self.buffer.add(super::BufferedWrite::UpdateNode {
@@ -1471,13 +1585,18 @@ impl WriteOps for WriteTransaction {
             version_id,
             label: node.label,
             properties: merged_properties,
-            temporal,
+            valid_from,
         })?;
 
         Ok(())
     }
 
-    fn update_edge(&mut self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
+    fn update_edge_with_valid_time(
+        &mut self,
+        edge_id: EdgeId,
+        properties: PropertyMap,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
         // Check transaction state
         if self.state != TxState::Active {
             return Err(TransactionError::InvalidState {
@@ -1503,9 +1622,9 @@ impl WriteOps for WriteTransaction {
         // Build the final merged property map
         let merged_properties = builder.build();
 
-        // Get timestamp for temporal interval
+        // Get timestamp: use provided valid_from or default to transaction start time
         let timestamp = self.start_timestamp;
-        let temporal = BiTemporalInterval::current(timestamp);
+        let valid_from = valid_from.unwrap_or(timestamp);
 
         // Buffer the write with merged properties
         self.buffer.add(super::BufferedWrite::UpdateEdge {
@@ -1515,13 +1634,17 @@ impl WriteOps for WriteTransaction {
             target: edge.target,
             label: edge.label,
             properties: merged_properties,
-            temporal,
+            valid_from,
         })?;
 
         Ok(())
     }
 
-    fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
+    fn delete_node_with_valid_time(
+        &mut self,
+        node_id: NodeId,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
         // Check transaction state
         if self.state != TxState::Active {
             return Err(TransactionError::InvalidState {
@@ -1540,9 +1663,32 @@ impl WriteOps for WriteTransaction {
             self.buffer.mark_has_vector_operations();
         }
 
+        // Get timestamp: use provided valid_from or default to transaction start time
+        let timestamp = self.start_timestamp;
+        let valid_from = valid_from.unwrap_or(timestamp);
+
+        // Validate valid_from is not too far in future
+        self.validate_valid_from_future(valid_from)?;
+
+        // Validate valid_from is not before entity creation
+        let historical = self.historical.read_or_err()?;
+        if let Some(current_version_id) = historical.get_current_node_version(node_id)
+            && let Some(current_version) = historical.get_node_version(current_version_id)
+        {
+            let creation_time = current_version.temporal.valid_time().start();
+            drop(historical); // Release lock before calling validation
+            self.validate_valid_from_not_before_creation(
+                &format!("node:{}", node_id.as_u64()),
+                creation_time,
+                valid_from,
+            )?;
+        }
+
         // Buffer the write
-        self.buffer
-            .add(super::BufferedWrite::DeleteNode { node_id })?;
+        self.buffer.add(super::BufferedWrite::DeleteNode {
+            node_id,
+            valid_from,
+        })?;
 
         Ok(())
     }
@@ -1585,7 +1731,11 @@ impl WriteOps for WriteTransaction {
         Ok(())
     }
 
-    fn delete_edge(&mut self, edge_id: EdgeId) -> Result<()> {
+    fn delete_edge_with_valid_time(
+        &mut self,
+        edge_id: EdgeId,
+        valid_from: Option<Timestamp>,
+    ) -> Result<()> {
         // Check transaction state
         if self.state != TxState::Active {
             return Err(TransactionError::InvalidState {
@@ -1604,9 +1754,15 @@ impl WriteOps for WriteTransaction {
             self.buffer.mark_has_vector_operations();
         }
 
+        // Get timestamp: use provided valid_from or default to transaction start time
+        let timestamp = self.start_timestamp;
+        let valid_from = valid_from.unwrap_or(timestamp);
+
         // Buffer the write
-        self.buffer
-            .add(super::BufferedWrite::DeleteEdge { edge_id })?;
+        self.buffer.add(super::BufferedWrite::DeleteEdge {
+            edge_id,
+            valid_from,
+        })?;
 
         Ok(())
     }
@@ -4295,6 +4451,277 @@ mod timestamp_ordering_tests {
         assert_eq!(
             final_node.get_property("version").and_then(|v| v.as_int()),
             Some(5)
+        );
+    }
+}
+
+// =========================================================================
+// Phase 5: Bi-Temporal Validation Tests
+// =========================================================================
+
+#[cfg(test)]
+mod bitemporal_validation_tests {
+    use super::*;
+    use crate::api::transaction::types::TxIdGenerator;
+    use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
+    use tempfile::TempDir;
+
+    struct TestHarness {
+        current: Arc<CurrentStorage>,
+        historical: Arc<RwLock<HistoricalStorage>>,
+        temporal_indexes: Arc<TemporalIndexes>,
+        wal: Arc<ConcurrentWalSystem>,
+        current_timestamp: Arc<Mutex<Timestamp>>,
+        node_id_gen: Arc<Mutex<IdGenerator>>,
+        edge_id_gen: Arc<Mutex<IdGenerator>>,
+        version_id_gen: Arc<Mutex<IdGenerator>>,
+        tx_id_gen: TxIdGenerator,
+        visibility_manager: Arc<TxVisibilityManager>,
+        _temp_dir: TempDir,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let current = Arc::new(CurrentStorage::new());
+            let historical = Arc::new(RwLock::new(HistoricalStorage::new()));
+            let temporal_indexes = Arc::new(TemporalIndexes::new());
+
+            let temp_dir = TempDir::new().unwrap();
+            let wal_config = ConcurrentWalSystemConfig::new(temp_dir.path());
+            let wal = Arc::new(ConcurrentWalSystem::new(wal_config).unwrap());
+
+            let current_timestamp = Arc::new(Mutex::new(time::now()));
+            let node_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let edge_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let version_id_gen = Arc::new(Mutex::new(IdGenerator::new()));
+            let tx_id_gen = TxIdGenerator::new();
+            let visibility_manager = Arc::new(TxVisibilityManager::new());
+
+            TestHarness {
+                current: current.clone(),
+                historical: historical.clone(),
+                temporal_indexes: temporal_indexes.clone(),
+                wal: wal.clone(),
+                current_timestamp: current_timestamp.clone(),
+                node_id_gen,
+                edge_id_gen,
+                version_id_gen,
+                tx_id_gen,
+                visibility_manager,
+                _temp_dir: temp_dir,
+            }
+        }
+
+        fn begin_write(&self) -> WriteTransaction {
+            let tx_id = self.tx_id_gen.next();
+            let snapshot_ts = *self.current_timestamp.lock_or_err().unwrap();
+            let snapshot = self.visibility_manager.capture_snapshot(snapshot_ts);
+
+            WriteTransaction::new(
+                tx_id,
+                snapshot,
+                self.current.clone(),
+                self.historical.clone(),
+                self.temporal_indexes.clone(),
+                self.wal.clone(),
+                self.current_timestamp.clone(),
+                self.visibility_manager.clone(),
+                self.node_id_gen.clone(),
+                self.edge_id_gen.clone(),
+                self.version_id_gen.clone(),
+            )
+        }
+    }
+
+    #[test]
+    fn test_create_node_with_backdated_valid_time_verified() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        // Create node with valid_time = 1 hour ago
+        let one_hour_ago_wallclock = time::now().wallclock() - 3_600_000_000;
+        let one_hour_ago = HybridTimestamp::new(one_hour_ago_wallclock, 0).unwrap();
+
+        let mut tx = harness.begin_write();
+        let node_id = tx
+            .create_node_with_valid_time(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Alice").build(),
+                Some(one_hour_ago),
+            )
+            .unwrap();
+        let commit_result = tx.commit();
+        assert!(commit_result.is_ok(), "Commit failed: {:?}", commit_result);
+
+        // Verify via historical storage that valid_time != transaction_time
+        let historical = harness.historical.read_or_err().unwrap();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let node_version = historical.get_node_version(version_id).unwrap();
+
+        // Valid time should be backdated (1 hour ago)
+        assert_eq!(
+            node_version.temporal.valid_time().start(),
+            one_hour_ago,
+            "valid_time should be 1 hour ago"
+        );
+
+        // Transaction time should be recent (commit time)
+        assert!(
+            node_version.temporal.transaction_time().start() > one_hour_ago,
+            "transaction_time should be after valid_time"
+        );
+
+        // Verify the gap is approximately 1 hour
+        let gap_us = node_version.temporal.transaction_time().start().wallclock()
+            - node_version.temporal.valid_time().start().wallclock();
+        assert!(
+            gap_us > 3_500_000_000, // At least 58 minutes
+            "Gap should be approximately 1 hour, got {}µs",
+            gap_us
+        );
+    }
+
+    #[test]
+    fn test_create_node_rejects_far_future_valid_time() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::utils::error::TemporalError;
+
+        let harness = TestHarness::new();
+
+        // Try to create node with valid_time = 2 years in future
+        let two_years_future_wallclock = time::now().wallclock() + 2 * 365 * 24 * 3_600_000_000;
+        let two_years_future = HybridTimestamp::new(two_years_future_wallclock, 0).unwrap();
+
+        let mut tx = harness.begin_write();
+        let result =
+            tx.create_node_with_valid_time("Person", PropertyMap::new(), Some(two_years_future));
+
+        assert!(result.is_err(), "Should reject far-future valid_time");
+
+        // Verify it's the right error type
+        let err = result.unwrap_err();
+        match err {
+            crate::utils::error::Error::Temporal(TemporalError::ValidTimeTooFarInFuture {
+                ..
+            }) => {
+                // Expected error type
+            }
+            other => panic!("Expected ValidTimeTooFarInFuture, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_update_node_rejects_valid_time_before_creation() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::utils::error::TemporalError;
+
+        let harness = TestHarness::new();
+
+        // First create a node
+        let mut tx = harness.begin_write();
+        let node_id = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let commit_result = tx.commit();
+        assert!(commit_result.is_ok());
+
+        // Get the node's creation time
+        let historical = harness.historical.read_or_err().unwrap();
+        let version_id = historical.get_current_node_version(node_id).unwrap();
+        let creation_version = historical.get_node_version(version_id).unwrap();
+        let creation_time = creation_version.temporal.valid_time().start();
+        drop(historical);
+
+        // Try to update with valid_time before creation
+        let way_in_past = HybridTimestamp::new(1000, 0).unwrap(); // Epoch + 1ms
+        assert!(
+            way_in_past < creation_time,
+            "Test setup: way_in_past should be before creation_time"
+        );
+
+        let mut tx2 = harness.begin_write();
+        let result = tx2.update_node_with_valid_time(
+            node_id,
+            PropertyMapBuilder::new().insert("name", "Bob").build(),
+            Some(way_in_past),
+        );
+
+        assert!(
+            result.is_err(),
+            "Should reject valid_time before entity creation"
+        );
+
+        // Verify it's the right error type
+        let err = result.unwrap_err();
+        match err {
+            crate::utils::error::Error::Temporal(
+                TemporalError::ValidTimeBeforeEntityCreation { .. },
+            ) => {
+                // Expected error type
+            }
+            other => panic!("Expected ValidTimeBeforeEntityCreation, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_create_edge_with_backdated_valid_time_verified() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        // Create two nodes first
+        let mut tx = harness.begin_write();
+        let source_id = tx.create_node("Person", PropertyMap::new()).unwrap();
+        let target_id = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        // Create edge with valid_time = 30 minutes ago
+        let thirty_min_ago_wallclock = time::now().wallclock() - 1_800_000_000;
+        let thirty_min_ago = HybridTimestamp::new(thirty_min_ago_wallclock, 0).unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let edge_id = tx2
+            .create_edge_with_valid_time(
+                source_id,
+                target_id,
+                "KNOWS",
+                PropertyMap::new(),
+                Some(thirty_min_ago),
+            )
+            .unwrap();
+        tx2.commit().unwrap();
+
+        // Verify via historical storage
+        let historical = harness.historical.read_or_err().unwrap();
+        let version_id = historical.get_current_edge_version(edge_id).unwrap();
+        let edge_version = historical.get_edge_version(version_id).unwrap();
+
+        // Valid time should be backdated
+        assert_eq!(edge_version.temporal.valid_time().start(), thirty_min_ago);
+
+        // Transaction time should be recent
+        assert!(edge_version.temporal.transaction_time().start() > thirty_min_ago);
+    }
+
+    #[test]
+    fn test_delete_node_rejects_valid_time_before_creation() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let harness = TestHarness::new();
+
+        // Create a node
+        let mut tx = harness.begin_write();
+        let node_id = tx.create_node("Person", PropertyMap::new()).unwrap();
+        tx.commit().unwrap();
+
+        // Try to delete with valid_time before creation
+        let way_in_past = HybridTimestamp::new(1000, 0).unwrap();
+
+        let mut tx2 = harness.begin_write();
+        let result = tx2.delete_node_with_valid_time(node_id, Some(way_in_past));
+
+        assert!(
+            result.is_err(),
+            "Should reject valid_time before entity creation"
         );
     }
 }

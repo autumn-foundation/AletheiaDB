@@ -421,7 +421,9 @@ impl QueryPlanner {
     ) -> Result<PhysicalOp> {
         match scan {
             ScanOp::NodeLookup(ids) => {
-                if let Some((valid_time, tx_time)) = temporal.as_ref().and_then(|ctx| ctx.as_of) {
+                if let Some((valid_time, tx_time)) =
+                    temporal.as_ref().and_then(|ctx| ctx.as_of_tuple())
+                {
                     let use_batch = self.cost_model.should_use_batch_temporal_lookup(ids.len());
                     return Ok(PhysicalOp::TemporalNodeLookup {
                         node_ids: ids.clone(),
@@ -465,7 +467,7 @@ impl QueryPlanner {
                     }));
                 }
 
-                if let Some((_, tx_time)) = temporal.as_ref().and_then(|ctx| ctx.as_of) {
+                if let Some((_, tx_time)) = temporal.as_ref().and_then(|ctx| ctx.as_of_tuple()) {
                     return Ok(PhysicalOp::TemporalVectorSearch {
                         embedding: embedding.clone(),
                         k: *k,
@@ -599,7 +601,7 @@ impl QueryPlanner {
                 depth,
             } => {
                 // Extract temporal context for edge filtering during traversal
-                let temporal_ctx = temporal.as_ref().and_then(|ctx| ctx.as_of);
+                let temporal_ctx = temporal.as_ref().and_then(|ctx| ctx.as_of_tuple());
                 Ok(PhysicalOp::IndexedTraversal {
                     input: Box::new(input),
                     direction: *direction,
@@ -1382,10 +1384,7 @@ mod tests {
         let mut query = QueryBuilder::new().start(NodeId::new(1).unwrap()).build();
 
         // Add temporal context
-        query.temporal_context = Some(TemporalContext {
-            as_of: Some((now, now)),
-            between: None,
-        });
+        query.temporal_context = Some(TemporalContext::as_of(now, now));
 
         let plan = planner.plan(query).unwrap();
         // Should be TemporalNodeLookup instead of NodeLookup
@@ -1410,10 +1409,7 @@ mod tests {
         };
 
         // Add temporal context
-        query.temporal_context = Some(TemporalContext {
-            as_of: Some((now, now)),
-            between: None,
-        });
+        query.temporal_context = Some(TemporalContext::as_of(now, now));
 
         let plan = planner.plan(query).unwrap();
         // Should be TemporalVectorSearch instead of HnswSearch

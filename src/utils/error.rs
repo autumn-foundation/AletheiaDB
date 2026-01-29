@@ -393,6 +393,32 @@ pub enum TemporalError {
         /// The current logical counter value (u32::MAX)
         current_logical: u32,
     },
+    /// Valid time is too far in the future.
+    ///
+    /// This prevents users from backdating facts decades or centuries into the future,
+    /// which could be either an accident or a DoS attack attempting to fill the database
+    /// with far-future timestamps.
+    ValidTimeTooFarInFuture {
+        /// The attempted valid_from timestamp
+        valid_from: Timestamp,
+        /// The current system time
+        current_time: Timestamp,
+        /// Maximum allowed future offset in microseconds
+        max_future_offset_us: i64,
+    },
+    /// Valid time precedes entity creation.
+    ///
+    /// This prevents backdating a fact's valid_time to before the entity existed.
+    /// For example, you cannot update a node with valid_from=Jan 1 if the node
+    /// was created on Feb 1.
+    ValidTimeBeforeEntityCreation {
+        /// The attempted valid_from timestamp
+        valid_from: Timestamp,
+        /// When the entity was created
+        entity_creation_time: Timestamp,
+        /// The entity ID (for error context)
+        entity_id: String,
+    },
 }
 
 impl fmt::Display for TemporalError {
@@ -468,6 +494,28 @@ impl fmt::Display for TemporalError {
                     f,
                     "HLC logical counter overflow at wallclock={}: current_logical={} would exceed u32::MAX",
                     wallclock, current_logical
+                )
+            }
+            TemporalError::ValidTimeTooFarInFuture {
+                valid_from,
+                current_time,
+                max_future_offset_us,
+            } => {
+                write!(
+                    f,
+                    "valid_from {} is too far in future (current: {}, max offset: {}µs)",
+                    valid_from, current_time, max_future_offset_us
+                )
+            }
+            TemporalError::ValidTimeBeforeEntityCreation {
+                valid_from,
+                entity_creation_time,
+                entity_id,
+            } => {
+                write!(
+                    f,
+                    "valid_from {} is before entity creation time {} for {}",
+                    valid_from, entity_creation_time, entity_id
                 )
             }
         }
@@ -1228,5 +1276,43 @@ mod tests {
 
         let display = format!("{}", converted);
         assert!(display.contains("Temporal error"));
+    }
+
+    // =========================================================================
+    // Phase 2: True Bi-Temporal Validation Error Tests
+    // =========================================================================
+
+    #[test]
+    fn test_valid_time_too_far_in_future_error_display() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let err = TemporalError::ValidTimeTooFarInFuture {
+            valid_from: HybridTimestamp::new(2000, 0).unwrap(),
+            current_time: HybridTimestamp::new(1000, 0).unwrap(),
+            max_future_offset_us: 31_536_000_000_000, // 1 year
+        };
+
+        let msg = format!("{}", err);
+        assert!(msg.contains("too far in future"));
+        assert!(msg.contains("2000"));
+        assert!(msg.contains("1000"));
+        assert!(msg.contains("31536000000000"));
+    }
+
+    #[test]
+    fn test_valid_time_before_entity_creation_error_display() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let err = TemporalError::ValidTimeBeforeEntityCreation {
+            valid_from: HybridTimestamp::new(100, 0).unwrap(),
+            entity_creation_time: HybridTimestamp::new(500, 0).unwrap(),
+            entity_id: "node:123".to_string(),
+        };
+
+        let msg = format!("{}", err);
+        assert!(msg.contains("before entity creation"));
+        assert!(msg.contains("100"));
+        assert!(msg.contains("500"));
+        assert!(msg.contains("node:123"));
     }
 }

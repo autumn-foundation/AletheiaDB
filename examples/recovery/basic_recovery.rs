@@ -62,7 +62,7 @@ use gallifreydb::core::{
     id::{EdgeId, NodeId},
     interning::GLOBAL_INTERNER,
     property::{PropertyMapBuilder, PropertyValue},
-    temporal::{BiTemporalInterval, time},
+    temporal::time,
 };
 use gallifreydb::storage::{
     persistence::{CheckpointConfig, PersistenceManager},
@@ -104,7 +104,7 @@ fn main() -> Result<()> {
                 .insert("name", format!("Alice{}", i))
                 .insert("age", (20 + i) as i64)
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     println!("✓ Created 50 nodes");
@@ -122,7 +122,7 @@ fn main() -> Result<()> {
             properties: PropertyMapBuilder::new()
                 .insert("since", 2020 + (i as i64))
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     println!("✓ Created 49 edges (chain: 1→2→3→...→50)");
@@ -139,7 +139,7 @@ fn main() -> Result<()> {
             .insert("age", 21)
             .insert("updated", true)
             .build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     println!("✓ Updated node 1 properties");
 
@@ -147,7 +147,7 @@ fn main() -> Result<()> {
     let node_id_25 = NodeId::new(25)?;
     wal.append(WalOperation::DeleteNode {
         node_id: node_id_25,
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     println!("✓ Deleted node 25");
 

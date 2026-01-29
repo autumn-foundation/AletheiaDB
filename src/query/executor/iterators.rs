@@ -2391,7 +2391,7 @@ mod tests {
         let node = current.create_node("Person", props.clone()).unwrap();
 
         // Add version to historical storage
-        use crate::core::temporal::{BiTemporalInterval, time};
+        use crate::core::temporal::time;
         let now = time::now();
         let label = crate::core::interning::GLOBAL_INTERNER
             .intern("Person")
@@ -2401,7 +2401,8 @@ mod tests {
             hist.add_node_version(
                 node,
                 crate::core::id::VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(now),
+                now,
+                now,
                 label,
                 props,
             )
@@ -2454,14 +2455,8 @@ mod tests {
                 .insert("name", format!("Person{}", i).as_str())
                 .build();
 
-            hist.add_node_version(
-                node_id,
-                version_id,
-                crate::core::temporal::BiTemporalInterval::current(timestamp),
-                label,
-                props,
-            )
-            .unwrap();
+            hist.add_node_version(node_id, version_id, timestamp, timestamp, label, props)
+                .unwrap();
         }
         drop(hist);
 
@@ -2529,14 +2524,8 @@ mod tests {
 
         {
             let mut hist = historical.write();
-            hist.add_node_version(
-                node_id,
-                version_id,
-                crate::core::temporal::BiTemporalInterval::current(timestamp),
-                label,
-                props,
-            )
-            .unwrap();
+            hist.add_node_version(node_id, version_id, timestamp, timestamp, label, props)
+                .unwrap();
         }
 
         // Test the get_temporal_version helper method directly
@@ -2678,14 +2667,8 @@ mod tests {
 
         {
             let mut hist = historical.write();
-            hist.add_node_version(
-                node_id,
-                version_id,
-                crate::core::temporal::BiTemporalInterval::current(timestamp),
-                label,
-                props,
-            )
-            .unwrap();
+            hist.add_node_version(node_id, version_id, timestamp, timestamp, label, props)
+                .unwrap();
         }
 
         // Test filter_node orchestrator with matching label
@@ -2726,7 +2709,8 @@ mod tests {
             hist.add_node_version(
                 node_id,
                 version_id,
-                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                timestamp,
+                timestamp,
                 person_label,
                 props,
             )
@@ -2792,14 +2776,8 @@ mod tests {
                     .insert("name", format!("Person{}", i).as_str())
                     .build();
 
-                hist.add_node_version(
-                    node_id,
-                    version_id,
-                    crate::core::temporal::BiTemporalInterval::current(timestamp),
-                    label,
-                    props,
-                )
-                .unwrap();
+                hist.add_node_version(node_id, version_id, timestamp, timestamp, label, props)
+                    .unwrap();
             }
 
             // Add Company node
@@ -2807,7 +2785,8 @@ mod tests {
             hist.add_node_version(
                 NodeId::new(4).unwrap(),
                 VersionId::new(400).unwrap(),
-                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                timestamp,
+                timestamp,
                 company_label,
                 PropertyMapBuilder::new().insert("name", "Acme").build(),
             )
@@ -2854,7 +2833,8 @@ mod tests {
             hist.add_node_version(
                 NodeId::new(1).unwrap(),
                 VersionId::new(100).unwrap(),
-                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                timestamp,
+                timestamp,
                 person_label,
                 PropertyMapBuilder::new().insert("name", "Alice").build(),
             )
@@ -2864,7 +2844,8 @@ mod tests {
             hist.add_node_version(
                 NodeId::new(2).unwrap(),
                 VersionId::new(200).unwrap(),
-                crate::core::temporal::BiTemporalInterval::current(timestamp),
+                timestamp,
+                timestamp,
                 company_label,
                 PropertyMapBuilder::new().insert("name", "Acme").build(),
             )

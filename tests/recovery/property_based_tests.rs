@@ -32,7 +32,7 @@ use gallifreydb::{
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::PropertyMapBuilder,
-        temporal::{BiTemporalInterval, Timestamp, time},
+        temporal::{Timestamp, time},
     },
     storage::{
         current::CurrentStorage,
@@ -220,7 +220,7 @@ impl RecoveryTestHarness {
                             node_id: NodeId::new(*id)?,
                             label: GLOBAL_INTERNER.intern(label).unwrap(),
                             properties: PropertyMapBuilder::new().insert("value", *value).build(),
-                            temporal: BiTemporalInterval::current(timestamp_counter),
+                            valid_from: timestamp_counter,
                         })?;
                         created_nodes.insert(*id);
                     }
@@ -236,7 +236,7 @@ impl RecoveryTestHarness {
                             properties: PropertyMapBuilder::new()
                                 .insert("value", *new_value)
                                 .build(),
-                            temporal: BiTemporalInterval::current(timestamp_counter),
+                            valid_from: timestamp_counter,
                         })?;
                     }
                 }
@@ -244,7 +244,7 @@ impl RecoveryTestHarness {
                     if created_nodes.contains(id) {
                         wal.append(WalOperation::DeleteNode {
                             node_id: NodeId::new(*id)?,
-                            temporal: BiTemporalInterval::current(timestamp_counter),
+                            valid_from: timestamp_counter,
                         })?;
                         created_nodes.remove(id);
                     }
@@ -265,7 +265,7 @@ impl RecoveryTestHarness {
                             target: NodeId::new(*to)?,
                             label: GLOBAL_INTERNER.intern(label).unwrap(),
                             properties: PropertyMapBuilder::new().build(),
-                            temporal: BiTemporalInterval::current(timestamp_counter),
+                            valid_from: timestamp_counter,
                         })?;
                         created_edges.insert(*id);
                     }
@@ -281,7 +281,7 @@ impl RecoveryTestHarness {
                             properties: PropertyMapBuilder::new()
                                 .insert("value", *new_value)
                                 .build(),
-                            temporal: BiTemporalInterval::current(timestamp_counter),
+                            valid_from: timestamp_counter,
                         })?;
                     }
                 }
@@ -289,7 +289,7 @@ impl RecoveryTestHarness {
                     if created_edges.contains(id) {
                         wal.append(WalOperation::DeleteEdge {
                             edge_id: EdgeId::new(*id)?,
-                            temporal: BiTemporalInterval::current(timestamp_counter),
+                            valid_from: timestamp_counter,
                         })?;
                         created_edges.remove(id);
                     }

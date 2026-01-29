@@ -375,7 +375,7 @@ mod tests {
             .unwrap();
 
         // Add versions to historical storage (needed for temporal queries)
-        use crate::core::temporal::{BiTemporalInterval, time};
+        use crate::core::temporal::time;
         let now = time::now();
         let alice_label = crate::core::interning::GLOBAL_INTERNER
             .intern("Person")
@@ -386,7 +386,8 @@ mod tests {
             hist.add_node_version(
                 alice,
                 crate::core::id::VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(now),
+                now,
+                now,
                 alice_label,
                 alice_props,
             )
@@ -394,7 +395,8 @@ mod tests {
             hist.add_node_version(
                 bob,
                 crate::core::id::VersionId::new(2).unwrap(),
-                BiTemporalInterval::current(now),
+                now,
+                now,
                 bob_label,
                 bob_props,
             )

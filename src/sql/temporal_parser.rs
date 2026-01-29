@@ -165,7 +165,7 @@ impl ExtractedTemporal {
                 Ok(Some(TemporalContext::as_of(time::now(), *ts)))
             }
             (Some(TemporalClause::SystemTimeBetween(range)), None) => {
-                Ok(Some(TemporalContext::between(*range)))
+                Ok(Some(TemporalContext::transaction_time_between(*range)))
             }
 
             // Valid time only: Query valid time with current transaction time
@@ -173,7 +173,7 @@ impl ExtractedTemporal {
                 Ok(Some(TemporalContext::as_of(*ts, time::now())))
             }
             (None, Some(TemporalClause::ValidTimeBetween(range))) => {
-                Ok(Some(TemporalContext::between(*range)))
+                Ok(Some(TemporalContext::valid_time_between(*range)))
             }
 
             // Bi-temporal: both system and valid time AS OF (fully supported)
@@ -688,7 +688,7 @@ mod tests {
         let ctx = extracted.to_temporal_context().unwrap();
         assert!(ctx.is_some());
         let ctx = ctx.unwrap();
-        assert!(ctx.as_of.is_some());
+        assert!(ctx.as_of_tuple().is_some());
     }
 
     #[test]
@@ -702,9 +702,9 @@ mod tests {
         let ctx = extracted.to_temporal_context().unwrap();
         assert!(ctx.is_some());
         let ctx = ctx.unwrap();
-        assert!(ctx.as_of.is_some());
+        assert!(ctx.as_of_tuple().is_some());
 
-        let (vt, tt) = ctx.as_of.unwrap();
+        let (vt, tt) = ctx.as_of_tuple().unwrap();
         assert_eq!(vt.wallclock(), 1500);
         assert_eq!(tt.wallclock(), 2000);
     }
@@ -874,7 +874,7 @@ mod tests {
 
         // Valid time should be set to "now" (non-zero)
         let ctx = ctx.unwrap();
-        let (vt, tt) = ctx.as_of.unwrap();
+        let (vt, tt) = ctx.as_of_tuple().unwrap();
         assert_eq!(tt.wallclock(), 1000); // System time from clause
         assert!(vt.wallclock() > 0); // Valid time is "now"
     }

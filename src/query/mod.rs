@@ -49,6 +49,7 @@ pub mod lexer;
 pub mod parser;
 pub mod plan;
 pub mod planner;
+pub mod result;
 
 // Re-export commonly used types
 pub use ast::QueryAst;
@@ -61,3 +62,4 @@ pub use lexer::{Lexer, LexerError, Token};
 pub use parser::{ParseError, Parser};
 pub use plan::{LogicalOp, LogicalPlan};
 pub use planner::{PhysicalPlan, QueryPlanner};
+pub use result::{EntityHistory, VersionDiff, VersionInfo, VersionSummary};

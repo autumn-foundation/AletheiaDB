@@ -300,31 +300,189 @@ pub enum SortKey {
 /// Temporal context for a query.
 ///
 /// Specifies when to evaluate the query in time.
-#[derive(Debug, Clone)]
+/// Temporal query context supporting independent valid_time and transaction_time dimensions.
+///
+/// Enables true bi-temporal queries where each dimension can be queried independently:
+/// - "What did we know at time T?" → `as_of_transaction_time(T)`
+/// - "What was true at time T?" → `as_of_valid_time(T)`
+/// - "What did we know at time T about what was true at time V?" → `as_of(V, T)`
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TemporalContext {
-    /// Point-in-time query (as_of semantics)
-    pub as_of: Option<(Timestamp, Timestamp)>,
-    /// Time range query (between semantics)
-    pub between: Option<TimeRange>,
+    /// Point-in-time query for valid_time dimension
+    pub valid_time_as_of: Option<Timestamp>,
+    /// Point-in-time query for transaction_time dimension
+    pub transaction_time_as_of: Option<Timestamp>,
+    /// Time range query for valid_time dimension
+    pub valid_time_between: Option<TimeRange>,
+    /// Time range query for transaction_time dimension
+    pub transaction_time_between: Option<TimeRange>,
+    /// Include historical versions in results (for history queries)
+    pub include_history: bool,
 }
 
 impl TemporalContext {
-    /// Create a point-in-time context
+    /// Create a point-in-time context for both dimensions (traditional bi-temporal query).
+    ///
+    /// # Example
+    /// ```ignore
+    /// // "What did we know at tx_time about what was valid at valid_time?"
+    /// let ctx = TemporalContext::as_of(valid_time, tx_time);
+    /// ```
     #[must_use]
     pub fn as_of(valid_time: Timestamp, transaction_time: Timestamp) -> Self {
         TemporalContext {
-            as_of: Some((valid_time, transaction_time)),
-            between: None,
+            valid_time_as_of: Some(valid_time),
+            transaction_time_as_of: Some(transaction_time),
+            valid_time_between: None,
+            transaction_time_between: None,
+            include_history: false,
         }
     }
 
-    /// Create a time range context
+    /// Create a context querying only the valid_time dimension.
+    ///
+    /// Transaction time defaults to "now" (most recent recorded state).
+    ///
+    /// # Example
+    /// ```ignore
+    /// // "What was valid/true at this time?" (using current database state)
+    /// let ctx = TemporalContext::as_of_valid_time(timestamp);
+    /// ```
     #[must_use]
-    pub fn between(range: TimeRange) -> Self {
+    pub fn as_of_valid_time(timestamp: Timestamp) -> Self {
         TemporalContext {
-            as_of: None,
-            between: Some(range),
+            valid_time_as_of: Some(timestamp),
+            transaction_time_as_of: None,
+            valid_time_between: None,
+            transaction_time_between: None,
+            include_history: false,
         }
+    }
+
+    /// Create a context querying only the transaction_time dimension.
+    ///
+    /// Valid time defaults to "now" (current validity).
+    ///
+    /// # Example
+    /// ```ignore
+    /// // "What did we know/record at this time?" (database state as of tx_time)
+    /// let ctx = TemporalContext::as_of_transaction_time(timestamp);
+    /// ```
+    #[must_use]
+    pub fn as_of_transaction_time(timestamp: Timestamp) -> Self {
+        TemporalContext {
+            valid_time_as_of: None,
+            transaction_time_as_of: Some(timestamp),
+            valid_time_between: None,
+            transaction_time_between: None,
+            include_history: false,
+        }
+    }
+
+    /// Create a context for querying a valid_time range.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // "What was valid between start and end?"
+    /// let ctx = TemporalContext::valid_time_between(range);
+    /// ```
+    #[must_use]
+    pub fn valid_time_between(range: TimeRange) -> Self {
+        TemporalContext {
+            valid_time_as_of: None,
+            transaction_time_as_of: None,
+            valid_time_between: Some(range),
+            transaction_time_between: None,
+            include_history: false,
+        }
+    }
+
+    /// Create a context for querying a transaction_time range.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // "What did we record between start and end?"
+    /// let ctx = TemporalContext::transaction_time_between(range);
+    /// ```
+    #[must_use]
+    pub fn transaction_time_between(range: TimeRange) -> Self {
+        TemporalContext {
+            valid_time_as_of: None,
+            transaction_time_as_of: None,
+            valid_time_between: None,
+            transaction_time_between: Some(range),
+            include_history: false,
+        }
+    }
+
+    /// Create a time range context (backward compatibility - uses valid_time dimension).
+    ///
+    /// **Deprecated**: Use `valid_time_between()` or `transaction_time_between()` for clarity.
+    #[must_use]
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use valid_time_between() or transaction_time_between() instead"
+    )]
+    pub fn between(range: TimeRange) -> Self {
+        Self::valid_time_between(range)
+    }
+
+    /// Set whether to include historical versions in results.
+    ///
+    /// When enabled, queries return all versions within the temporal context
+    /// rather than just the current state.
+    #[must_use]
+    pub fn with_history(mut self, include: bool) -> Self {
+        self.include_history = include;
+        self
+    }
+
+    /// Resolve temporal dimensions by filling missing dimensions with current time.
+    ///
+    /// Returns `(valid_time, transaction_time)` where:
+    /// - Missing `valid_time_as_of` → `time::now()`
+    /// - Missing `transaction_time_as_of` → `time::now()`
+    ///
+    /// # Example
+    /// ```ignore
+    /// let ctx = TemporalContext::as_of_valid_time(ts);
+    /// let (vt, tt) = ctx.resolve_now();
+    /// // vt == ts, tt == now()
+    /// ```
+    #[must_use]
+    pub fn resolve_now(&self) -> (Timestamp, Timestamp) {
+        use crate::core::temporal::time;
+
+        let now = time::now();
+        let valid_time = self.valid_time_as_of.unwrap_or(now);
+        let transaction_time = self.transaction_time_as_of.unwrap_or(now);
+
+        (valid_time, transaction_time)
+    }
+
+    // =========================================================================
+    // Backward Compatibility Helpers
+    // =========================================================================
+
+    /// Get point-in-time timestamps as a tuple (backward compatibility).
+    ///
+    /// Returns `Some((valid_time, transaction_time))` only if both dimensions
+    /// are set as point-in-time queries.
+    #[must_use]
+    pub fn as_of_tuple(&self) -> Option<(Timestamp, Timestamp)> {
+        match (self.valid_time_as_of, self.transaction_time_as_of) {
+            (Some(vt), Some(tt)) => Some((vt, tt)),
+            _ => None,
+        }
+    }
+
+    /// Check if this context has any temporal constraints.
+    #[must_use]
+    pub fn is_temporal(&self) -> bool {
+        self.valid_time_as_of.is_some()
+            || self.transaction_time_as_of.is_some()
+            || self.valid_time_between.is_some()
+            || self.transaction_time_between.is_some()
     }
 }
 
@@ -418,13 +576,148 @@ mod tests {
     }
 
     #[test]
-    fn test_temporal_context() {
+    fn test_temporal_context_backward_compat() {
         let as_of = TemporalContext::as_of(1000.into(), 2000.into());
-        assert!(as_of.as_of.is_some());
-        assert!(as_of.between.is_none());
+        assert_eq!(as_of.valid_time_as_of, Some(1000.into()));
+        assert_eq!(as_of.transaction_time_as_of, Some(2000.into()));
+        assert_eq!(as_of.valid_time_between, None);
+        assert_eq!(as_of.transaction_time_between, None);
 
+        #[allow(deprecated)]
         let between = TemporalContext::between(TimeRange::from(0.into()));
-        assert!(between.as_of.is_none());
-        assert!(between.between.is_some());
+        assert_eq!(between.valid_time_as_of, None);
+        assert_eq!(between.transaction_time_as_of, None);
+        assert!(between.valid_time_between.is_some());
+    }
+
+    // =========================================================================
+    // Phase 6: Enhanced TemporalContext Tests
+    // =========================================================================
+
+    #[test]
+    fn test_temporal_context_as_of_valid_time_only() {
+        use crate::core::temporal::time;
+
+        let ts = time::now();
+        let ctx = TemporalContext::as_of_valid_time(ts);
+
+        assert_eq!(ctx.valid_time_as_of, Some(ts));
+        assert_eq!(ctx.transaction_time_as_of, None);
+        assert_eq!(ctx.valid_time_between, None);
+        assert_eq!(ctx.transaction_time_between, None);
+        assert!(!ctx.include_history);
+    }
+
+    #[test]
+    fn test_temporal_context_as_of_transaction_time_only() {
+        use crate::core::temporal::time;
+
+        let ts = time::now();
+        let ctx = TemporalContext::as_of_transaction_time(ts);
+
+        assert_eq!(ctx.transaction_time_as_of, Some(ts));
+        assert_eq!(ctx.valid_time_as_of, None);
+        assert_eq!(ctx.valid_time_between, None);
+        assert_eq!(ctx.transaction_time_between, None);
+        assert!(!ctx.include_history);
+    }
+
+    #[test]
+    fn test_temporal_context_as_of_both_dimensions() {
+        use crate::core::temporal::time;
+
+        let vt = time::now();
+        let tt = time::now();
+        let ctx = TemporalContext::as_of(vt, tt);
+
+        assert_eq!(ctx.valid_time_as_of, Some(vt));
+        assert_eq!(ctx.transaction_time_as_of, Some(tt));
+        assert_eq!(ctx.valid_time_between, None);
+        assert_eq!(ctx.transaction_time_between, None);
+    }
+
+    #[test]
+    fn test_temporal_context_valid_time_between() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let start = HybridTimestamp::new(1000, 0).unwrap();
+        let end = HybridTimestamp::new(2000, 0).unwrap();
+        let range = TimeRange::new(start, end).unwrap();
+
+        let ctx = TemporalContext::valid_time_between(range);
+
+        assert_eq!(ctx.valid_time_between, Some(range));
+        assert_eq!(ctx.transaction_time_between, None);
+        assert_eq!(ctx.valid_time_as_of, None);
+        assert_eq!(ctx.transaction_time_as_of, None);
+    }
+
+    #[test]
+    fn test_temporal_context_transaction_time_between() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let start = HybridTimestamp::new(1000, 0).unwrap();
+        let end = HybridTimestamp::new(2000, 0).unwrap();
+        let range = TimeRange::new(start, end).unwrap();
+
+        let ctx = TemporalContext::transaction_time_between(range);
+
+        assert_eq!(ctx.transaction_time_between, Some(range));
+        assert_eq!(ctx.valid_time_between, None);
+        assert_eq!(ctx.valid_time_as_of, None);
+        assert_eq!(ctx.transaction_time_as_of, None);
+    }
+
+    #[test]
+    fn test_temporal_context_resolve_now_fills_missing() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let ts = HybridTimestamp::new(1000, 0).unwrap();
+        let ctx = TemporalContext::as_of_valid_time(ts);
+
+        let resolved = ctx.resolve_now();
+
+        // Valid time should be preserved
+        assert_eq!(resolved.0, ts);
+
+        // Transaction time should be approximately now
+        assert!(resolved.1.wallclock() > ts.wallclock());
+    }
+
+    #[test]
+    fn test_temporal_context_resolve_now_preserves_both() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let vt = HybridTimestamp::new(1000, 0).unwrap();
+        let tt = HybridTimestamp::new(2000, 0).unwrap();
+        let ctx = TemporalContext::as_of(vt, tt);
+
+        let resolved = ctx.resolve_now();
+
+        // Both should be preserved
+        assert_eq!(resolved.0, vt);
+        assert_eq!(resolved.1, tt);
+    }
+
+    #[test]
+    fn test_temporal_context_with_history() {
+        use crate::core::temporal::time;
+
+        let ts = time::now();
+        let ctx = TemporalContext::as_of_valid_time(ts).with_history(true);
+
+        assert!(ctx.include_history);
+        assert_eq!(ctx.valid_time_as_of, Some(ts));
+    }
+
+    #[test]
+    fn test_temporal_context_default_is_empty() {
+        let ctx = TemporalContext::default();
+
+        assert_eq!(ctx.valid_time_as_of, None);
+        assert_eq!(ctx.transaction_time_as_of, None);
+        assert_eq!(ctx.valid_time_between, None);
+        assert_eq!(ctx.transaction_time_between, None);
+        assert!(!ctx.include_history);
     }
 }

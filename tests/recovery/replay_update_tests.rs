@@ -12,7 +12,7 @@ use gallifreydb::{
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::{PropertyMap, PropertyMapBuilder},
-        temporal::{BiTemporalInterval, time},
+        temporal::time,
     },
     storage::{
         persistence::{CheckpointConfig, PersistenceManager},
@@ -43,7 +43,7 @@ fn test_replay_update_node_basic() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
-        temporal: BiTemporalInterval::current(timestamp1),
+        valid_from: timestamp1,
     })?;
 
     // Update node with new properties
@@ -55,7 +55,7 @@ fn test_replay_update_node_basic() -> Result<()> {
             .insert("name", "Alice")
             .insert("age", 30_i64)
             .build(),
-        temporal: BiTemporalInterval::current(timestamp2),
+        valid_from: timestamp2,
     })?;
     wal.flush()?;
 
@@ -103,7 +103,7 @@ fn test_replay_update_node_label_change() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update node to "User" label
@@ -112,7 +112,7 @@ fn test_replay_update_node_label_change() -> Result<()> {
         version_id: VersionId::new(2).unwrap(),
         label: GLOBAL_INTERNER.intern("User").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     wal.flush()?;
 
@@ -151,7 +151,7 @@ fn test_replay_update_node_with_vector() -> Result<()> {
         properties: PropertyMapBuilder::new()
             .insert_vector("embedding", &embedding_v1)
             .build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update node with new embedding
@@ -162,7 +162,7 @@ fn test_replay_update_node_with_vector() -> Result<()> {
         properties: PropertyMapBuilder::new()
             .insert_vector("embedding", &embedding_v2)
             .build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     wal.flush()?;
 
@@ -203,7 +203,7 @@ fn test_replay_multiple_updates_same_node() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Counter").unwrap(),
         properties: PropertyMapBuilder::new().insert("count", 0_i64).build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update 5 times
@@ -213,7 +213,7 @@ fn test_replay_multiple_updates_same_node() -> Result<()> {
             version_id: VersionId::new((i + 1) as u64).unwrap(),
             label: GLOBAL_INTERNER.intern("Counter").unwrap(),
             properties: PropertyMapBuilder::new().insert("count", i).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -259,14 +259,14 @@ fn test_replay_update_edge_basic() -> Result<()> {
         node_id: source_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: target_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Create edge
@@ -276,7 +276,7 @@ fn test_replay_update_edge_basic() -> Result<()> {
         target: target_id,
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMapBuilder::new().insert("since", 2020_i64).build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update edge
@@ -288,7 +288,7 @@ fn test_replay_update_edge_basic() -> Result<()> {
             .insert("since", 2020_i64)
             .insert("strength", 0.8)
             .build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     wal.flush()?;
 
@@ -336,14 +336,14 @@ fn test_replay_update_edge_label_change() -> Result<()> {
         node_id: source_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: target_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Create edge with "KNOWS" label
@@ -353,7 +353,7 @@ fn test_replay_update_edge_label_change() -> Result<()> {
         target: target_id,
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update edge to "FRIENDS_WITH" label
@@ -362,7 +362,7 @@ fn test_replay_update_edge_label_change() -> Result<()> {
         version_id: VersionId::new(4).unwrap(),
         label: GLOBAL_INTERNER.intern("FRIENDS_WITH").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     wal.flush()?;
 
@@ -396,7 +396,7 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMapBuilder::new().insert("value", i as i64).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -406,7 +406,7 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
         version_id: VersionId::new(4).unwrap(),
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 10_i64).build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.append(WalOperation::UpdateNode {
@@ -414,7 +414,7 @@ fn test_replay_mixed_creates_and_updates() -> Result<()> {
         version_id: VersionId::new(5).unwrap(),
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 20_i64).build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.flush()?;

@@ -3,11 +3,7 @@
 mod common;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use gallifreydb::core::{
-    interning::GLOBAL_INTERNER,
-    property::PropertyMapBuilder,
-    temporal::{BiTemporalInterval, time},
-};
+use gallifreydb::core::{interning::GLOBAL_INTERNER, property::PropertyMapBuilder, temporal::time};
 use gallifreydb::storage::{
     CurrentStorage, HistoricalStorage, LSN,
     persistence::{Checkpoint, CheckpointConfig, PersistenceManager},
@@ -125,7 +121,7 @@ fn bench_recovery(c: &mut Criterion) {
                     node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
-                    temporal: BiTemporalInterval::current(time::now()),
+                    valid_from: time::now(),
                 };
                 wal.append_async(operation).unwrap();
             }
@@ -155,7 +151,7 @@ fn bench_recovery(c: &mut Criterion) {
                     node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
-                    temporal: BiTemporalInterval::current(time::now()),
+                    valid_from: time::now(),
                 };
                 wal.append_async(operation).unwrap();
             }

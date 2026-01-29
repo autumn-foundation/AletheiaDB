@@ -22,7 +22,6 @@ use std::path::Path;
 use crate::core::hlc::HybridTimestamp;
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::property::PropertyMap;
-use crate::core::temporal::BiTemporalInterval;
 use crate::utils::error::{Error, Result, StorageError};
 
 use super::{LSN, WalEntry, WalOperation};
@@ -319,21 +318,22 @@ pub(crate) fn parse_entry_at(
             let label = crate::core::interning::InternedString::from_raw(label_id);
 
             // V1+: deserialize properties and temporal
-            let (properties, temporal) = if version >= WAL_VERSION {
+            let (properties, valid_from) = if version >= WAL_VERSION {
                 let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
                 current_offset += props_len;
-                let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[current_offset..])?;
-                current_offset += temp_len;
-                (props, temp)
+                let (valid_from_ts, ts_len) =
+                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
+                current_offset += ts_len;
+                (props, valid_from_ts)
             } else {
-                (PropertyMap::new(), BiTemporalInterval::current(timestamp))
+                (PropertyMap::new(), timestamp)
             };
 
             WalOperation::CreateNode {
                 node_id,
                 label,
                 properties,
-                temporal,
+                valid_from,
             }
         }
         2 => {
@@ -370,14 +370,15 @@ pub(crate) fn parse_entry_at(
             // Reconstruct InternedString from ID
             let label = crate::core::interning::InternedString::from_raw(label_id);
 
-            let (properties, temporal) = if version >= WAL_VERSION {
+            let (properties, valid_from) = if version >= WAL_VERSION {
                 let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
                 current_offset += props_len;
-                let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[current_offset..])?;
-                current_offset += temp_len;
-                (props, temp)
+                let (valid_from_ts, ts_len) =
+                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
+                current_offset += ts_len;
+                (props, valid_from_ts)
             } else {
-                (PropertyMap::new(), BiTemporalInterval::current(timestamp))
+                (PropertyMap::new(), timestamp)
             };
 
             WalOperation::CreateEdge {
@@ -386,7 +387,7 @@ pub(crate) fn parse_entry_at(
                 target,
                 label,
                 properties,
-                temporal,
+                valid_from,
             }
         }
         3 => {
@@ -403,7 +404,7 @@ pub(crate) fn parse_entry_at(
             let version_id = deserialize_version_id(buffer, current_offset, "UpdateNode")?;
             current_offset += 8;
 
-            let (label, properties, temporal) = if version >= WAL_VERSION {
+            let (label, properties, valid_from) = if version >= WAL_VERSION {
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -418,15 +419,16 @@ pub(crate) fn parse_entry_at(
 
                 let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
                 current_offset += props_len;
-                let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[current_offset..])?;
-                current_offset += temp_len;
-                (lbl, props, temp)
+                let (valid_from_ts, ts_len) =
+                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
+                current_offset += ts_len;
+                (lbl, props, valid_from_ts)
             } else {
                 (
                     // For old WAL format, create a dummy InternedString (this shouldn't happen in practice)
                     crate::core::interning::InternedString::from_raw(0),
                     PropertyMap::new(),
-                    BiTemporalInterval::current(timestamp),
+                    timestamp,
                 )
             };
 
@@ -435,7 +437,7 @@ pub(crate) fn parse_entry_at(
                 version_id,
                 label,
                 properties,
-                temporal,
+                valid_from,
             }
         }
         4 => {
@@ -452,7 +454,7 @@ pub(crate) fn parse_entry_at(
             let version_id = deserialize_version_id(buffer, current_offset, "UpdateEdge")?;
             current_offset += 8;
 
-            let (label, properties, temporal) = if version >= WAL_VERSION {
+            let (label, properties, valid_from) = if version >= WAL_VERSION {
                 // Read 4-byte InternedString ID
                 let label_id = u32::from_le_bytes([
                     buffer[current_offset],
@@ -467,15 +469,16 @@ pub(crate) fn parse_entry_at(
 
                 let (props, props_len) = PropertyMap::deserialize(&buffer[current_offset..])?;
                 current_offset += props_len;
-                let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[current_offset..])?;
-                current_offset += temp_len;
-                (lbl, props, temp)
+                let (valid_from_ts, ts_len) =
+                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
+                current_offset += ts_len;
+                (lbl, props, valid_from_ts)
             } else {
                 (
                     // For old WAL format, create a dummy InternedString (this shouldn't happen in practice)
                     crate::core::interning::InternedString::from_raw(0),
                     PropertyMap::new(),
-                    BiTemporalInterval::current(timestamp),
+                    timestamp,
                 )
             };
 
@@ -484,7 +487,7 @@ pub(crate) fn parse_entry_at(
                 version_id,
                 label,
                 properties,
-                temporal,
+                valid_from,
             }
         }
         5 => {
@@ -522,15 +525,19 @@ pub(crate) fn parse_entry_at(
             let node_id = deserialize_node_id(buffer, current_offset, "DeleteNode")?;
             current_offset += 8;
 
-            let temporal = if version >= WAL_VERSION {
-                let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[current_offset..])?;
-                current_offset += temp_len;
-                temp
+            let valid_from = if version >= WAL_VERSION {
+                let (valid_from_ts, ts_len) =
+                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
+                current_offset += ts_len;
+                valid_from_ts
             } else {
-                BiTemporalInterval::current(timestamp)
+                timestamp
             };
 
-            WalOperation::DeleteNode { node_id, temporal }
+            WalOperation::DeleteNode {
+                node_id,
+                valid_from,
+            }
         }
         7 => {
             // DeleteEdge
@@ -543,15 +550,19 @@ pub(crate) fn parse_entry_at(
             let edge_id = deserialize_edge_id(buffer, current_offset, "DeleteEdge")?;
             current_offset += 8;
 
-            let temporal = if version >= WAL_VERSION {
-                let (temp, temp_len) = BiTemporalInterval::deserialize(&buffer[current_offset..])?;
-                current_offset += temp_len;
-                temp
+            let valid_from = if version >= WAL_VERSION {
+                let (valid_from_ts, ts_len) =
+                    HybridTimestamp::deserialize(&buffer[current_offset..])?;
+                current_offset += ts_len;
+                valid_from_ts
             } else {
-                BiTemporalInterval::current(timestamp)
+                timestamp
             };
 
-            WalOperation::DeleteEdge { edge_id, temporal }
+            WalOperation::DeleteEdge {
+                edge_id,
+                valid_from,
+            }
         }
         _ => {
             // Unknown operation type
@@ -688,7 +699,7 @@ mod tests {
             node_id,
             label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry = WalEntry::new(LSN(1), operation);
 
@@ -727,7 +738,7 @@ mod tests {
             target,
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry = WalEntry::new(LSN(2), operation);
 
@@ -768,7 +779,7 @@ mod tests {
             version_id,
             label: GLOBAL_INTERNER.intern("UpdatedPerson").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry = WalEntry::new(LSN(3), operation);
 
@@ -807,7 +818,7 @@ mod tests {
             version_id,
             label: GLOBAL_INTERNER.intern("UPDATED_KNOWS").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry = WalEntry::new(LSN(4), operation);
 
@@ -842,7 +853,7 @@ mod tests {
         let node_id = NodeId::new(42).unwrap();
         let operation = WalOperation::DeleteNode {
             node_id,
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry = WalEntry::new(LSN(5), operation);
 
@@ -872,7 +883,7 @@ mod tests {
         let edge_id = EdgeId::new(100).unwrap();
         let operation = WalOperation::DeleteEdge {
             edge_id,
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry = WalEntry::new(LSN(6), operation);
 
@@ -931,7 +942,7 @@ mod tests {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("First").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry1 = WalEntry::new(LSN(1), operation1);
 
@@ -939,7 +950,7 @@ mod tests {
             node_id: NodeId::new(2).unwrap(),
             label: GLOBAL_INTERNER.intern("Second").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry2 = WalEntry::new(LSN(2), operation2);
 
@@ -1075,14 +1086,14 @@ mod tests {
                 node_id,
                 label: parsed_label,
                 properties,
-                temporal,
+                valid_from,
             } => {
                 assert_eq!(node_id.as_u64(), 123);
                 assert_eq!(parsed_label, GLOBAL_INTERNER.intern("TestNode").unwrap());
                 // Version 0 should have empty properties
                 assert!(properties.is_empty());
-                // Temporal should be set to current(timestamp)
-                assert_eq!(temporal.transaction_time().start(), timestamp);
+                // Valid_from should be set to the timestamp
+                assert_eq!(valid_from, timestamp);
             }
             _ => panic!("Expected CreateNode operation"),
         }
@@ -1096,7 +1107,7 @@ mod tests {
             node_id,
             label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry = WalEntry::new(LSN(1), operation);
 
@@ -1152,7 +1163,7 @@ mod tests {
                 node_id: NodeId::new(i + 1).unwrap(),
                 label: GLOBAL_INTERNER.intern(format!("Node_{}", i)).unwrap(),
                 properties: PropertyMap::new(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             };
 
             let entry = WalEntry::new(lsn, operation);
@@ -1206,7 +1217,7 @@ mod tests {
                         .intern(format!("Node_seg{}_entry{}", seg_id, i))
                         .unwrap(),
                     properties: PropertyMap::new(),
-                    temporal: BiTemporalInterval::current(time::now()),
+                    valid_from: time::now(),
                 };
 
                 let entry = WalEntry::new(lsn, operation);
@@ -1254,7 +1265,7 @@ mod tests {
                 node_id: NodeId::new(i).unwrap(),
                 label: GLOBAL_INTERNER.intern(format!("Node_{}", i)).unwrap(),
                 properties: PropertyMap::new(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             };
 
             let entry = WalEntry::new(lsn, operation);
@@ -1320,7 +1331,7 @@ mod tests {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("Node_1").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         };
         let entry = WalEntry::new(LSN(1), operation);
         let mut buffer = Vec::new();

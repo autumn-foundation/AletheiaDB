@@ -75,15 +75,22 @@ impl PhysicalPlan {
         ));
 
         if let Some(ref ctx) = self.temporal_context {
-            if let Some((valid, tx)) = ctx.as_of {
+            if let Some((valid, tx)) = ctx.as_of_tuple() {
                 output.push_str(&format!(
                     "  Temporal Context: as_of(valid={}, tx={})\n",
                     valid, tx
                 ));
             }
-            if let Some(ref range) = ctx.between {
+            if let Some(ref range) = ctx.valid_time_between {
                 output.push_str(&format!(
-                    "  Temporal Context: between({}, {})\n",
+                    "  Temporal Context: valid_time between({}, {})\n",
+                    range.start(),
+                    range.end()
+                ));
+            }
+            if let Some(ref range) = ctx.transaction_time_between {
+                output.push_str(&format!(
+                    "  Temporal Context: transaction_time between({}, {})\n",
                     range.start(),
                     range.end()
                 ));
@@ -726,10 +733,7 @@ mod tests {
         let temporal_plan = PhysicalPlan {
             root: PhysicalOp::Empty,
             estimated_cost: Cost::default(),
-            temporal_context: Some(TemporalContext {
-                as_of: Some((1000.into(), 2000.into())),
-                between: None,
-            }),
+            temporal_context: Some(TemporalContext::as_of(1000.into(), 2000.into())),
             parallel: false,
             include_provenance: false,
         };
@@ -1696,10 +1700,7 @@ mod tests {
                 memory: 500,
                 network: 0.0,
             },
-            temporal_context: Some(TemporalContext {
-                as_of: Some((1000.into(), 2000.into())),
-                between: None,
-            }),
+            temporal_context: Some(TemporalContext::as_of(1000.into(), 2000.into())),
             parallel: false,
             include_provenance: false,
         };

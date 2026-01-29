@@ -12,7 +12,7 @@ use gallifreydb::{
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::{PropertyMap, PropertyMapBuilder},
-        temporal::{BiTemporalInterval, time},
+        temporal::time,
     },
     storage::{
         persistence::{CheckpointConfig, PersistenceManager},
@@ -43,13 +43,13 @@ fn test_replay_delete_node_basic() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
-        temporal: BiTemporalInterval::current(timestamp1),
+        valid_from: timestamp1,
     })?;
 
     // Delete node
     wal.append(WalOperation::DeleteNode {
         node_id,
-        temporal: BiTemporalInterval::current(timestamp2),
+        valid_from: timestamp2,
     })?;
     wal.flush()?;
 
@@ -88,7 +88,7 @@ fn test_replay_delete_node_after_update() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update node
@@ -100,13 +100,13 @@ fn test_replay_delete_node_after_update() -> Result<()> {
             .insert("name", "Alice")
             .insert("age", 30_i64)
             .build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Delete node
     wal.append(WalOperation::DeleteNode {
         node_id,
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     wal.flush()?;
 
@@ -146,14 +146,14 @@ fn test_replay_delete_edge_basic() -> Result<()> {
         node_id: source_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.append(WalOperation::CreateNode {
         node_id: target_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Create edge
@@ -163,13 +163,13 @@ fn test_replay_delete_edge_basic() -> Result<()> {
         target: target_id,
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Delete edge
     wal.append(WalOperation::DeleteEdge {
         edge_id,
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     wal.flush()?;
 
@@ -213,7 +213,7 @@ fn test_replay_multiple_deletes() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -221,7 +221,7 @@ fn test_replay_multiple_deletes() -> Result<()> {
     for id in [2, 4] {
         wal.append(WalOperation::DeleteNode {
             node_id: NodeId::new(id).unwrap(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -269,13 +269,13 @@ fn test_replay_delete_with_vector() -> Result<()> {
         properties: PropertyMapBuilder::new()
             .insert_vector("embedding", &embedding)
             .build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Delete node
     wal.append(WalOperation::DeleteNode {
         node_id,
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     wal.flush()?;
 
@@ -311,7 +311,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
         node_id: NodeId::new(1).unwrap(),
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 1_i64).build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Create node 2
@@ -319,7 +319,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
         node_id: NodeId::new(2).unwrap(),
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 2_i64).build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update node 1
@@ -328,13 +328,13 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
         version_id: VersionId::new(3).unwrap(),
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 10_i64).build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Delete node 2
     wal.append(WalOperation::DeleteNode {
         node_id: NodeId::new(2).unwrap(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Create node 3
@@ -342,7 +342,7 @@ fn test_replay_mixed_creates_updates_deletes() -> Result<()> {
         node_id: NodeId::new(3).unwrap(),
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("value", 3_i64).build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.flush()?;

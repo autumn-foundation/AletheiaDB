@@ -160,17 +160,23 @@ fn test_streaming_with_temporal_versions() {
         for v in 0..5 {
             use gallifreydb::core::id::VersionId;
             use gallifreydb::core::temporal::time::now;
-            use gallifreydb::core::temporal::{BiTemporalInterval, TimeRange};
 
             let version_id = VersionId::new((i * 10 + v) as u64 + 1000).unwrap();
-            let temporal = BiTemporalInterval::new(TimeRange::from(now()), TimeRange::from(now()));
+            let timestamp = now();
 
             let updated_props = PropertyMapBuilder::new()
                 .insert("value", (i * 10 + v) as i64)
                 .build();
 
             historical
-                .add_node_version(node_id, version_id, temporal, label, updated_props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    timestamp,
+                    timestamp,
+                    label,
+                    updated_props,
+                )
                 .unwrap();
         }
     }
