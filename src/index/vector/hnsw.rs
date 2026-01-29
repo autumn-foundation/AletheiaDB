@@ -1797,7 +1797,10 @@ mod tests {
                 assert!(msg.contains("bad magic bytes"));
             }
             Ok(_) => panic!("Expected IndexError with bad magic bytes message, got: Ok(_)"),
-            Err(e) => panic!("Expected IndexError with bad magic bytes message, got: Err({:?})", e),
+            Err(e) => panic!(
+                "Expected IndexError with bad magic bytes message, got: Err({:?})",
+                e
+            ),
         }
         Ok(())
     }
@@ -1824,7 +1827,10 @@ mod tests {
                 assert!(msg.contains("Unsupported mapping file version"));
             }
             Ok(_) => panic!("Expected IndexError with version message, got: Ok(_)"),
-            Err(e) => panic!("Expected IndexError with version message, got: Err({:?})", e),
+            Err(e) => panic!(
+                "Expected IndexError with version message, got: Err({:?})",
+                e
+            ),
         }
         Ok(())
     }
@@ -1925,7 +1931,10 @@ mod tests {
                 assert!(msg.contains("size mismatch"));
             }
             Ok(_) => panic!("Expected IndexError with size mismatch message, got: Ok(_)"),
-            Err(e) => panic!("Expected IndexError with size mismatch message, got: Err({:?})", e),
+            Err(e) => panic!(
+                "Expected IndexError with size mismatch message, got: Err({:?})",
+                e
+            ),
         }
         Ok(())
     }
