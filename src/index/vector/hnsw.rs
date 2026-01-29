@@ -1068,12 +1068,14 @@ impl HnswIndex {
         Ok(())
     }
 
-    /// Convert usearch matches to sorted vector of (NodeId, similarity) tuples.
+    /// Convert usearch matches to vector of (NodeId, similarity) tuples.
     ///
     /// This helper function encapsulates the common logic of:
     /// 1. Converting usearch keys back to NodeIds
     /// 2. Converting distances to similarities based on the configured metric
-    /// 3. Sorting results by similarity (descending order)
+    ///
+    /// Note: Results are already sorted by usearch (ascending distance = descending similarity),
+    /// so no explicit sorting is needed. See tests/hnsw_sort_verification.rs for verification.
     ///
     /// # Performance Optimization (Issue #206)
     ///
@@ -1092,7 +1094,8 @@ impl HnswIndex {
     ///
     /// # Returns
     ///
-    /// A sorted vector of (NodeId, similarity) pairs where higher similarity means more similar.
+    /// A vector of (NodeId, similarity) pairs where higher similarity means more similar.
+    /// The vector is already sorted by similarity (descending) due to usearch guarantees.
     fn convert_and_sort_matches(&self, matches: Matches) -> Vec<(NodeId, f32)> {
         let mut results: Vec<(NodeId, f32)> = Vec::with_capacity(matches.keys.len());
 
@@ -1270,16 +1273,20 @@ fn load_mappings_from_reader<R: Read>(
 
     // Ensure we reached EOF
     let mut check_buf = [0u8; 1];
-    let bytes_read = reader.read(&mut check_buf).map_err(|e| {
-        Error::Vector(VectorError::IndexError(format!(
-            "Failed to check for EOF after CRC: {}",
-            e
-        )))
-    })?;
-    if bytes_read > 0 {
-        return Err(Error::Vector(VectorError::IndexError(
-            "Mapping file corrupted: Unexpected data after CRC".to_string(),
-        )));
+    match reader.read(&mut check_buf) {
+        Ok(0) => {} // EOF as expected
+        Ok(n) => {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Mapping file corrupted: {} unexpected bytes after CRC",
+                n
+            ))));
+        }
+        Err(e) => {
+            return Err(Error::Vector(VectorError::IndexError(format!(
+                "Failed to verify EOF: {}",
+                e
+            ))));
+        }
     }
 
     Ok((id_mapping, reverse_mapping, max_key))
@@ -1998,7 +2005,7 @@ mod tests {
                 result
                     .unwrap_err()
                     .to_string()
-                    .contains("Unexpected data after CRC")
+                    .contains("unexpected bytes after CRC")
             );
         }
 
