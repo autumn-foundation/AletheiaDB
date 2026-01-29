@@ -265,10 +265,9 @@ impl GallifreyDB {
         // Load indexes on startup if enabled
         if let Some(ref manager) = persistence_manager
             && config.persistence.load_on_startup
+            && let Err(e) = restoration::restore_indexes(&db, manager)
         {
-            if let Err(e) = restoration::restore_indexes(&db, manager) {
-                eprintln!("Warning: Failed to restore indexes: {}", e);
-            }
+            eprintln!("Warning: Failed to restore indexes: {}", e);
         }
 
         // Start background persistence thread if enabled
