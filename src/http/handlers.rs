@@ -1,14 +1,14 @@
 //! HTTP request handlers.
 
-use crate::core::NodeId;
-use crate::http::converters::{interned_to_string, json_to_property_map, property_map_to_json};
-use crate::http::state::AppState;
-use crate::query::QueryBuilder;
-use crate::query::ir::{Predicate, PredicateValue};
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use crate::http::state::AppState;
+use crate::http::converters::{json_to_property_map, property_map_to_json, interned_to_string};
+use crate::core::NodeId;
+use crate::query::QueryBuilder;
+use crate::query::ir::{Predicate, PredicateValue};
 
 /// Health check response structure.
 #[derive(Debug, Serialize)]
@@ -41,6 +41,8 @@ pub enum QueryRequest {
     FindNode {
         label: Option<String>,
         properties: Option<HashMap<String, serde_json::Value>>,
+        limit: Option<usize>,
+        offset: Option<usize>,
     },
     GetNode {
         node_id: u64,
@@ -107,13 +109,16 @@ pub async fn handle_query(
 
     match req.into_inner() {
         QueryRequest::CreateNode { label, properties } => {
-            let props = properties
-                .map(|p| json_to_property_map(&p))
-                .unwrap_or_default();
+            let props = match properties {
+                Some(p) => match json_to_property_map(&p) {
+                    Ok(map) => map,
+                    Err(e) => return HttpResponse::BadRequest().json(ApiResponse::error(e)),
+                },
+                None => crate::core::PropertyMap::new(),
+            };
 
             match db.create_node(&label, props) {
                 Ok(node_id) => {
-                    // Fetch the created node to return full details
                     match db.get_node(node_id) {
                         Ok(node) => {
                             let node_json = json!({
@@ -121,10 +126,10 @@ pub async fn handle_query(
                                 "label": interned_to_string(node.label),
                                 "properties": property_map_to_json(&node.properties)
                             });
+                            // Issue 5: Return single object, not array
                             HttpResponse::Ok().json(ApiResponse::success(node_json))
                         }
-                        Err(e) => HttpResponse::InternalServerError()
-                            .json(ApiResponse::error(e.to_string())),
+                        Err(e) => HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string())),
                     }
                 }
                 Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
@@ -141,12 +146,13 @@ pub async fn handle_query(
                         });
                         HttpResponse::Ok().json(ApiResponse::success(node_json))
                     }
-                    Err(e) => HttpResponse::NotFound().json(ApiResponse::error(e.to_string())),
+                    // Issue 1: Return 404 for node not found
+                    Err(_) => HttpResponse::NotFound().json(ApiResponse::error(format!("Node {} not found", node_id))),
                 },
                 Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),
             }
         }
-        QueryRequest::FindNode { label, properties } => {
+        QueryRequest::FindNode { label, properties, limit, offset } => {
             let mut builder = if let Some(lbl) = label {
                 QueryBuilder::new().scan_label(&lbl)
             } else {
@@ -161,47 +167,45 @@ pub async fn handle_query(
                 }
             }
 
-            match builder.limit(100).execute(db) {
+            // Issue 4: Pagination
+            if let Some(skip) = offset {
+                builder = builder.skip(skip);
+            }
+
+            let limit_val = limit.unwrap_or(100);
+            match builder.limit(limit_val).execute(db) {
                 Ok(results) => {
                     let mut nodes = Vec::new();
-                    for row_result in results {
-                        match row_result {
-                            Ok(row) => {
-                                if let crate::query::executor::EntityResult::Node(node) = row.entity {
-                                    nodes.push(json!({
-                                        "id": node.id.as_u64(),
-                                        "label": interned_to_string(node.label),
-                                        "properties": property_map_to_json(&node.properties)
-                                    }));
-                                }
-                            }
-                            Err(e) => {
-                                return HttpResponse::InternalServerError()
-                                    .json(ApiResponse::error(e.to_string()));
-                            }
+                    for row in results.flatten() {
+                        if let crate::query::executor::EntityResult::Node(node) = row.entity {
+                            nodes.push(json!({
+                                "id": node.id.as_u64(),
+                                "label": interned_to_string(node.label),
+                                "properties": property_map_to_json(&node.properties)
+                            }));
                         }
                     }
                     HttpResponse::Ok().json(ApiResponse::success(json!(nodes)))
                 }
-                Err(e) => {
-                    HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string()))
-                }
+                Err(e) => HttpResponse::InternalServerError().json(ApiResponse::error(e.to_string())),
             }
         }
         QueryRequest::FindNeighbors { node_id } => {
             match NodeId::new(node_id) {
                 Ok(nid) => {
-                    // Get outgoing and incoming edges to find connected nodes
-                    // For simplicity, we just return the connected nodes
+                    // Issue 2: Deduplication
+                    // Use a HashSet to track seen node IDs
+                    let mut seen_ids = HashSet::new();
                     let mut neighbors = Vec::new();
 
                     // Outgoing
                     let outgoing = db.get_outgoing_edges(nid);
                     for edge_id in outgoing {
-                        if let Ok(target) = db.get_edge_target(edge_id) {
-                            if let Ok(node) = db.get_node(target) {
+                        if let Ok(node) = db.get_edge_target(edge_id).and_then(|target| db.get_node(target)) {
+                            let id = node.id.as_u64();
+                            if seen_ids.insert(id) {
                                 neighbors.push(json!({
-                                    "id": node.id.as_u64(),
+                                    "id": id,
                                     "label": interned_to_string(node.label),
                                     "properties": property_map_to_json(&node.properties)
                                 }));
@@ -212,10 +216,11 @@ pub async fn handle_query(
                     // Incoming
                     let incoming = db.get_incoming_edges(nid);
                     for edge_id in incoming {
-                        if let Ok(source) = db.get_edge_source(edge_id) {
-                            if let Ok(node) = db.get_node(source) {
+                        if let Ok(node) = db.get_edge_source(edge_id).and_then(|source| db.get_node(source)) {
+                            let id = node.id.as_u64();
+                            if seen_ids.insert(id) {
                                 neighbors.push(json!({
-                                    "id": node.id.as_u64(),
+                                    "id": id,
                                     "label": interned_to_string(node.label),
                                     "properties": property_map_to_json(&node.properties)
                                 }));
@@ -223,7 +228,6 @@ pub async fn handle_query(
                         }
                     }
 
-                    // Deduplicate? For now just return list
                     HttpResponse::Ok().json(ApiResponse::success(json!(neighbors)))
                 }
                 Err(e) => HttpResponse::BadRequest().json(ApiResponse::error(e.to_string())),

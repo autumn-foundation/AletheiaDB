@@ -43,41 +43,52 @@ pub fn property_value_to_json(value: &PropertyValue) -> serde_json::Value {
     }
 }
 
-pub fn json_to_property_map(json: &HashMap<String, serde_json::Value>) -> PropertyMap {
+pub fn json_to_property_map(
+    json: &HashMap<String, serde_json::Value>,
+) -> Result<PropertyMap, String> {
     let mut builder = PropertyMapBuilder::new();
     for (key, value) in json {
-        if let Some(pv) = json_to_property_value(value) {
-            builder = builder.insert(key.as_str(), pv);
-        }
+        let pv = json_to_property_value(value)?;
+        builder = builder.insert(key.as_str(), pv);
     }
-    builder.build()
+    Ok(builder.build())
 }
 
-pub fn json_to_property_value(value: &serde_json::Value) -> Option<PropertyValue> {
+pub fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue, String> {
     match value {
-        serde_json::Value::Null => Some(PropertyValue::Null),
-        serde_json::Value::Bool(b) => Some(PropertyValue::Bool(*b)),
+        serde_json::Value::Null => Ok(PropertyValue::Null),
+        serde_json::Value::Bool(b) => Ok(PropertyValue::Bool(*b)),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Some(PropertyValue::Int(i))
+                Ok(PropertyValue::Int(i))
             } else {
-                n.as_f64().map(PropertyValue::Float)
+                n.as_f64()
+                    .map(PropertyValue::Float)
+                    .ok_or_else(|| "Invalid number format".to_string())
             }
         }
-        serde_json::Value::String(s) => Some(PropertyValue::String(Arc::from(s.as_str()))),
+        serde_json::Value::String(s) => Ok(PropertyValue::String(Arc::from(s.as_str()))),
         serde_json::Value::Array(arr) => {
             if arr.iter().all(|v| v.is_number()) && !arr.is_empty() {
-                let floats: Vec<f32> = arr
+                let floats: Result<Vec<f32>, String> = arr
                     .iter()
-                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .map(|v| {
+                        v.as_f64()
+                            .map(|f| f as f32)
+                            .ok_or_else(|| "Invalid float in array".to_string())
+                    })
                     .collect();
-                if floats.len() == arr.len() {
-                    return Some(PropertyValue::Vector(Arc::from(floats)));
+
+                if let Ok(floats) = floats {
+                    return Ok(PropertyValue::Vector(Arc::from(floats)));
                 }
             }
-            let values: Vec<PropertyValue> = arr.iter().filter_map(json_to_property_value).collect();
-            Some(PropertyValue::Array(Arc::new(values)))
+            let values: Result<Vec<PropertyValue>, String> =
+                arr.iter().map(json_to_property_value).collect();
+            Ok(PropertyValue::Array(Arc::new(values?)))
         }
-        serde_json::Value::Object(_) => None,
+        serde_json::Value::Object(_) => {
+            Err("Nested objects are not supported as property values".to_string())
+        }
     }
 }
