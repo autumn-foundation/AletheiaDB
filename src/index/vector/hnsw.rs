@@ -987,19 +987,21 @@ impl HnswIndex {
         let count = mappings.len() as u64;
 
         // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
-        let data_size = mappings.len()
-            .checked_mul(16)
-            .ok_or_else(|| Error::Vector(VectorError::IndexError(
+        let data_size = mappings.len().checked_mul(16).ok_or_else(|| {
+            Error::Vector(VectorError::IndexError(
                 "Mapping count too large for serialization".to_string(),
-            )))?;
+            ))
+        })?;
         let total_size = 4usize
             .checked_add(1)
             .and_then(|s| s.checked_add(8))
             .and_then(|s| s.checked_add(data_size))
             .and_then(|s| s.checked_add(4))
-            .ok_or_else(|| Error::Vector(VectorError::IndexError(
-                "Mapping file size calculation overflow".to_string(),
-            )))?;
+            .ok_or_else(|| {
+                Error::Vector(VectorError::IndexError(
+                    "Mapping file size calculation overflow".to_string(),
+                ))
+            })?;
         let mut file_data = Vec::with_capacity(total_size);
 
         // Write header
@@ -1157,22 +1159,35 @@ fn load_mappings_with_integrity(
     }
 
     // Parse count
-    let count = u64::from_le_bytes(file_data[5..13].try_into().unwrap()) as usize;
+    let count_bytes = file_data.get(5..13).ok_or_else(|| {
+        Error::Vector(VectorError::IndexError(
+            "Mapping file too short to contain count".to_string(),
+        ))
+    })?;
+    let count_arr: [u8; 8] = count_bytes.try_into().map_err(|e| {
+        Error::Vector(VectorError::IndexError(format!(
+            "Failed to parse count bytes: {}",
+            e
+        )))
+    })?;
+    let count = u64::from_le_bytes(count_arr) as usize;
 
     // Verify data size with overflow protection
-    let data_size = count
-        .checked_mul(16)
-        .ok_or_else(|| Error::Vector(VectorError::IndexError(
+    let data_size = count.checked_mul(16).ok_or_else(|| {
+        Error::Vector(VectorError::IndexError(
             "Mapping file count causes overflow".to_string(),
-        )))?;
+        ))
+    })?;
     let expected_size = 4usize
         .checked_add(1)
         .and_then(|s| s.checked_add(8))
         .and_then(|s| s.checked_add(data_size))
         .and_then(|s| s.checked_add(4))
-        .ok_or_else(|| Error::Vector(VectorError::IndexError(
-            "Mapping file size calculation overflow".to_string(),
-        )))?;
+        .ok_or_else(|| {
+            Error::Vector(VectorError::IndexError(
+                "Mapping file size calculation overflow".to_string(),
+            ))
+        })?;
 
     if file_data.len() != expected_size {
         return Err(Error::Vector(VectorError::IndexError(format!(
@@ -1797,8 +1812,8 @@ mod tests {
 
     #[test]
     fn test_load_mappings_overflow() -> Result<()> {
-        use std::io::Write;
         use crc32fast::Hasher;
+        use std::io::Write;
 
         // Create a temporary file
         let dir = tempfile::tempdir()?;
@@ -1841,7 +1856,10 @@ mod tests {
                 msg
             );
         } else {
-            panic!("Expected IndexError with overflow message, got: {:?}", result);
+            panic!(
+                "Expected IndexError with overflow message, got: {:?}",
+                result
+            );
         }
 
         Ok(())
