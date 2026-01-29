@@ -606,7 +606,9 @@ mod simd {
     /// Computes dot product, magnitude_a², and magnitude_b² using AVX2.
     ///
     /// # Safety
-    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// Caller must ensure:
+    /// 1. AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
@@ -678,7 +680,9 @@ mod simd {
     /// Computes dot product, magnitude_a², and magnitude_b² using SSE2.
     ///
     /// # Safety
-    /// Caller must ensure SSE2 is available (always true on x86_64).
+    /// Caller must ensure:
+    /// 1. SSE2 is available (always true on x86_64).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_sse2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
@@ -752,7 +756,9 @@ mod simd {
     /// `dot_and_magnitudes_avx2` when magnitudes aren't needed.
     ///
     /// # Safety
-    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// Caller must ensure:
+    /// 1. AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
@@ -794,7 +800,9 @@ mod simd {
     /// `dot_and_magnitudes_sse2` when magnitudes aren't needed.
     ///
     /// # Safety
-    /// Caller must ensure SSE2 is available (always true on x86_64).
+    /// Caller must ensure:
+    /// 1. SSE2 is available (always true on x86_64).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_product_sse2(a: &[f32], b: &[f32]) -> f32 {
@@ -833,7 +841,9 @@ mod simd {
     /// Computes sum of squared differences using AVX2.
     ///
     /// # Safety
-    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// Caller must ensure:
+    /// 1. AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn squared_diff_sum_avx2(a: &[f32], b: &[f32]) -> f32 {
@@ -881,7 +891,9 @@ mod simd {
     /// Computes sum of squared differences using SSE2.
     ///
     /// # Safety
-    /// Caller must ensure SSE2 is available (always true on x86_64).
+    /// Caller must ensure:
+    /// 1. SSE2 is available (always true on x86_64).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn squared_diff_sum_sse2(a: &[f32], b: &[f32]) -> f32 {
@@ -1093,6 +1105,7 @@ fn scale_in_place(v: &mut [f32], scalar: f32) {
 /// - Scalar implementation on other platforms
 #[inline]
 fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+    debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     {
         // Use runtime detection for best available instruction set
@@ -1135,6 +1148,7 @@ fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
 /// - Scalar implementation on other platforms
 #[inline]
 fn squared_diff_sum(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         // Use runtime detection for best available instruction set.
@@ -1162,6 +1176,7 @@ fn squared_diff_sum(a: &[f32], b: &[f32]) -> f32 {
 /// - Scalar implementation on other platforms
 #[inline]
 fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         // Use runtime detection for best available instruction set.
@@ -4311,6 +4326,69 @@ mod tests {
             result,
             Err(Error::Vector(VectorError::DimensionTooLarge { .. }))
         ));
+    }
+
+    // ========================================================================
+    // SIMD Coverage Tests
+    // ========================================================================
+
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn test_simd_explicit_coverage() {
+        // This test explicitly calls internal SIMD functions to ensure code coverage
+        // for safety assertions, even if the runtime dispatcher favors one instruction set.
+        let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let b = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+
+        // 1. Test SSE2 (Always available on x86_64, usually available on x86)
+        if is_x86_feature_detected!("sse2") {
+            unsafe {
+                // dot_and_magnitudes_sse2
+                let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes_sse2(&a, &b);
+                assert!(!dot.is_nan());
+                assert!(mag_a > 0.0);
+                assert!(mag_b > 0.0);
+
+                // dot_product_sse2
+                let dot_prod = super::simd::dot_product_sse2(&a, &b);
+                assert!((dot - dot_prod).abs() < 1e-5);
+
+                // squared_diff_sum_sse2
+                let sq_diff = super::simd::squared_diff_sum_sse2(&a, &b);
+                assert!(sq_diff >= 0.0);
+
+                // scale_in_place_sse2
+                let mut v = a.clone();
+                super::simd::scale_in_place_sse2(&mut v, 2.0);
+                assert!((v[0] - 2.0).abs() < 1e-5);
+            }
+        }
+
+        // 2. Test AVX2 (Conditional)
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                // scale_in_place_avx2 only needs AVX2
+                let mut v = a.clone();
+                super::simd::scale_in_place_avx2(&mut v, 2.0);
+                assert!((v[0] - 2.0).abs() < 1e-5);
+
+                // Others need FMA + AVX2
+                if is_x86_feature_detected!("fma") {
+                    // dot_and_magnitudes_avx2
+                    let (dot, mag_a, _mag_b) = super::simd::dot_and_magnitudes_avx2(&a, &b);
+                    assert!(!dot.is_nan());
+                    assert!(mag_a > 0.0);
+
+                    // dot_product_avx2
+                    let dot_prod = super::simd::dot_product_avx2(&a, &b);
+                    assert!((dot - dot_prod).abs() < 1e-5);
+
+                    // squared_diff_sum_avx2
+                    let sq_diff = super::simd::squared_diff_sum_avx2(&a, &b);
+                    assert!(sq_diff >= 0.0);
+                }
+            }
+        }
     }
 }
 
