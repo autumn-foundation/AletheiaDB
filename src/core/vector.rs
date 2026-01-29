@@ -606,7 +606,9 @@ mod simd {
     /// Computes dot product, magnitude_a², and magnitude_b² using AVX2.
     ///
     /// # Safety
-    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// Caller must ensure:
+    /// 1. AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
@@ -679,7 +681,9 @@ mod simd {
     /// Computes dot product, magnitude_a², and magnitude_b² using SSE2.
     ///
     /// # Safety
-    /// Caller must ensure SSE2 is available (always true on x86_64).
+    /// Caller must ensure:
+    /// 1. SSE2 is available (always true on x86_64).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_and_magnitudes_sse2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
@@ -754,7 +758,9 @@ mod simd {
     /// `dot_and_magnitudes_avx2` when magnitudes aren't needed.
     ///
     /// # Safety
-    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// Caller must ensure:
+    /// 1. AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
@@ -797,7 +803,9 @@ mod simd {
     /// `dot_and_magnitudes_sse2` when magnitudes aren't needed.
     ///
     /// # Safety
-    /// Caller must ensure SSE2 is available (always true on x86_64).
+    /// Caller must ensure:
+    /// 1. SSE2 is available (always true on x86_64).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn dot_product_sse2(a: &[f32], b: &[f32]) -> f32 {
@@ -837,7 +845,9 @@ mod simd {
     /// Computes sum of squared differences using AVX2.
     ///
     /// # Safety
-    /// Caller must ensure AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// Caller must ensure:
+    /// 1. AVX2 and FMA are available (checked via `is_x86_feature_detected!`).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "avx2", enable = "fma")]
     #[inline]
     pub unsafe fn squared_diff_sum_avx2(a: &[f32], b: &[f32]) -> f32 {
@@ -886,7 +896,9 @@ mod simd {
     /// Computes sum of squared differences using SSE2.
     ///
     /// # Safety
-    /// Caller must ensure SSE2 is available (always true on x86_64).
+    /// Caller must ensure:
+    /// 1. SSE2 is available (always true on x86_64).
+    /// 2. `a.len() == b.len()`.
     #[target_feature(enable = "sse2")]
     #[inline]
     pub unsafe fn squared_diff_sum_sse2(a: &[f32], b: &[f32]) -> f32 {
