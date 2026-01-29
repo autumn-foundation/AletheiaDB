@@ -1348,18 +1348,23 @@ impl PropertyMap {
         buffer.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
         for (key, value) in self.inner.iter() {
             // Serialize key: resolve InternedString to actual string
-            let key_str =
-                GLOBAL_INTERNER
-                    .resolve(*key)
-                    .ok_or_else(|| StorageError::InconsistentState {
-                        reason: format!(
-                            "PropertyKey {} not found in interner - data corruption detected",
-                            key.as_u32()
-                        ),
-                    })?;
-            let key_bytes = key_str.as_bytes();
-            buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
-            buffer.extend_from_slice(key_bytes);
+            // Use with_str to avoid Arc cloning overhead (Issue #405)
+            let success = GLOBAL_INTERNER.with_str(*key, |key_str| {
+                let key_bytes = key_str.as_bytes();
+                buffer.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(key_bytes);
+            });
+
+            if success.is_none() {
+                return Err(StorageError::InconsistentState {
+                    reason: format!(
+                        "PropertyKey {} not found in interner - data corruption detected",
+                        key.as_u32()
+                    ),
+                }
+                .into());
+            }
+
             // Serialize value
             value.serialize_into(buffer);
         }
@@ -1459,10 +1464,8 @@ impl PropertyMap {
         let mut size = 4; // Count field
         for (key, value) in self.inner.iter() {
             // Key: length prefix (4) + key bytes
-            let key_len = GLOBAL_INTERNER
-                .resolve(*key)
-                .map(|s| s.len())
-                .unwrap_or(256); // Conservative fallback if key missing (corruption)
+            // Use with_str to avoid Arc cloning overhead (Issue #405)
+            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256); // Conservative fallback if key missing (corruption)
 
             size += 4 + key_len;
             size += value.serialized_size();
