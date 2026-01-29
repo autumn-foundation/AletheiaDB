@@ -611,6 +611,7 @@ mod simd {
     #[inline]
     pub unsafe fn dot_and_magnitudes_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
         unsafe {
+            debug_assert_eq!(a.len(), b.len());
             let len = a.len();
             let chunks = len / 8;
             let remainder = len % 8;
@@ -683,6 +684,7 @@ mod simd {
     #[inline]
     pub unsafe fn dot_and_magnitudes_sse2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
         unsafe {
+            debug_assert_eq!(a.len(), b.len());
             let len = a.len();
             let chunks = len / 4;
             let remainder = len % 4;
@@ -759,6 +761,7 @@ mod simd {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
+            debug_assert_eq!(a.len(), b.len());
             let a_chunks = a.chunks_exact(8);
             let b_chunks = b.chunks_exact(8);
             let a_rem = a_chunks.remainder();
@@ -801,6 +804,7 @@ mod simd {
         // SAFETY: The unsafe block is required by the `unsafe_op_in_unsafe_fn` lint.
         // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
+            debug_assert_eq!(a.len(), b.len());
             let a_chunks = a.chunks_exact(4);
             let b_chunks = b.chunks_exact(4);
             let a_rem = a_chunks.remainder();
@@ -841,6 +845,7 @@ mod simd {
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees AVX2 and FMA are available via runtime feature detection.
         unsafe {
+            debug_assert_eq!(a.len(), b.len());
             let len = a.len();
             let chunks = len / 8;
             let remainder = len % 8;
@@ -889,6 +894,7 @@ mod simd {
         // All unsafe operations within this unsafe fn must still be in an unsafe block.
         // The caller guarantees SSE2 is available via runtime feature detection.
         unsafe {
+            debug_assert_eq!(a.len(), b.len());
             let len = a.len();
             let chunks = len / 4;
             let remainder = len % 4;
