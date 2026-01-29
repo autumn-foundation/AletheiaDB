@@ -765,9 +765,11 @@ mod tests {
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(5);
         while wal.total_flushed() < 10 {
+            // LCOV_EXCL_START
             if start.elapsed() > timeout {
-                break; // LCOV_EXCL_LINE
+                break;
             }
+            // LCOV_EXCL_STOP
             std::thread::sleep(Duration::from_millis(10));
         }
 
