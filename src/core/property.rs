@@ -1466,6 +1466,25 @@ impl PropertyMap {
     pub fn serialized_size(&self) -> usize {
         self.cached_size
     }
+
+    /// Calculate the serialized size by iterating over all properties (O(N)).
+    /// Used for debug verification of the cached size.
+    #[cfg(debug_assertions)]
+    fn serialized_size_calculated(&self) -> usize {
+        if self.is_empty() {
+            return 4; // Count field
+        }
+
+        let mut size = 4; // Count field
+        for (key, value) in self.inner.iter() {
+            // Key: length prefix (4) + key bytes
+            // Use with_str to avoid Arc cloning overhead
+            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
+            size += 4 + key_len;
+            size += value.serialized_size();
+        }
+        size
+    }
 }
 
 impl Default for PropertyMap {
@@ -1477,7 +1496,7 @@ impl Default for PropertyMap {
 impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
     fn from_iter<I: IntoIterator<Item = (PropertyKey, PropertyValue)>>(iter: I) -> Self {
         let mut map = HashMap::new();
-        let mut size = 4; // Count field
+        let mut size: usize = 4; // Count field
 
         for (key, value) in iter {
             // Need key size for serialization
@@ -1485,12 +1504,14 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
             let key_size = 4 + key_len;
             let val_size = value.serialized_size();
 
-            size += key_size + val_size;
+            size = size.saturating_add(key_size).saturating_add(val_size);
 
             if let Some(old_val) = map.insert(key, value) {
                 // If replaced, subtract the size of the old entry (key + value)
                 // Key size is the same since it's the same key ID
-                size -= key_size + old_val.serialized_size();
+                size = size
+                    .saturating_sub(key_size)
+                    .saturating_sub(old_val.serialized_size());
             }
         }
 
@@ -1540,12 +1561,17 @@ impl PropertyMapBuilder {
         if let Some(old_val) = self.map.insert(interned_key, val) {
             // Replaced existing entry
             // Key size is unchanged (same key ID means same string)
-            self.current_size -= old_val.serialized_size();
-            self.current_size += val_size;
+            self.current_size = self
+                .current_size
+                .saturating_sub(old_val.serialized_size())
+                .saturating_add(val_size);
         } else {
             // New entry
             let key_size = 4 + key.len(); // Length prefix (4) + string bytes
-            self.current_size += key_size + val_size;
+            self.current_size = self
+                .current_size
+                .saturating_add(key_size)
+                .saturating_add(val_size);
         }
         self
     }
@@ -1559,8 +1585,10 @@ impl PropertyMapBuilder {
 
         if let Some(old_val) = self.map.insert(key, value) {
             // Replaced existing entry - key size constant
-            self.current_size -= old_val.serialized_size();
-            self.current_size += val_size;
+            self.current_size = self
+                .current_size
+                .saturating_sub(old_val.serialized_size())
+                .saturating_add(val_size);
         } else {
             // New entry - need key size!
             // We must look up the string length since we only have the ID.
@@ -1568,7 +1596,10 @@ impl PropertyMapBuilder {
             // avoid it for updates and for subsequent serialization size checks.
             let key_len = GLOBAL_INTERNER.with_str(key, |s| s.len()).unwrap_or(256);
             let key_size = 4 + key_len;
-            self.current_size += key_size + val_size;
+            self.current_size = self
+                .current_size
+                .saturating_add(key_size)
+                .saturating_add(val_size);
         }
         self
     }
@@ -1619,7 +1650,10 @@ impl PropertyMapBuilder {
         if let Some(old_val) = self.map.remove(key) {
             let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
             let key_size = 4 + key_len;
-            self.current_size -= key_size + old_val.serialized_size();
+            self.current_size = self
+                .current_size
+                .saturating_sub(key_size)
+                .saturating_sub(old_val.serialized_size());
         }
         self
     }
@@ -3394,5 +3428,20 @@ mod tests {
         let builder = map.builder().remove("key2");
         let map = builder.build();
         assert_eq!(map.cached_size, map.serialized_size());
+    }
+
+    #[test]
+    fn test_cached_size_invariant() {
+        // Property-based test: size should always match actual serialization
+        let map = PropertyMapBuilder::new()
+            .insert("a", 1)
+            .insert("b", "test")
+            .remove("a")
+            .insert("c", vec![1.0f32, 2.0])
+            .build();
+
+        let serialized = map.serialize().unwrap();
+        assert_eq!(map.serialized_size(), serialized.len());
+        assert_eq!(map.cached_size, serialized.len());
     }
 }
