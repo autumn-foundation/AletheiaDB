@@ -1,3 +1,8 @@
+//! Configuration types for temporal vector indexing.
+//!
+//! This module defines snapshot strategies, retention policies,
+//! and configuration validation for the temporal vector index.
+
 use crate::index::vector::hnsw::HnswConfig;
 use crate::utils::{Result, VectorError};
 use std::time::Duration;

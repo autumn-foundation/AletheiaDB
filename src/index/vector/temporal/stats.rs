@@ -1,3 +1,8 @@
+//! Statistics and monitoring types.
+//!
+//! This module defines structures for tracking memory usage and snapshot status
+//! of the temporal vector index.
+
 use super::config::MAX_ACCUMULATED_CHANGES;
 use crate::core::temporal::Timestamp;
 use std::time::Duration;

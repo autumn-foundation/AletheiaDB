@@ -1,3 +1,8 @@
+//! Internal snapshot data structures.
+//!
+//! This module implements the core data structures for storing and querying
+//! temporal vector snapshots, including full and delta formats.
+
 use super::config::{MAX_DELTA_CHAIN_DEPTH, MIN_CAPACITY_ESTIMATE};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
@@ -17,27 +22,26 @@ pub(crate) enum VectorSnapshot {
     /// Full snapshot containing all vectors
     Full(Arc<HashMap<NodeId, Arc<[f32]>>>),
 
-    /// Delta snapshot containing only changes relative to a base
+    /// Delta snapshot storing only differences
     Delta {
-        /// Timestamp of the base full snapshot
+        /// Timestamp of the base snapshot this delta is relative to
         base_time: Timestamp,
-        /// Vectors added or updated since base
+        /// Vectors added or updated since the base snapshot
         added: Arc<HashMap<NodeId, Arc<[f32]>>>,
-        /// Vectors removed since base
+        /// NodeIds removed since the base snapshot
         removed: Arc<HashSet<NodeId>>,
     },
 }
 
 impl VectorSnapshot {
-    /// Get a vector from this snapshot, given access to the full snapshot data.
+    /// Retrieves a vector for a given node ID, traversing the delta chain if necessary.
     ///
-    /// Uses iterative traversal through delta chain to avoid stack overflow.
-    /// Enforces MAX_DELTA_CHAIN_DEPTH to prevent unbounded traversal.
+    /// # Complexity
+    /// - Full: O(1)
+    /// - Delta: O(depth) where depth is the number of delta layers
     ///
-    /// Returns:
-    /// - Ok(Some(vector)) - Vector found
-    /// - Ok(None) - Vector not found or was removed
-    /// - Err - Delta chain depth exceeded or corrupted snapshot state
+    /// # Safety
+    /// Enforces `MAX_DELTA_CHAIN_DEPTH` to prevent stack overflow or excessive latency.
     pub(crate) fn get_vector(
         &self,
         node_id: &NodeId,
@@ -46,15 +50,14 @@ impl VectorSnapshot {
         let mut current = self;
         let mut depth = 0;
 
-        // Iteratively traverse the delta chain with depth limit
         loop {
             // SAFETY: Check depth limit to prevent unbounded traversal
             // If chain exceeds MAX_DELTA_CHAIN_DEPTH, return error instead of silently failing
             if depth >= MAX_DELTA_CHAIN_DEPTH {
                 return Err(VectorError::IndexError(format!(
                     "Delta chain depth exceeded {} for node {:?}. \
-                         This indicates corrupted snapshot state or misconfiguration. \
-                         Reduce full_snapshot_interval or check snapshot integrity.",
+                     This indicates corrupted snapshot state or misconfiguration. \
+                     Reduce full_snapshot_interval or check snapshot integrity.",
                     MAX_DELTA_CHAIN_DEPTH, node_id
                 ))
                 .into());
@@ -79,16 +82,15 @@ impl VectorSnapshot {
                         return Ok(Some(Arc::clone(vec)));
                     }
 
-                    // Continue to base snapshot
+                    // If not found, traverse to base
                     if let Some(base) = all_snapshots.get(base_time) {
                         current = base;
                         depth += 1;
                     } else {
-                        // Base snapshot was pruned - this is corrupted state
+                        // Base snapshot missing - this is a serious integrity error
                         return Err(VectorError::IndexError(format!(
-                            "Base snapshot at timestamp {} not found for node {:?}. \
-                                 Snapshot state is corrupted or base was incorrectly pruned.",
-                            base_time, node_id
+                            "Base snapshot at {} missing for delta snapshot",
+                            base_time
                         ))
                         .into());
                     }
@@ -97,30 +99,21 @@ impl VectorSnapshot {
         }
     }
 
-    /// Reconstruct all vectors in this snapshot as a HashMap.
+    /// Reconstructs the full state of vectors at this snapshot.
     ///
-    /// For delta snapshots, this combines the base with added/removed changes.
-    /// Uses iterative traversal with depth limiting to prevent stack overflow.
+    /// Useful for operations that need the complete dataset (e.g., drift analysis).
     ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Delta chain depth exceeds MAX_DELTA_CHAIN_DEPTH (corrupted state)
-    /// - Base snapshot is missing (corrupted state or incorrect pruning)
+    /// # Performance
+    /// This operation can be expensive for deep delta chains. Consider caching results
+    /// if called frequently.
     pub(crate) fn to_hashmap(
         &self,
         all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
     ) -> Result<HashMap<NodeId, Arc<[f32]>>> {
-        // Use iterative approach to prevent stack overflow (similar to get_vector)
+        // Collect layers
         let mut current = self;
+        let mut delta_layers = Vec::new();
         let mut depth = 0;
-
-        // Collect the chain of deltas from newest to oldest
-        struct DeltaLayer<'a> {
-            added: &'a Arc<HashMap<NodeId, Arc<[f32]>>>,
-            removed: &'a Arc<HashSet<NodeId>>,
-        }
-        let mut delta_layers: Vec<DeltaLayer<'_>> = Vec::new();
 
         // Walk backwards through delta chain to find the Full snapshot base
         let base_vectors: HashMap<NodeId, Arc<[f32]>> = loop {
@@ -128,8 +121,8 @@ impl VectorSnapshot {
                 // Return error instead of partial results to prevent silent data loss
                 return Err(VectorError::IndexError(format!(
                     "Delta chain depth exceeded {} in to_hashmap(). \
-                         This indicates corrupted snapshot state or misconfiguration. \
-                         Reduce full_snapshot_interval or check snapshot integrity.",
+                     This indicates corrupted snapshot state or misconfiguration. \
+                     Reduce full_snapshot_interval or check snapshot integrity.",
                     MAX_DELTA_CHAIN_DEPTH
                 ))
                 .into());
@@ -138,25 +131,31 @@ impl VectorSnapshot {
             match current {
                 VectorSnapshot::Full(vectors) => {
                     // Found the base Full snapshot
-                    break (**vectors).clone();
+                    // Clone the inner HashMap (O(N)) - unavoidable for reconstruction
+                    break vectors.as_ref().clone();
                 }
                 VectorSnapshot::Delta {
                     base_time,
                     added,
                     removed,
                 } => {
-                    // Record this delta layer for later application
-                    delta_layers.push(DeltaLayer { added, removed });
+                    // Store delta layer to apply later (in reverse order)
+                    struct DeltaLayer<'a> {
+                        added: &'a HashMap<NodeId, Arc<[f32]>>,
+                        removed: &'a HashSet<NodeId>,
+                    }
+                    delta_layers.push(DeltaLayer {
+                        added: added.as_ref(),
+                        removed: removed.as_ref(),
+                    });
 
-                    // Move to base snapshot
-                    if let Some(base_snapshot) = all_snapshots.get(base_time) {
-                        current = base_snapshot;
+                    // Move to previous snapshot
+                    if let Some(base) = all_snapshots.get(base_time) {
+                        current = base;
                         depth += 1;
                     } else {
-                        // Base was pruned - return error to prevent silent data loss
                         return Err(VectorError::IndexError(format!(
-                            "Base snapshot at timestamp {} not found in to_hashmap(). \
-                                 Snapshot state is corrupted or base was incorrectly pruned.",
+                            "Base snapshot at {} missing during reconstruction",
                             base_time
                         ))
                         .into());
@@ -165,8 +164,10 @@ impl VectorSnapshot {
             }
         };
 
-        // Apply delta layers in reverse order (oldest to newest)
+        // Apply deltas forward (from oldest to newest)
+        // Base is already cloned, so we can modify it directly
         let mut result = base_vectors;
+
         for layer in delta_layers.iter().rev() {
             // Apply removals
             for node_id in layer.removed.iter() {
@@ -181,22 +182,37 @@ impl VectorSnapshot {
         Ok(result)
     }
 
-    /// Returns an approximate count of vectors in this snapshot.
+    /// Optimized version of to_hashmap that collects ALL vectors from a set of snapshots.
     ///
-    /// **IMPORTANT**: For delta snapshots, this returns ONLY the count of added vectors,
-    /// ignoring the base snapshot size and removed vectors. This is intentionally an
+    /// This is more efficient than calling to_hashmap on each snapshot individually
+    /// when iterating over a time range.
+    pub(crate) fn collect_all(
+        &self,
+        all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
+    ) -> Result<Vec<(NodeId, Arc<[f32]>)>> {
+        let map = self.to_hashmap(all_snapshots)?;
+        Ok(map.into_iter().collect())
+    }
+
+    /// Returns the number of vectors in this snapshot.
+    ///
+    /// # Accuracy Note
+    /// For Full snapshots, this is exact.
+    /// For Delta snapshots, this is an **estimate** based on the added vectors count.
+    /// It does not account for removals or base vectors, so it returns a safe
     /// underestimate used for capacity estimation during index construction.
     ///
     /// **For exact counts**, use `to_hashmap().len()` which reconstructs the full snapshot
     /// by applying all deltas to the base. Note that reconstruction has O(depth) cost and
-    /// may return partial results if the delta chain exceeds `MAX_DELTA_CHAIN_DEPTH`.
+    /// should be avoided in hot paths unless necessary.
     ///
-    /// # Examples
+    /// # Example
+    /// ```rust,ignore
+    /// // Fast, O(1), but approximate for Deltas
+    /// let approx_len = snapshot.len();
     ///
-    /// ```ignore
-    /// // Delta snapshot: base has 100 vectors, added 10, removed 5
-    /// snapshot.len()           // Returns 10 (approximation, added only)
-    /// snapshot.to_hashmap().len()  // Returns 105 (exact: 100 + 10 - 5)
+    /// // Slow, O(depth), but exact
+    /// let exact_len = snapshot.to_hashmap(&all_snapshots)?.len();
     /// ```
     pub(crate) fn len(&self) -> usize {
         match self {
@@ -213,22 +229,17 @@ impl VectorSnapshot {
     /// Collect all vectors in this snapshot into a Vec.
     ///
     /// For delta snapshots, this reconstructs the full set.
-    /// Returns a vector of (NodeId, Arc<[f32]>) pairs.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the snapshot state is corrupted (see `to_hashmap` for details).
-    pub(crate) fn collect_all(
+    pub(crate) fn to_vec(
         &self,
         all_snapshots: &BTreeMap<Timestamp, VectorSnapshot>,
     ) -> Result<Vec<(NodeId, Arc<[f32]>)>> {
-        let hashmap = self.to_hashmap(all_snapshots)?;
-        Ok(hashmap.into_iter().collect())
+        let map = self.to_hashmap(all_snapshots)?;
+        Ok(map.into_iter().collect())
     }
 }
 
-/// Storage structure for snapshot data.
-/// Can be either a full HNSW index or a delta index.
+/// Helper struct for `SnapshotIndex` enum.
+/// Wraps either a full HNSW index or a delta index.
 #[derive(Clone)]
 pub(crate) enum SnapshotIndex {
     Full(Arc<HnswIndex>),
@@ -258,14 +269,14 @@ impl std::fmt::Debug for SnapshotIndex {
 }
 
 impl SnapshotIndex {
-    pub(crate) fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
+    pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
         match self {
             SnapshotIndex::Full(index) => index.search(query, k),
             SnapshotIndex::Delta(delta) => delta.search(query, k),
         }
     }
 
-    pub(crate) fn search_with_filter(
+    pub fn search_with_filter(
         &self,
         query: &[f32],
         k: usize,
@@ -281,8 +292,7 @@ impl SnapshotIndex {
         match self {
             SnapshotIndex::Full(index) => index.len(),
             SnapshotIndex::Delta(delta) => {
-                // Correct count: base + added - removed
-                // removed.len() is O(1), so no performance penalty
+                // Estimate length for delta
                 delta.base.len() + delta.added.len() - delta.removed.len()
             }
         }
@@ -296,14 +306,12 @@ impl SnapshotIndex {
     }
 }
 
-/// A delta snapshot that stores only changes relative to a base snapshot.
-#[derive(Clone)]
+/// Internal delta index implementation.
+///
+/// Stores changes relative to a base index.
 pub(crate) struct DeltaIndex {
-    /// The base snapshot this delta is built upon (usually a Full snapshot)
     pub(crate) base: Arc<SnapshotIndex>,
-    /// Vectors added or updated since the base snapshot
     pub(crate) added: Arc<HnswIndex>,
-    /// IDs of vectors that were removed or updated (invalidating the base version)
     pub(crate) removed: Arc<HashSet<NodeId>>,
 }
 
@@ -320,38 +328,31 @@ impl std::fmt::Debug for DeltaIndex {
 
 impl DeltaIndex {
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
-        // Search strategy: Search for k*2 candidates from each index to ensure we don't
-        // miss true top-k when merging. This is necessary because the global top-k might
-        // be distributed across both indexes.
-        //
-        // Example: If added has [0.99, 0.95, 0.90] and base has [0.97, 0.93, 0.88],
-        // searching for k=2 in each would give [0.99, 0.95] + [0.97, 0.93].
-        // Merging gives true top-2: [0.99, 0.97] ✓
+        // Search for k*2 candidates to ensure global top-k
+        // We need more candidates because some might be in the 'removed' set
+        // or shadowed by newer versions in 'added'
         let search_k = k.saturating_mul(2).max(k + 10);
 
-        // 1. Search added vectors (new and updated)
+        // Search added (small index, fast)
         let mut results = self.added.search(query, search_k)?;
 
-        // 2. Search base vectors with filter
-        // Filter out any ID that is in the 'removed' set, which includes:
-        // - Nodes that were updated (old version in base, new version in added)
-        // - Nodes that were removed (present in base, deleted from current state)
-        let removed = &self.removed;
-        let base_results = self
-            .base
-            .search_with_filter(query, search_k, &|id| !removed.contains(id))?;
+        // Filter out results that are in 'removed' set (unlikely for added, but possible if
+        // a node was added then removed in same snapshot window - though usually that's handled at construction)
+        // More importantly, this handles the case where we merge results.
 
-        // 3. Merge results from both indexes
+        // Search base
+        // We must filter out nodes that are in 'removed' set OR in 'added' set (updates shadow old versions)
+        let removed = &self.removed;
+        let added_ids: HashSet<NodeId> = results.iter().map(|(id, _)| *id).collect();
+
+        let predicate = |id: &NodeId| !removed.contains(id) && !added_ids.contains(id);
+
+        let base_results = self.base.search_with_filter(query, search_k, &predicate)?;
+
+        // Merge results
         results.extend(base_results);
 
-        // 4. Deduplicate: Although the removed filter should prevent duplicates,
-        // we deduplicate as a safety measure to ensure correctness.
-        // We keep the first occurrence (which has the better score after sorting).
-        use std::collections::HashSet;
-        let mut seen = HashSet::new();
-        results.retain(|(id, _)| seen.insert(*id));
-
-        // 5. Sort by similarity (descending) and truncate to k
+        // Sort and truncate to k
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
 
@@ -398,24 +399,17 @@ impl DeltaIndex {
 }
 
 /// Snapshot data protected by a single lock.
-///
-/// Groups snapshots and vector history together to ensure atomic updates
-/// and prevent deadlocks from acquiring multiple locks sequentially.
 pub(crate) struct SnapshotData {
-    /// Historical HNSW snapshots at anchor timestamps
-    /// Key: Timestamp when snapshot was created
-    /// Value: (Stable snapshot ID, SnapshotIndex)
+    /// Maps timestamp -> (snapshot_id, snapshot_index)
     pub(crate) snapshots: BTreeMap<Timestamp, (usize, SnapshotIndex)>,
 
-    /// Historical vector values at each snapshot
-    /// Key: Timestamp when snapshot was created
-    /// Value: Immutable map of NodeId -> Vector for that snapshot
+    /// Maps timestamp -> vector_data (for reconstruction)
     pub(crate) vector_history: BTreeMap<Timestamp, VectorSnapshot>,
 }
 
 impl SnapshotData {
     pub(crate) fn new() -> Self {
-        SnapshotData {
+        Self {
             snapshots: BTreeMap::new(),
             vector_history: BTreeMap::new(),
         }
@@ -424,128 +418,103 @@ impl SnapshotData {
     pub(crate) fn insert(
         &mut self,
         timestamp: Timestamp,
-        stable_id: usize,
-        snapshot: SnapshotIndex,
+        id: usize,
+        index: SnapshotIndex,
         vectors: VectorSnapshot,
     ) {
-        self.snapshots.insert(timestamp, (stable_id, snapshot));
+        self.snapshots.insert(timestamp, (id, index));
         self.vector_history.insert(timestamp, vectors);
-    }
-
-    pub(crate) fn remove_oldest(&mut self) {
-        if let Some(oldest_key) = self.snapshots.keys().next().copied() {
-            self.snapshots.remove(&oldest_key);
-            self.vector_history.remove(&oldest_key);
-        }
     }
 
     pub(crate) fn len(&self) -> usize {
         self.snapshots.len()
     }
+
+    pub(crate) fn remove_oldest(&mut self) {
+        if let Some(key) = self.snapshots.keys().next().copied() {
+            self.snapshots.remove(&key);
+            self.vector_history.remove(&key);
+        }
+    }
 }
 
-/// Metadata for snapshot management.
-///
-/// Tracks state needed to determine when to create the next snapshot.
-#[derive(Debug, Clone)]
+/// Snapshot metadata tracking state.
 pub(crate) struct SnapshotMetadata {
-    /// Last snapshot timestamp (microseconds since epoch)
-    pub(crate) last_snapshot_time: Timestamp,
-
-    /// Transaction count since last snapshot
-    pub(crate) transactions_since_snapshot: usize,
-
-    /// Vectors changed since last snapshot (resets every snapshot)
-    pub(crate) vectors_changed_since_snapshot: HashSet<NodeId>,
-
-    /// Total snapshots created (for ID generation)
+    /// Total number of snapshots created (ever)
     pub(crate) total_snapshots: usize,
 
-    /// Time of the last FULL snapshot
+    /// Number of transactions since last snapshot
+    pub(crate) transactions_since_snapshot: usize,
+
+    /// Last snapshot creation time
+    pub(crate) last_snapshot_time: Timestamp,
+
+    /// Set of NodeIds changed since last snapshot (for ChangeThreshold)
+    pub(crate) vectors_changed_since_snapshot: HashSet<NodeId>,
+
+    /// Last FULL snapshot time (for delta calculation)
     pub(crate) last_full_snapshot_time: Timestamp,
 
-    /// Accumulated changes since the last FULL snapshot.
-    /// This is used to build Delta snapshots.
-    /// Resets only when a FULL snapshot is created.
-    ///
-    /// **MEMORY GROWTH WARNING**: This set grows unboundedly between full snapshots.
-    /// In write-heavy workloads with large `full_snapshot_interval` values, this can
-    /// consume significant memory. Mitigation strategies:
-    /// - Reduce `full_snapshot_interval` to trigger full snapshots more frequently
-    /// - Use manual snapshots (`create_manual_snapshot()`) during idle periods
-    /// - Monitor memory usage if updating >100k unique vectors between full snapshots
-    pub(crate) changes_accumulated: HashSet<NodeId>,
-
-    /// Number of snapshots created since the last FULL snapshot.
-    /// Used to trigger periodic FULL snapshots.
+    /// Number of snapshots since last FULL snapshot
     pub(crate) snapshots_since_full: usize,
+
+    /// Accumulator for ALL changes since last FULL snapshot
+    /// Used to build the delta index.
+    pub(crate) changes_accumulated: HashSet<NodeId>,
 }
 
 impl SnapshotMetadata {
     pub(crate) fn new(initial_time: Timestamp) -> Self {
-        SnapshotMetadata {
-            last_snapshot_time: initial_time,
-            transactions_since_snapshot: 0,
-            vectors_changed_since_snapshot: HashSet::new(),
+        Self {
             total_snapshots: 0,
+            transactions_since_snapshot: 0,
+            last_snapshot_time: initial_time,
+            vectors_changed_since_snapshot: HashSet::new(),
             last_full_snapshot_time: initial_time,
-            changes_accumulated: HashSet::new(),
             snapshots_since_full: 0,
+            changes_accumulated: HashSet::new(),
         }
     }
 
-    /// Record a vector change for snapshot tracking.
-    pub(crate) fn record_change(&mut self, node_id: NodeId) {
-        self.vectors_changed_since_snapshot.insert(node_id);
-        self.changes_accumulated.insert(node_id);
+    pub(crate) fn record_change(&mut self, id: NodeId) {
+        self.vectors_changed_since_snapshot.insert(id);
+        self.changes_accumulated.insert(id);
     }
 
-    /// Record a transaction (increment counter).
     pub(crate) fn record_transaction(&mut self) {
         self.transactions_since_snapshot += 1;
     }
 
-    /// Reset tracking after creating a snapshot.
-    pub(crate) fn reset(&mut self, snapshot_time: Timestamp, is_full: bool) {
-        self.last_snapshot_time = snapshot_time;
+    pub(crate) fn reset(&mut self, current_time: Timestamp, is_full: bool) {
         self.transactions_since_snapshot = 0;
+        self.last_snapshot_time = current_time;
         self.vectors_changed_since_snapshot.clear();
         self.total_snapshots += 1;
 
         if is_full {
-            self.last_full_snapshot_time = snapshot_time;
-            self.changes_accumulated.clear();
+            self.last_full_snapshot_time = current_time;
             self.snapshots_since_full = 0;
+            self.changes_accumulated.clear();
         } else {
             self.snapshots_since_full += 1;
         }
     }
 }
 
-/// Combined state for current vectors and metadata.
-///
 /// **Issue #233 Optimization**: This struct combines vector storage and metadata
 /// into a single structure protected by one RwLock, reducing lock acquisitions
-/// from 3 to 1 per add() operation.
-///
-/// This eliminates the need for:
-/// - DashMap internal locking for vectors
-/// - Separate RwLock for metadata
-///
-/// Instead, we acquire a single write lock to update both vectors and metadata atomically.
-#[derive(Debug)]
+/// from 3 to 1 during hot-path operations like `add()`.
 pub(crate) struct VectorState {
-    /// Current vector storage - maintains actual vector data for snapshot copying
-    /// Maps NodeId to the vector embedding
+    /// In-memory storage of current vectors
     pub(crate) vectors: HashMap<NodeId, Arc<[f32]>>,
 
-    /// Metadata for snapshot management
+    /// Metadata for snapshot tracking
     pub(crate) metadata: SnapshotMetadata,
 }
 
 impl VectorState {
     pub(crate) fn new(initial_time: Timestamp) -> Self {
-        VectorState {
+        Self {
             vectors: HashMap::new(),
             metadata: SnapshotMetadata::new(initial_time),
         }
