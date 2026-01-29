@@ -6,7 +6,19 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust
+//! use gallifreydb::query::QueryBuilder;
+//! use gallifreydb::core::NodeId;
+//! use gallifreydb::core::temporal::Timestamp;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let alice_id = NodeId::new(1)?;
+//! let bob_id = NodeId::new(2)?;
+//! let node_id = NodeId::new(3)?;
+//! let embedding = vec![0.1, 0.2, 0.3];
+//! let valid_time = Timestamp::new(1000, 0)?;
+//! let tx_time = Timestamp::new(2000, 0)?;
+//!
 //! // Build a graph + vector query
 //! let query = QueryBuilder::new()
 //!     .start(alice_id)
@@ -34,6 +46,8 @@
 //!         .label_filter("Person")
 //!         .finish()
 //!     .build();
+//! # Ok(())
+//! # }
 //! ```
 
 use std::marker::PhantomData;
@@ -190,7 +204,11 @@ impl QueryBuilder<state::Initial> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust
+    /// use gallifreydb::query::QueryBuilder;
+    /// use gallifreydb::index::vector::DistanceMetric;
+    ///
+    /// let embedding = vec![0.1, 0.2, 0.3];
     /// let query = QueryBuilder::new()
     ///     .find_similar_builder(&embedding, 10)
     ///         .property("title_embedding")
@@ -295,7 +313,14 @@ impl QueryBuilder<state::HasNodes> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust
+    /// use gallifreydb::query::QueryBuilder;
+    /// use gallifreydb::core::NodeId;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let alice_id = NodeId::new(1)?;
+    /// let embedding = vec![0.1, 0.2, 0.3];
+    ///
     /// let query = QueryBuilder::new()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
@@ -303,6 +328,8 @@ impl QueryBuilder<state::HasNodes> {
     ///         .property("custom_embedding")
     ///         .finish()
     ///     .build();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn rank_by_similarity_builder(
         self,
@@ -340,11 +367,19 @@ impl QueryBuilder<state::HasNodes> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
+    /// # let node_id = NodeId::new(1)?;
+    /// # let bob_id = NodeId::new(2)?;
     /// let results = db.query()
     ///     .start(node_id)
     ///     .similar_to(bob_id, 10)
-    ///     .execute()?;
+    ///     .execute(&db)?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # See Also
@@ -381,7 +416,13 @@ impl QueryBuilder<state::HasNodes> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
+    /// # let alice_id = NodeId::new(1)?;
+    /// # let bob_id = NodeId::new(2)?;
     /// // Find similar documents using custom embedding
     /// let results = db.query()
     ///     .start(alice_id)
@@ -389,7 +430,9 @@ impl QueryBuilder<state::HasNodes> {
     ///         .property("custom_embedding")
     ///         .label_filter("Document")
     ///         .finish()
-    ///     .execute()?;
+    ///     .execute(&db)?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Panics
@@ -562,13 +605,22 @@ impl<S: QueryState> QueryBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// let results = db.query()
+    /// ```rust
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::core::NodeId;
+    /// # use gallifreydb::core::temporal::Timestamp;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let timestamp = Timestamp::new(1000, 0)?;
+    /// # let tx_time = Timestamp::new(2000, 0)?;
+    /// # let node_id = NodeId::new(1)?;
+    /// let query = QueryBuilder::new()
     ///     .as_of(timestamp, tx_time)
     ///     .start(node_id)
     ///     .traverse("KNOWS")
     ///     .with_provenance()
     ///     .build();
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_provenance(mut self) -> Self {
@@ -599,10 +651,14 @@ impl<S: QueryState> QueryBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
     /// use gallifreydb::GallifreyDB;
+    /// use gallifreydb::core::NodeId;
     ///
-    /// let db = GallifreyDB::new();
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let db = GallifreyDB::new()?;
+    /// let alice_id = NodeId::new(1)?;
+    ///
     /// let results = db.query()
     ///     .start(alice_id)
     ///     .traverse("KNOWS")
@@ -612,6 +668,8 @@ impl<S: QueryState> QueryBuilder<S> {
     ///     let row = row?;
     ///     println!("Found: {:?}", row.entity);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn execute(
         self,
@@ -654,7 +712,12 @@ impl<S: QueryState> QueryBuilder<S> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust
+/// # use gallifreydb::query::QueryBuilder;
+/// # use gallifreydb::core::NodeId;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let alice_id = NodeId::new(1)?;
+/// # let bob_id = NodeId::new(2)?;
 /// let query = QueryBuilder::new()
 ///     .start(alice_id)
 ///     .similar_to_builder(bob_id, 10)
@@ -662,6 +725,8 @@ impl<S: QueryState> QueryBuilder<S> {
 ///         .label_filter("Person")
 ///         .finish()
 ///     .build();
+/// # Ok(())
+/// # }
 /// ```
 #[must_use = "builders do nothing unless you call finish()"]
 pub struct SimilarToBuilder<S: QueryState> {
@@ -692,10 +757,18 @@ impl<S: QueryState> SimilarToBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .similar_to_builder(node_id, 10)
+    /// ```rust
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let node_id = NodeId::new(1)?;
+    /// QueryBuilder::new()
+    ///     .start(node_id)
+    ///     .similar_to_builder(node_id, 10)
     ///     .property("custom_embedding")
-    ///     .finish()
+    ///     .finish();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn property(mut self, key: impl Into<String>) -> Self {
         self.property_key = Some(key.into());
@@ -706,10 +779,18 @@ impl<S: QueryState> SimilarToBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .similar_to_builder(node_id, 10)
+    /// ```rust
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let node_id = NodeId::new(1)?;
+    /// QueryBuilder::new()
+    ///     .start(node_id)
+    ///     .similar_to_builder(node_id, 10)
     ///     .label_filter("Document")
-    ///     .finish()
+    ///     .finish();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn label_filter(mut self, label: impl Into<String>) -> Self {
         self.label_filter = Some(label.into());
@@ -733,7 +814,12 @@ impl<S: QueryState> SimilarToBuilder<S> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust
+/// # use gallifreydb::query::QueryBuilder;
+/// # use gallifreydb::core::NodeId;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let alice_id = NodeId::new(1)?;
+/// # let embedding = vec![0.1, 0.2, 0.3];
 /// let query = QueryBuilder::new()
 ///     .start(alice_id)
 ///     .traverse("KNOWS")
@@ -741,6 +827,8 @@ impl<S: QueryState> SimilarToBuilder<S> {
 ///         .property("custom_embedding")
 ///         .finish()
 ///     .build();
+/// # Ok(())
+/// # }
 /// ```
 #[must_use = "builders do nothing unless you call finish()"]
 pub struct RankBySimilarityBuilder<S: QueryState> {
@@ -766,10 +854,20 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .rank_by_similarity_builder(&embedding, 10)
+    /// ```rust
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::core::NodeId;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let alice_id = NodeId::new(1)?;
+    /// # let embedding = vec![0.1, 0.2, 0.3];
+    /// QueryBuilder::new()
+    ///     .start(alice_id)
+    ///     .traverse("KNOWS")
+    ///     .rank_by_similarity_builder(&embedding, 10)
     ///     .property("custom_embedding")
-    ///     .finish()
+    ///     .finish();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn property(mut self, key: impl Into<String>) -> Self {
         self.property_key = Some(key.into());
@@ -792,13 +890,18 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust
+/// # use gallifreydb::query::QueryBuilder;
+/// # use gallifreydb::index::vector::DistanceMetric;
+/// # fn main() {
+/// # let embedding = vec![0.1, 0.2, 0.3];
 /// let query = QueryBuilder::new()
 ///     .find_similar_builder(&embedding, 10)
 ///         .property("title_embedding")
 ///         .metric(DistanceMetric::Euclidean)
 ///         .finish()
 ///     .build();
+/// # }
 /// ```
 #[must_use = "builders do nothing unless you call finish()"]
 pub struct FindSimilarBuilder {
@@ -826,10 +929,15 @@ impl FindSimilarBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .find_similar_builder(&embedding, 10)
+    /// ```rust
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # fn main() {
+    /// # let embedding = vec![0.1, 0.2, 0.3];
+    /// QueryBuilder::new()
+    ///     .find_similar_builder(&embedding, 10)
     ///     .property("body_embedding")
-    ///     .finish()
+    ///     .finish();
+    /// # }
     /// ```
     pub fn property(mut self, key: impl Into<String>) -> Self {
         self.property_key = Some(key.into());
@@ -842,10 +950,16 @@ impl FindSimilarBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// .find_similar_builder(&embedding, 10)
+    /// ```rust
+    /// # use gallifreydb::query::QueryBuilder;
+    /// # use gallifreydb::index::vector::DistanceMetric;
+    /// # fn main() {
+    /// # let embedding = vec![0.1, 0.2, 0.3];
+    /// QueryBuilder::new()
+    ///     .find_similar_builder(&embedding, 10)
     ///     .metric(DistanceMetric::Euclidean)
-    ///     .finish()
+    ///     .finish();
+    /// # }
     /// ```
     pub fn metric(mut self, metric: DistanceMetric) -> Self {
         self.metric = metric;

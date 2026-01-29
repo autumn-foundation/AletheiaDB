@@ -979,28 +979,27 @@ impl HnswIndex {
         // Save mappings to companion file with integrity checks
         // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
         let mappings_path = path.with_extension("usearch.mappings");
-        let mut mappings = Vec::new();
+        let mut mappings = Vec::with_capacity(self.id_mapping.len());
         for entry in self.id_mapping.iter() {
             mappings.push((*entry.key(), *entry.value()));
         }
 
         let count = mappings.len() as u64;
-        let mappings_data: Vec<u8> = mappings
-            .iter()
-            .flat_map(|(node_id, key)| {
-                let mut bytes = Vec::with_capacity(16);
-                bytes.extend_from_slice(&node_id.as_u64().to_le_bytes());
-                bytes.extend_from_slice(&key.to_le_bytes());
-                bytes
-            })
-            .collect();
 
-        // Build file with header and checksum
-        let mut file_data = Vec::with_capacity(4 + 1 + 8 + mappings_data.len() + 4);
+        // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
+        let total_size = 4 + 1 + 8 + (mappings.len() * 16) + 4;
+        let mut file_data = Vec::with_capacity(total_size);
+
+        // Write header
         file_data.extend_from_slice(MAPPING_MAGIC);
         file_data.push(MAPPING_VERSION);
         file_data.extend_from_slice(&count.to_le_bytes());
-        file_data.extend_from_slice(&mappings_data);
+
+        // Write data directly
+        for (node_id, key) in &mappings {
+            file_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
+            file_data.extend_from_slice(&key.to_le_bytes());
+        }
 
         // Calculate CRC32 over all data (header + mappings)
         let mut hasher = Hasher::new();
@@ -1769,5 +1768,174 @@ mod tests {
 
         // Pass null pointer - should panic
         wrapper(valid_ptr, null_ptr);
+    }
+
+    #[test]
+    fn test_load_mappings_bad_magic() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.usearch");
+        let mappings_path = path.with_extension("usearch.mappings");
+
+        // Create valid index
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        index.save(&path)?;
+
+        // Corrupt magic bytes
+        let mut data = std::fs::read(&mappings_path).unwrap();
+        data[0] = b'X';
+        data[1] = b'X';
+        data[2] = b'X';
+        data[3] = b'X';
+        std::fs::write(&mappings_path, &data).unwrap();
+
+        // Try to load
+        let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("bad magic bytes"));
+            }
+            Ok(_) => panic!("Expected IndexError with bad magic bytes message, got: Ok(_)"),
+            Err(e) => panic!(
+                "Expected IndexError with bad magic bytes message, got: Err({:?})",
+                e
+            ),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_mappings_bad_version() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.usearch");
+        let mappings_path = path.with_extension("usearch.mappings");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        index.save(&path)?;
+
+        // Corrupt version
+        let mut data = std::fs::read(&mappings_path).unwrap();
+        data[4] = 99; // Invalid version
+        std::fs::write(&mappings_path, &data).unwrap();
+
+        let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("Unsupported mapping file version"));
+            }
+            Ok(_) => panic!("Expected IndexError with version message, got: Ok(_)"),
+            Err(e) => panic!(
+                "Expected IndexError with version message, got: Err({:?})",
+                e
+            ),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_mappings_bad_crc() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.usearch");
+        let mappings_path = path.with_extension("usearch.mappings");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        index.save(&path)?;
+
+        // Corrupt data (which invalidates CRC)
+        let mut data = std::fs::read(&mappings_path).unwrap();
+        // Modify the node ID part of the data (after header: 4+1+8 = 13 bytes)
+        // Data format: [NodeId:8][Key:8]...
+        if data.len() > 13 {
+            data[13] = data[13].wrapping_add(1);
+        }
+        std::fs::write(&mappings_path, &data).unwrap();
+
+        let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("CRC mismatch"));
+            }
+            Ok(_) => panic!("Expected IndexError with CRC message, got: Ok(_)"),
+            Err(e) => panic!("Expected IndexError with CRC message, got: Err({:?})", e),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_mappings_truncated() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.usearch");
+        let mappings_path = path.with_extension("usearch.mappings");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        index.save(&path)?;
+
+        // Truncate file
+        let data = std::fs::read(&mappings_path).unwrap();
+        let truncated = &data[..10]; // Smaller than header
+        std::fs::write(&mappings_path, truncated).unwrap();
+
+        let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("too small") || msg.contains("corrupted"));
+            }
+            Ok(_) => panic!("Expected IndexError with size message, got: Ok(_)"),
+            Err(e) => panic!("Expected IndexError with size message, got: Err({:?})", e),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_mappings_size_mismatch() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.usearch");
+        let mappings_path = path.with_extension("usearch.mappings");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        index.save(&path)?;
+
+        // Modify count to be larger (mismatch with actual size), then fix CRC to pass CRC check
+        let mut data = std::fs::read(&mappings_path).unwrap();
+        // Count is at offset 5 (Magic 4 + Version 1)
+        // Original count is 1. Let's make it 2.
+        let count_offset = 5;
+        data[count_offset] = 2;
+
+        // Recompute CRC so we pass the CRC check and hit the size check
+        let crc_offset = data.len() - 4;
+        let mut hasher = Hasher::new();
+        hasher.update(&data[..crc_offset]);
+        let new_crc = hasher.finalize();
+
+        let crc_bytes = new_crc.to_le_bytes();
+        data[crc_offset] = crc_bytes[0];
+        data[crc_offset + 1] = crc_bytes[1];
+        data[crc_offset + 2] = crc_bytes[2];
+        data[crc_offset + 3] = crc_bytes[3];
+
+        std::fs::write(&mappings_path, &data).unwrap();
+
+        let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("size mismatch"));
+            }
+            Ok(_) => panic!("Expected IndexError with size mismatch message, got: Ok(_)"),
+            Err(e) => panic!(
+                "Expected IndexError with size mismatch message, got: Err({:?})",
+                e
+            ),
+        }
+        Ok(())
     }
 }
