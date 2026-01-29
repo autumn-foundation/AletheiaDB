@@ -1,11 +1,11 @@
 #![cfg(feature = "vault")]
 
-use super::{KeyProvider, MasterKey, KeyError};
+use super::{KeyError, KeyProvider, MasterKey};
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use serde::Deserialize;
 use vaultrs::client::{VaultClient, VaultClientSettingsBuilder};
 use vaultrs::kv2;
-use serde::Deserialize;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 /// Abstract interface for Vault operations.
 #[async_trait]
@@ -71,7 +71,9 @@ impl VaultProvider {
         // Parse mount and path
         let parts: Vec<&str> = secret_path.splitn(2, '/').collect();
         if parts.len() != 2 {
-            return Err(KeyError::ConfigError("Invalid secret path. Expected format: mount/path".to_string()));
+            return Err(KeyError::ConfigError(
+                "Invalid secret path. Expected format: mount/path".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -82,10 +84,15 @@ impl VaultProvider {
     }
 
     /// Create with custom operations for testing.
-    pub fn new_with_ops(ops: Box<dyn VaultOperations>, secret_path: &str) -> Result<Self, KeyError> {
+    pub fn new_with_ops(
+        ops: Box<dyn VaultOperations>,
+        secret_path: &str,
+    ) -> Result<Self, KeyError> {
         let parts: Vec<&str> = secret_path.splitn(2, '/').collect();
         if parts.len() != 2 {
-            return Err(KeyError::ConfigError("Invalid secret path. Expected format: mount/path".to_string()));
+            return Err(KeyError::ConfigError(
+                "Invalid secret path. Expected format: mount/path".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -99,9 +106,11 @@ impl VaultProvider {
 #[async_trait]
 impl KeyProvider for VaultProvider {
     async fn get_master_key(&self) -> Result<MasterKey, KeyError> {
-        let val = self.ops.read_key(&self.mount, &self.path).await.map_err(|e| {
-            KeyError::ProviderError(e)
-        })?;
+        let val = self
+            .ops
+            .read_key(&self.mount, &self.path)
+            .await
+            .map_err(|e| KeyError::ProviderError(e))?;
 
         let bytes = BASE64.decode(val.trim()).map_err(|e| {
             KeyError::ConfigError(format!("Invalid base64 encoding from Vault: {}", e))

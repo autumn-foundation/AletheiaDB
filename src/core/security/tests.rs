@@ -94,6 +94,16 @@ async fn test_file_provider() {
 
     let key = provider.get_master_key().await.expect("Should load key");
     assert_eq!(key.as_bytes(), &master_key_data);
+
+    // Test get_key_version
+    let key_v1 = provider.get_key_version(1).await.expect("Should load version 1");
+    assert_eq!(key_v1.as_bytes(), &master_key_data);
+
+    // Test get_key_version mismatch
+    match provider.get_key_version(99).await {
+        Err(KeyError::NotFound) => {},
+        _ => panic!("Expected NotFound for version 99"),
+    }
 }
 
 #[tokio::test]
@@ -124,14 +134,6 @@ async fn test_file_provider_errors() {
         Err(KeyError::ConfigError(msg)) if msg.contains("too short") => {},
         _ => panic!("Expected ConfigError for short file"),
     }
-
-    // 4. Version Mismatch
-    let key_file = create_test_key_file(passphrase, &master_key_data);
-    let provider = FileKeyProvider::new(key_file.path(), passphrase);
-    match provider.get_key_version(999).await {
-        Err(KeyError::NotFound) => {},
-        _ => panic!("Expected NotFound for version mismatch"),
-    }
 }
 
 #[tokio::test]
@@ -150,13 +152,23 @@ async fn test_env_provider() {
     let provider = EnvKeyProvider::new(var_name);
     let result = provider.get_master_key().await;
 
+    let key = result.expect("Should load key from env");
+    assert_eq!(key.as_bytes(), &master_key_data);
+
+    // Test get_key_version
+    let key_v1 = provider.get_key_version(1).await.expect("Should load version 1");
+    assert_eq!(key_v1.as_bytes(), &master_key_data);
+
+    // Test get_key_version mismatch
+    match provider.get_key_version(99).await {
+        Err(KeyError::NotFound) => {},
+        _ => panic!("Expected NotFound for version 99"),
+    }
+
     // Clean up
     unsafe {
         std::env::remove_var(var_name);
     }
-
-    let key = result.expect("Should load key from env");
-    assert_eq!(key.as_bytes(), &master_key_data);
 }
 
 #[tokio::test]

@@ -1,13 +1,13 @@
-use super::{KeyProvider, MasterKey, KeyError};
+use super::{KeyError, KeyProvider, MasterKey};
+use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
-use std::path::PathBuf;
-use zeroize::Zeroizing;
-use tokio::fs;
-use argon2::{Argon2, Params, Algorithm, Version};
 use chacha20poly1305::{
+    ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Key, Nonce
 };
+use std::path::PathBuf;
+use tokio::fs;
+use zeroize::Zeroizing;
 
 const SALT_SIZE: usize = 16;
 const NONCE_SIZE: usize = 12;
@@ -52,7 +52,9 @@ impl KeyProvider for FileKeyProvider {
 
         // 2. Validate length
         if data.len() < MIN_FILE_SIZE {
-             return Err(KeyError::ConfigError("Key file corrupted (too short)".to_string()));
+            return Err(KeyError::ConfigError(
+                "Key file corrupted (too short)".to_string(),
+            ));
         }
 
         let salt = &data[0..SALT_SIZE];
@@ -66,23 +68,24 @@ impl KeyProvider for FileKeyProvider {
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
         let mut kek = Zeroizing::new([0u8; 32]);
-        argon2.hash_password_into(
-            self.passphrase.as_bytes(),
-            salt,
-            &mut *kek
-        ).map_err(|e| KeyError::ConfigError(format!("Argon2 KDF failed: {}", e)))?;
+        argon2
+            .hash_password_into(self.passphrase.as_bytes(), salt, &mut *kek)
+            .map_err(|e| KeyError::ConfigError(format!("Argon2 KDF failed: {}", e)))?;
 
         // 4. Decrypt
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&*kek));
         let nonce = Nonce::from_slice(nonce_bytes);
 
         let plaintext = Zeroizing::new(
-            cipher.decrypt(nonce, ciphertext)
-                .map_err(|_| KeyError::DecryptionFailed)?
+            cipher
+                .decrypt(nonce, ciphertext)
+                .map_err(|_| KeyError::DecryptionFailed)?,
         );
 
         if plaintext.len() != 32 {
-            return Err(KeyError::ConfigError("Decrypted key has invalid length".to_string()));
+            return Err(KeyError::ConfigError(
+                "Decrypted key has invalid length".to_string(),
+            ));
         }
 
         let mut key_bytes = [0u8; 32];

@@ -1,7 +1,7 @@
-use super::{KeyProvider, MasterKey, KeyError};
+use super::{KeyError, KeyProvider, MasterKey};
 use async_trait::async_trait;
-use std::env;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use std::env;
 
 /// Provider that loads the master key from a base64-encoded environment variable.
 pub struct EnvKeyProvider {
@@ -22,9 +22,9 @@ impl KeyProvider for EnvKeyProvider {
     async fn get_master_key(&self) -> Result<MasterKey, KeyError> {
         let val = env::var(&self.var_name).map_err(|_| KeyError::NotFound)?;
 
-        let bytes = BASE64.decode(val.trim()).map_err(|e| {
-            KeyError::ConfigError(format!("Invalid base64 encoding: {}", e))
-        })?;
+        let bytes = BASE64
+            .decode(val.trim())
+            .map_err(|e| KeyError::ConfigError(format!("Invalid base64 encoding: {}", e)))?;
 
         if bytes.len() != 32 {
             return Err(KeyError::ConfigError(format!(

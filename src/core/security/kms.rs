@@ -1,12 +1,12 @@
 #![cfg(feature = "aws-kms")]
 
-use super::{KeyProvider, MasterKey, KeyError};
+use super::{KeyError, KeyProvider, MasterKey};
 use async_trait::async_trait;
+use aws_sdk_kms::primitives::Blob;
+use aws_sdk_kms::types::DataKeySpec;
 use std::path::PathBuf;
 use tokio::fs;
 use zeroize::Zeroizing;
-use aws_sdk_kms::types::DataKeySpec;
-use aws_sdk_kms::primitives::Blob;
 
 /// Abstract interface for KMS operations to enable mocking.
 #[async_trait]
@@ -32,7 +32,7 @@ impl RealKmsClient {
     pub async fn new(key_id: String, region: Option<String>) -> Self {
         let mut config_loader = aws_config::defaults(BehaviorVersion::latest());
         if let Some(r) = region {
-             config_loader = config_loader.region(aws_config::Region::new(r));
+            config_loader = config_loader.region(aws_config::Region::new(r));
         }
         let config = config_loader.load().await;
         let client = aws_sdk_kms::Client::new(&config);
@@ -45,7 +45,9 @@ impl RealKmsClient {
 impl KmsOperations for RealKmsClient {
     async fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
         let blob = Blob::new(ciphertext);
-        let resp = self.client.decrypt()
+        let resp = self
+            .client
+            .decrypt()
             .key_id(&self.key_id) // Optional usually, but good to be explicit
             .ciphertext_blob(blob)
             .send()
@@ -57,7 +59,9 @@ impl KmsOperations for RealKmsClient {
     }
 
     async fn generate_data_key(&self) -> Result<(Vec<u8>, Vec<u8>), String> {
-        let resp = self.client.generate_data_key()
+        let resp = self
+            .client
+            .generate_data_key()
             .key_id(&self.key_id)
             .key_spec(DataKeySpec::Aes256)
             .send()
@@ -83,7 +87,11 @@ pub struct AwsKmsProvider {
 
 impl AwsKmsProvider {
     /// Create a new AwsKmsProvider using the real AWS SDK.
-    pub async fn new(key_id: impl Into<String>, region: Option<String>, storage_path: impl Into<PathBuf>) -> Self {
+    pub async fn new(
+        key_id: impl Into<String>,
+        region: Option<String>,
+        storage_path: impl Into<PathBuf>,
+    ) -> Self {
         let ops = RealKmsClient::new(key_id.into(), region).await;
         Self {
             ops: Box::new(ops),
@@ -106,17 +114,22 @@ impl KeyProvider for AwsKmsProvider {
         // 1. Check if storage file exists
         if self.storage_path.exists() {
             // Load and decrypt
-            let ciphertext = fs::read(&self.storage_path).await.map_err(|e| {
-                KeyError::ConfigError(format!("Failed to read key file: {}", e))
-            })?;
+            let ciphertext = fs::read(&self.storage_path)
+                .await
+                .map_err(|e| KeyError::ConfigError(format!("Failed to read key file: {}", e)))?;
 
-            let plaintext = Zeroizing::new(self.ops.decrypt(&ciphertext).await.map_err(|e| {
-                KeyError::ProviderError(e)
-            })?);
+            let plaintext = Zeroizing::new(
+                self.ops
+                    .decrypt(&ciphertext)
+                    .await
+                    .map_err(|e| KeyError::ProviderError(e))?,
+            );
 
             if plaintext.len() != 32 {
-                 // AES-256 is 32 bytes
-                 return Err(KeyError::ConfigError("Decrypted key has invalid length".to_string()));
+                // AES-256 is 32 bytes
+                return Err(KeyError::ConfigError(
+                    "Decrypted key has invalid length".to_string(),
+                ));
             }
 
             let mut key = [0u8; 32];
@@ -125,20 +138,24 @@ impl KeyProvider for AwsKmsProvider {
             Ok(MasterKey::new(key, 1))
         } else {
             // Generate new
-            let (plaintext, ciphertext) = self.ops.generate_data_key().await.map_err(|e| {
-                KeyError::ProviderError(e)
-            })?;
+            let (plaintext, ciphertext) = self
+                .ops
+                .generate_data_key()
+                .await
+                .map_err(|e| KeyError::ProviderError(e))?;
 
             let plaintext = Zeroizing::new(plaintext);
 
-             if plaintext.len() != 32 {
-                 return Err(KeyError::ConfigError("Generated key has invalid length".to_string()));
+            if plaintext.len() != 32 {
+                return Err(KeyError::ConfigError(
+                    "Generated key has invalid length".to_string(),
+                ));
             }
 
             // Save ciphertext
-            fs::write(&self.storage_path, &ciphertext).await.map_err(|e| {
-                 KeyError::ConfigError(format!("Failed to write key file: {}", e))
-            })?;
+            fs::write(&self.storage_path, &ciphertext)
+                .await
+                .map_err(|e| KeyError::ConfigError(format!("Failed to write key file: {}", e)))?;
 
             let mut key = [0u8; 32];
             key.copy_from_slice(&*plaintext);
@@ -148,7 +165,7 @@ impl KeyProvider for AwsKmsProvider {
     }
 
     async fn get_key_version(&self, version: u32) -> Result<MasterKey, KeyError> {
-         let key = self.get_master_key().await?;
+        let key = self.get_master_key().await?;
         if key.version() == version {
             Ok(key)
         } else {
