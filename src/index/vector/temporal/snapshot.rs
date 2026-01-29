@@ -1,4 +1,4 @@
-use super::config::{MAX_ACCUMULATED_CHANGES, MAX_DELTA_CHAIN_DEPTH, MIN_CAPACITY_ESTIMATE};
+use super::config::{MAX_DELTA_CHAIN_DEPTH, MIN_CAPACITY_ESTIMATE};
 use crate::core::id::NodeId;
 use crate::core::temporal::Timestamp;
 use crate::index::vector::VectorIndex;

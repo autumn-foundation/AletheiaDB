@@ -1,3 +1,4 @@
+use super::config::MAX_ACCUMULATED_CHANGES;
 use crate::core::temporal::Timestamp;
 use std::time::Duration;
 
