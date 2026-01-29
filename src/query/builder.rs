@@ -6,7 +6,7 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```rust
 //! # use gallifreydb::query::QueryBuilder;
 //! # use gallifreydb::core::NodeId;
 //! # use gallifreydb::core::temporal::time;
@@ -195,7 +195,7 @@ impl QueryBuilder<state::Initial> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use gallifreydb::query::QueryBuilder;
     /// # use gallifreydb::index::vector::DistanceMetric;
     /// # let embedding = vec![0.0; 384];
@@ -303,7 +303,7 @@ impl QueryBuilder<state::HasNodes> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use gallifreydb::query::QueryBuilder;
     /// # use gallifreydb::core::NodeId;
     /// # let alice_id = NodeId::new(1).unwrap();
@@ -315,8 +315,6 @@ impl QueryBuilder<state::HasNodes> {
     ///         .property("custom_embedding")
     ///         .finish()
     ///     .build();
-    /// # Ok(())
-    /// # }
     /// ```
     pub fn rank_by_similarity_builder(
         self,
@@ -596,21 +594,20 @@ impl<S: QueryState> QueryBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use gallifreydb::GallifreyDB;
     /// # use gallifreydb::core::NodeId;
-    /// # let db = GallifreyDB::new().unwrap();
+    /// # // Mock DB for builder test
     /// # let node_id = NodeId::new(1).unwrap();
     /// # let timestamp = gallifreydb::core::temporal::time::now();
     /// # let tx_time = timestamp;
-    /// let results = db.query()
+    /// // We only build the query here, so we don't need a real DB
+    /// let query = gallifreydb::query::QueryBuilder::new()
     ///     .as_of(timestamp, tx_time)
     ///     .start(node_id)
     ///     .traverse("KNOWS")
     ///     .with_provenance()
     ///     .build();
-    /// # Ok(())
-    /// # }
     /// ```
     #[must_use]
     pub fn with_provenance(mut self) -> Self {
@@ -701,7 +698,7 @@ impl<S: QueryState> QueryBuilder<S> {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust
 /// # use gallifreydb::query::QueryBuilder;
 /// # use gallifreydb::core::NodeId;
 /// # let alice_id = NodeId::new(1).unwrap();
@@ -713,8 +710,6 @@ impl<S: QueryState> QueryBuilder<S> {
 ///         .label_filter("Person")
 ///         .finish()
 ///     .build();
-/// # Ok(())
-/// # }
 /// ```
 #[must_use = "builders do nothing unless you call finish()"]
 pub struct SimilarToBuilder<S: QueryState> {
@@ -745,7 +740,7 @@ impl<S: QueryState> SimilarToBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use gallifreydb::query::QueryBuilder;
     /// # use gallifreydb::core::NodeId;
     /// # let node_id = NodeId::new(1).unwrap();
@@ -794,7 +789,7 @@ impl<S: QueryState> SimilarToBuilder<S> {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust
 /// # use gallifreydb::query::QueryBuilder;
 /// # use gallifreydb::core::NodeId;
 /// # let alice_id = NodeId::new(1).unwrap();
@@ -806,8 +801,6 @@ impl<S: QueryState> SimilarToBuilder<S> {
 ///         .property("custom_embedding")
 ///         .finish()
 ///     .build();
-/// # Ok(())
-/// # }
 /// ```
 #[must_use = "builders do nothing unless you call finish()"]
 pub struct RankBySimilarityBuilder<S: QueryState> {
@@ -833,7 +826,7 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use gallifreydb::query::QueryBuilder;
     /// # use gallifreydb::core::NodeId;
     /// # let node_id = NodeId::new(1).unwrap();
@@ -864,7 +857,7 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust
 /// # use gallifreydb::query::QueryBuilder;
 /// # use gallifreydb::index::vector::DistanceMetric;
 /// # let embedding = vec![0.0; 384];
@@ -874,7 +867,6 @@ impl<S: QueryState> RankBySimilarityBuilder<S> {
 ///         .metric(DistanceMetric::Euclidean)
 ///         .finish()
 ///     .build();
-/// # }
 /// ```
 #[must_use = "builders do nothing unless you call finish()"]
 pub struct FindSimilarBuilder {
@@ -902,7 +894,7 @@ impl FindSimilarBuilder {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use gallifreydb::query::QueryBuilder;
     /// # let embedding = vec![0.0; 384];
     /// # let builder = QueryBuilder::new();
@@ -921,7 +913,7 @@ impl FindSimilarBuilder {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// # use gallifreydb::query::QueryBuilder;
     /// # use gallifreydb::index::vector::DistanceMetric;
     /// # let embedding = vec![0.0; 384];
