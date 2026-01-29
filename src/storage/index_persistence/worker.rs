@@ -74,7 +74,7 @@ pub(crate) fn spawn_background_persistence_thread(
                 let graph_seconds = tracker.seconds_since_graph_persist();
                 if (graph_mutations >= policies.graph.mutation_threshold as u64
                     || graph_seconds >= policies.graph.time_interval_secs as u64)
-                    && let Err(e) = persist_graph_index(&current, &manager, &tracker)
+                    && let Err(e) = persist_graph_index(&current, &manager, Some(&tracker))
                 {
                     eprintln!(
                         "Background persistence: Failed to persist graph index: {}",

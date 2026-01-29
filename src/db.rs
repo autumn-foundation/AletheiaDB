@@ -2144,10 +2144,6 @@ impl GallifreyDB {
     /// ```
     pub fn persist_indexes(&self) -> Result<()> {
         use crate::storage::index_persistence::formats::IndexManifest;
-        use crate::storage::index_persistence::formats::{PersistedEdge, PersistedNode};
-        use crate::storage::index_persistence::graph::{
-            new_graph_index_data, persist_property_map, save_graph_index,
-        };
 
         // Warn if background persistence thread has stopped
         if self
@@ -2173,47 +2169,10 @@ impl GallifreyDB {
         })?;
 
         // 2. Save graph index
-        let mut graph_data = new_graph_index_data();
-
-        // Export all nodes
-        let all_nodes = self.current.all_nodes();
-        for node in all_nodes {
-            let label_idx = node.label.as_u32();
-            let properties = persist_property_map(&node.properties).map_err(|e| {
-                StorageError::PersistenceError(format!("Failed to persist node properties: {}", e))
-            })?;
-
-            graph_data.nodes.push(PersistedNode {
-                id: node.id.as_u64(),
-                label_idx,
-                version_id: node.current_version.as_u64(),
-                properties,
-            });
-        }
-
-        // Export all edges
-        let all_edges = self.current.all_edges();
-        for edge in all_edges {
-            let label_idx = edge.label.as_u32();
-            let properties = persist_property_map(&edge.properties).map_err(|e| {
-                StorageError::PersistenceError(format!("Failed to persist edge properties: {}", e))
-            })?;
-
-            graph_data.edges.push(PersistedEdge {
-                id: edge.id.as_u64(),
-                source_id: edge.source.as_u64(),
-                target_id: edge.target.as_u64(),
-                label_idx,
-                version_id: edge.current_version.as_u64(),
-                properties,
-            });
-        }
-
-        graph_data.node_count = graph_data.nodes.len() as u64;
-        graph_data.edge_count = graph_data.edges.len() as u64;
-
-        save_graph_index(&graph_data, &manager.graph_path().join("adjacency.idx")).map_err(
-            |e| StorageError::PersistenceError(format!("Failed to save graph index: {}", e)),
+        crate::storage::index_persistence::operations::persist_graph_index(
+            &self.current,
+            manager,
+            self.persistence_tracker.as_ref(),
         )?;
 
         // 3. Save vector indexes
