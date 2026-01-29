@@ -54,18 +54,18 @@ impl KeyProvider for FileKeyProvider {
         let ciphertext = &data[28..];
 
         // 3. Derive KEK
-        let mut kek = [0u8; 32];
+        let mut kek = Zeroizing::new([0u8; 32]);
         let argon2 = Argon2::default();
         if argon2.hash_password_into(
             self.passphrase.as_bytes(),
             salt,
-            &mut kek
+            &mut *kek
         ).is_err() {
             return Err(KeyError::DecryptionFailed);
         }
 
         // 4. Decrypt
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&kek));
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&*kek));
         let nonce = Nonce::from_slice(nonce_bytes);
 
         let plaintext = cipher.decrypt(nonce, ciphertext)
