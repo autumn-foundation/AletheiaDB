@@ -520,10 +520,10 @@ impl HistoricalStorage {
         // Construct bi-temporal interval from separate dimensions
         let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
 
-        // For tombstones, close the valid_time immediately to create an empty interval
-        // This marks that the entity is not valid at any point after deletion
+        // For tombstones, close the valid_time at valid_from to create an empty interval [valid_from, valid_from)
+        // This represents "entity is no longer valid starting from this point"
         if is_tombstone {
-            temporal = temporal.close_valid_time(tx_time);
+            temporal = temporal.close_valid_time(valid_from);
         }
 
         // Check capacity limit using cached count (O(1) operation, DoS protection)
@@ -711,10 +711,10 @@ impl HistoricalStorage {
         // Construct bi-temporal interval from separate dimensions
         let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
 
-        // For tombstones, close the valid_time immediately to create an empty interval
-        // This marks that the entity is not valid at any point after deletion
+        // For tombstones, close the valid_time at valid_from to create an empty interval [valid_from, valid_from)
+        // This represents "entity is no longer valid starting from this point"
         if is_tombstone {
-            temporal = temporal.close_valid_time(tx_time);
+            temporal = temporal.close_valid_time(valid_from);
         }
 
         // Check capacity limit using cached count (O(1) operation, DoS protection)

@@ -826,7 +826,7 @@ impl WriteTransaction {
     ///
     /// A properly constructed `BiTemporalInterval`:
     /// - Regular versions: Open-ended valid_time `[valid_from, ∞)`
-    /// - Tombstones: Closed valid_time `[tx_time, tx_time)` (empty interval)
+    /// - Tombstones: Closed valid_time `[valid_from, valid_from)` (empty interval)
     #[inline]
     fn create_temporal_interval(
         valid_from: Timestamp,
@@ -835,7 +835,9 @@ impl WriteTransaction {
     ) -> BiTemporalInterval {
         let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
         if is_tombstone {
-            temporal = temporal.close_valid_time(tx_time);
+            // Close valid_time at valid_from to create empty interval [valid_from, valid_from)
+            // This represents "entity is no longer valid starting from this point"
+            temporal = temporal.close_valid_time(valid_from);
         }
         temporal
     }
