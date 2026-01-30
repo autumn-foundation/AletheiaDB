@@ -425,14 +425,14 @@ impl PropertyValue {
     ///
     /// | Type   | Format                                      |
     /// |--------|---------------------------------------------|
-    /// | Null   | [tag:1]                                     |
-    /// | Bool   | [tag:1][value:1]                           |
-    /// | Int    | [tag:1][i64:8]                             |
-    /// | Float  | [tag:1][f64:8]                             |
-    /// | String | [tag:1][len:4][utf8_bytes:len]             |
-    /// | Bytes  | [tag:1][len:4][bytes:len]                  |
-    /// | Array  | [tag:1][count:4][elements...]              |
-    /// | Vector | [tag:1][dim:4][f32_values:dim*4]           |
+    /// | Null   | `[tag:1]`                                   |
+    /// | Bool   | `[tag:1][value:1]`                          |
+    /// | Int    | `[tag:1][i64:8]`                            |
+    /// | Float  | `[tag:1][f64:8]`                            |
+    /// | String | `[tag:1][len:4][utf8_bytes:len]`            |
+    /// | Bytes  | `[tag:1][len:4][bytes:len]`                 |
+    /// | Array  | `[tag:1][count:4][elements...]`             |
+    /// | Vector | `[tag:1][dim:4][f32_values:dim*4]`          |
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         self.serialize_into(&mut buffer);

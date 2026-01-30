@@ -3,6 +3,65 @@
 //! A recursive descent parser that converts tokenized GQL input into an AST.
 //! The parser supports the full GQL grammar including MATCH patterns, vector
 //! search operations, temporal clauses, and hybrid queries.
+//!
+//! # Architecture
+//!
+//! The parser works in two stages:
+//! 1. **Lexical Analysis**: The [`Lexer`] converts the input string into a stream of [`Token`]s.
+//! 2. **Syntactic Analysis**: The [`Parser`] consumes tokens to build a [`QueryAst`].
+//!
+//! The parser implements a recursive descent strategy with a strict recursion limit to prevent
+//! stack overflow attacks (DoS protection).
+//!
+//! # Supported Syntax
+//!
+//! ## Graph Pattern Matching
+//! ```cypher
+//! MATCH (n:Person {name: 'Alice'})-[:KNOWS]->(m:Person)
+//! ```
+//!
+//! ## Vector Search
+//! ```cypher
+//! -- Find similar to embedding vector
+//! SIMILAR TO [0.1, 0.2, 0.3] LIMIT 10
+//!
+//! -- Find similar to another node's embedding
+//! FIND SIMILAR TO (node_id) LIMIT 10
+//! ```
+//!
+//! ## Hybrid Queries
+//! ```cypher
+//! MATCH (n:Document)
+//! RANK BY SIMILARITY TO $query_embedding TOP 10
+//! WHERE n.year > 2020
+//! RETURN n.title
+//! ```
+//!
+//! ## Temporal Queries
+//! ```cypher
+//! -- Point-in-time query
+//! AS OF '2023-01-01T00:00:00Z'
+//! MATCH (n) RETURN n
+//!
+//! -- Bi-temporal point query
+//! AS OF '2023-01-01T00:00:00Z', '2023-01-02T00:00:00Z'
+//! MATCH (n) RETURN n
+//!
+//! -- Time range query
+//! BETWEEN '2023-01-01' AND '2023-12-31'
+//! MATCH (n) RETURN n
+//! ```
+//!
+//! # Example
+//!
+//! ```rust
+//! use gallifreydb::query::parser::Parser;
+//!
+//! let query = "MATCH (n:Person) WHERE n.age > 30 RETURN n";
+//! let ast = Parser::parse(query).expect("Failed to parse query");
+//!
+//! println!("Parsed AST: {:?}", ast);
+//! ```
 
 use std::sync::Arc;
 
@@ -313,7 +372,7 @@ impl Parser {
                         _ => {
                             return Err(self.error(
                                 "Expected number after '-'".to_string(),
-                                Some("number".to_string()),
+                                "number".to_string().into(),
                             ));
                         }
                     }

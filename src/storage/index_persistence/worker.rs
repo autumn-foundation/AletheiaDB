@@ -1,3 +1,27 @@
+//! Background persistence worker.
+//!
+//! This module implements the background thread responsible for automatic index persistence.
+//! The worker periodically checks persistence policies (time-based and mutation-based)
+//! and triggers persistence operations when thresholds are exceeded.
+//!
+//! # Architecture
+//!
+//! The worker thread runs in a loop until shutdown is signaled. It performs the following:
+//! 1. Sleeps for a short interval (1 second).
+//! 2. Checks if shutdown is signaled.
+//! 3. Checks persistence policies for each index type (Vector, Graph, Temporal, Strings).
+//! 4. Triggers persistence if thresholds are met.
+//! 5. Logs any errors during persistence.
+//!
+//! # Crash Safety
+//!
+//! The worker thread is wrapped in `std::panic::catch_unwind` to prevent the entire
+//! application from crashing if a panic occurs during persistence. If the worker panics:
+//! - The error is logged to stderr.
+//! - The `stopped_flag` is set to true.
+//! - The database continues running, but automatic persistence stops.
+//! - Users must restart the database to restore automatic persistence.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -19,8 +43,8 @@ use super::tracker::PersistenceTracker;
 /// Spawn a background thread for automatic index persistence.
 ///
 /// This thread periodically checks persistence policies and triggers index saves when:
-/// - Mutation thresholds are exceeded
-/// - Time intervals have elapsed
+/// - Mutation thresholds are exceeded (e.g., 10,000 new writes)
+/// - Time intervals have elapsed (e.g., every 5 minutes)
 /// - Special events occur (e.g., graph adjacency rebuild)
 ///
 /// # Crash Safety
@@ -31,6 +55,11 @@ use super::tracker::PersistenceTracker;
 /// - The database continues running but future persistence attempts will fail with warnings
 ///
 /// This prevents data corruption while alerting users to the failure.
+///
+/// # Shutdown
+///
+/// On shutdown signal, the thread performs one final persistence of all indexes
+/// to ensure a clean state for the next startup.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_background_persistence_thread(
     current: Arc<CurrentStorage>,
