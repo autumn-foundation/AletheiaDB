@@ -10,8 +10,10 @@
 //! predicates (filters) as early as possible in the query pipeline, we reduce the
 //! cardinality (number of rows) that subsequent operators must process.
 //!
-//! For example, if a `VectorRank` operation is O(N log N) and a filter removes 90%
-//! of the rows, pushing the filter before the rank reduces the cost by ~10x.
+//! For example, if a `VectorRank` operation is O(N log k) (where N is the number of
+//! input rows and k is the top_k parameter) and a filter removes 90% of the rows,
+//! pushing the filter before the rank reduces the cost from O(N log k) to roughly
+//! O(0.1N log k), i.e., by about 10x.
 //!
 //! # Optimization Strategy
 //!
