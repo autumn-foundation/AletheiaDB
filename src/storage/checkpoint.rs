@@ -728,6 +728,7 @@ impl CheckpointManager {
                     (
                         PersistedVersionType::Delta {
                             base_anchor_tx: version.temporal.transaction_time().start().wallclock(),
+                            base_anchor_tx_logical: version.temporal.transaction_time().start().logical(),
                             removed_keys,
                         },
                         persist_property_map(&changed_props).map_err(persistence_err)?,
@@ -742,12 +743,19 @@ impl CheckpointManager {
                 node_id: version.node_id.as_u64(),
                 label_idx: version.label.as_u32(),
                 valid_from: valid_time.start().wallclock(),
+        valid_from_logical: valid_time.start().logical(),
                 valid_to: if valid_time.is_current() {
                     None
                 } else {
                     Some(valid_time.end().wallclock())
                 },
+        valid_to_logical: if valid_time.is_current() {
+            None
+        } else {
+            Some(valid_time.end().logical())
+        },
                 tx_time: version.temporal.transaction_time().start().wallclock(),
+        tx_time_logical: version.temporal.transaction_time().start().logical(),
                 version_type,
                 properties,
                 vector_snapshot_id,
@@ -784,6 +792,7 @@ impl CheckpointManager {
                     (
                         PersistedVersionType::Delta {
                             base_anchor_tx: version.temporal.transaction_time().start().wallclock(),
+                    base_anchor_tx_logical: version.temporal.transaction_time().start().logical(),
                             removed_keys,
                         },
                         persist_property_map(&changed_props).map_err(persistence_err)?,
@@ -799,12 +808,19 @@ impl CheckpointManager {
                 target_id: version.target.as_u64(),
                 label_idx: version.label.as_u32(),
                 valid_from: valid_time.start().wallclock(),
+        valid_from_logical: valid_time.start().logical(),
                 valid_to: if valid_time.is_current() {
                     None
                 } else {
                     Some(valid_time.end().wallclock())
                 },
+        valid_to_logical: if valid_time.is_current() {
+            None
+        } else {
+            Some(valid_time.end().logical())
+        },
                 tx_time: version.temporal.transaction_time().start().wallclock(),
+        tx_time_logical: version.temporal.transaction_time().start().logical(),
                 version_type,
                 properties,
             };

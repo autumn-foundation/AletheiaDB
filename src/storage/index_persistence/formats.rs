@@ -277,8 +277,14 @@ pub struct NodeVersionEntry {
     pub valid_from: i64,
     /// Valid time end (None = still valid)
     pub valid_to: Option<i64>,
+    /// Valid time start (logical counter)
+    pub valid_from_logical: u32,
+    /// Valid time end (logical counter)
+    pub valid_to_logical: Option<u32>,
     /// Transaction time (unix timestamp)
     pub tx_time: i64,
+    /// Transaction time (logical counter)
+    pub tx_time_logical: u32,
     /// Version type (delta or anchor)
     pub version_type: PersistedVersionType,
     /// Properties at this version
@@ -307,6 +313,8 @@ pub enum PersistedVersionType {
     Delta {
         /// Transaction time of base anchor
         base_anchor_tx: i64,
+        /// Transaction time of base anchor (logical counter)
+        base_anchor_tx_logical: u32,
         /// Property keys that were removed in this delta (interned string indices)
         removed_keys: Vec<u32>,
     },
@@ -331,8 +339,14 @@ pub struct EdgeVersionEntry {
     pub valid_from: i64,
     /// Valid time end
     pub valid_to: Option<i64>,
+    /// Valid time start (logical counter)
+    pub valid_from_logical: u32,
+    /// Valid time end (logical counter)
+    pub valid_to_logical: Option<u32>,
     /// Transaction time
     pub tx_time: i64,
+    /// Transaction time (logical counter)
+    pub tx_time_logical: u32,
     /// Version type
     pub version_type: PersistedVersionType,
     /// Properties
