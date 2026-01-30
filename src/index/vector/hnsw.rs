@@ -1974,11 +1974,10 @@ mod tests {
     #[test]
     fn test_load_oversized_mapping_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test_index.usearch");
-        let mappings_path = path.with_extension("usearch.mappings");
+        let mappings_path = dir.path().join("test_index.usearch.mappings");
 
         // Create an oversized mappings file (> 10MB)
-        let mut file = std::fs::File::create(&mappings_path).unwrap();
+        let file = std::fs::File::create(&mappings_path).unwrap();
         file.set_len(MAX_MAPPING_FILE_SIZE + 10).unwrap();
 
         // Test load_mappings_with_integrity directly to avoid needing a valid usearch index
