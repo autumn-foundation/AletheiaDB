@@ -160,3 +160,90 @@ impl HistoricalStats {
         total_entries * BYTES_PER_ENTRY
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_metrics_calculations() {
+        let metrics = CacheMetrics {
+            primary_cache_hits: 70,
+            anchor_cache_hits: 10,
+            full_reconstructions: 20,
+        };
+
+        assert_eq!(metrics.total_operations(), 100);
+        assert!((metrics.hit_rate().unwrap() - 0.8).abs() < 1e-6);
+        assert!((metrics.primary_hit_rate().unwrap() - 0.7).abs() < 1e-6);
+        assert!((metrics.anchor_fallback_rate().unwrap() - 0.1).abs() < 1e-6);
+        assert!((metrics.reconstruction_rate().unwrap() - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cache_metrics_empty() {
+        let metrics = CacheMetrics {
+            primary_cache_hits: 0,
+            anchor_cache_hits: 0,
+            full_reconstructions: 0,
+        };
+
+        assert_eq!(metrics.total_operations(), 0);
+        assert!(metrics.hit_rate().is_none());
+        assert!(metrics.primary_hit_rate().is_none());
+        assert!(metrics.anchor_fallback_rate().is_none());
+        assert!(metrics.reconstruction_rate().is_none());
+    }
+
+    #[test]
+    fn test_historical_stats_compression_ratio() {
+        let mut stats = HistoricalStats {
+            total_node_versions: 0,
+            total_edge_versions: 0,
+            node_anchor_count: 0,
+            node_delta_count: 0,
+            edge_anchor_count: 0,
+            edge_delta_count: 0,
+            unique_nodes: 0,
+            unique_edges: 0,
+            node_cache_entries: 0,
+            edge_cache_entries: 0,
+            node_anchor_cache_entries: 0,
+            edge_anchor_cache_entries: 0,
+        };
+
+        // Case 1: Empty
+        assert!((stats.compression_ratio() - 1.0).abs() < 1e-6);
+
+        // Case 2: 10 node versions (1 anchor), 10 edge versions (1 anchor)
+        stats.total_node_versions = 10;
+        stats.node_anchor_count = 1;
+        stats.total_edge_versions = 10;
+        stats.edge_anchor_count = 1;
+
+        // Ratio: 2 / 20 = 0.1
+        assert!((stats.compression_ratio() - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_estimated_cache_memory() {
+        let stats = HistoricalStats {
+            total_node_versions: 0,
+            total_edge_versions: 0,
+            node_anchor_count: 0,
+            node_delta_count: 0,
+            edge_anchor_count: 0,
+            edge_delta_count: 0,
+            unique_nodes: 0,
+            unique_edges: 0,
+            node_cache_entries: 10,
+            edge_cache_entries: 10,
+            node_anchor_cache_entries: 5,
+            edge_anchor_cache_entries: 5,
+        };
+
+        // Total entries: 30
+        // Expected size: 30 * 150 = 4500
+        assert_eq!(stats.estimated_cache_memory_bytes(), 4500);
+    }
+}

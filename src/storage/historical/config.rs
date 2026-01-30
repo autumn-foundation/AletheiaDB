@@ -127,3 +127,32 @@ pub const ANCHOR_CACHE_SIZE_RATIO: usize = 5; // 20% of main cache
 /// Even with very small main caches, we want enough anchor cache to hold
 /// at least a few anchors to avoid immediate evictions.
 pub const MIN_ANCHOR_CACHE_SIZE: usize = 100;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_retention_policy_unbounded() {
+        let policy = RetentionPolicy::unbounded();
+        assert_eq!(policy.max_versions_per_entity, usize::MAX);
+        assert_eq!(policy.max_age_ms, i64::MAX);
+    }
+
+    #[test]
+    fn test_retention_policy_default() {
+        let policy = RetentionPolicy::default();
+        assert_eq!(
+            policy.max_versions_per_entity,
+            DEFAULT_MAX_VERSIONS_PER_ENTITY
+        );
+        assert_eq!(policy.max_age_ms, DEFAULT_MAX_VERSION_AGE_MS);
+    }
+
+    #[test]
+    fn test_retention_policy_new() {
+        let policy = RetentionPolicy::new(500, 1000);
+        assert_eq!(policy.max_versions_per_entity, 500);
+        assert_eq!(policy.max_age_ms, 1000);
+    }
+}
