@@ -1483,7 +1483,7 @@ mod tests {
         match result {
             Err(Error::Storage(StorageError::CorruptedData(msg))) => {
                 assert_eq!(msg, "WAL offset overflow");
-            },
+            }
             _ => panic!("Expected WAL offset overflow error, got: {:?}", result),
         }
     }

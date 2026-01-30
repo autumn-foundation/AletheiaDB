@@ -1974,7 +1974,7 @@ mod tests {
 
         // Write huge count
         let count_bytes = huge_count.to_le_bytes();
-        data[count_offset..count_offset+8].copy_from_slice(&count_bytes);
+        data[count_offset..count_offset + 8].copy_from_slice(&count_bytes);
 
         // Update CRC (checksum calculation is still valid, only logic check fails)
         let crc_offset = data.len() - 4;
@@ -1989,10 +1989,17 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(Error::Vector(VectorError::IndexError(msg))) => {
-                assert!(msg.contains("overflow"), "Expected overflow error, got: {}", msg);
+                assert!(
+                    msg.contains("overflow"),
+                    "Expected overflow error, got: {}",
+                    msg
+                );
             }
             Ok(_) => panic!("Expected IndexError with overflow message, got: Ok(_)"),
-            Err(e) => panic!("Expected IndexError with overflow message, got: Err({:?})", e),
+            Err(e) => panic!(
+                "Expected IndexError with overflow message, got: Err({:?})",
+                e
+            ),
         }
         Ok(())
     }
