@@ -809,6 +809,37 @@ impl WriteTransaction {
     /// 2. `temporal_indexes` - temporal indexes (acquired second)
     /// 3. `version_id_gen` - version ID generator (acquired later for tombstones)
     ///
+    /// ## Helper Functions
+    ///
+    /// Helper function to create a bi-temporal interval with proper closing logic.
+    ///
+    /// This centralizes the interval construction logic to ensure both historical storage
+    /// and temporal indexes use exactly the same interval semantics.
+    ///
+    /// # Arguments
+    ///
+    /// * `valid_from` - When the fact became valid in reality (user-controlled)
+    /// * `tx_time` - When the fact was recorded in the database (system-controlled)
+    /// * `is_tombstone` - Whether this is a deletion tombstone (closes valid_time immediately)
+    ///
+    /// # Returns
+    ///
+    /// A properly constructed `BiTemporalInterval`:
+    /// - Regular versions: Open-ended valid_time `[valid_from, ∞)`
+    /// - Tombstones: Closed valid_time `[tx_time, tx_time)` (empty interval)
+    #[inline]
+    fn create_temporal_interval(
+        valid_from: Timestamp,
+        tx_time: Timestamp,
+        is_tombstone: bool,
+    ) -> BiTemporalInterval {
+        let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+        if is_tombstone {
+            temporal = temporal.close_valid_time(tx_time);
+        }
+        temporal
+    }
+
     /// Helper function to apply node writes (both create and update operations).
     ///
     /// # Arguments
@@ -885,9 +916,8 @@ impl WriteTransaction {
         )?;
 
         // Index in temporal indexes with bi-temporal interval
-        // Use the same temporal interval logic as historical storage (no tombstone closing for regular writes)
-        let temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
-        // Note: For regular creates/updates, is_tombstone=false, so no closing needed
+        // Use the same interval construction logic as historical storage
+        let temporal = Self::create_temporal_interval(valid_from, commit_timestamp, false);
         self.temporal_indexes
             .insert_node_version(node_id, version_id, temporal)?;
 
@@ -984,7 +1014,8 @@ impl WriteTransaction {
         )?;
 
         // Index in temporal indexes with bi-temporal interval
-        let temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
+        // Use the same interval construction logic as historical storage
+        let temporal = Self::create_temporal_interval(valid_from, commit_timestamp, false);
         self.temporal_indexes
             .insert_edge_version(edge_id, version_id, temporal)?;
 
@@ -1016,10 +1047,12 @@ impl WriteTransaction {
             historical.close_node_version_transaction_time(current_version_id, commit_timestamp)?;
         }
 
+        // Create tombstone interval using centralized logic
+        // Tombstones have closed valid_time intervals [tx_time, tx_time) (empty interval)
+        let tombstone_temporal = Self::create_temporal_interval(valid_from, commit_timestamp, true);
+
         // Add tombstone version to historical storage
-        // Tombstones use the provided valid_from (when deletion became valid)
-        // and commit_timestamp (when deletion was recorded)
-        // The is_tombstone=true flag closes the valid_time immediately
+        // The is_tombstone=true flag ensures add_node_version uses the same interval logic
         historical.add_node_version(
             node_id,
             tombstone_id,
@@ -1030,11 +1063,7 @@ impl WriteTransaction {
             true, // is_tombstone
         )?;
 
-        // Index the tombstone version
-        // CRITICAL: Tombstones must have closed valid_time intervals
-        let mut tombstone_temporal =
-            BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
-        tombstone_temporal = tombstone_temporal.close_valid_time(commit_timestamp);
+        // Index the tombstone version with the same interval
         self.temporal_indexes
             .insert_node_version(node_id, tombstone_id, tombstone_temporal)?;
 
@@ -1069,10 +1098,12 @@ impl WriteTransaction {
             historical.close_edge_version_transaction_time(current_version_id, commit_timestamp)?;
         }
 
+        // Create tombstone interval using centralized logic
+        // Tombstones have closed valid_time intervals [tx_time, tx_time) (empty interval)
+        let tombstone_temporal = Self::create_temporal_interval(valid_from, commit_timestamp, true);
+
         // Add tombstone version to historical storage
-        // Tombstones use the provided valid_from (when deletion became valid)
-        // and commit_timestamp (when deletion was recorded)
-        // The is_tombstone=true flag closes the valid_time immediately
+        // The is_tombstone=true flag ensures add_edge_version uses the same interval logic
         historical.add_edge_version(
             edge_id,
             tombstone_id,
@@ -1085,13 +1116,7 @@ impl WriteTransaction {
             true, // is_tombstone
         )?;
 
-        // Create bi-temporal interval for tombstone (valid_from user-controlled, tx_time = commit)
-        // CRITICAL: Tombstones must have closed valid_time intervals
-        let mut tombstone_temporal =
-            BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
-        tombstone_temporal = tombstone_temporal.close_valid_time(commit_timestamp);
-
-        // Index the tombstone version
+        // Index the tombstone version with the same interval
         self.temporal_indexes
             .insert_edge_version(edge_id, tombstone_id, tombstone_temporal)?;
 
