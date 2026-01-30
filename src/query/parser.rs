@@ -10,8 +10,7 @@
 //! 1. **Lexical Analysis**: The [`Lexer`] converts the input string into a stream of [`Token`]s.
 //! 2. **Syntactic Analysis**: The [`Parser`] consumes tokens to build a [`QueryAst`].
 //!
-//! The parser implements a recursive descent strategy with a strict recursion limit to prevent
-//! stack overflow attacks (DoS protection).
+//! The parser implements a recursive descent strategy.
 //!
 //! # Supported Syntax
 //!
@@ -1820,6 +1819,14 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.message.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_parse_error_float_list_bad_dash() {
+        let result = Parser::parse("SIMILAR TO [0.1, -] LIMIT 10");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Expected number after '-'"));
     }
 
     #[test]

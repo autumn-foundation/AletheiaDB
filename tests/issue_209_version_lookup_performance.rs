@@ -77,8 +77,10 @@ fn test_version_lookup_correctness_many_versions() {
     // Test: Query at the beginning of each version interval
     for (expected_version_idx, &timestamp) in version_timestamps.iter().enumerate() {
         // Query at valid_time + 1, but use a tx_time far enough in the future to see the version
+        // We use a large offset (1 second) to account for potential delays between
+        // transaction start (valid_time basis) and commit (transaction_time basis) on slow CI.
         let query_valid_time = Timestamp::from(timestamp.wallclock() + 1i64);
-        let query_tx_time = Timestamp::from(timestamp.wallclock() + 1000i64); // 1ms in future
+        let query_tx_time = Timestamp::from(timestamp.wallclock() + 1_000_000i64); // 1s in future
 
         let version_id = hist_guard
             .find_node_version_at_time(node_id, query_valid_time, query_tx_time)
