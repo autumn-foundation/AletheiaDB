@@ -54,10 +54,14 @@ impl From<LexerError> for ParseError {
     }
 }
 
+/// Maximum recursion depth to prevent stack overflow
+const MAX_RECURSION_DEPTH: usize = 100;
+
 /// A parser for the GQL query language.
 pub struct Parser {
     tokens: Vec<Token>,
     position: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -67,8 +71,26 @@ impl Parser {
         let mut parser = Parser {
             tokens,
             position: 0,
+            depth: 0,
         };
         parser.parse_query()
+    }
+
+    fn enter_recursion(&mut self, context: &str) -> Result<(), ParseError> {
+        if self.depth >= MAX_RECURSION_DEPTH {
+            return Err(self.error(
+                format!("Recursion limit reached in {}", context),
+                Some("less complex query".to_string()),
+            ));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn exit_recursion(&mut self) {
+        if self.depth > 0 {
+            self.depth -= 1;
+        }
     }
 
     /// Parse a complete query.
@@ -715,7 +737,10 @@ impl Parser {
     }
 
     fn parse_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
-        self.parse_or_predicate()
+        self.enter_recursion("predicate")?;
+        let result = self.parse_or_predicate();
+        self.exit_recursion();
+        result
     }
 
     fn parse_or_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
@@ -744,9 +769,11 @@ impl Parser {
 
     fn parse_not_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
         if self.check(&Token::Not) {
+            self.enter_recursion("NOT predicate")?;
             self.advance();
-            let pred = self.parse_not_predicate()?;
-            return Ok(PredicateExpr::Not(Box::new(pred)));
+            let result = self.parse_not_predicate();
+            self.exit_recursion();
+            return result.map(|pred| PredicateExpr::Not(Box::new(pred)));
         }
 
         self.parse_primary_predicate()
