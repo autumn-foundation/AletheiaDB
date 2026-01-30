@@ -2266,6 +2266,7 @@ impl Default for HistoricalStorage {
     }
 }
 
+/// Statistics and metrics for historical storage.
 pub mod stats;
 pub use stats::{CacheMetrics, HistoricalStats};
 
