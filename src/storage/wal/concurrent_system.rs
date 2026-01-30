@@ -855,7 +855,7 @@ mod tests {
 
         // Wait for background flush with polling (more resilient than single sleep)
         let start = std::time::Instant::now();
-        let timeout = Duration::from_millis(200); // Increased timeout for CI
+        let timeout = Duration::from_secs(5); // Increased timeout for CI
         let mut flushed = false;
         while start.elapsed() < timeout {
             if wal.total_flushed() >= 1 {
