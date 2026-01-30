@@ -16,8 +16,14 @@ use std::time::Instant;
 /// at various timestamps return the correct version IDs.
 #[test]
 fn test_version_lookup_correctness_many_versions() {
-    use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
+    use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder, WalConfigBuilder};
     use gallifreydb::storage::index_persistence::PersistenceConfig;
+
+    // Use a temporary directory for isolation
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let wal_config = WalConfigBuilder::new()
+        .wal_dir(temp_dir.path().to_path_buf())
+        .build();
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -34,6 +40,7 @@ fn test_version_lookup_correctness_many_versions() {
     let config = GallifreyDBConfigBuilder::new()
         .historical(historical_config)
         .persistence(persistence_config)
+        .wal(wal_config)
         .build();
 
     let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
@@ -45,7 +52,8 @@ fn test_version_lookup_correctness_many_versions() {
 
     // Create 1000 versions with distinct timestamps
     const NUM_VERSIONS: usize = 1000;
-    let mut version_timestamps = Vec::new();
+    // Store (valid_time, tx_time) for precise querying
+    let mut version_info = Vec::new();
 
     for i in 0..NUM_VERSIONS {
         // Small delay to ensure distinct timestamps
@@ -67,25 +75,34 @@ fn test_version_lookup_correctness_many_versions() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_node_version(node_id).unwrap();
         let version = hist_guard.get_node_version(version_id).unwrap();
-        version_timestamps.push(version.temporal.valid_time().start());
+
+        // Capture exact valid time start and transaction time start
+        version_info.push((
+            version.temporal.valid_time().start(),
+            version.temporal.transaction_time().start()
+        ));
     }
 
     // Now query at various timestamps and verify correctness
     let historical = db.__test_historical_storage();
     let hist_guard = historical.read();
 
-    // Test: Query at the beginning of each version interval
-    for (expected_version_idx, &timestamp) in version_timestamps.iter().enumerate() {
-        // Query at valid_time + 1, but use a tx_time far enough in the future to see the version
-        let query_valid_time = Timestamp::from(timestamp.wallclock() + 1i64);
-        let query_tx_time = Timestamp::from(timestamp.wallclock() + 5000i64); // 5ms in future
+    // Test: Query exactly at the start of each version's interval
+    for (expected_version_idx, &(valid_start, tx_start)) in version_info.iter().enumerate() {
+        // Query exactly at the creation time
+        // The transaction time must be >= the creation transaction time for it to be visible
+        let query_valid_time = valid_start;
+        // Use exact transaction time - this should be visible
+        let query_tx_time = tx_start;
 
         let version_id = hist_guard
             .find_node_version_at_time(node_id, query_valid_time, query_tx_time)
             .unwrap_or_else(|| {
+                // Fallback debug - try with MAX transaction time to see if it's a TX time issue
+                let debug_res = hist_guard.find_node_version_at_time(node_id, query_valid_time, gallifreydb::core::temporal::TIMESTAMP_MAX);
                 panic!(
-                    "Should find version at timestamp (valid={}, tx={}) (expected version index {})",
-                    query_valid_time, query_tx_time, expected_version_idx
+                    "Should find version at timestamp (valid={}, tx={}) (expected version index {}). With Tx=Max found: {:?}",
+                    query_valid_time, query_tx_time, expected_version_idx, debug_res
                 )
             });
 
@@ -130,7 +147,13 @@ fn test_version_lookup_correctness_many_versions() {
 /// implementation should remain fast.
 #[test]
 fn test_version_lookup_performance_scaling() {
-    use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
+    use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder, WalConfigBuilder};
+
+    // Use a temporary directory for isolation
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let wal_config = WalConfigBuilder::new()
+        .wal_dir(temp_dir.path().to_path_buf())
+        .build();
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -140,6 +163,7 @@ fn test_version_lookup_performance_scaling() {
 
     let config = GallifreyDBConfigBuilder::new()
         .historical(historical_config)
+        .wal(wal_config)
         .build();
 
     let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
@@ -151,11 +175,13 @@ fn test_version_lookup_performance_scaling() {
 
     // Create 1000 versions
     const NUM_VERSIONS: usize = 1000;
-    let mut version_timestamps = Vec::new();
+    // Capture precise query times (valid, tx)
+    let mut query_times = Vec::new();
 
     println!("Creating {} versions...", NUM_VERSIONS);
     for i in 0..NUM_VERSIONS {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Reduced sleep for speed - we handle isolation now
+        std::thread::sleep(std::time::Duration::from_millis(2));
 
         let props = PropertyMapBuilder::new()
             .insert("version", i as i64)
@@ -172,7 +198,10 @@ fn test_version_lookup_performance_scaling() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_node_version(node_id).unwrap();
         let version = hist_guard.get_node_version(version_id).unwrap();
-        version_timestamps.push(version.temporal.valid_time().start());
+        query_times.push((
+            version.temporal.valid_time().start(),
+            version.temporal.transaction_time().start()
+        ));
     }
 
     // Measure lookup performance
@@ -193,17 +222,17 @@ fn test_version_lookup_performance_scaling() {
     println!("---------------------|-----------|------------------");
 
     for (idx, description) in test_positions {
-        let query_time = version_timestamps[idx];
+        let (valid_at, tx_at) = query_times[idx];
 
         // Warm up
         for _ in 0..10 {
-            let _ = hist_guard.find_node_version_at_time(node_id, query_time, query_time);
+            let _ = hist_guard.find_node_version_at_time(node_id, valid_at, tx_at);
         }
 
         // Measure 100 lookups
         let start = Instant::now();
         for _ in 0..100 {
-            let _ = hist_guard.find_node_version_at_time(node_id, query_time, query_time);
+            let _ = hist_guard.find_node_version_at_time(node_id, valid_at, tx_at);
         }
         let elapsed = start.elapsed();
         let avg_micros = elapsed.as_micros() / 100;
@@ -230,8 +259,14 @@ fn test_version_lookup_performance_scaling() {
 /// Test edge version lookup with many versions.
 #[test]
 fn test_edge_version_lookup_correctness_many_versions() {
-    use gallifreydb::config::GallifreyDBConfigBuilder;
+    use gallifreydb::config::{GallifreyDBConfigBuilder, WalConfigBuilder};
     use gallifreydb::storage::index_persistence::PersistenceConfig;
+
+    // Use a temporary directory for isolation
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let wal_config = WalConfigBuilder::new()
+        .wal_dir(temp_dir.path().to_path_buf())
+        .build();
 
     // Disable persistence to avoid stale index data
     let persistence_config = PersistenceConfig {
@@ -241,6 +276,7 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
     let config = GallifreyDBConfigBuilder::new()
         .persistence(persistence_config)
+        .wal(wal_config)
         .build();
 
     let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
@@ -266,7 +302,7 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
     // Create many versions (stay within default 1000 limit)
     const NUM_VERSIONS: usize = 100;
-    let mut version_timestamps = Vec::new();
+    let mut version_info = Vec::new();
 
     for i in 0..NUM_VERSIONS {
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -284,7 +320,10 @@ fn test_edge_version_lookup_correctness_many_versions() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        version_timestamps.push(version.temporal.valid_time().start());
+        version_info.push((
+            version.temporal.valid_time().start(),
+            version.temporal.transaction_time().start()
+        ));
     }
 
     // Query and verify
@@ -293,11 +332,9 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
     // Test a few representative timestamps
     for &idx in &[0, NUM_VERSIONS / 4, NUM_VERSIONS / 2, NUM_VERSIONS - 1] {
-        let valid_timestamp = version_timestamps[idx];
-        // Query with tx_time far enough in future to see the version
-        let query_valid_time = valid_timestamp;
-        let query_tx_time = Timestamp::from(valid_timestamp.wallclock() + 5000i64);
+        let (query_valid_time, query_tx_time) = version_info[idx];
 
+        // Use exact captured timestamps
         let version_id = hist_guard
             .find_edge_version_at_time(edge_id, query_valid_time, query_tx_time)
             .unwrap_or_else(|| {
@@ -334,7 +371,16 @@ fn test_edge_version_lookup_correctness_many_versions() {
 /// in the temporal index, which is a prerequisite for the optimized lookup.
 #[test]
 fn test_temporal_index_population() {
-    let db = GallifreyDB::new().expect("Failed to create database");
+    use gallifreydb::config::{GallifreyDBConfigBuilder, WalConfigBuilder};
+
+    // Use a temporary directory for isolation
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let wal_config = WalConfigBuilder::new()
+        .wal_dir(temp_dir.path().to_path_buf())
+        .build();
+    let config = GallifreyDBConfigBuilder::new().wal(wal_config).build();
+
+    let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
 
     let node_id = db
         .create_node("TestNode", PropertyMapBuilder::new().build())
@@ -385,7 +431,16 @@ fn test_temporal_index_population() {
 /// correct results.
 #[test]
 fn test_temporal_index_matches_linear_scan() {
-    let db = GallifreyDB::new().expect("Failed to create database");
+    use gallifreydb::config::{GallifreyDBConfigBuilder, WalConfigBuilder};
+
+    // Use a temporary directory for isolation
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let wal_config = WalConfigBuilder::new()
+        .wal_dir(temp_dir.path().to_path_buf())
+        .build();
+    let config = GallifreyDBConfigBuilder::new().wal(wal_config).build();
+
+    let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
 
     let node_id = db
         .create_node("TestNode", PropertyMapBuilder::new().build())
