@@ -22,15 +22,21 @@ fn test_temporal_lookup_directly() {
     println!("Created node {:?} with value='v1'", node_id);
 
     // Get the timestamp of the first version from HistoricalStorage
-    let t1 = {
+    let (t1_valid, t1_tx) = {
         let historical = db.__test_historical_storage();
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_node_version(node_id).unwrap();
         let version = hist_guard.get_node_version(version_id).unwrap();
-        // Use a timestamp between this version's start and the next update
-        (version.temporal.valid_time().start().wallclock() + 1).into()
+        // Use a timestamp between this version's start and the next update for valid_time
+        let valid = (version.temporal.valid_time().start().wallclock() + 1).into();
+        // Use a timestamp after the version was recorded for tx_time
+        let tx = (version.temporal.transaction_time().start().wallclock() + 1000).into();
+        (valid, tx)
     };
-    println!("Using query timestamp t1={} (just after first version)", t1);
+    println!(
+        "Using query timestamp t1_valid={}, t1_tx={} (just after first version)",
+        t1_valid, t1_tx
+    );
 
     // Update the node
     thread::sleep(Duration::from_millis(100));
@@ -90,25 +96,28 @@ fn test_temporal_lookup_directly() {
     {
         let historical = db.__test_historical_storage();
         let hist_guard = historical.read();
-        match hist_guard.find_node_version_at_time(node_id, t1, t1) {
+        match hist_guard.find_node_version_at_time(node_id, t1_valid, t1_tx) {
             Some(version_id) => {
                 let version = hist_guard.get_node_version(version_id).unwrap();
                 println!("find_node_version_at_time returned: {:?}", version_id);
                 println!("Version temporal: {}", version.temporal);
                 println!(
-                    "Version is_visible_at(t1={}, t1={})? {}",
-                    t1,
-                    t1,
-                    version.temporal.is_visible_at(t1, t1)
+                    "Version is_visible_at(valid={}, tx={})? {}",
+                    t1_valid,
+                    t1_tx,
+                    version.temporal.is_visible_at(t1_valid, t1_tx)
                 );
             }
             None => println!("find_node_version_at_time returned None"),
         }
     }
 
-    // Try temporal lookup at t1
-    println!("\n=== Attempting temporal lookup at t1={} ===", t1);
-    let query = db.query().as_of(t1, t1).start(node_id).build();
+    // Try temporal lookup with proper bi-temporal coordinates
+    println!(
+        "\n=== Attempting temporal lookup at valid={}, tx={} ===",
+        t1_valid, t1_tx
+    );
+    let query = db.query().as_of(t1_valid, t1_tx).start(node_id).build();
 
     match db.execute_query(query) {
         Ok(results) => {
