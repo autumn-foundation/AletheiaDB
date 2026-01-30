@@ -8,11 +8,11 @@ mod tests {
         let depth = 10000;
         let mut query = "MATCH (n) WHERE ".to_string();
         for _ in 0..depth {
-            query.push_str("(");
+            query.push('(');
         }
         query.push_str("n.age > 10");
         for _ in 0..depth {
-            query.push_str(")");
+            query.push(')');
         }
         query.push_str(" RETURN n");
 
