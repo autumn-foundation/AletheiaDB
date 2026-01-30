@@ -987,7 +987,15 @@ impl HnswIndex {
         let count = mappings.len() as u64;
 
         // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
-        let total_size = 4 + 1 + 8 + (mappings.len() * 16) + 4;
+        // Use checked arithmetic to prevent overflow
+        let count_size = mappings
+            .len()
+            .checked_mul(16)
+            .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
+        let total_size = count_size
+            .checked_add(4 + 1 + 8 + 4)
+            .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
+
         let mut file_data = Vec::with_capacity(total_size);
 
         // Write header
@@ -1147,8 +1155,18 @@ fn load_mappings_with_integrity(
     // Parse count
     let count = u64::from_le_bytes(file_data[5..13].try_into().unwrap()) as usize;
 
-    // Verify data size
-    let expected_size = 4 + 1 + 8 + (count * 16) + 4;
+    // Verify data size with checked arithmetic
+    let data_size = count.checked_mul(16).ok_or_else(|| {
+        Error::Vector(VectorError::IndexError(
+            "Mapping count too large (overflow)".to_string(),
+        ))
+    })?;
+    let expected_size = data_size.checked_add(4 + 1 + 8 + 4).ok_or_else(|| {
+        Error::Vector(VectorError::IndexError(
+            "Mapping file size too large (overflow)".to_string(),
+        ))
+    })?;
+
     if file_data.len() != expected_size {
         return Err(Error::Vector(VectorError::IndexError(format!(
             "Mapping file size mismatch: expected {} bytes, got {}",

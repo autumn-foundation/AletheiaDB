@@ -43,6 +43,22 @@ Public HTTP and MCP endpoints could be vectors for DoS attacks via large inputs 
   - Vector dimensions validated against index configuration.
   - WAL segment reading limits file size to 1GB to prevent memory map exhaustion.
 
+## 2026-02-05 - DoS & Integer Overflow Lockdown
+
+**Threat:** Stack Overflow (DoS) in Query Parser
+The recursive descent parser in `src/query/parser.rs` lacked recursion depth limits. A malicious query with deeply nested parentheses (e.g., `((((...))))`) could cause a stack overflow, crashing the server.
+
+**Defense:** Recursion Limit
+Enforced `MAX_RECURSION_DEPTH = 100` in `src/query/parser.rs`. Added a `depth` parameter to recursive parsing functions (`parse_predicate` chain) to track and limit nesting level. Verified with `tests/parser_dos.rs`.
+
+**Threat:** Integer Overflow in WAL & Index Loading
+Arithmetic operations on file offsets (`src/storage/wal/segment_reader.rs`) and allocation sizes (`src/index/vector/hnsw.rs`) were unchecked. Maliciously crafted files could cause integer overflows, leading to panics (DoS) or logic errors (loading incorrect data).
+
+**Defense:** Checked Arithmetic
+- Replaced arithmetic operators with `checked_add` and `checked_mul` in `src/index/vector/hnsw.rs` and `src/storage/wal/segment_reader.rs`.
+- Implemented a `macro_rules! add_offset` helper in WAL reader to safely increment offsets and propagate errors on overflow.
+- Added explicit error handling for size calculations to prevent panics.
+
 ## Open Risks
 - `usearch` FFI boundaries rely on the C++ library behaving correctly regarding pointer validity. We added panic guards for null pointers, but full memory safety depends on `usearch` correctness.
 - The `usearch` dependency points to a fork (`madmax983/USearch`). This fork contains Rust-specific fixes (move semantics) not yet in upstream. We have pinned the specific commit to ensure stability, but future upstream security patches will need manual cherry-picking.
