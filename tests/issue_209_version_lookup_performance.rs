@@ -16,7 +16,9 @@ use std::time::Instant;
 /// at various timestamps return the correct version IDs.
 #[test]
 fn test_version_lookup_correctness_many_versions() {
-    use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder, WalConfigBuilder};
+    use gallifreydb::config::{
+        GallifreyDBConfigBuilder, HistoricalConfigBuilder, WalConfigBuilder,
+    };
     use gallifreydb::storage::index_persistence::PersistenceConfig;
 
     // Use a temporary directory for isolation
@@ -79,7 +81,7 @@ fn test_version_lookup_correctness_many_versions() {
         // Capture exact valid time start and transaction time start
         version_info.push((
             version.temporal.valid_time().start(),
-            version.temporal.transaction_time().start()
+            version.temporal.transaction_time().start(),
         ));
     }
 
@@ -147,7 +149,9 @@ fn test_version_lookup_correctness_many_versions() {
 /// implementation should remain fast.
 #[test]
 fn test_version_lookup_performance_scaling() {
-    use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder, WalConfigBuilder};
+    use gallifreydb::config::{
+        GallifreyDBConfigBuilder, HistoricalConfigBuilder, WalConfigBuilder,
+    };
 
     // Use a temporary directory for isolation
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
@@ -200,7 +204,7 @@ fn test_version_lookup_performance_scaling() {
         let version = hist_guard.get_node_version(version_id).unwrap();
         query_times.push((
             version.temporal.valid_time().start(),
-            version.temporal.transaction_time().start()
+            version.temporal.transaction_time().start(),
         ));
     }
 
@@ -322,7 +326,7 @@ fn test_edge_version_lookup_correctness_many_versions() {
         let version = hist_guard.get_edge_version(version_id).unwrap();
         version_info.push((
             version.temporal.valid_time().start(),
-            version.temporal.transaction_time().start()
+            version.temporal.transaction_time().start(),
         ));
     }
 
