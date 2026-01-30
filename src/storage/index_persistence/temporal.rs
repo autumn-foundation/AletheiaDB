@@ -73,6 +73,7 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
                 PersistedVersionType::Delta {
                     // Phase 2: Extract wallclock for persistence format (i64)
                     base_anchor_tx: tx_time.start().wallclock(),
+                    base_anchor_tx_logical: tx_time.start().logical(),
                     removed_keys,
                 },
                 persist_property_map(&props)?,
@@ -87,12 +88,19 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
         node_id: version.node_id.as_u64(),
         label_idx: version.label.as_u32(),
         valid_from: valid_time.start().wallclock(),
+        valid_from_logical: valid_time.start().logical(),
         valid_to: if valid_time.is_current() {
             None
         } else {
             Some(valid_time.end().wallclock())
         },
+        valid_to_logical: if valid_time.is_current() {
+            None
+        } else {
+            Some(valid_time.end().logical())
+        },
         tx_time: tx_time.start().wallclock(),
+        tx_time_logical: tx_time.start().logical(),
         version_type,
         properties,
         vector_snapshot_id,
@@ -150,6 +158,7 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
                 PersistedVersionType::Delta {
                     // Phase 2: Extract wallclock for persistence format (i64)
                     base_anchor_tx: tx_time.start().wallclock(),
+                    base_anchor_tx_logical: tx_time.start().logical(),
                     removed_keys,
                 },
                 persist_property_map(&props)?,
@@ -165,12 +174,19 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
         target_id: version.target.as_u64(),
         label_idx: version.label.as_u32(),
         valid_from: valid_time.start().wallclock(),
+        valid_from_logical: valid_time.start().logical(),
         valid_to: if valid_time.is_current() {
             None
         } else {
             Some(valid_time.end().wallclock())
         },
+        valid_to_logical: if valid_time.is_current() {
+            None
+        } else {
+            Some(valid_time.end().logical())
+        },
         tx_time: tx_time.start().wallclock(),
+        tx_time_logical: tx_time.start().logical(),
         version_type,
         properties,
     })
@@ -194,10 +210,10 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
     // Restore temporal interval
     // Phase 2: Convert i64 from persistence format to HybridTimestamp
     use crate::core::hlc::HybridTimestamp;
-    let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
+    let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, entry.valid_from_logical);
     let valid_end = entry
         .valid_to
-        .map(|t| HybridTimestamp::new_unchecked(t, 0))
+        .map(|t| HybridTimestamp::new_unchecked(t, entry.valid_to_logical.unwrap_or(0)))
         .unwrap_or(TIMESTAMP_MAX);
 
     let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
@@ -207,7 +223,10 @@ pub fn restore_node_version(entry: &NodeVersionEntry) -> Result<NodeVersion> {
         ))
     })?;
 
-    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(entry.tx_time, 0));
+    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(
+        entry.tx_time,
+        entry.tx_time_logical,
+    ));
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
     // Use the preserved version ID from the persisted entry
@@ -292,10 +311,10 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
     // Restore temporal interval
     // Phase 2: Convert i64 from persistence format to HybridTimestamp
     use crate::core::hlc::HybridTimestamp;
-    let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, 0);
+    let valid_start = HybridTimestamp::new_unchecked(entry.valid_from, entry.valid_from_logical);
     let valid_end = entry
         .valid_to
-        .map(|t| HybridTimestamp::new_unchecked(t, 0))
+        .map(|t| HybridTimestamp::new_unchecked(t, entry.valid_to_logical.unwrap_or(0)))
         .unwrap_or(TIMESTAMP_MAX);
 
     let valid_time = TimeRange::new(valid_start, valid_end).map_err(|e| {
@@ -305,7 +324,10 @@ pub fn restore_edge_version(entry: &EdgeVersionEntry) -> Result<EdgeVersion> {
         ))
     })?;
 
-    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(entry.tx_time, 0));
+    let tx_time = TimeRange::from(HybridTimestamp::new_unchecked(
+        entry.tx_time,
+        entry.tx_time_logical,
+    ));
     let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
     // Use the preserved version ID from the persisted entry
@@ -522,8 +544,11 @@ mod tests {
             node_id: 1,
             label_idx: label.as_u32(),
             valid_from: 1000,
+            valid_from_logical: 0,
             valid_to: Some(2000),
+            valid_to_logical: Some(0),
             tx_time: 1000,
+            tx_time_logical: 0,
             version_type: PersistedVersionType::Anchor,
             properties: PersistedPropertyMap { entries: vec![] },
             vector_snapshot_id: Some(42),
@@ -695,8 +720,11 @@ mod tests {
             node_id: 1,
             label_idx: label.as_u32(),
             valid_from: 1000,
+            valid_from_logical: 0,
             valid_to: Some(2000),
+            valid_to_logical: Some(0),
             tx_time: 1000,
+            tx_time_logical: 0,
             version_type: PersistedVersionType::Anchor,
             properties,
             vector_snapshot_id: Some(42),
@@ -744,10 +772,14 @@ mod tests {
             node_id: 1,
             label_idx: label.as_u32(),
             valid_from: 2000,
+            valid_from_logical: 0,
             valid_to: Some(3000),
+            valid_to_logical: Some(0),
             tx_time: 2000,
+            tx_time_logical: 0,
             version_type: PersistedVersionType::Delta {
                 base_anchor_tx: 1000,
+                base_anchor_tx_logical: 0,
                 removed_keys: vec![],
             },
             properties,
@@ -788,8 +820,11 @@ mod tests {
             target_id: 2,
             label_idx: label.as_u32(),
             valid_from: 1000,
+            valid_from_logical: 0,
             valid_to: Some(2000),
+            valid_to_logical: Some(0),
             tx_time: 1000,
+            tx_time_logical: 0,
             version_type: PersistedVersionType::Anchor,
             properties,
         };
@@ -840,8 +875,11 @@ mod tests {
             node_id: 1,
             label_idx: person_label.as_u32(),
             valid_from: 1000,
+            valid_from_logical: 0,
             valid_to: Some(2000),
+            valid_to_logical: Some(0),
             tx_time: 1000,
+            tx_time_logical: 0,
             version_type: PersistedVersionType::Anchor,
             properties,
             vector_snapshot_id: Some(42),
@@ -1082,6 +1120,126 @@ mod tests {
         assert!(
             !entry.properties.entries.is_empty(),
             "Should have materialized vector property"
+        );
+    }
+
+    #[test]
+    fn test_persist_delta_preserves_logical_timestamp() {
+        // Test that Delta version persistence preserves logical timestamps
+        // even though they are currently unused in restoration (for future proofing)
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
+        use crate::storage::version::PropertyDelta;
+        use std::collections::HashMap;
+
+        let wallclock = 2_000_000_000;
+        let logical = 99;
+
+        let start_time = HybridTimestamp::new(wallclock, logical).unwrap();
+        let temporal = BiTemporalInterval::current(start_time);
+
+        let label = GLOBAL_INTERNER.intern("Person").unwrap();
+
+        let mut changed = HashMap::new();
+        changed.insert(
+            GLOBAL_INTERNER.intern("age").unwrap(),
+            crate::core::property::PropertyValue::Int(31),
+        );
+
+        let delta = PropertyDelta {
+            changed,
+            vector_deltas: Default::default(),
+            removed: Default::default(),
+        };
+
+        let version = NodeVersion {
+            id: VersionId::new(2).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            temporal,
+            label,
+            data: VersionData::Delta { delta },
+            next_version: None,
+            prev_version: Some(VersionId::new(1).unwrap()),
+        };
+
+        // Convert to persisted entry
+        let entry = convert_node_version(&version).unwrap();
+
+        // Verify logical timestamp fields in entry
+        assert_eq!(entry.tx_time, wallclock);
+        assert_eq!(entry.tx_time_logical, logical);
+
+        // Verify delta-specific fields
+        if let PersistedVersionType::Delta {
+            base_anchor_tx,
+            base_anchor_tx_logical,
+            ..
+        } = entry.version_type
+        {
+            assert_eq!(base_anchor_tx, wallclock);
+            assert_eq!(base_anchor_tx_logical, logical);
+        } else {
+            panic!("Expected Delta version type");
+        }
+
+        // Restore and verify (logical timestamp should be preserved in temporal)
+        let restored = restore_node_version(&entry).unwrap();
+        assert_eq!(
+            restored.temporal.transaction_time().start().logical(),
+            logical
+        );
+    }
+
+    #[test]
+    fn test_hlc_logical_component_persistence_loss() {
+        // Regression test for HLC logical counter loss during index persistence
+        use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
+
+        let wallclock = 1_000_000_000;
+        let logical: u32 = 42; // Non-zero logical counter
+
+        // Create a HybridTimestamp with non-zero logical counter
+        let ts_start = HybridTimestamp::new(wallclock, logical).unwrap();
+        let ts_end = HybridTimestamp::new(wallclock + 1000, 0).unwrap();
+
+        let time_range = TimeRange::new(ts_start, ts_end).unwrap();
+        let tx_range = TimeRange::new(ts_start, TIMESTAMP_MAX).unwrap();
+        let temporal = BiTemporalInterval::new(time_range, tx_range);
+
+        let props = PropertyMapBuilder::new().build();
+        let label = GLOBAL_INTERNER.intern("Test").unwrap();
+
+        let version = NodeVersion {
+            id: VersionId::new(1).unwrap(),
+            node_id: NodeId::new(1).unwrap(),
+            temporal,
+            label,
+            data: VersionData::Anchor {
+                properties: props,
+                vector_snapshot_id: None,
+            },
+            next_version: None,
+            prev_version: None,
+        };
+
+        // Persist
+        let entry = convert_node_version(&version).unwrap();
+
+        // Restore
+        let restored = restore_node_version(&entry).unwrap();
+
+        // Check if logical counter was preserved
+        let restored_start = restored.temporal.valid_time().start();
+        assert_eq!(
+            restored_start.wallclock(),
+            wallclock,
+            "Wallclock should be preserved"
+        );
+        assert_eq!(
+            restored_start.logical(),
+            logical,
+            "Logical counter should be preserved"
         );
     }
 }
