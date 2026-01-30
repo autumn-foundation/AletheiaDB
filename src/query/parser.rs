@@ -755,19 +755,12 @@ impl Parser {
     fn parse_primary_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
         // Parenthesized predicate
         if self.check(&Token::LeftParen) {
-            self.advance();
-            let pred = self.parse_predicate()?;
-            self.expect(&Token::RightParen)?;
-            return Ok(PredicateExpr::Grouped(Box::new(pred)));
+            return self.parse_grouped_predicate();
         }
 
         // EXISTS(n.prop)
         if self.check(&Token::Exists) {
-            self.advance();
-            self.expect(&Token::LeftParen)?;
-            let prop = self.parse_property_access()?;
-            self.expect(&Token::RightParen)?;
-            return Ok(PredicateExpr::Exists(prop));
+            return self.parse_exists_predicate();
         }
 
         // Property-based predicates
@@ -775,30 +768,63 @@ impl Parser {
 
         // IS [NOT] NULL
         if self.check(&Token::Is) {
-            self.advance();
-            let is_not = if self.check(&Token::Not) {
-                self.advance();
-                true
-            } else {
-                false
-            };
-            self.expect(&Token::Null)?;
-
-            if let Expression::Property(prop) = expr {
-                return Ok(if is_not {
-                    PredicateExpr::IsNotNull(prop)
-                } else {
-                    PredicateExpr::IsNull(prop)
-                });
-            } else {
-                return Err(self.error(
-                    "IS NULL requires property access".to_string(),
-                    Some("property".to_string()),
-                ));
-            }
+            return self.parse_is_null_predicate(expr);
         }
 
         // CONTAINS, STARTS WITH, ENDS WITH
+        if self.check(&Token::Contains) || self.check(&Token::Starts) || self.check(&Token::Ends) {
+            return self.parse_string_predicate(expr);
+        }
+
+        // IN [list]
+        if self.check(&Token::In) {
+            return self.parse_in_predicate(expr);
+        }
+
+        // Comparison operators
+        self.parse_comparison_predicate(expr)
+    }
+
+    fn parse_grouped_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
+        self.advance();
+        let pred = self.parse_predicate()?;
+        self.expect(&Token::RightParen)?;
+        Ok(PredicateExpr::Grouped(Box::new(pred)))
+    }
+
+    fn parse_exists_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
+        self.advance();
+        self.expect(&Token::LeftParen)?;
+        let prop = self.parse_property_access()?;
+        self.expect(&Token::RightParen)?;
+        Ok(PredicateExpr::Exists(prop))
+    }
+
+    fn parse_is_null_predicate(&mut self, expr: Expression) -> Result<PredicateExpr, ParseError> {
+        self.advance();
+        let is_not = if self.check(&Token::Not) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        self.expect(&Token::Null)?;
+
+        if let Expression::Property(prop) = expr {
+            Ok(if is_not {
+                PredicateExpr::IsNotNull(prop)
+            } else {
+                PredicateExpr::IsNull(prop)
+            })
+        } else {
+            Err(self.error(
+                "IS NULL requires property access".to_string(),
+                Some("property".to_string()),
+            ))
+        }
+    }
+
+    fn parse_string_predicate(&mut self, expr: Expression) -> Result<PredicateExpr, ParseError> {
         if self.check(&Token::Contains) {
             self.advance();
             let substring = self.parse_string()?;
@@ -849,35 +875,40 @@ impl Parser {
             }
         }
 
-        // IN [list]
-        if self.check(&Token::In) {
-            self.advance();
-            self.expect(&Token::LeftBracket)?;
-            let mut values = Vec::new();
-            if !self.check(&Token::RightBracket) {
-                loop {
-                    values.push(self.parse_property_value()?);
-                    if !self.check(&Token::Comma) {
-                        break;
-                    }
-                    self.advance();
+        Err(self.error("Expected string predicate".to_string(), None))
+    }
+
+    fn parse_in_predicate(&mut self, expr: Expression) -> Result<PredicateExpr, ParseError> {
+        self.advance();
+        self.expect(&Token::LeftBracket)?;
+        let mut values = Vec::new();
+        if !self.check(&Token::RightBracket) {
+            loop {
+                values.push(self.parse_property_value()?);
+                if !self.check(&Token::Comma) {
+                    break;
                 }
-            }
-            self.expect(&Token::RightBracket)?;
-            if let Expression::Property(prop) = expr {
-                return Ok(PredicateExpr::In {
-                    property: prop,
-                    values,
-                });
-            } else {
-                return Err(self.error(
-                    "IN requires a property expression".to_string(),
-                    Some("property.name IN [...]".to_string()),
-                ));
+                self.advance();
             }
         }
+        self.expect(&Token::RightBracket)?;
+        if let Expression::Property(prop) = expr {
+            Ok(PredicateExpr::In {
+                property: prop,
+                values,
+            })
+        } else {
+            Err(self.error(
+                "IN requires a property expression".to_string(),
+                Some("property.name IN [...]".to_string()),
+            ))
+        }
+    }
 
-        // Comparison operators
+    fn parse_comparison_predicate(
+        &mut self,
+        expr: Expression,
+    ) -> Result<PredicateExpr, ParseError> {
         let op = match self.current() {
             Some(Token::Eq) => ComparisonOp::Eq,
             Some(Token::Ne) => ComparisonOp::Ne,
