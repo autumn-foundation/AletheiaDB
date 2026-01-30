@@ -281,3 +281,134 @@ impl From<i64> for HybridTimestamp {
         HybridTimestamp::new_unchecked(wallclock, 0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_creation() {
+        let valid = HybridTimestamp::new(1000, 0);
+        assert!(valid.is_ok());
+        let ts = valid.unwrap();
+        assert_eq!(ts.wallclock(), 1000);
+        assert_eq!(ts.logical(), 0);
+
+        let invalid = HybridTimestamp::new(MAX_VALID_TIMESTAMP + 1, 0);
+        assert!(invalid.is_err());
+        match invalid {
+            Err(TemporalError::InvalidTimestamp { .. }) => {}
+            _ => panic!("Expected InvalidTimestamp error"),
+        }
+    }
+
+    #[test]
+    fn test_ordering() {
+        let t1 = HybridTimestamp::new(1000, 0).unwrap();
+        let t2 = HybridTimestamp::new(1000, 1).unwrap();
+        let t3 = HybridTimestamp::new(1001, 0).unwrap();
+
+        assert!(t1 < t2);
+        assert!(t2 < t3);
+        assert!(t1 < t3);
+    }
+
+    #[test]
+    fn test_send() {
+        let t = HybridTimestamp::new(1000, 5).unwrap();
+
+        // Case 1: Wallclock advanced
+        let t_next = t.send(1001).unwrap();
+        assert_eq!(t_next.wallclock(), 1001);
+        assert_eq!(t_next.logical(), 0);
+
+        // Case 2: Wallclock same or behind
+        let t_next = t.send(1000).unwrap();
+        assert_eq!(t_next.wallclock(), 1000);
+        assert_eq!(t_next.logical(), 6);
+
+        let t_next = t.send(999).unwrap();
+        assert_eq!(t_next.wallclock(), 1000);
+        assert_eq!(t_next.logical(), 6);
+    }
+
+    #[test]
+    fn test_receive() {
+        let local = HybridTimestamp::new(1000, 5).unwrap();
+
+        // Case 1: Physical clock dominates -> Reset logical
+        let msg = HybridTimestamp::new(900, 0).unwrap();
+        let updated = local.receive(msg, 1100).unwrap();
+        assert_eq!(updated.wallclock(), 1100);
+        assert_eq!(updated.logical(), 0);
+
+        // Case 2: All equal -> Increment max logical
+        let msg = HybridTimestamp::new(1000, 10).unwrap();
+        let updated = local.receive(msg, 1000).unwrap();
+        assert_eq!(updated.wallclock(), 1000);
+        assert_eq!(updated.logical(), 11);
+
+        // Case 3: Local dominates -> Increment local logical
+        let msg = HybridTimestamp::new(900, 0).unwrap();
+        let updated = local.receive(msg, 900).unwrap();
+        assert_eq!(updated.wallclock(), 1000);
+        assert_eq!(updated.logical(), 6);
+
+        // Case 4: Message dominates -> Increment msg logical
+        let msg = HybridTimestamp::new(1100, 5).unwrap();
+        let updated = local.receive(msg, 900).unwrap();
+        assert_eq!(updated.wallclock(), 1100);
+        assert_eq!(updated.logical(), 6);
+    }
+
+    #[test]
+    fn test_logical_overflow() {
+        // We can use new_unchecked to create a timestamp at the limit
+        // new_unchecked is pub(crate), so it is visible to the child test module
+        let t_max = HybridTimestamp::new_unchecked(1000, u32::MAX);
+
+        // Overflow in send
+        let err = t_max.send(1000);
+        assert!(matches!(
+            err,
+            Err(TemporalError::LogicalCounterOverflow { .. })
+        ));
+
+        // Overflow in receive (local dominates)
+        let msg = HybridTimestamp::new(900, 0).unwrap();
+        let err = t_max.receive(msg, 900);
+        assert!(matches!(
+            err,
+            Err(TemporalError::LogicalCounterOverflow { .. })
+        ));
+    }
+
+    #[test]
+    fn test_serialization() {
+        let ts = HybridTimestamp::new(123456789, 42).unwrap();
+        let bytes = ts.serialize();
+        assert_eq!(bytes.len(), 12);
+
+        let (deserialized, size) = HybridTimestamp::deserialize(&bytes).unwrap();
+        assert_eq!(size, 12);
+        assert_eq!(deserialized, ts);
+    }
+
+    #[test]
+    fn test_deserialize_errors() {
+        // Too short
+        let bytes = vec![0u8; 11];
+        assert!(matches!(
+            HybridTimestamp::deserialize(&bytes),
+            Err(StorageError::CorruptedData(_))
+        ));
+
+        // Invalid wallclock
+        let invalid_ts = HybridTimestamp::new_unchecked(MAX_VALID_TIMESTAMP + 1, 0);
+        let bytes = invalid_ts.serialize();
+        assert!(matches!(
+            HybridTimestamp::deserialize(&bytes),
+            Err(StorageError::CorruptedData(_))
+        ));
+    }
+}
