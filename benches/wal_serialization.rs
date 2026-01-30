@@ -11,7 +11,7 @@ use gallifreydb::{
         PropertyMapBuilder,
         id::{EdgeId, NodeId, VersionId},
         interning::GLOBAL_INTERNER,
-        temporal::{BiTemporalInterval, time},
+        temporal::time,
     },
     storage::wal::{
         WalOperation,
@@ -49,7 +49,7 @@ fn bench_serialize_create_node(c: &mut Criterion) {
                     node_id: black_box(NodeId::new(1).unwrap()),
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: props.build(),
-                    temporal: BiTemporalInterval::current(time::now()),
+                    valid_from: time::now(),
                 };
 
                 // This will call serialize_entry internally
@@ -82,7 +82,7 @@ fn bench_serialize_create_edge(c: &mut Criterion) {
                     target: NodeId::new(2).unwrap(),
                     label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
                     properties: props.build(),
-                    temporal: BiTemporalInterval::current(time::now()),
+                    valid_from: time::now(),
                 };
 
                 black_box(wal.append_async(operation).unwrap());
@@ -113,7 +113,7 @@ fn bench_serialize_update_node(c: &mut Criterion) {
                     version_id: VersionId::new(2).unwrap(),
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: props.build(),
-                    temporal: BiTemporalInterval::current(time::now()),
+                    valid_from: time::now(),
                 };
 
                 black_box(wal.append_async(operation).unwrap());
@@ -138,7 +138,7 @@ fn bench_serialize_batch(c: &mut Criterion) {
                     node_id: NodeId::new(i).unwrap(),
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
-                    temporal: BiTemporalInterval::current(time::now()),
+                    valid_from: time::now(),
                 };
                 black_box(wal.append_async(operation).unwrap());
             }
@@ -162,7 +162,7 @@ fn bench_serialize_high_frequency(c: &mut Criterion) {
                     node_id: NodeId::new(i).unwrap(),
                     label: GLOBAL_INTERNER.intern("Test").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
-                    temporal: BiTemporalInterval::current(time::now()),
+                    valid_from: time::now(),
                 };
                 black_box(wal.append_async(operation).unwrap());
             }

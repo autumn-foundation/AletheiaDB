@@ -7,7 +7,7 @@
 use gallifreydb::core::id::NodeId;
 use gallifreydb::core::interning::{GLOBAL_INTERNER, InternedString};
 use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::{BiTemporalInterval, time};
+use gallifreydb::core::temporal::time;
 use gallifreydb::storage::persistence::{CheckpointConfig, PersistenceManager};
 use gallifreydb::storage::wal::WalOperation;
 use gallifreydb::storage::wal::concurrent_system::{
@@ -30,13 +30,12 @@ fn test_wal_replay_rejects_invalid_interned_string() {
     let invalid_label = InternedString::from_raw(999999);
     let node_id = NodeId::new(1).unwrap();
     let properties = PropertyMapBuilder::new().build();
-    let temporal = BiTemporalInterval::current(time::now());
 
     let op = WalOperation::CreateNode {
         node_id,
         label: invalid_label,
         properties,
-        temporal,
+        valid_from: time::now(),
     };
 
     // Write the operation to WAL
@@ -82,13 +81,12 @@ fn test_wal_replay_accepts_valid_interned_string() {
     let valid_label = GLOBAL_INTERNER.intern("TestNode").unwrap();
     let node_id = NodeId::new(1).unwrap();
     let properties = PropertyMapBuilder::new().build();
-    let temporal = BiTemporalInterval::current(time::now());
 
     let op = WalOperation::CreateNode {
         node_id,
         label: valid_label,
         properties,
-        temporal,
+        valid_from: time::now(),
     };
 
     // Write the operation to WAL
@@ -131,13 +129,12 @@ fn test_wal_replay_rejects_corrupted_interned_string() {
         let invalid_label = InternedString::from_raw(1000000 + i);
         let node_id = NodeId::new(i as u64).unwrap();
         let properties = PropertyMapBuilder::new().build();
-        let temporal = BiTemporalInterval::current(time::now());
 
         let op = WalOperation::CreateNode {
             node_id,
             label: invalid_label,
             properties,
-            temporal,
+            valid_from: time::now(),
         };
 
         wal.append(op).unwrap();

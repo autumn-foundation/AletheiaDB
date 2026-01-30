@@ -13,12 +13,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gallifreydb::{
-    core::{
-        PropertyMapBuilder,
-        id::NodeId,
-        interning::GLOBAL_INTERNER,
-        temporal::{BiTemporalInterval, time},
-    },
+    core::{PropertyMapBuilder, id::NodeId, interning::GLOBAL_INTERNER, temporal::time},
     storage::wal::{
         WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -50,7 +45,7 @@ fn create_test_operations(count: usize) -> Vec<WalOperation> {
                 .insert("id", i as i64)
                 .insert("name", format!("Node {}", i))
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })
         .collect()
 }
@@ -62,7 +57,7 @@ fn create_minimal_operations(count: usize) -> Vec<WalOperation> {
             node_id: NodeId::new(i as u64 + 1).unwrap(),
             label: GLOBAL_INTERNER.intern("N").unwrap(),
             properties: PropertyMapBuilder::new().build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })
         .collect()
 }

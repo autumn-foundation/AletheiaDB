@@ -6,12 +6,12 @@
 use gallifreydb::core::id::{EdgeId, NodeId, VersionId};
 use gallifreydb::core::interning::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::{BiTemporalInterval, time};
+use gallifreydb::core::temporal::{Timestamp, time};
 use gallifreydb::storage::wal::{LSN, WalEntry, WalOperation};
 
-/// Helper to create a test temporal interval
-fn test_temporal() -> BiTemporalInterval {
-    BiTemporalInterval::current(time::now())
+/// Helper to create a test temporal value
+fn test_temporal() -> Timestamp {
+    time::now()
 }
 
 /// Test that WalOperation::CreateNode uses InternedString for label
@@ -27,7 +27,7 @@ fn test_wal_create_node_uses_interned_string() {
         node_id,
         label, // Should accept InternedString directly
         properties,
-        temporal,
+        valid_from: temporal,
     };
 
     // Verify the operation was created successfully
@@ -56,7 +56,7 @@ fn test_wal_create_edge_uses_interned_string() {
         target,
         label, // Should accept InternedString directly
         properties,
-        temporal,
+        valid_from: temporal,
     };
 
     match op {
@@ -81,7 +81,7 @@ fn test_wal_update_node_uses_interned_string() {
         version_id,
         label, // Should accept InternedString directly
         properties,
-        temporal,
+        valid_from: temporal,
     };
 
     match op {
@@ -106,7 +106,7 @@ fn test_wal_update_edge_uses_interned_string() {
         version_id,
         label, // Should accept InternedString directly
         properties,
-        temporal,
+        valid_from: temporal,
     };
 
     match op {
@@ -129,7 +129,7 @@ fn test_wal_entry_creation_with_interned_string() {
         node_id,
         label,
         properties,
-        temporal,
+        valid_from: temporal,
     };
 
     // Creating a WAL entry should work without any allocations
@@ -160,7 +160,7 @@ fn test_no_allocations_in_buffered_write_to_wal_operation() {
         version_id,
         label,
         properties: properties.clone(),
-        temporal,
+        valid_from: temporal,
     };
 
     // When converting to WalOperation, the label should be copied directly
@@ -170,14 +170,14 @@ fn test_no_allocations_in_buffered_write_to_wal_operation() {
             node_id,
             label,
             properties,
-            temporal,
+            valid_from: temporal,
             ..
         } => {
             WalOperation::CreateNode {
                 node_id,
                 label, // Should copy InternedString directly (just a u32)
                 properties,
-                temporal,
+                valid_from: temporal,
             }
         }
         _ => panic!("Expected CreateNode"),
@@ -214,14 +214,14 @@ fn test_interned_string_size_independence() {
         node_id,
         label: short_label,
         properties: properties.clone(),
-        temporal,
+        valid_from: temporal,
     };
 
     let op2 = WalOperation::CreateNode {
         node_id,
         label: long_label,
         properties,
-        temporal,
+        valid_from: temporal,
     };
 
     // Both operations should use the same amount of memory for the label field

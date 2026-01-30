@@ -975,8 +975,8 @@ impl CheckpointManager {
                 let version = crate::storage::version::NodeVersion {
                     id: version_id,
                     node_id,
-                    label,
                     temporal,
+                    label,
                     data,
                     next_version: None,
                     prev_version: None,
@@ -1045,8 +1045,8 @@ impl CheckpointManager {
                     edge_id,
                     source,
                     target,
-                    label,
                     temporal,
+                    label,
                     data,
                     next_version: None,
                     prev_version: None,
@@ -1099,14 +1099,15 @@ impl CheckpointManager {
                     node_id,
                     label,
                     properties,
-                    temporal,
+                    valid_from,
                 } => {
                     max_node_id = max_node_id.max(node_id.as_u64());
 
                     // Label is already an InternedString (no allocation needed!)
                     let interned_label = label;
 
-                    let commit_timestamp = temporal.transaction_time().start();
+                    // Transaction time comes from when the WAL entry was logged
+                    let commit_timestamp = entry.timestamp;
                     let metadata =
                         VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
                     let version_id = VersionId::new(next_version_id)?;
@@ -1124,9 +1125,11 @@ impl CheckpointManager {
                     historical.add_node_version(
                         node_id,
                         version_id,
-                        temporal,
+                        valid_from,
+                        commit_timestamp,
                         interned_label,
                         properties,
+                        false, // not a tombstone
                     )?;
 
                     max_version_id = max_version_id.max(next_version_id - 1);
@@ -1137,14 +1140,14 @@ impl CheckpointManager {
                     target,
                     label,
                     properties,
-                    temporal,
+                    valid_from,
                 } => {
                     max_edge_id = max_edge_id.max(edge_id.as_u64());
 
                     // Label is already an InternedString (no allocation needed!)
                     let interned_label = label;
 
-                    let commit_timestamp = temporal.transaction_time().start();
+                    let commit_timestamp = entry.timestamp;
                     let metadata =
                         VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
                     let version_id = VersionId::new(next_version_id)?;
@@ -1164,11 +1167,13 @@ impl CheckpointManager {
                     historical.add_edge_version(
                         edge_id,
                         version_id,
-                        temporal,
+                        valid_from,
+                        commit_timestamp,
                         interned_label,
                         source,
                         target,
                         properties,
+                        false, // not a tombstone
                     )?;
 
                     max_version_id = max_version_id.max(next_version_id - 1);
@@ -1178,7 +1183,7 @@ impl CheckpointManager {
                     version_id,
                     label,
                     properties,
-                    temporal,
+                    valid_from,
                 } => {
                     max_version_id = max_version_id.max(version_id.as_u64());
                     next_version_id = next_version_id.max(version_id.as_u64() + 1);
@@ -1186,7 +1191,7 @@ impl CheckpointManager {
                     // Label is already an InternedString (no allocation needed!)
                     let interned_label = label;
 
-                    let commit_timestamp = temporal.transaction_time().start();
+                    let commit_timestamp = entry.timestamp;
                     let metadata =
                         VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
@@ -1210,9 +1215,11 @@ impl CheckpointManager {
                     historical.add_node_version(
                         node_id,
                         version_id,
-                        temporal,
+                        valid_from,
+                        commit_timestamp,
                         interned_label,
                         properties,
+                        false, // not a tombstone
                     )?;
                 }
                 WalOperation::UpdateEdge {
@@ -1220,7 +1227,7 @@ impl CheckpointManager {
                     version_id,
                     label,
                     properties,
-                    temporal,
+                    valid_from,
                 } => {
                     max_version_id = max_version_id.max(version_id.as_u64());
                     next_version_id = next_version_id.max(version_id.as_u64() + 1);
@@ -1230,7 +1237,7 @@ impl CheckpointManager {
                     // Label is already an InternedString (no allocation needed!)
                     let interned_label = label;
 
-                    let commit_timestamp = temporal.transaction_time().start();
+                    let commit_timestamp = entry.timestamp;
                     let metadata =
                         VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
 
@@ -1256,16 +1263,21 @@ impl CheckpointManager {
                     historical.add_edge_version(
                         edge_id,
                         version_id,
-                        temporal,
+                        valid_from,
+                        commit_timestamp,
                         interned_label,
                         current_edge.source,
                         current_edge.target,
                         properties,
+                        false, // not a tombstone
                     )?;
                 }
-                WalOperation::DeleteNode { node_id, temporal } => {
+                WalOperation::DeleteNode {
+                    node_id,
+                    valid_from: _,
+                } => {
                     let node = current.get_node(node_id)?;
-                    let commit_timestamp = temporal.transaction_time().start();
+                    let commit_timestamp = entry.timestamp;
 
                     if let Some(current_version_id) = historical.get_current_node_version(node_id) {
                         historical.close_node_version_transaction_time(
@@ -1277,22 +1289,27 @@ impl CheckpointManager {
                     let tombstone_version_id = VersionId::new(next_version_id)?;
                     next_version_id += 1;
 
-                    let tombstone_temporal = temporal.close_valid_time(commit_timestamp);
-
+                    // Tombstones use commit_timestamp for both valid_from and tx_time
+                    // The is_tombstone=true flag closes the valid_time immediately
                     historical.add_node_version(
                         node_id,
                         tombstone_version_id,
-                        tombstone_temporal,
+                        commit_timestamp,
+                        commit_timestamp,
                         node.label,
                         node.properties.clone(),
+                        true, // is_tombstone
                     )?;
 
                     current.delete_node_direct(node_id, commit_timestamp)?;
                     max_version_id = max_version_id.max(next_version_id - 1);
                 }
-                WalOperation::DeleteEdge { edge_id, temporal } => {
+                WalOperation::DeleteEdge {
+                    edge_id,
+                    valid_from: _,
+                } => {
                     let edge = current.get_edge(edge_id)?;
-                    let commit_timestamp = temporal.transaction_time().start();
+                    let commit_timestamp = entry.timestamp;
 
                     if let Some(current_version_id) = historical.get_current_edge_version(edge_id) {
                         historical.close_edge_version_transaction_time(
@@ -1304,16 +1321,18 @@ impl CheckpointManager {
                     let tombstone_version_id = VersionId::new(next_version_id)?;
                     next_version_id += 1;
 
-                    let tombstone_temporal = temporal.close_valid_time(commit_timestamp);
-
+                    // Tombstones use commit_timestamp for both valid_from and tx_time
+                    // The is_tombstone=true flag closes the valid_time immediately
                     historical.add_edge_version(
                         edge_id,
                         tombstone_version_id,
-                        tombstone_temporal,
+                        commit_timestamp,
+                        commit_timestamp,
                         edge.label,
                         edge.source,
                         edge.target,
                         edge.properties.clone(),
+                        true, // is_tombstone
                     )?;
 
                     current.delete_edge_direct(edge_id)?;
@@ -1525,7 +1544,7 @@ mod tests {
                 node_id: NodeId::new(i)?,
                 label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: props,
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             })?;
         }
         wal.flush()?;
@@ -1569,7 +1588,7 @@ mod tests {
                 node_id: NodeId::new(i)?,
                 label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: props,
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             })?;
         }
         wal.flush()?;
@@ -1668,7 +1687,7 @@ mod tests {
                 node_id: NodeId::new(i)?,
                 label: GLOBAL_INTERNER.intern("Test").unwrap(),
                 properties: props,
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             })?;
         }
         wal.flush()?;
@@ -2064,7 +2083,7 @@ mod tests {
                 properties: PropertyMapBuilder::new()
                     .insert("name", format!("Person{}", i))
                     .build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             })?;
         }
 
@@ -2075,7 +2094,7 @@ mod tests {
             target: NodeId::new(2)?,
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("since", 2023i64).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
         wal.flush()?;
 
@@ -2118,7 +2137,7 @@ mod tests {
                 .insert("name", "Alice")
                 .insert("age", 30i64)
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         // Update node
@@ -2130,7 +2149,7 @@ mod tests {
                 .insert("name", "Alice")
                 .insert("age", 31i64)
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
         wal.flush()?;
 
@@ -2169,7 +2188,7 @@ mod tests {
                 node_id: NodeId::new(i)?,
                 label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: PropertyMapBuilder::new().build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             })?;
         }
 
@@ -2182,7 +2201,7 @@ mod tests {
             target: NodeId::new(2)?,
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("strength", 5i64).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         // Update edge
@@ -2191,7 +2210,7 @@ mod tests {
             version_id: VersionId::new(4)?,
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties: PropertyMapBuilder::new().insert("strength", 10i64).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
         wal.flush()?;
 
@@ -2229,13 +2248,13 @@ mod tests {
             node_id,
             label: GLOBAL_INTERNER.intern("ToDelete").unwrap(),
             properties: PropertyMapBuilder::new().insert("temp", true).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         // Delete node
         wal.append(WalOperation::DeleteNode {
             node_id,
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
         wal.flush()?;
 
@@ -2272,7 +2291,7 @@ mod tests {
                 node_id: NodeId::new(i)?,
                 label: GLOBAL_INTERNER.intern("Person").unwrap(),
                 properties: PropertyMapBuilder::new().build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             })?;
         }
 
@@ -2285,13 +2304,13 @@ mod tests {
             target: NodeId::new(2)?,
             label: GLOBAL_INTERNER.intern("TEMP_EDGE").unwrap(),
             properties: PropertyMapBuilder::new().build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         // Delete edge
         wal.append(WalOperation::DeleteEdge {
             edge_id,
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
         wal.flush()?;
 
@@ -2327,7 +2346,7 @@ mod tests {
             node_id: NodeId::new(1)?,
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         // Add checkpoint marker
@@ -2341,7 +2360,7 @@ mod tests {
             node_id: NodeId::new(2)?,
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
         wal.flush()?;
 
@@ -2388,12 +2407,15 @@ mod tests {
             let anchor_props = PropertyMapBuilder::new()
                 .insert("title", "Version 1")
                 .build();
+            let now = time::now();
             historical.add_node_version(
                 node_id,
                 VersionId::new(1)?,
-                BiTemporalInterval::current(time::now()),
+                now,
+                now,
                 label,
                 anchor_props,
+                false, // not a tombstone
             )?;
 
             let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
@@ -2471,14 +2493,17 @@ mod tests {
             current.insert_edge_direct(edge)?;
 
             // Add historical edge version (anchor)
+            let now = time::now();
             historical.add_edge_version(
                 EdgeId::new(1)?,
                 VersionId::new(3)?,
-                BiTemporalInterval::current(time::now()),
+                now,
+                now,
                 edge_label,
                 NodeId::new(1)?,
                 NodeId::new(2)?,
                 PropertyMapBuilder::new().insert("strength", 5i64).build(),
+                false, // not a tombstone
             )?;
 
             let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
@@ -2576,9 +2601,6 @@ mod tests {
     /// Test temporal data with closed valid time (valid_to is set).
     #[test]
     fn test_checkpoint_with_closed_valid_time() -> Result<()> {
-        use crate::core::hlc::HybridTimestamp;
-        use crate::core::temporal::TimeRange;
-
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         let data_dir = temp_dir.path().join("data");
@@ -2599,19 +2621,17 @@ mod tests {
                     })?;
 
             // Current state (node is deleted, so not in current)
-            // Add historical version with closed valid time
+            // Add historical version with bi-temporal timestamps
             let now = time::now();
-            let later = HybridTimestamp::new_unchecked(now.wallclock() + 1000, 0);
-            let valid_time = TimeRange::new(now, later)?;
-            let tx_time = TimeRange::from(now);
-            let temporal = BiTemporalInterval::new(valid_time, tx_time);
 
             historical.add_node_version(
                 node_id,
                 VersionId::new(1)?,
-                temporal,
+                now, // valid_from
+                now, // tx_time
                 label,
                 PropertyMapBuilder::new().insert("deleted", true).build(),
+                false, // not a tombstone
             )?;
 
             let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
@@ -2752,7 +2772,7 @@ mod tests {
             node_id: NodeId::new(500)?,
             label: GLOBAL_INTERNER.intern("HighId").unwrap(),
             properties: PropertyMapBuilder::new().build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
 
         // Add entry with high edge ID
@@ -2762,7 +2782,7 @@ mod tests {
             target: NodeId::new(500)?,
             label: GLOBAL_INTERNER.intern("HighEdge").unwrap(),
             properties: PropertyMapBuilder::new().build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
         wal.flush()?;
 
@@ -2847,12 +2867,15 @@ mod tests {
             current.insert_node_direct(node, time::now())?;
 
             // Historical has version 100 (higher than current)
+            let now = time::now();
             historical.add_node_version(
                 node_id,
                 VersionId::new(100)?,
-                BiTemporalInterval::current(time::now()),
+                now,
+                now,
                 label,
                 PropertyMapBuilder::new().insert("v", 100i64).build(),
+                false, // not a tombstone
             )?;
 
             manager.create_checkpoint(LSN(0), &current, &historical)?;
@@ -2944,7 +2967,7 @@ mod tests {
                 node_id: NodeId::new(i)?,
                 label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             };
             wal.append_async(op)?;
         }
@@ -3054,7 +3077,7 @@ mod tests {
                 node_id: NodeId::new(i)?,
                 label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             };
             wal.append_async(op)?;
         }
@@ -3166,7 +3189,7 @@ mod tests {
                 node_id: NodeId::new(i)?,
                 label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
                 properties: PropertyMapBuilder::new().build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             };
             wal.append_async(op)?;
         }

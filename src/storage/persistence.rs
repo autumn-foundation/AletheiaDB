@@ -19,7 +19,7 @@ use crate::core::{
     id::{EdgeId, NodeId, VersionId},
     interning::InternedString,
     property::PropertyMap,
-    temporal::{BiTemporalInterval, Timestamp, time},
+    temporal::{Timestamp, time},
     version::VersionMetadata,
 };
 use crate::index::vector::HnswConfig;
@@ -547,7 +547,7 @@ impl PersistenceManager {
                     node_id,
                     label,
                     properties,
-                    temporal,
+                    valid_from,
                 } => {
                     // Track max node ID for ID generator initialization (Issue #291)
                     max_node_id = max_node_id.max(node_id.as_u64());
@@ -559,7 +559,8 @@ impl PersistenceManager {
                         node_id,
                         label,
                         properties,
-                        temporal,
+                        valid_from,
+                        entry.timestamp,
                         &mut next_version_id,
                     )?;
 
@@ -572,7 +573,7 @@ impl PersistenceManager {
                     target,
                     label,
                     properties,
-                    temporal,
+                    valid_from,
                 } => {
                     // Track max edge ID for ID generator initialization (Issue #291)
                     max_edge_id = max_edge_id.max(edge_id.as_u64());
@@ -586,7 +587,8 @@ impl PersistenceManager {
                         target,
                         label,
                         properties,
-                        temporal,
+                        valid_from,
+                        entry.timestamp,
                         &mut next_version_id,
                     )?;
 
@@ -598,7 +600,7 @@ impl PersistenceManager {
                     version_id,
                     label,
                     properties,
-                    temporal,
+                    valid_from,
                 } => {
                     // Track max version ID
                     max_version_id = max_version_id.max(version_id.as_u64());
@@ -616,7 +618,8 @@ impl PersistenceManager {
                         version_id,
                         label,
                         properties,
-                        temporal,
+                        valid_from,
+                        entry.timestamp,
                     )?;
                 }
                 WalOperation::UpdateEdge {
@@ -624,7 +627,7 @@ impl PersistenceManager {
                     version_id,
                     label,
                     properties,
-                    temporal,
+                    valid_from,
                 } => {
                     // Track max version ID
                     max_version_id = max_version_id.max(version_id.as_u64());
@@ -647,10 +650,14 @@ impl PersistenceManager {
                         current_edge.target,
                         label,
                         properties,
-                        temporal,
+                        valid_from,
+                        entry.timestamp,
                     )?;
                 }
-                WalOperation::DeleteNode { node_id, temporal } => {
+                WalOperation::DeleteNode {
+                    node_id,
+                    valid_from,
+                } => {
                     // Replay the DeleteNode operation
                     // CRITICAL: This closes the previous version's transaction_time
                     // BEFORE creating the tombstone for correct bi-temporal semantics
@@ -658,14 +665,18 @@ impl PersistenceManager {
                         &current,
                         &mut historical,
                         node_id,
-                        temporal,
+                        valid_from,
+                        entry.timestamp,
                         &mut next_version_id,
                     )?;
 
                     // Track max version ID
                     max_version_id = max_version_id.max(next_version_id - 1);
                 }
-                WalOperation::DeleteEdge { edge_id, temporal } => {
+                WalOperation::DeleteEdge {
+                    edge_id,
+                    valid_from,
+                } => {
                     // Replay the DeleteEdge operation
                     // CRITICAL: This closes the previous version's transaction_time
                     // BEFORE creating the tombstone for correct bi-temporal semantics
@@ -673,7 +684,8 @@ impl PersistenceManager {
                         &current,
                         &mut historical,
                         edge_id,
-                        temporal,
+                        valid_from,
+                        entry.timestamp,
                         &mut next_version_id,
                     )?;
 
@@ -708,7 +720,8 @@ impl PersistenceManager {
         node_id: NodeId,
         label: InternedString,
         properties: PropertyMap,
-        temporal: BiTemporalInterval,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
         next_version_id: &mut u64,
     ) -> Result<()> {
         // Validate that the InternedString ID exists in the interner
@@ -725,8 +738,8 @@ impl PersistenceManager {
         // ID is valid, use it directly (no allocation!)
         let interned_label = label;
 
-        // Extract commit timestamp from temporal interval
-        let commit_timestamp = temporal.transaction_time().start();
+        // Use tx_time as commit timestamp
+        let commit_timestamp = tx_time;
 
         // Create version metadata with recovery transaction ID (0)
         let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
@@ -748,7 +761,15 @@ impl PersistenceManager {
         current.insert_node_direct(node, commit_timestamp)?;
 
         // Add to historical storage for temporal queries
-        historical.add_node_version(node_id, version_id, temporal, interned_label, properties)?;
+        historical.add_node_version(
+            node_id,
+            version_id,
+            valid_from,
+            tx_time,
+            interned_label,
+            properties,
+            false, // not a tombstone
+        )?;
 
         Ok(())
     }
@@ -764,7 +785,8 @@ impl PersistenceManager {
         target: NodeId,
         label: InternedString,
         properties: PropertyMap,
-        temporal: BiTemporalInterval,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
         next_version_id: &mut u64,
     ) -> Result<()> {
         // Validate that the InternedString ID exists in the interner
@@ -780,8 +802,8 @@ impl PersistenceManager {
         // ID is valid, use it directly (no allocation!)
         let interned_label = label;
 
-        // Extract commit timestamp from temporal interval
-        let commit_timestamp = temporal.transaction_time().start();
+        // Use tx_time as commit timestamp
+        let commit_timestamp = tx_time;
 
         // Create version metadata with recovery transaction ID (0)
         let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
@@ -808,11 +830,13 @@ impl PersistenceManager {
         historical.add_edge_version(
             edge_id,
             version_id,
-            temporal,
+            valid_from,
+            tx_time,
             interned_label,
             source,
             target,
             properties,
+            false, // not a tombstone
         )?;
 
         Ok(())
@@ -828,7 +852,8 @@ impl PersistenceManager {
         version_id: VersionId,
         label: InternedString,
         properties: PropertyMap,
-        temporal: BiTemporalInterval,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
     ) -> Result<()> {
         // Validate that the InternedString ID exists in the interner
         GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
@@ -844,8 +869,8 @@ impl PersistenceManager {
         // ID is valid, use it directly (no allocation!)
         let interned_label = label;
 
-        // Extract commit timestamp from temporal interval
-        let commit_timestamp = temporal.transaction_time().start();
+        // Use tx_time as commit timestamp
+        let commit_timestamp = tx_time;
 
         // Create version metadata with recovery transaction ID (0)
         let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
@@ -869,7 +894,15 @@ impl PersistenceManager {
         }
 
         // Add new version to historical storage for temporal queries
-        historical.add_node_version(node_id, version_id, temporal, interned_label, properties)?;
+        historical.add_node_version(
+            node_id,
+            version_id,
+            valid_from,
+            tx_time,
+            interned_label,
+            properties,
+            false, // not a tombstone
+        )?;
 
         Ok(())
     }
@@ -886,7 +919,8 @@ impl PersistenceManager {
         target: NodeId,
         label: InternedString,
         properties: PropertyMap,
-        temporal: BiTemporalInterval,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
     ) -> Result<()> {
         // Validate that the InternedString ID exists in the interner
         GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
@@ -902,8 +936,8 @@ impl PersistenceManager {
         // ID is valid, use it directly (no allocation!)
         let interned_label = label;
 
-        // Extract commit timestamp from temporal interval
-        let commit_timestamp = temporal.transaction_time().start();
+        // Use tx_time as commit timestamp
+        let commit_timestamp = tx_time;
 
         // Create version metadata with recovery transaction ID (0)
         let metadata = VersionMetadata::new(TxId::new(RECOVERY_TX_ID), commit_timestamp);
@@ -932,11 +966,13 @@ impl PersistenceManager {
         historical.add_edge_version(
             edge_id,
             version_id,
-            temporal,
+            valid_from,
+            tx_time,
             interned_label,
             source,
             target,
             properties,
+            false, // not a tombstone
         )?;
 
         Ok(())
@@ -948,14 +984,15 @@ impl PersistenceManager {
         current: &CurrentStorage,
         historical: &mut HistoricalStorage,
         node_id: NodeId,
-        temporal: BiTemporalInterval,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
         next_version_id: &mut u64,
     ) -> Result<()> {
         // Get the node before deleting (to capture label and properties for tombstone)
         let node = current.get_node(node_id)?;
 
-        // Extract commit timestamp from temporal interval
-        let commit_timestamp = temporal.transaction_time().start();
+        // Use tx_time as commit timestamp
+        let commit_timestamp = tx_time;
 
         // Close the current version's transaction_time in historical storage
         // This is CRITICAL for correct bi-temporal semantics
@@ -967,19 +1004,19 @@ impl PersistenceManager {
         let tombstone_version_id = VersionId::new(*next_version_id)?;
         *next_version_id += 1;
 
-        // Create tombstone temporal interval
-        // The tombstone marks when the deletion occurred. Its transaction_time
-        // starts at commit_timestamp and remains open. Its valid_time is closed
-        // immediately since the entity no longer exists.
-        let tombstone_temporal = temporal.close_valid_time(commit_timestamp);
-
         // Add tombstone version to historical storage with the node's label and properties
+        // CRITICAL: Tombstone uses valid_from (when deletion became valid in reality)
+        // and commit_timestamp (when deletion was recorded in database)
+        // This preserves true bi-temporal semantics for deletions
+        // The is_tombstone=true flag closes the valid_time immediately
         historical.add_node_version(
             node_id,
             tombstone_version_id,
-            tombstone_temporal,
+            valid_from,
+            commit_timestamp,
             node.label,
             node.properties.clone(),
+            true, // is_tombstone
         )?;
 
         // Delete from current storage
@@ -994,14 +1031,15 @@ impl PersistenceManager {
         current: &CurrentStorage,
         historical: &mut HistoricalStorage,
         edge_id: EdgeId,
-        temporal: BiTemporalInterval,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
         next_version_id: &mut u64,
     ) -> Result<()> {
         // Get the edge before deleting (to capture label, source, target, properties for tombstone)
         let edge = current.get_edge(edge_id)?;
 
-        // Extract commit timestamp from temporal interval
-        let commit_timestamp = temporal.transaction_time().start();
+        // Use tx_time as commit timestamp
+        let commit_timestamp = tx_time;
 
         // Close the current version's transaction_time in historical storage
         // This is CRITICAL for correct bi-temporal semantics
@@ -1013,21 +1051,21 @@ impl PersistenceManager {
         let tombstone_version_id = VersionId::new(*next_version_id)?;
         *next_version_id += 1;
 
-        // Create tombstone temporal interval
-        // The tombstone marks when the deletion occurred. Its transaction_time
-        // starts at commit_timestamp and remains open. Its valid_time is closed
-        // immediately since the entity no longer exists.
-        let tombstone_temporal = temporal.close_valid_time(commit_timestamp);
-
         // Add tombstone version to historical storage with the edge's data
+        // CRITICAL: Tombstone uses valid_from (when deletion became valid in reality)
+        // and commit_timestamp (when deletion was recorded in database)
+        // This preserves true bi-temporal semantics for deletions
+        // The is_tombstone=true flag closes the valid_time immediately
         historical.add_edge_version(
             edge_id,
             tombstone_version_id,
-            tombstone_temporal,
+            valid_from,
+            commit_timestamp,
             edge.label,
             edge.source,
             edge.target,
             edge.properties.clone(),
+            true, // is_tombstone
         )?;
 
         // Delete from current storage
@@ -1494,7 +1532,6 @@ mod tests {
     fn test_recovery_replay_wal_from_checkpoint_lsn() -> Result<()> {
         use crate::core::id::NodeId;
         use crate::core::property::PropertyMap;
-        use crate::core::temporal::BiTemporalInterval;
         use crate::storage::wal::concurrent_system::ConcurrentWalSystemConfig;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1510,7 +1547,7 @@ mod tests {
                 node_id: NodeId::new(i).unwrap(),
                 label: GLOBAL_INTERNER.intern("Test").unwrap(),
                 properties: PropertyMap::new(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             })?;
         }
         wal.flush()?;
@@ -1664,20 +1701,20 @@ mod tests {
                 .build();
 
             let node_id = NodeId::new(i as u64 + 1)?;
-            let temporal = BiTemporalInterval::current(time::now());
+            let now = time::now();
 
             // Write to WAL
             wal.append(WalOperation::CreateNode {
                 node_id,
                 label: GLOBAL_INTERNER.intern("Document").unwrap(),
                 properties: props.clone(),
-                temporal,
+                valid_from: now,
             })?;
 
             // Create in storage for checkpoint
             let interned_label = GLOBAL_INTERNER.intern("Document")?;
             let version_id = VersionId::new(i as u64 + 1)?;
-            let commit_timestamp = temporal.transaction_time().start();
+            let commit_timestamp = now;
             let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
             let node =
                 Node::with_metadata(node_id, interned_label, props.clone(), version_id, metadata);
@@ -1787,18 +1824,18 @@ mod tests {
                 .build();
 
             let node_id = NodeId::new(i + 1)?;
-            let temporal = BiTemporalInterval::current(time::now());
+            let now = time::now();
 
             wal.append(WalOperation::CreateNode {
                 node_id,
                 label: GLOBAL_INTERNER.intern("Document").unwrap(),
                 properties: props.clone(),
-                temporal,
+                valid_from: now,
             })?;
 
             let interned_label = GLOBAL_INTERNER.intern("Document")?;
             let version_id = VersionId::new(i + 1)?;
-            let commit_timestamp = temporal.transaction_time().start();
+            let commit_timestamp = now;
             let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
             let node = Node::with_metadata(node_id, interned_label, props, version_id, metadata);
             current.insert_node_direct(node, commit_timestamp)?;
@@ -1871,18 +1908,18 @@ mod tests {
                 .build();
 
             let node_id = NodeId::new(i as u64 + 1)?;
-            let temporal = BiTemporalInterval::current(time::now());
+            let now = time::now();
 
             wal.append(WalOperation::CreateNode {
                 node_id,
                 label: GLOBAL_INTERNER.intern("Doc").unwrap(),
                 properties: props.clone(),
-                temporal,
+                valid_from: now,
             })?;
 
             let interned_label = GLOBAL_INTERNER.intern("Doc")?;
             let version_id = VersionId::new(i as u64 + 1)?;
-            let commit_timestamp = temporal.transaction_time().start();
+            let commit_timestamp = now;
             let metadata = VersionMetadata::new(TxId::new(0), commit_timestamp);
             let node = Node::with_metadata(node_id, interned_label, props, version_id, metadata);
             current.insert_node_direct(node, commit_timestamp)?;

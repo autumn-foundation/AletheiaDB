@@ -24,7 +24,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use gallifreydb::core::id::NodeId;
 use gallifreydb::core::interning::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::{BiTemporalInterval, time};
+use gallifreydb::core::temporal::time;
 use gallifreydb::index::vector::DistanceMetric;
 use gallifreydb::index::vector::hnsw::HnswConfig;
 use gallifreydb::storage::current::CurrentStorage;
@@ -184,7 +184,7 @@ fn create_wal_only_database(operation_count: usize) -> (TempDir, ConcurrentWalSy
                 node_id: NodeId::new(i as u64).unwrap(),
                 label: GLOBAL_INTERNER.intern("WalNode").unwrap(),
                 properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             }
         } else {
             // Update node operation (update the previous node)
@@ -200,7 +200,7 @@ fn create_wal_only_database(operation_count: usize) -> (TempDir, ConcurrentWalSy
                     .insert("id", node_id as i64)
                     .insert("updated", true)
                     .build(),
-                temporal: BiTemporalInterval::current(time::now()),
+                valid_from: time::now(),
             }
         };
 

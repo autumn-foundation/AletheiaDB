@@ -305,6 +305,110 @@ pub struct GetEdgeAtTimeRequest {
     pub transaction_time: Option<String>,
 }
 
+/// Request to get a node at a specific valid time (independent dimension query).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GetNodeAtValidTimeRequest {
+    /// The unique identifier of the node.
+    #[schemars(description = "The unique identifier of the node")]
+    pub node_id: u64,
+
+    /// Valid time as ISO 8601 timestamp (when the fact was true in reality).
+    #[schemars(
+        description = "Valid time as ISO 8601 timestamp (when the fact was true in reality)"
+    )]
+    pub valid_time: String,
+}
+
+/// Request to get a node at a specific transaction time (independent dimension query).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GetNodeAtTransactionTimeRequest {
+    /// The unique identifier of the node.
+    #[schemars(description = "The unique identifier of the node")]
+    pub node_id: u64,
+
+    /// Transaction time as ISO 8601 timestamp (when the fact was recorded).
+    #[schemars(
+        description = "Transaction time as ISO 8601 timestamp (when the fact was recorded)"
+    )]
+    pub transaction_time: String,
+}
+
+/// Request to get the complete version history of a node.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GetNodeHistoryRequest {
+    /// The unique identifier of the node.
+    #[schemars(description = "The unique identifier of the node")]
+    pub node_id: u64,
+}
+
+/// Request to compute the difference between two versions of a node.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DiffNodeVersionsRequest {
+    /// The unique identifier of the node.
+    #[schemars(description = "The unique identifier of the node")]
+    pub node_id: u64,
+
+    /// The ID of the older version (from).
+    #[schemars(description = "The ID of the older version (from)")]
+    pub from_version: u64,
+
+    /// The ID of the newer version (to).
+    #[schemars(description = "The ID of the newer version (to)")]
+    pub to_version: u64,
+}
+
+/// Request to get an edge at a specific valid time (independent dimension query).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GetEdgeAtValidTimeRequest {
+    /// The unique identifier of the edge.
+    #[schemars(description = "The unique identifier of the edge")]
+    pub edge_id: u64,
+
+    /// Valid time as ISO 8601 timestamp (when the fact was true in reality).
+    #[schemars(
+        description = "Valid time as ISO 8601 timestamp (when the fact was true in reality)"
+    )]
+    pub valid_time: String,
+}
+
+/// Request to get an edge at a specific transaction time (independent dimension query).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GetEdgeAtTransactionTimeRequest {
+    /// The unique identifier of the edge.
+    #[schemars(description = "The unique identifier of the edge")]
+    pub edge_id: u64,
+
+    /// Transaction time as ISO 8601 timestamp (when the fact was recorded).
+    #[schemars(
+        description = "Transaction time as ISO 8601 timestamp (when the fact was recorded)"
+    )]
+    pub transaction_time: String,
+}
+
+/// Request to get the complete version history of an edge.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GetEdgeHistoryRequest {
+    /// The unique identifier of the edge.
+    #[schemars(description = "The unique identifier of the edge")]
+    pub edge_id: u64,
+}
+
+/// Request to compute the difference between two versions of an edge.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DiffEdgeVersionsRequest {
+    /// The unique identifier of the edge.
+    #[schemars(description = "The unique identifier of the edge")]
+    pub edge_id: u64,
+
+    /// The ID of the older version (from).
+    #[schemars(description = "The ID of the older version (from)")]
+    pub from_version: u64,
+
+    /// The ID of the newer version (to).
+    #[schemars(description = "The ID of the newer version (to)")]
+    pub to_version: u64,
+}
+
 // ============================================================================
 // Hybrid Query Operations
 // ============================================================================
@@ -397,4 +501,45 @@ pub struct HybridQueryResult {
     pub similarity_score: Option<f32>,
     pub traversal_path: Option<Vec<u64>>,
     pub timestamp: Option<String>,
+}
+
+/// Information about a specific version in an entity's history.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionInfoResponse {
+    pub version_number: u64,
+    pub version_id: u64,
+    pub valid_from: String,
+    pub valid_to: Option<String>,
+    pub transaction_from: String,
+    pub transaction_to: Option<String>,
+    pub properties: HashMap<String, serde_json::Value>,
+    pub label: String,
+}
+
+/// Complete version history of an entity (node or edge).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityHistoryResponse {
+    pub versions: Vec<VersionInfoResponse>,
+}
+
+/// Difference between two versions showing property changes.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionDiffResponse {
+    pub from_version: u64,
+    pub to_version: u64,
+    pub added: HashMap<String, serde_json::Value>,
+    pub removed: HashMap<String, serde_json::Value>,
+    pub modified: Vec<PropertyChangeResponse>,
+}
+
+/// Details of a property modification.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropertyChangeResponse {
+    pub key: String,
+    pub old_value: serde_json::Value,
+    pub new_value: serde_json::Value,
 }

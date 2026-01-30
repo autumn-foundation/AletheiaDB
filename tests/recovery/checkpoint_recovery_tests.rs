@@ -12,7 +12,7 @@ use gallifreydb::{
         graph::Node,
         id::{EdgeId, NodeId, VersionId},
         property::PropertyMap,
-        temporal::{BiTemporalInterval, time},
+        temporal::time,
     },
     storage::{
         CheckpointManager, UnifiedCheckpointConfig,
@@ -50,7 +50,7 @@ fn test_checkpoint_recovery_basic() -> Result<()> {
             node_id: NodeId::new(i)?,
             label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties: props,
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -92,7 +92,7 @@ fn test_checkpoint_with_persisted_state_and_wal_replay() -> Result<()> {
             node_id: NodeId::new(i)?,
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: props,
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -123,7 +123,7 @@ fn test_checkpoint_with_persisted_state_and_wal_replay() -> Result<()> {
             node_id: NodeId::new(i)?,
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: props,
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -322,7 +322,7 @@ fn test_checkpoint_recovery_with_updates() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMapBuilder::new().insert("name", "Alice").build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update node
@@ -333,7 +333,7 @@ fn test_checkpoint_recovery_with_updates() -> Result<()> {
         properties: PropertyMapBuilder::new()
             .insert("name", "Alice Updated")
             .build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.flush()?;
@@ -375,14 +375,14 @@ fn test_checkpoint_recovery_with_deletes() -> Result<()> {
             node_id: NodeId::new(i)?,
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
     // Delete node 2
     wal.append(WalOperation::DeleteNode {
         node_id: NodeId::new(2)?,
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.flush()?;

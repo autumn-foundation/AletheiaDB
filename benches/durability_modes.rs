@@ -18,11 +18,7 @@ use criterion::{
 };
 use gallifreydb::{
     GallifreyDB, WalConfigBuilder, WriteOps, WriteOptions,
-    core::{
-        PropertyMapBuilder,
-        interning::GLOBAL_INTERNER,
-        temporal::{BiTemporalInterval, time},
-    },
+    core::{PropertyMapBuilder, interning::GLOBAL_INTERNER, temporal::time},
     storage::wal::{
         DurabilityMode, WalOperation,
         concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig},
@@ -653,7 +649,7 @@ fn bench_wal_append(c: &mut Criterion) {
                         node_id: black_box(gallifreydb::core::id::NodeId::new(1).unwrap()),
                         label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
+                        valid_from: time::now(),
                     },
                     "create_edge" => WalOperation::CreateEdge {
                         edge_id: black_box(gallifreydb::core::id::EdgeId::new(1).unwrap()),
@@ -661,14 +657,14 @@ fn bench_wal_append(c: &mut Criterion) {
                         target: gallifreydb::core::id::NodeId::new(2).unwrap(),
                         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
+                        valid_from: time::now(),
                     },
                     _ => WalOperation::UpdateNode {
                         node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
                         version_id: gallifreydb::core::id::VersionId::new(2).unwrap(),
                         label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
+                        valid_from: time::now(),
                     },
                 };
                 wal.append_async(operation).unwrap();
@@ -702,7 +698,7 @@ fn bench_wal_throughput(c: &mut Criterion) {
                         node_id: gallifreydb::core::id::NodeId::new(i).unwrap(),
                         label: GLOBAL_INTERNER.intern("Person").unwrap(),
                         properties: PropertyMapBuilder::new().build(),
-                        temporal: BiTemporalInterval::current(time::now()),
+                        valid_from: time::now(),
                     };
                     black_box(wal.append_async(operation).unwrap());
                 }
@@ -748,7 +744,7 @@ fn bench_wal_with_sync(c: &mut Criterion) {
                     node_id: gallifreydb::core::id::NodeId::new(1).unwrap(),
                     label: GLOBAL_INTERNER.intern("Person").unwrap(),
                     properties: PropertyMapBuilder::new().build(),
-                    temporal: BiTemporalInterval::current(time::now()),
+                    valid_from: time::now(),
                 };
                 wal.append_async(operation).unwrap();
                 wal.commit().unwrap(); // ✅ Commit with configured durability mode

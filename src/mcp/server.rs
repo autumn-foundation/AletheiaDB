@@ -1120,6 +1120,315 @@ impl GallifreyMcpServer {
         }
     }
 
+    // ============================================================================
+    // Phase 11: Independent Dimension Temporal Queries & Version History
+    // ============================================================================
+
+    fn handle_get_node_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
+        let req: GetNodeAtValidTimeRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let valid_time = match self.parse_timestamp(&req.valid_time) {
+            Ok(t) => t,
+            Err(e) => return self.error_json(&e),
+        };
+
+        match self.db.get_node_at_valid_time(node_id, valid_time) {
+            Ok(node) => {
+                let response = self.node_to_response(&node);
+                self.success_json(json!({
+                    "node": response,
+                    "valid_time": req.valid_time
+                }))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn handle_get_node_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
+        let req: GetNodeAtTransactionTimeRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let tx_time = match self.parse_timestamp(&req.transaction_time) {
+            Ok(t) => t,
+            Err(e) => return self.error_json(&e),
+        };
+
+        match self.db.get_node_at_transaction_time(node_id, tx_time) {
+            Ok(node) => {
+                let response = self.node_to_response(&node);
+                self.success_json(json!({
+                    "node": response,
+                    "transaction_time": req.transaction_time
+                }))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn handle_get_node_history(&self, args: serde_json::Value) -> CallToolResult {
+        let req: GetNodeHistoryRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        match self.db.get_node_history(node_id) {
+            Ok(history) => {
+                let versions: Vec<_> = history
+                    .versions
+                    .iter()
+                    .map(|v| self.version_info_to_response(v))
+                    .collect();
+
+                self.success_json(json!({
+                    "node_id": req.node_id,
+                    "versions": versions,
+                    "version_count": versions.len()
+                }))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn handle_diff_node_versions(&self, args: serde_json::Value) -> CallToolResult {
+        let req: DiffNodeVersionsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let node_id = match NodeId::new(req.node_id) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let from_version = match crate::core::id::VersionId::new(req.from_version) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let to_version = match crate::core::id::VersionId::new(req.to_version) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        match self
+            .db
+            .diff_node_versions(node_id, from_version, to_version)
+        {
+            Ok(diff) => {
+                let response = self.version_diff_to_response(&diff);
+                self.success_json(json!(response))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn handle_get_edge_at_valid_time(&self, args: serde_json::Value) -> CallToolResult {
+        let req: GetEdgeAtValidTimeRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let edge_id = match EdgeId::new(req.edge_id) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let valid_time = match self.parse_timestamp(&req.valid_time) {
+            Ok(t) => t,
+            Err(e) => return self.error_json(&e),
+        };
+
+        match self.db.get_edge_at_valid_time(edge_id, valid_time) {
+            Ok(edge) => {
+                let response = self.edge_to_response(&edge);
+                self.success_json(json!({
+                    "edge": response,
+                    "valid_time": req.valid_time
+                }))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn handle_get_edge_at_transaction_time(&self, args: serde_json::Value) -> CallToolResult {
+        let req: GetEdgeAtTransactionTimeRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let edge_id = match EdgeId::new(req.edge_id) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let tx_time = match self.parse_timestamp(&req.transaction_time) {
+            Ok(t) => t,
+            Err(e) => return self.error_json(&e),
+        };
+
+        match self.db.get_edge_at_transaction_time(edge_id, tx_time) {
+            Ok(edge) => {
+                let response = self.edge_to_response(&edge);
+                self.success_json(json!({
+                    "edge": response,
+                    "transaction_time": req.transaction_time
+                }))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn handle_get_edge_history(&self, args: serde_json::Value) -> CallToolResult {
+        let req: GetEdgeHistoryRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let edge_id = match EdgeId::new(req.edge_id) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        match self.db.get_edge_history(edge_id) {
+            Ok(history) => {
+                let versions: Vec<_> = history
+                    .versions
+                    .iter()
+                    .map(|v| self.version_info_to_response(v))
+                    .collect();
+
+                self.success_json(json!({
+                    "edge_id": req.edge_id,
+                    "versions": versions,
+                    "version_count": versions.len()
+                }))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    fn handle_diff_edge_versions(&self, args: serde_json::Value) -> CallToolResult {
+        let req: DiffEdgeVersionsRequest = match serde_json::from_value(args) {
+            Ok(r) => r,
+            Err(e) => return self.error_json(&format!("Invalid arguments: {}", e)),
+        };
+
+        let edge_id = match EdgeId::new(req.edge_id) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let from_version = match crate::core::id::VersionId::new(req.from_version) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        let to_version = match crate::core::id::VersionId::new(req.to_version) {
+            Ok(id) => id,
+            Err(e) => return self.error_json(&e.to_string()),
+        };
+
+        match self
+            .db
+            .diff_edge_versions(edge_id, from_version, to_version)
+        {
+            Ok(diff) => {
+                let response = self.version_diff_to_response(&diff);
+                self.success_json(json!(response))
+            }
+            Err(e) => self.error_json(&e.to_string()),
+        }
+    }
+
+    // Helper methods for converting internal types to response types
+
+    fn version_info_to_response(&self, info: &crate::query::VersionInfo) -> serde_json::Value {
+        use crate::core::temporal::TIMESTAMP_MAX;
+
+        let properties = self.property_map_to_json(&info.properties);
+
+        let valid_to = {
+            let end = info.temporal.valid_time().end();
+            if end == TIMESTAMP_MAX {
+                None
+            } else {
+                Some(end.wallclock().to_string())
+            }
+        };
+
+        let transaction_to = {
+            let end = info.temporal.transaction_time().end();
+            if end == TIMESTAMP_MAX {
+                None
+            } else {
+                Some(end.wallclock().to_string())
+            }
+        };
+
+        json!({
+            "version_number": info.version_number,
+            "version_id": info.version_id.as_u64(),
+            "valid_from": info.temporal.valid_time().start().wallclock().to_string(),
+            "valid_to": valid_to,
+            "transaction_from": info.temporal.transaction_time().start().wallclock().to_string(),
+            "transaction_to": transaction_to,
+            "properties": properties,
+            "label": info.label
+        })
+    }
+
+    fn version_diff_to_response(&self, diff: &crate::query::VersionDiff) -> serde_json::Value {
+        let added = self.property_map_to_json(&diff.added);
+        let removed = self.property_map_to_json(&diff.removed);
+
+        let modified: Vec<_> = diff
+            .modified
+            .iter()
+            .map(|(key, old_val, new_val)| {
+                let key_str = GLOBAL_INTERNER
+                    .resolve(*key)
+                    .map(|s| s.as_ref().to_string())
+                    .unwrap_or_else(|| format!("{:?}", key));
+
+                json!({
+                    "key": key_str,
+                    "old_value": self.property_value_to_json(old_val),
+                    "new_value": self.property_value_to_json(new_val)
+                })
+            })
+            .collect();
+
+        json!({
+            "from_version": diff.from_version.as_u64(),
+            "to_version": diff.to_version.as_u64(),
+            "added": added,
+            "removed": removed,
+            "modified": modified,
+            "has_changes": diff.has_changes(),
+            "change_count": diff.change_count()
+        })
+    }
+
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
         let req: HybridQueryRequest = match serde_json::from_value(args) {
             Ok(r) => r,
@@ -1449,6 +1758,46 @@ impl ServerHandler for GallifreyMcpServer {
                     make_input_schema::<GetEdgeAtTimeRequest>(),
                 ),
                 Tool::new(
+                    "get_node_at_valid_time",
+                    "Get node state at a specific valid time (independent dimension query).",
+                    make_input_schema::<GetNodeAtValidTimeRequest>(),
+                ),
+                Tool::new(
+                    "get_node_at_transaction_time",
+                    "Get node state at a specific transaction time (independent dimension query).",
+                    make_input_schema::<GetNodeAtTransactionTimeRequest>(),
+                ),
+                Tool::new(
+                    "get_node_history",
+                    "Get complete version history of a node.",
+                    make_input_schema::<GetNodeHistoryRequest>(),
+                ),
+                Tool::new(
+                    "diff_node_versions",
+                    "Compute the difference between two versions of a node.",
+                    make_input_schema::<DiffNodeVersionsRequest>(),
+                ),
+                Tool::new(
+                    "get_edge_at_valid_time",
+                    "Get edge state at a specific valid time (independent dimension query).",
+                    make_input_schema::<GetEdgeAtValidTimeRequest>(),
+                ),
+                Tool::new(
+                    "get_edge_at_transaction_time",
+                    "Get edge state at a specific transaction time (independent dimension query).",
+                    make_input_schema::<GetEdgeAtTransactionTimeRequest>(),
+                ),
+                Tool::new(
+                    "get_edge_history",
+                    "Get complete version history of an edge.",
+                    make_input_schema::<GetEdgeHistoryRequest>(),
+                ),
+                Tool::new(
+                    "diff_edge_versions",
+                    "Compute the difference between two versions of an edge.",
+                    make_input_schema::<DiffEdgeVersionsRequest>(),
+                ),
+                Tool::new(
                     "hybrid_query",
                     "Execute a hybrid query combining graph traversal, vector similarity, and temporal filtering.",
                     make_input_schema::<HybridQueryRequest>(),
@@ -1491,6 +1840,14 @@ impl ServerHandler for GallifreyMcpServer {
             "list_vector_indexes" => self.handle_list_vector_indexes(args),
             "get_node_at_time" => self.handle_get_node_at_time(args),
             "get_edge_at_time" => self.handle_get_edge_at_time(args),
+            "get_node_at_valid_time" => self.handle_get_node_at_valid_time(args),
+            "get_node_at_transaction_time" => self.handle_get_node_at_transaction_time(args),
+            "get_node_history" => self.handle_get_node_history(args),
+            "diff_node_versions" => self.handle_diff_node_versions(args),
+            "get_edge_at_valid_time" => self.handle_get_edge_at_valid_time(args),
+            "get_edge_at_transaction_time" => self.handle_get_edge_at_transaction_time(args),
+            "get_edge_history" => self.handle_get_edge_history(args),
+            "diff_edge_versions" => self.handle_diff_edge_versions(args),
             "hybrid_query" => self.handle_hybrid_query(args),
             _ => self.error_json(&format!("Unknown tool: {}", request.name)),
         };

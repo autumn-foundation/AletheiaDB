@@ -1159,6 +1159,337 @@ impl GallifreyDB {
     }
 
     // ========================================================================
+    // History & Version API (Phase 9: True Bi-Temporal)
+    // ========================================================================
+
+    /// Get a node as it was valid at a specific valid time.
+    ///
+    /// Transaction time defaults to "now" - queries what was valid at the given time,
+    /// based on the latest knowledge.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // "What were Alice's properties on January 15th?"
+    /// let node = db.get_node_at_valid_time(alice_id, jan_15)?;
+    /// ```
+    pub fn get_node_at_valid_time(&self, node_id: NodeId, valid_time: Timestamp) -> Result<Node> {
+        let tx_time = time::now();
+        self.get_node_at_time(node_id, valid_time, tx_time)
+    }
+
+    /// Get a node as it was recorded at a specific transaction time.
+    ///
+    /// Valid time defaults to "now" - queries what we knew at the given time,
+    /// regardless of when facts were valid.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // "What did we know about Alice on February 1st?"
+    /// let node = db.get_node_at_transaction_time(alice_id, feb_1)?;
+    /// ```
+    pub fn get_node_at_transaction_time(
+        &self,
+        node_id: NodeId,
+        transaction_time: Timestamp,
+    ) -> Result<Node> {
+        let valid_time = time::now();
+        self.get_node_at_time(node_id, valid_time, transaction_time)
+    }
+
+    /// Get the complete version history of a node.
+    ///
+    /// Returns all versions in chronological order (oldest first).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let history = db.get_node_history(alice_id)?;
+    /// println!("Alice has {} versions", history.version_count());
+    /// ```
+    pub fn get_node_history(&self, node_id: NodeId) -> Result<crate::query::EntityHistory> {
+        use crate::query::VersionInfo;
+
+        let historical = self.historical.read_or_err()?;
+
+        // Get the current version ID
+        let current_version_id = historical
+            .get_current_node_version(node_id)
+            .ok_or(StorageError::NodeNotFound(node_id))?;
+
+        // Traverse the version chain backwards to get all versions in order
+        let mut version_ids = Vec::new();
+        let mut current_id = Some(current_version_id);
+
+        while let Some(vid) = current_id {
+            version_ids.push(vid);
+            current_id = historical
+                .get_node_version(vid)
+                .and_then(|v| v.prev_version);
+        }
+
+        // Reverse to get oldest-first order
+        version_ids.reverse();
+
+        // Build VersionInfo for each version
+        let mut versions = Vec::with_capacity(version_ids.len());
+        for (version_number, version_id) in version_ids.iter().enumerate() {
+            if let Some(version) = historical.get_node_version(*version_id) {
+                let properties = historical.reconstruct_node_properties(*version_id)?;
+
+                versions.push(VersionInfo {
+                    version_number: (version_number + 1) as u64, // 1-indexed
+                    version_id: *version_id,
+                    temporal: version.temporal,
+                    properties,
+                    label: version.label.to_string(),
+                });
+            }
+        }
+
+        Ok(crate::query::EntityHistory { versions })
+    }
+
+    /// Get a node at a specific logical version number.
+    ///
+    /// Version numbers are 1-indexed (1 = first version, 2 = second version, etc.).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let v1 = db.get_node_at_version(alice_id, 1)?;  // Original version
+    /// let v2 = db.get_node_at_version(alice_id, 2)?;  // After first update
+    /// ```
+    pub fn get_node_at_version(&self, node_id: NodeId, version_number: u64) -> Result<Node> {
+        let historical = self.historical.read_or_err()?;
+
+        // Get the current version ID
+        let current_version_id = historical
+            .get_current_node_version(node_id)
+            .ok_or(StorageError::NodeNotFound(node_id))?;
+
+        // Traverse the version chain backwards to collect all versions
+        let mut version_ids = Vec::new();
+        let mut current_id = Some(current_version_id);
+
+        while let Some(vid) = current_id {
+            version_ids.push(vid);
+            current_id = historical
+                .get_node_version(vid)
+                .and_then(|v| v.prev_version);
+        }
+
+        // Reverse to get oldest-first order
+        version_ids.reverse();
+
+        // Convert 1-indexed version number to 0-indexed array index
+        let index = version_number
+            .checked_sub(1)
+            .ok_or(StorageError::NodeNotFound(node_id))? as usize;
+
+        // Get the version ID at that index
+        let version_id = version_ids
+            .get(index)
+            .ok_or(StorageError::NodeNotFound(node_id))?;
+
+        // Reconstruct the node from that version
+        let version = historical
+            .get_node_version(*version_id)
+            .ok_or(StorageError::VersionNotFound(*version_id))?;
+
+        let properties = historical.reconstruct_node_properties(*version_id)?;
+
+        Ok(Node::new(
+            version.node_id,
+            version.label,
+            properties,
+            version.id,
+        ))
+    }
+
+    /// Compute the difference between two versions of a node.
+    ///
+    /// Shows which properties were added, removed, or modified.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let history = db.get_node_history(alice_id)?;
+    /// let v1 = history.first_version().unwrap().version_id;
+    /// let v2 = history.current_version().unwrap().version_id;
+    ///
+    /// let diff = db.diff_node_versions(alice_id, v1, v2)?;
+    /// if diff.has_changes() {
+    ///     println!("Properties changed: {}", diff.change_count());
+    /// }
+    /// ```
+    pub fn diff_node_versions(
+        &self,
+        node_id: NodeId,
+        from_version: crate::core::id::VersionId,
+        to_version: crate::core::id::VersionId,
+    ) -> Result<crate::query::VersionDiff> {
+        let historical = self.historical.read_or_err()?;
+
+        // Validate that both versions belong to the requested node
+        let from_ver = historical
+            .get_node_version(from_version)
+            .ok_or(StorageError::VersionNotFound(from_version))?;
+        let to_ver = historical
+            .get_node_version(to_version)
+            .ok_or(StorageError::VersionNotFound(to_version))?;
+
+        if from_ver.node_id != node_id {
+            return Err(StorageError::InconsistentState {
+                reason: format!(
+                    "Version {} belongs to node {}, not node {}",
+                    from_version, from_ver.node_id, node_id
+                ),
+            }
+            .into());
+        }
+        if to_ver.node_id != node_id {
+            return Err(StorageError::InconsistentState {
+                reason: format!(
+                    "Version {} belongs to node {}, not node {}",
+                    to_version, to_ver.node_id, node_id
+                ),
+            }
+            .into());
+        }
+
+        // Reconstruct both versions
+        let from_props = historical.reconstruct_node_properties(from_version)?;
+        let to_props = historical.reconstruct_node_properties(to_version)?;
+
+        // Compute diff
+        Ok(crate::query::VersionDiff::compute(
+            &from_props,
+            &to_props,
+            from_version,
+            to_version,
+        ))
+    }
+
+    /// Get an edge at a specific valid time.
+    ///
+    /// Query by valid time only (transaction time defaults to now).
+    pub fn get_edge_at_valid_time(&self, edge_id: EdgeId, valid_time: Timestamp) -> Result<Edge> {
+        let transaction_time = time::now();
+        self.get_edge_at_time(edge_id, valid_time, transaction_time)
+    }
+
+    /// Get an edge at a specific transaction time.
+    ///
+    /// Query by transaction time only (valid time defaults to now).
+    pub fn get_edge_at_transaction_time(
+        &self,
+        edge_id: EdgeId,
+        transaction_time: Timestamp,
+    ) -> Result<Edge> {
+        let valid_time = time::now();
+        self.get_edge_at_time(edge_id, valid_time, transaction_time)
+    }
+
+    /// Get the complete version history of an edge.
+    ///
+    /// Returns all versions in chronological order (oldest first).
+    pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<crate::query::EntityHistory> {
+        use crate::query::VersionInfo;
+
+        let historical = self.historical.read_or_err()?;
+
+        // Get the current version ID
+        let current_version_id = historical
+            .get_current_edge_version(edge_id)
+            .ok_or(StorageError::EdgeNotFound(edge_id))?;
+
+        // Traverse the version chain backwards to get all versions
+        let mut version_ids = Vec::new();
+        let mut current_id = Some(current_version_id);
+
+        while let Some(vid) = current_id {
+            version_ids.push(vid);
+            current_id = historical
+                .get_edge_version(vid)
+                .and_then(|v| v.prev_version);
+        }
+
+        // Reverse to get oldest-first order
+        version_ids.reverse();
+
+        // Build VersionInfo for each version
+        let mut versions = Vec::with_capacity(version_ids.len());
+        for (version_number, version_id) in version_ids.iter().enumerate() {
+            if let Some(version) = historical.get_edge_version(*version_id) {
+                let properties = historical.reconstruct_edge_properties(*version_id)?;
+
+                versions.push(VersionInfo {
+                    version_number: (version_number + 1) as u64, // 1-indexed
+                    version_id: *version_id,
+                    temporal: version.temporal,
+                    properties,
+                    label: version.label.to_string(),
+                });
+            }
+        }
+
+        Ok(crate::query::EntityHistory { versions })
+    }
+
+    /// Compute the difference between two versions of an edge.
+    ///
+    /// Shows which properties were added, removed, or modified.
+    pub fn diff_edge_versions(
+        &self,
+        edge_id: EdgeId,
+        from_version: crate::core::id::VersionId,
+        to_version: crate::core::id::VersionId,
+    ) -> Result<crate::query::VersionDiff> {
+        let historical = self.historical.read_or_err()?;
+
+        // Validate that both versions belong to the requested edge
+        let from_ver = historical
+            .get_edge_version(from_version)
+            .ok_or(StorageError::VersionNotFound(from_version))?;
+        let to_ver = historical
+            .get_edge_version(to_version)
+            .ok_or(StorageError::VersionNotFound(to_version))?;
+
+        if from_ver.edge_id != edge_id {
+            return Err(StorageError::InconsistentState {
+                reason: format!(
+                    "Version {} belongs to edge {}, not edge {}",
+                    from_version, from_ver.edge_id, edge_id
+                ),
+            }
+            .into());
+        }
+        if to_ver.edge_id != edge_id {
+            return Err(StorageError::InconsistentState {
+                reason: format!(
+                    "Version {} belongs to edge {}, not edge {}",
+                    to_version, to_ver.edge_id, edge_id
+                ),
+            }
+            .into());
+        }
+
+        // Reconstruct both versions
+        let from_props = historical.reconstruct_edge_properties(from_version)?;
+        let to_props = historical.reconstruct_edge_properties(to_version)?;
+
+        // Compute diff
+        Ok(crate::query::VersionDiff::compute(
+            &from_props,
+            &to_props,
+            from_version,
+            to_version,
+        ))
+    }
+
+    // ========================================================================
     // Vector Indexing API (VS-030)
     // ========================================================================
 
@@ -2677,7 +3008,8 @@ impl<'a> VectorIndexBuilder<'a> {
 mod tests {
     use super::*;
     use crate::api::transaction::ReadOps;
-    use crate::core::property::PropertyMapBuilder;
+    use crate::core::GLOBAL_INTERNER;
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
 
     #[test]
     fn test_create_node() {
@@ -5423,5 +5755,295 @@ mod tests {
         // Verify get_edge_source and get_edge_target
         assert_eq!(db.get_edge_source(knows_edge).unwrap(), alice);
         assert_eq!(db.get_edge_target(knows_edge).unwrap(), bob);
+    }
+
+    // ==================== Phase 9: History/Version API Tests ====================
+
+    #[test]
+    fn test_get_node_at_valid_time() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create backdated node
+        let mut tx = db.write_transaction().unwrap();
+        let jan_1 = crate::core::hlc::HybridTimestamp::new(1_704_067_200_000_000, 0).unwrap();
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let node_id = tx
+            .create_node_with_valid_time("Person", props, Some(jan_1))
+            .unwrap();
+        tx.commit().unwrap();
+
+        // Query at Jan 15 (after valid_time start)
+        let jan_15 = crate::core::hlc::HybridTimestamp::new(1_705_276_800_000_000, 0).unwrap();
+        let node = db.get_node_at_valid_time(node_id, jan_15).unwrap();
+        assert_eq!(node.id, node_id);
+        assert_eq!(
+            node.properties.get("name").unwrap(),
+            &PropertyValue::String("Alice".into())
+        );
+    }
+
+    #[test]
+    fn test_get_node_at_transaction_time() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create node
+        let props = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let node_id = db.create_node("Person", props).unwrap();
+
+        // Query at current transaction time should find it
+        let tx_time = time::now();
+        let node = db.get_node_at_transaction_time(node_id, tx_time).unwrap();
+        assert_eq!(node.id, node_id);
+    }
+
+    #[test]
+    fn test_get_node_history_returns_all_versions() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create and update a node
+        let props1 = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let node_id = db.create_node("Person", props1).unwrap();
+
+        // Update node through transaction
+        db.write(|tx| {
+            let props2 = PropertyMapBuilder::new()
+                .insert("name", "Alice Smith")
+                .build();
+            tx.update_node(node_id, props2)
+        })
+        .unwrap();
+
+        let history = db.get_node_history(node_id).unwrap();
+        assert_eq!(history.version_count(), 2);
+        assert_eq!(history.first_version().unwrap().version_number, 1);
+        assert_eq!(history.current_version().unwrap().version_number, 2);
+    }
+
+    #[test]
+    fn test_get_node_at_version() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create and update a node
+        let props1 = PropertyMapBuilder::new().insert("name", "Alice").build();
+        let node_id = db.create_node("Person", props1).unwrap();
+
+        db.write(|tx| {
+            let props2 = PropertyMapBuilder::new().insert("name", "Bob").build();
+            tx.update_node(node_id, props2)
+        })
+        .unwrap();
+
+        // Query version 1
+        let v1 = db.get_node_at_version(node_id, 1).unwrap();
+        assert_eq!(
+            v1.properties.get("name").unwrap(),
+            &PropertyValue::String("Alice".into())
+        );
+
+        // Query version 2
+        let v2 = db.get_node_at_version(node_id, 2).unwrap();
+        assert_eq!(
+            v2.properties.get("name").unwrap(),
+            &PropertyValue::String("Bob".into())
+        );
+    }
+
+    #[test]
+    fn test_diff_node_versions() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create node
+        let props1 = PropertyMapBuilder::new()
+            .insert("name", "Alice")
+            .insert("age", 30i64)
+            .build();
+        let node_id = db.create_node("Person", props1).unwrap();
+
+        // Update it
+        db.write(|tx| {
+            let props2 = PropertyMapBuilder::new()
+                .insert("name", "Alice")
+                .insert("age", 31i64)
+                .insert("city", "NYC")
+                .build();
+            tx.update_node(node_id, props2)
+        })
+        .unwrap();
+
+        // Get history to find version IDs
+        let history = db.get_node_history(node_id).unwrap();
+        let v1_id = history.first_version().unwrap().version_id;
+        let v2_id = history.current_version().unwrap().version_id;
+
+        // Compute diff
+        let diff = db.diff_node_versions(node_id, v1_id, v2_id).unwrap();
+
+        assert!(diff.has_changes());
+        assert_eq!(diff.added.len(), 1); // city added
+        assert!(diff.added.contains_key("city"));
+        assert_eq!(diff.modified.len(), 1); // age modified
+        assert!(diff.removed.is_empty());
+    }
+
+    #[test]
+    fn test_get_edge_history_returns_all_versions() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create nodes
+        let alice = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let bob = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create and update edge
+        let props1 = PropertyMapBuilder::new().insert("since", 2020i64).build();
+        let edge_id = db.create_edge(alice, bob, "KNOWS", props1).unwrap();
+
+        let props2 = PropertyMapBuilder::new().insert("since", 2021i64).build();
+        db.write(|tx| tx.update_edge(edge_id, props2)).unwrap();
+
+        let history = db.get_edge_history(edge_id).unwrap();
+        assert_eq!(history.version_count(), 2);
+    }
+
+    #[test]
+    fn test_diff_edge_versions() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create nodes
+        let alice = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let bob = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Create and update edge
+        let props1 = PropertyMapBuilder::new().insert("weight", 1.0f64).build();
+        let edge_id = db.create_edge(alice, bob, "KNOWS", props1).unwrap();
+
+        let props2 = PropertyMapBuilder::new().insert("weight", 2.0f64).build();
+        db.write(|tx| tx.update_edge(edge_id, props2)).unwrap();
+
+        // Get history to find version IDs
+        let history = db.get_edge_history(edge_id).unwrap();
+        let v1_id = history.first_version().unwrap().version_id;
+        let v2_id = history.current_version().unwrap().version_id;
+
+        // Compute diff
+        let diff = db.diff_edge_versions(edge_id, v1_id, v2_id).unwrap();
+
+        assert!(diff.has_changes());
+        assert_eq!(diff.modified.len(), 1); // weight modified
+    }
+
+    /// End-to-end integration test for true bi-temporal support.
+    ///
+    /// This test verifies the complete workflow:
+    /// 1. Backdated writes with valid_time
+    /// 2. Independent dimension queries (valid_time vs transaction_time)
+    /// 3. Version history tracking
+    /// 4. Version diffing
+    /// 5. Logical version queries
+    #[test]
+    fn test_full_bitemporal_workflow() {
+        use crate::core::hlc::HybridTimestamp;
+        use crate::core::temporal::time;
+
+        let db = GallifreyDB::new().unwrap();
+
+        // === PART 1: Backdated Write ===
+        let jan_1 = HybridTimestamp::new(1_704_067_200_000_000, 0).unwrap(); // 2024-01-01
+        let jan_15 = HybridTimestamp::new(1_705_276_800_000_000, 0).unwrap(); // 2024-01-15
+        let feb_1 = HybridTimestamp::new(1_706_745_600_000_000, 0).unwrap(); // 2024-02-01
+
+        // Create Alice with valid_time = Jan 1, but recording happens now
+        let alice = db
+            .write(|tx| {
+                tx.create_node_with_valid_time(
+                    "Person",
+                    PropertyMapBuilder::new().insert("name", "Alice").build(),
+                    Some(jan_1),
+                )
+            })
+            .unwrap();
+
+        // === PART 2: Query by Valid Time ===
+        // "Was Alice in the system on Jan 15?" - YES (valid_time covers it)
+        let result = db.get_node_at_valid_time(alice, jan_15);
+        assert!(result.is_ok(), "Should find Alice at Jan 15 valid time");
+
+        // === PART 3: Query by Transaction Time ===
+        // "Did we know about Alice on Jan 15?" - NO (recorded after)
+        let result = db.get_node_at_transaction_time(alice, jan_15);
+        assert!(
+            result.is_err(),
+            "Should NOT find Alice at Jan 15 transaction time (recorded later)"
+        );
+
+        // "Did we know about Alice now?" - YES (recorded at current time)
+        let result = db.get_node_at_transaction_time(alice, time::now());
+        assert!(
+            result.is_ok(),
+            "Should find Alice at current transaction time"
+        );
+
+        // === PART 4: Update and Check History ===
+        db.write(|tx| {
+            tx.update_node_with_valid_time(
+                alice,
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice Smith")
+                    .build(),
+                Some(feb_1), // Name changed on Feb 1
+            )
+        })
+        .unwrap();
+
+        let history = db.get_node_history(alice).unwrap();
+        assert_eq!(
+            history.versions.len(),
+            2,
+            "Should have 2 versions after update"
+        );
+
+        // Version 1: name = "Alice", valid from Jan 1
+        // Version 2: name = "Alice Smith", valid from Feb 1
+
+        // === PART 5: Version Diff ===
+        let diff = db
+            .diff_node_versions(
+                alice,
+                history.versions[0].version_id,
+                history.versions[1].version_id,
+            )
+            .unwrap();
+
+        assert_eq!(diff.modified.len(), 1, "Should have 1 modified property");
+
+        // Check that "name" was modified
+        let name_key = GLOBAL_INTERNER.intern("name").unwrap();
+        let (modified_key, _, _) = &diff.modified[0];
+        assert_eq!(
+            *modified_key, name_key,
+            "Modified property should be 'name'"
+        );
+
+        // === PART 6: Query by Logical Version ===
+        let v1 = db.get_node_at_version(alice, 1).unwrap();
+        assert_eq!(
+            v1.properties.get("name").unwrap(),
+            &PropertyValue::String("Alice".into()),
+            "Version 1 should have name='Alice'"
+        );
+
+        let v2 = db.get_node_at_version(alice, 2).unwrap();
+        assert_eq!(
+            v2.properties.get("name").unwrap(),
+            &PropertyValue::String("Alice Smith".into()),
+            "Version 2 should have name='Alice Smith'"
+        );
     }
 }

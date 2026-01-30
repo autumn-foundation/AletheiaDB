@@ -63,7 +63,7 @@ use gallifreydb::core::{
     id::{EdgeId, NodeId},
     interning::GLOBAL_INTERNER,
     property::PropertyMapBuilder,
-    temporal::{BiTemporalInterval, time},
+    temporal::time,
 };
 use gallifreydb::storage::{
     persistence::{CheckpointConfig, PersistenceManager},
@@ -193,7 +193,7 @@ fn main() -> Result<()> {
             node_id,
             label: GLOBAL_INTERNER.intern(format!("Node{}", i)).unwrap(),
             properties: PropertyMapBuilder::new().insert("id", i as i64).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -209,7 +209,7 @@ fn main() -> Result<()> {
             target,
             label: GLOBAL_INTERNER.intern("EDGE").unwrap(),
             properties: PropertyMapBuilder::new().insert("weight", i as i64).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 

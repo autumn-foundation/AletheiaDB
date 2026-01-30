@@ -465,7 +465,7 @@ impl AstConverter {
                         reason: format!("Invalid time range: {}", e),
                     })
                 })?;
-                Ok(Some(TemporalContext::between(range)))
+                Ok(Some(TemporalContext::valid_time_between(range)))
             }
         }
     }
@@ -1115,8 +1115,9 @@ mod tests {
         // Should have temporal context
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.unwrap();
-        assert!(ctx.as_of.is_some());
-        let (vt, _tt) = ctx.as_of.unwrap();
+        let as_of_tuple = ctx.as_of_tuple();
+        assert!(as_of_tuple.is_some());
+        let (vt, _tt) = as_of_tuple.unwrap();
         // Timestamp is stored as microseconds, so 1000 is 1000 microseconds
         assert_eq!(vt.wallclock(), 1000);
     }
@@ -1131,7 +1132,7 @@ mod tests {
         // Should have temporal context with between
         assert!(query.temporal_context.is_some());
         let ctx = query.temporal_context.unwrap();
-        assert!(ctx.between.is_some());
+        assert!(ctx.valid_time_between.is_some());
     }
 
     #[test]

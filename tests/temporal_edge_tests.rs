@@ -60,9 +60,14 @@ fn test_temporal_edge_lookup_basic() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        (version.temporal.valid_time().start().wallclock() + 1).into()
+        let valid_time = (version.temporal.valid_time().start().wallclock() + 1).into();
+        let tx_time = (version.temporal.transaction_time().start().wallclock() + 1000).into();
+        (valid_time, tx_time)
     };
-    println!("Using query timestamp t1={} (just after first version)", t1);
+    println!(
+        "Using query timestamps valid={}, tx={} (just after first version)",
+        t1.0, t1.1
+    );
 
     // Update the edge
     thread::sleep(Duration::from_millis(100));
@@ -119,20 +124,23 @@ fn test_temporal_edge_lookup_basic() {
     }
 
     // Verify temporal lookup at t1
-    println!("\n=== Verifying temporal edge lookup at t1={} ===", t1);
+    println!(
+        "\n=== Verifying temporal edge lookup at valid={}, tx={} ===",
+        t1.0, t1.1
+    );
     {
         let historical = db.__test_historical_storage();
         let hist_guard = historical.read();
-        match hist_guard.find_edge_version_at_time(edge_id, t1, t1) {
+        match hist_guard.find_edge_version_at_time(edge_id, t1.0, t1.1) {
             Some(version_id) => {
                 let version = hist_guard.get_edge_version(version_id).unwrap();
                 println!("find_edge_version_at_time returned: {:?}", version_id);
                 println!("Version temporal: {}", version.temporal);
                 println!(
-                    "Version is_visible_at(t1={}, t1={})? {}",
-                    t1,
-                    t1,
-                    version.temporal.is_visible_at(t1, t1)
+                    "Version is_visible_at(valid={}, tx={})? {}",
+                    t1.0,
+                    t1.1,
+                    version.temporal.is_visible_at(t1.0, t1.1)
                 );
 
                 // Reconstruct properties
@@ -146,7 +154,10 @@ fn test_temporal_edge_lookup_basic() {
                 );
                 println!("✓ Temporal edge lookup correctly returned historical state");
             }
-            None => panic!("find_edge_version_at_time returned None for t1={}", t1),
+            None => panic!(
+                "find_edge_version_at_time returned None for valid={}, tx={}",
+                t1.0, t1.1
+            ),
         }
     }
 }
@@ -197,7 +208,9 @@ fn test_temporal_edge_multiple_updates() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        (version.temporal.valid_time().start().wallclock() + 1).into()
+        let valid_time = (version.temporal.valid_time().start().wallclock() + 1).into();
+        let tx_time = (version.temporal.transaction_time().start().wallclock() + 1000).into();
+        (valid_time, tx_time)
     });
 
     // Update multiple times
@@ -220,7 +233,9 @@ fn test_temporal_edge_multiple_updates() {
             let hist_guard = historical.read();
             let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
             let version = hist_guard.get_edge_version(version_id).unwrap();
-            (version.temporal.valid_time().start().wallclock() + 1).into()
+            let valid_time = (version.temporal.valid_time().start().wallclock() + 1).into();
+            let tx_time = (version.temporal.transaction_time().start().wallclock() + 1000).into();
+            (valid_time, tx_time)
         });
     }
 
@@ -236,8 +251,13 @@ fn test_temporal_edge_multiple_updates() {
 
     for (i, &timestamp) in timestamps[..timestamps.len() - 1].iter().enumerate() {
         let version_id = hist_guard
-            .find_edge_version_at_time(edge_id, timestamp, timestamp)
-            .unwrap_or_else(|| panic!("Should find version at timestamp {}", timestamp));
+            .find_edge_version_at_time(edge_id, timestamp.0, timestamp.1)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Should find version at valid={}, tx={}",
+                    timestamp.0, timestamp.1
+                )
+            });
 
         let properties = hist_guard.reconstruct_edge_properties(version_id).unwrap();
         let expected_weight = (i as f64) * 0.1 + 0.5;
@@ -245,14 +265,15 @@ fn test_temporal_edge_multiple_updates() {
 
         assert!(
             (actual_weight - expected_weight).abs() < 0.001,
-            "At timestamp {}, expected weight {}, got {}",
-            timestamp,
+            "At valid={}, tx={}, expected weight {}, got {}",
+            timestamp.0,
+            timestamp.1,
             expected_weight,
             actual_weight
         );
         println!(
-            "✓ Version {} at t={}: weight={}",
-            i, timestamp, actual_weight
+            "✓ Version {} at valid={}, tx={}: weight={}",
+            i, timestamp.0, timestamp.1, actual_weight
         );
     }
 }
@@ -289,12 +310,16 @@ fn test_temporal_edge_interval_closing() {
         .unwrap();
 
     // Get first version
-    let (v1_id, v1_start) = {
+    let (v1_id, v1_start, v1_tx) = {
         let historical = db.__test_historical_storage();
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        (version_id, version.temporal.valid_time().start())
+        (
+            version_id,
+            version.temporal.valid_time().start(),
+            version.temporal.transaction_time().start(),
+        )
     };
 
     // Update edge
@@ -309,12 +334,15 @@ fn test_temporal_edge_interval_closing() {
     .unwrap();
 
     // Get second version
-    let v2_start = {
+    let (v2_start, v2_tx) = {
         let historical = db.__test_historical_storage();
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        version.temporal.valid_time().start()
+        (
+            version.temporal.valid_time().start(),
+            version.temporal.transaction_time().start(),
+        )
     };
 
     // Verify first version interval was closed
@@ -344,9 +372,11 @@ fn test_temporal_edge_interval_closing() {
     let hist_guard = historical.read();
 
     // Query at t1 (during v1)
-    let t1 = (v1_start.wallclock() + 1).into();
+    let t1_valid = (v1_start.wallclock() + 1).into();
+    let t1_tx = (v1_tx.wallclock() + 1000).into();
+    let t1 = (t1_valid, t1_tx);
     let v1_lookup = hist_guard
-        .find_edge_version_at_time(edge_id, t1, t1)
+        .find_edge_version_at_time(edge_id, t1.0, t1.1)
         .unwrap();
     assert_eq!(
         v1_lookup, v1_id,
@@ -361,9 +391,11 @@ fn test_temporal_edge_interval_closing() {
     );
 
     // Query at t2 (during v2)
-    let t2 = (v2_start.wallclock() + 1).into();
+    let t2_valid = (v2_start.wallclock() + 1).into();
+    let t2_tx = (v2_tx.wallclock() + 1000).into();
+    let t2 = (t2_valid, t2_tx);
     let v2_lookup = hist_guard
-        .find_edge_version_at_time(edge_id, t2, t2)
+        .find_edge_version_at_time(edge_id, t2.0, t2.1)
         .unwrap();
     let props_v2 = hist_guard.reconstruct_edge_properties(v2_lookup).unwrap();
     assert_eq!(
@@ -588,7 +620,9 @@ fn test_temporal_edge_with_vector_properties() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        (version.temporal.valid_time().start().wallclock() + 1).into()
+        let valid_time = (version.temporal.valid_time().start().wallclock() + 1).into();
+        let tx_time = (version.temporal.transaction_time().start().wallclock() + 1000).into();
+        (valid_time, tx_time)
     };
 
     // Update with new vector
@@ -612,7 +646,7 @@ fn test_temporal_edge_with_vector_properties() {
         let hist_guard = historical.read();
 
         let version_id = hist_guard
-            .find_edge_version_at_time(edge_id, t1, t1)
+            .find_edge_version_at_time(edge_id, t1.0, t1.1)
             .unwrap();
         let properties = hist_guard.reconstruct_edge_properties(version_id).unwrap();
 

@@ -11,7 +11,7 @@ use gallifreydb::{
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::{PropertyMap, PropertyMapBuilder},
-        temporal::{BiTemporalInterval, time},
+        temporal::time,
     },
     storage::{
         persistence::{CheckpointConfig, PersistenceManager},
@@ -39,7 +39,7 @@ fn test_recover_initializes_node_id_generator() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -80,7 +80,7 @@ fn test_recover_initializes_edge_id_generator() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -92,7 +92,7 @@ fn test_recover_initializes_edge_id_generator() -> Result<()> {
             target: NodeId::new(2).unwrap(),
             label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -138,7 +138,7 @@ fn test_recover_initializes_version_id_generator() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMapBuilder::new().insert("count", 0_i64).build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update 4 times (versions 2, 3, 4, 5)
@@ -148,7 +148,7 @@ fn test_recover_initializes_version_id_generator() -> Result<()> {
             version_id: VersionId::new((i + 1) as u64).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMapBuilder::new().insert("count", i).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -192,7 +192,7 @@ fn test_recover_handles_gaps_in_ids() -> Result<()> {
             node_id: NodeId::new(id).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -232,14 +232,14 @@ fn test_recover_with_deletes_tracks_max_ids() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
     // Delete node 2
     wal.append(WalOperation::DeleteNode {
         node_id: NodeId::new(2).unwrap(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     wal.flush()?;
 
@@ -308,7 +308,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -320,7 +320,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
             target: NodeId::new(2).unwrap(),
             label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -330,7 +330,7 @@ fn test_recover_all_generators_independent() -> Result<()> {
         version_id: VersionId::new(6).unwrap(),
         label: GLOBAL_INTERNER.intern("UpdatedNode").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
     wal.flush()?;
 

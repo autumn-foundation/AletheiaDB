@@ -77,7 +77,7 @@ use gallifreydb::core::{
     id::{EdgeId, NodeId},
     interning::GLOBAL_INTERNER,
     property::{PropertyMapBuilder, PropertyValue},
-    temporal::{BiTemporalInterval, time},
+    temporal::time,
 };
 use gallifreydb::storage::{
     persistence::{CheckpointConfig, PersistenceManager},
@@ -142,7 +142,7 @@ fn main() -> Result<()> {
                 .insert("id", i as i64)
                 .insert("name", format!("Node {}", i))
                 .build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -157,7 +157,7 @@ fn main() -> Result<()> {
             target,
             label: GLOBAL_INTERNER.intern("LINKS_TO").unwrap(),
             properties: PropertyMapBuilder::new().insert("weight", i as i64).build(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -173,7 +173,7 @@ fn main() -> Result<()> {
             .insert("name", "Node 1 (Updated)")
             .insert("updated", 1)
             .build(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Flush WAL to ensure all entries are persisted

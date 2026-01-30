@@ -267,6 +267,37 @@ impl BiTemporalInterval {
         }
     }
 
+    /// Create a bi-temporal interval with separate valid_from and transaction_time.
+    ///
+    /// This enables true bi-temporal semantics where:
+    /// - `valid_from`: when the fact became true in reality (user-controlled)
+    /// - `tx_time`: when the fact was recorded in the database (system-managed)
+    ///
+    /// Both dimensions are open-ended (current), but start at different times.
+    /// This allows backdating facts - recording at time T2 that something was
+    /// valid since time T1 (where T1 < T2).
+    ///
+    /// # Example
+    /// ```
+    /// use gallifreydb::core::temporal::BiTemporalInterval;
+    /// use gallifreydb::core::hlc::HybridTimestamp;
+    ///
+    /// // Record today that Alice joined the company last month
+    /// let last_month = HybridTimestamp::new(1704067200_000_000, 0).unwrap();
+    /// let today = HybridTimestamp::new(1706745600_000_000, 0).unwrap();
+    ///
+    /// let interval = BiTemporalInterval::with_valid_time(last_month, today);
+    /// // Alice's membership was valid since last month
+    /// // But we only recorded it today
+    /// ```
+    #[inline]
+    pub fn with_valid_time(valid_from: Timestamp, tx_time: Timestamp) -> Self {
+        BiTemporalInterval {
+            valid_time: TimeRange::from(valid_from),
+            transaction_time: TimeRange::from(tx_time),
+        }
+    }
+
     /// Get the valid time range.
     #[inline]
     pub const fn valid_time(&self) -> TimeRange {
@@ -853,5 +884,58 @@ mod tests {
         // It represents "infinity" or "current"
         assert_eq!(TIMESTAMP_MAX.wallclock(), i64::MAX);
         assert_eq!(TIMESTAMP_MAX.logical(), 0);
+    }
+
+    // =========================================================================
+    // Phase 1: True Bi-Temporal Support Tests (with_valid_time)
+    // =========================================================================
+
+    #[test]
+    fn test_with_valid_time_creates_separate_dimensions() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_from = HybridTimestamp::new(1000, 0).unwrap();
+        let tx_time = HybridTimestamp::new(2000, 0).unwrap();
+
+        let interval = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+
+        assert_eq!(interval.valid_time().start(), valid_from);
+        assert_eq!(interval.transaction_time().start(), tx_time);
+        assert_ne!(
+            interval.valid_time().start(),
+            interval.transaction_time().start()
+        );
+    }
+
+    #[test]
+    fn test_with_valid_time_creates_open_ended_ranges() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_from = HybridTimestamp::new(1000, 0).unwrap();
+        let tx_time = HybridTimestamp::new(2000, 0).unwrap();
+
+        let interval = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+
+        // Both should be open-ended (end = TIMESTAMP_MAX)
+        assert!(interval.valid_time().is_current());
+        assert!(interval.transaction_time().is_current());
+    }
+
+    #[test]
+    fn test_with_valid_time_backdated_visibility() {
+        use crate::core::hlc::HybridTimestamp;
+
+        // Create interval: valid from Jan 1, recorded on Feb 1
+        let jan_1 = HybridTimestamp::new(1_704_067_200_000_000, 0).unwrap(); // 2024-01-01
+        let feb_1 = HybridTimestamp::new(1_706_745_600_000_000, 0).unwrap(); // 2024-02-01
+        let jan_15 = HybridTimestamp::new(1_705_276_800_000_000, 0).unwrap(); // 2024-01-15
+
+        let interval = BiTemporalInterval::with_valid_time(jan_1, feb_1);
+
+        // Visible at valid_time=Jan 15, tx_time=Feb 1 (after recording)
+        assert!(interval.is_visible_at(jan_15, feb_1));
+
+        // NOT visible at valid_time=Jan 15, tx_time=Jan 15 (before recording)
+        assert!(!interval.is_visible_at(jan_15, jan_15));
     }
 }

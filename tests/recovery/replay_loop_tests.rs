@@ -11,7 +11,7 @@ use gallifreydb::{
     core::{
         id::{EdgeId, NodeId, VersionId},
         property::PropertyMap,
-        temporal::{BiTemporalInterval, time},
+        temporal::time,
     },
     storage::{
         current::CurrentStorage,
@@ -81,7 +81,7 @@ fn test_recover_tracks_max_node_id() -> Result<()> {
             node_id: NodeId::new(id).unwrap(),
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -122,7 +122,7 @@ fn test_recover_tracks_max_edge_id() -> Result<()> {
             node_id: NodeId::new(id).unwrap(),
             label: GLOBAL_INTERNER.intern("Node").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -134,7 +134,7 @@ fn test_recover_tracks_max_edge_id() -> Result<()> {
             target: NodeId::new(2).unwrap(),
             label: GLOBAL_INTERNER.intern("CONNECTS").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -181,7 +181,7 @@ fn test_recover_tracks_max_version_id() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Append updates with various version IDs
@@ -191,7 +191,7 @@ fn test_recover_tracks_max_version_id() -> Result<()> {
             version_id: VersionId::new(version_id).unwrap(),
             label: GLOBAL_INTERNER.intern("Updated").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -236,7 +236,7 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Node").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update with version 100 (large jump)
@@ -245,7 +245,7 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
         version_id: VersionId::new(100).unwrap(),
         label: GLOBAL_INTERNER.intern("Updated").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update with version 50 (out of order - should still track max=100)
@@ -254,13 +254,13 @@ fn test_recover_handles_non_sequential_version_ids() -> Result<()> {
         version_id: VersionId::new(50).unwrap(),
         label: GLOBAL_INTERNER.intern("Another").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Delete creates tombstone (should get next version after max)
     wal.append(WalOperation::DeleteNode {
         node_id,
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.flush()?;
@@ -301,7 +301,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
         node_id,
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Create edge
@@ -311,7 +311,7 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
         target: NodeId::new(2).unwrap(),
         label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Update node
@@ -320,13 +320,13 @@ fn test_recover_with_multiple_operation_types() -> Result<()> {
         version_id: VersionId::new(2).unwrap(),
         label: GLOBAL_INTERNER.intern("Person").unwrap(),
         properties: PropertyMap::new(),
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     // Delete node
     wal.append(WalOperation::DeleteNode {
         node_id,
-        temporal: BiTemporalInterval::current(time::now()),
+        valid_from: time::now(),
     })?;
 
     wal.flush()?;
@@ -363,7 +363,7 @@ fn test_recover_from_checkpoint_lsn() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
     wal.flush()?;
@@ -426,7 +426,7 @@ fn test_recover_handles_checkpoint_marker() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 
@@ -442,7 +442,7 @@ fn test_recover_handles_checkpoint_marker() -> Result<()> {
             node_id: NodeId::new(i).unwrap(),
             label: GLOBAL_INTERNER.intern("Test").unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         })?;
     }
 

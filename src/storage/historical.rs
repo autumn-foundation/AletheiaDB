@@ -506,14 +506,26 @@ impl HistoricalStorage {
     /// This will automatically determine whether to create an anchor or delta
     /// based on the version chain length.
     /// Returns an error if the version limit for this entity is exceeded (DoS protection).
+    #[allow(clippy::too_many_arguments)]
     pub fn add_node_version(
         &mut self,
         node_id: NodeId,
         version_id: VersionId,
-        temporal: BiTemporalInterval,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
         label: InternedString,
         properties: PropertyMap,
+        is_tombstone: bool,
     ) -> Result<()> {
+        // Construct bi-temporal interval from separate dimensions
+        let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+
+        // For tombstones, close the valid_time at valid_from to create an empty interval [valid_from, valid_from)
+        // This represents "entity is no longer valid starting from this point"
+        if is_tombstone {
+            temporal = temporal.close_valid_time(valid_from);
+        }
+
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
         if version_count >= self.retention_policy.max_versions_per_entity {
@@ -688,12 +700,23 @@ impl HistoricalStorage {
         &mut self,
         edge_id: EdgeId,
         version_id: VersionId,
-        temporal: BiTemporalInterval,
+        valid_from: Timestamp,
+        tx_time: Timestamp,
         label: InternedString,
         source: NodeId,
         target: NodeId,
         properties: PropertyMap,
+        is_tombstone: bool,
     ) -> Result<()> {
+        // Construct bi-temporal interval from separate dimensions
+        let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+
+        // For tombstones, close the valid_time at valid_from to create an empty interval [valid_from, valid_from)
+        // This represents "entity is no longer valid starting from this point"
+        if is_tombstone {
+            temporal = temporal.close_valid_time(valid_from);
+        }
+
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
         if version_count >= self.retention_policy.max_versions_per_entity {
@@ -2549,7 +2572,7 @@ mod tests {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::observer::{StorageEvent, StorageObserver};
     use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::{TIMESTAMP_MAX, TimeRange};
+    use crate::core::temporal::TIMESTAMP_MAX;
 
     #[test]
     fn test_create_first_version() {
@@ -2562,7 +2585,15 @@ mod tests {
         let props = PropertyMapBuilder::new().insert("name", "Alice").build();
 
         storage
-            .add_node_version(node_id, version_id, temporal, label, props)
+            .add_node_version(
+                node_id,
+                version_id,
+                temporal.valid_time().start(),
+                temporal.transaction_time().start(),
+                label,
+                props,
+                false, // not a tombstone
+            )
             .unwrap();
 
         // First version should be an anchor
@@ -2593,7 +2624,15 @@ mod tests {
                 .build();
 
             storage
-                .add_node_version(node_id, version_id, temporal, label, props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
 
             version_ids.push(version_id);
@@ -2636,12 +2675,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("name", "Alice")
                     .insert("age", 30i64)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2651,12 +2692,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("name", "Alice")
                     .insert("age", 31i64)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2682,12 +2725,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(0.into(), 1000.into()).unwrap(),
-                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
-                ),
+                0.into(),
+                0.into(),
                 label,
                 PropertyMapBuilder::new().insert("age", 30i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2695,12 +2737,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::new(
-                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
-                ),
+                1000.into(),
+                0.into(),
                 label,
                 PropertyMapBuilder::new().insert("age", 31i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2708,12 +2749,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v3,
-                BiTemporalInterval::new(
-                    TimeRange::new(2000.into(), TIMESTAMP_MAX).unwrap(),
-                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
-                ),
+                2000.into(),
+                0.into(),
                 label,
                 PropertyMapBuilder::new().insert("age", 32i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2749,9 +2789,11 @@ mod tests {
                 .add_node_version(
                     node_id,
                     VersionId::new(i).unwrap(),
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -2760,9 +2802,11 @@ mod tests {
         let result = storage.add_node_version(
             node_id,
             VersionId::new(3).unwrap(),
-            BiTemporalInterval::current(1300.into()),
+            1300.into(),
+            1300.into(),
             label,
             PropertyMapBuilder::new().build(),
+            false, // not a tombstone
         );
 
         assert!(result.is_err());
@@ -2799,11 +2843,13 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     VersionId::new(i).unwrap(),
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     source,
                     target,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -2812,11 +2858,13 @@ mod tests {
         let result = storage.add_edge_version(
             edge_id,
             VersionId::new(2).unwrap(),
-            BiTemporalInterval::current(1200.into()),
+            1200.into(),
+            1200.into(),
             label,
             source,
             target,
             PropertyMapBuilder::new().build(),
+            false, // not a tombstone
         );
 
         assert!(result.is_err());
@@ -2849,9 +2897,11 @@ mod tests {
                 .add_node_version(
                     NodeId::new(1).unwrap(),
                     VersionId::new(i).unwrap(),
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -2900,7 +2950,15 @@ mod tests {
             .build();
 
         storage
-            .add_node_version(node_id, version_id, temporal, label, props)
+            .add_node_version(
+                node_id,
+                version_id,
+                temporal.valid_time().start(),
+                temporal.transaction_time().start(),
+                label,
+                props,
+                false, // not a tombstone
+            )
             .unwrap();
 
         // First version should be an anchor
@@ -2929,12 +2987,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "Doc")
                     .insert_vector("embedding", &embedding_v1)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2945,12 +3005,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "Doc")
                     .insert_vector("embedding", &embedding_v2)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2986,12 +3048,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "Same Title")
                     .insert_vector("embedding", &embedding_v1)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3002,12 +3066,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "Same Title") // Unchanged
                     .insert_vector("embedding", &embedding_v2) // Changed
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3043,12 +3109,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "V1 Title")
                     .insert_vector("embedding", &embedding)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3058,12 +3126,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("title", "V2 Title")
                     .insert_vector("embedding", &embedding) // Unchanged
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3110,11 +3180,13 @@ mod tests {
                 .add_node_version(
                     node_id,
                     VersionId::new(i as u64).unwrap(),
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert_vector("embedding", emb)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -3170,7 +3242,17 @@ mod tests {
             .build();
 
         storage
-            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .add_edge_version(
+                edge_id,
+                version_id,
+                temporal.valid_time().start(),
+                temporal.transaction_time().start(),
+                label,
+                source,
+                target,
+                props,
+                false, // not a tombstone
+            )
             .unwrap();
 
         // Verify edge version
@@ -3205,7 +3287,8 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 source,
                 target,
@@ -3213,6 +3296,7 @@ mod tests {
                     .insert("weight", 0.5f64)
                     .insert_vector("embedding", &embedding_v1)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3223,7 +3307,8 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v2,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 source,
                 target,
@@ -3231,6 +3316,7 @@ mod tests {
                     .insert("weight", 0.9f64)
                     .insert_vector("embedding", &embedding_v2)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3264,11 +3350,13 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &embedding)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3297,19 +3385,18 @@ mod tests {
             (1000, TIMESTAMP_MAX.wallclock(), vec![0.3f32, 0.0]), // valid 1000+
         ];
 
-        for (i, (start, end, emb)) in embeddings.iter().enumerate() {
+        for (i, (start, _end, emb)) in embeddings.iter().enumerate() {
             storage
                 .add_node_version(
                     node_id,
                     VersionId::new(i as u64).unwrap(),
-                    BiTemporalInterval::new(
-                        TimeRange::new((*start).into(), (*end).into()).unwrap(),
-                        TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
-                    ),
+                    (*start).into(),
+                    0.into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert_vector("embedding", emb)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -3357,12 +3444,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("name", "empty")
                     .insert_vector("embedding", &empty_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3372,12 +3461,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("name", "updated")
                     .insert_vector("embedding", &empty_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3413,11 +3504,13 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &special_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3450,11 +3543,13 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &nan_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3464,11 +3559,13 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &nan_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3502,14 +3599,22 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
-        let temporal = BiTemporalInterval::current(1000.into());
+        let timestamp = 1000.into();
         let props = PropertyMapBuilder::new()
             .insert("name", "Alice")
             .insert("age", 30i64)
             .build();
 
         storage
-            .add_node_version(node_id, version_id, temporal, label, props.clone())
+            .add_node_version(
+                node_id,
+                version_id,
+                timestamp,
+                timestamp,
+                label,
+                props.clone(),
+                false, // not a tombstone
+            )
             .unwrap();
 
         // First read - cache miss, populates cache
@@ -3541,9 +3646,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new().insert("value", 1i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3552,9 +3659,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v2,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 PropertyMapBuilder::new().insert("value", 2i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3563,9 +3672,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v3,
-                BiTemporalInterval::current(3000.into()),
+                3000.into(),
+                3000.into(),
                 label,
                 PropertyMapBuilder::new().insert("value", 3i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3574,9 +3685,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v4,
-                BiTemporalInterval::current(4000.into()),
+                4000.into(),
+                4000.into(),
                 label,
                 PropertyMapBuilder::new().insert("value", 4i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3614,7 +3727,17 @@ mod tests {
         let props = PropertyMapBuilder::new().insert("since", 2020i64).build();
 
         storage
-            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .add_edge_version(
+                edge_id,
+                version_id,
+                temporal.valid_time().start(),
+                temporal.transaction_time().start(),
+                label,
+                source,
+                target,
+                props,
+                false, // not a tombstone
+            )
             .unwrap();
 
         // First read - cache miss
@@ -3646,7 +3769,7 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let edge_id = EdgeId::new(1).unwrap();
         let label = GLOBAL_INTERNER.intern("Test").unwrap();
-        let temporal = BiTemporalInterval::current(1000.into());
+        let timestamp = 1000.into();
 
         // Create 5 node versions
         for i in 0..5 {
@@ -3655,9 +3778,11 @@ mod tests {
                 .add_node_version(
                     node_id,
                     version_id,
-                    temporal,
+                    timestamp,
+                    timestamp,
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             // Reconstruct to populate cache
@@ -3671,11 +3796,13 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     version_id,
-                    temporal,
+                    timestamp,
+                    timestamp,
                     label,
                     node_id,
                     node_id,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             // Reconstruct to populate cache
@@ -3706,9 +3833,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 version_id,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 props,
+                false,
             )
             .unwrap();
 
@@ -3740,7 +3869,15 @@ mod tests {
         let props = PropertyMapBuilder::new().insert("name", "Bob").build();
 
         storage
-            .add_node_version(node_id, version_id, temporal, label, props)
+            .add_node_version(
+                node_id,
+                version_id,
+                temporal.valid_time().start(),
+                temporal.transaction_time().start(),
+                label,
+                props,
+                false, // not a tombstone
+            )
             .unwrap();
 
         let (vid, nid, lbl, data) = storage.extract_node_version_data(version_id).unwrap();
@@ -3769,7 +3906,17 @@ mod tests {
         let props = PropertyMapBuilder::new().insert("since", 2021i64).build();
 
         storage
-            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .add_edge_version(
+                edge_id,
+                version_id,
+                temporal.valid_time().start(),
+                temporal.transaction_time().start(),
+                label,
+                source,
+                target,
+                props,
+                false, // not a tombstone
+            )
             .unwrap();
 
         let (vid, eid, lbl, src, tgt, data) =
@@ -3870,9 +4017,11 @@ mod tests {
                 .add_node_version(
                     node_id,
                     VersionId::new(i).unwrap(),
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -3907,11 +4056,13 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     VersionId::new(i).unwrap(),
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     source,
                     target,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -3939,9 +4090,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3950,11 +4103,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 VersionId::new(2).unwrap(),
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 node_id,
                 node_id,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3980,9 +4135,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 version_id,
-                BiTemporalInterval::current(timestamp.into()),
+                timestamp.into(),
+                timestamp.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4032,9 +4189,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4068,9 +4227,11 @@ mod tests {
         let result = storage.add_node_version(
             node_id,
             VersionId::new(1).unwrap(),
-            BiTemporalInterval::current(1000.into()),
+            1000.into(),
+            1000.into(),
             label,
             PropertyMapBuilder::new().build(),
+            false, // not a tombstone
         );
 
         assert!(result.is_ok());
@@ -4109,9 +4270,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4137,9 +4300,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4169,9 +4334,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4206,9 +4373,11 @@ mod tests {
         let result = storage.add_node_version(
             node_id,
             VersionId::new(1).unwrap(),
-            BiTemporalInterval::current(1000.into()),
+            1000.into(),
+            1000.into(),
             label,
             PropertyMapBuilder::new().build(),
+            false, // not a tombstone
         );
 
         assert!(result.is_ok());
@@ -4251,9 +4420,11 @@ mod tests {
                 .add_node_version(
                     node_id,
                     VersionId::new(100 + i).unwrap(),
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4297,9 +4468,11 @@ mod tests {
             .add_node_version(
                 node1_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4308,11 +4481,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 VersionId::new(2).unwrap(),
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 node1_id,
                 node2_id,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4359,9 +4534,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v0,
-                BiTemporalInterval::current(0.into()),
+                0.into(),
+                0.into(),
                 label,
                 PropertyMapBuilder::new().insert("counter", 0i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4373,11 +4550,13 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    (i as i64 * 1000).into(),
+                    (i as i64 * 1000).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("counter", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4420,9 +4599,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v0,
-                BiTemporalInterval::current(0.into()),
+                0.into(),
+                0.into(),
                 label,
                 PropertyMapBuilder::new().insert("counter", 0i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4434,11 +4615,13 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    (i as i64 * 1000).into(),
+                    (i as i64 * 1000).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("counter", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4482,11 +4665,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v0,
-                BiTemporalInterval::current(0.into()),
+                0.into(),
+                0.into(),
                 label,
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 0.0f64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4498,11 +4683,13 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     vid,
-                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    (i as i64 * 1000).into(),
+                    (i as i64 * 1000).into(),
                     label,
                     source,
                     target,
                     PropertyMapBuilder::new().insert("weight", i as f64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4547,11 +4734,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v0,
-                BiTemporalInterval::current(0.into()),
+                0.into(),
+                0.into(),
                 label,
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 0.0f64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4563,11 +4752,13 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     vid,
-                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    (i as i64 * 1000).into(),
+                    (i as i64 * 1000).into(),
                     label,
                     source,
                     target,
                     PropertyMapBuilder::new().insert("weight", i as f64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4599,7 +4790,7 @@ mod tests {
         let node_id = NodeId::new(1).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("Person").unwrap();
-        let temporal = BiTemporalInterval::current(1000.into());
+        let timestamp = 1000.into();
         let props = PropertyMapBuilder::new()
             .insert("name", "Alice")
             .insert("age", 30i64)
@@ -4607,7 +4798,15 @@ mod tests {
 
         // Create the first version (which is always an anchor)
         storage
-            .add_node_version(node_id, version_id, temporal, label, props.clone())
+            .add_node_version(
+                node_id,
+                version_id,
+                timestamp,
+                timestamp,
+                label,
+                props.clone(),
+                false, // not a tombstone
+            )
             .unwrap();
 
         // Verify the version is an anchor
@@ -4645,7 +4844,7 @@ mod tests {
         let target = NodeId::new(200).unwrap();
         let version_id = VersionId::new(100).unwrap();
         let label = GLOBAL_INTERNER.intern("KNOWS").unwrap();
-        let temporal = BiTemporalInterval::current(1000.into());
+        let timestamp = 1000.into();
         let props = PropertyMapBuilder::new()
             .insert("since", 2020i64)
             .insert("weight", 0.8f64)
@@ -4656,11 +4855,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 version_id,
-                temporal,
+                timestamp,
+                timestamp,
                 label,
                 source,
                 target,
                 props.clone(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4707,7 +4908,15 @@ mod tests {
                 .build();
 
             storage
-                .add_node_version(node_id, version_id, temporal, label, props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
         }
 
@@ -4765,7 +4974,15 @@ mod tests {
                 .build();
 
             storage
-                .add_node_version(node_id, version_id, temporal, label, props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
         }
 
@@ -4831,7 +5048,15 @@ mod tests {
                 .build();
 
             storage
-                .add_node_version(node_id, version_id, temporal, label, props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
         }
 
@@ -4873,7 +5098,15 @@ mod tests {
             let props = PropertyMapBuilder::new().insert("value", i as i64).build();
 
             storage
-                .add_node_version(node_id, version_id, temporal, label, props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
         }
 
@@ -4959,7 +5192,15 @@ mod tests {
                 .build();
 
             storage
-                .add_node_version(node_id, version_id, temporal, label, props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
         }
 
@@ -5014,7 +5255,15 @@ mod tests {
             let props = PropertyMapBuilder::new().insert("value", i as i64).build();
 
             storage
-                .add_node_version(node_id, version_id, temporal, label, props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
         }
 
@@ -5081,7 +5330,15 @@ mod tests {
                 .build();
 
             storage
-                .add_node_version(node_id, version_id, temporal, label, props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
         }
 
@@ -5139,7 +5396,17 @@ mod tests {
                 .build();
 
             storage
-                .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+                .add_edge_version(
+                    edge_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    source,
+                    target,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
 
             version_ids.push(version_id);
@@ -5184,7 +5451,8 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v1,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 source,
                 target,
@@ -5192,6 +5460,7 @@ mod tests {
                     .insert("weight", 10i64)
                     .insert("since", "2020")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5201,7 +5470,8 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v2,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 source,
                 target,
@@ -5209,6 +5479,7 @@ mod tests {
                     .insert("weight", 20i64)
                     .insert("since", "2020")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5241,14 +5512,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v1,
-                BiTemporalInterval::new(
-                    TimeRange::new(0.into(), 1000.into()).unwrap(),
-                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
-                ),
+                0.into(),
+                0.into(),
                 label,
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 10i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5256,14 +5526,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v2,
-                BiTemporalInterval::new(
-                    TimeRange::new(1000.into(), 2000.into()).unwrap(),
-                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
-                ),
+                1000.into(),
+                0.into(),
                 label,
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 20i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5271,14 +5540,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v3,
-                BiTemporalInterval::new(
-                    TimeRange::new(2000.into(), TIMESTAMP_MAX).unwrap(),
-                    TimeRange::new(0.into(), TIMESTAMP_MAX).unwrap(),
-                ),
+                2000.into(),
+                0.into(),
                 label,
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 30i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5316,13 +5584,15 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     *vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     source,
                     target,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5354,7 +5624,17 @@ mod tests {
         let props = PropertyMapBuilder::new().insert("weight", 5i64).build();
 
         storage
-            .add_edge_version(edge_id, version_id, temporal, label, source, target, props)
+            .add_edge_version(
+                edge_id,
+                version_id,
+                temporal.valid_time().start(),
+                temporal.transaction_time().start(),
+                label,
+                source,
+                target,
+                props,
+                false, // not a tombstone
+            )
             .unwrap();
 
         // First version should always be an anchor
@@ -5394,11 +5674,13 @@ mod tests {
                 .add_node_version(
                     node_id,
                     node_vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     node_label,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             node_version_ids.push(node_vid);
@@ -5409,13 +5691,15 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     edge_vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     edge_label,
                     source,
                     target,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             edge_version_ids.push(edge_vid);
@@ -5505,11 +5789,13 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             version_ids.push(vid);
@@ -5531,11 +5817,13 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             version_ids.push(vid);
@@ -5566,9 +5854,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v0,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 0i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5582,11 +5872,13 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
 
@@ -5600,9 +5892,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v5,
-                BiTemporalInterval::current(1600.into()),
+                1600.into(),
+                1600.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 5i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5615,9 +5909,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v6,
-                BiTemporalInterval::current(1700.into()),
+                1700.into(),
+                1700.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 6i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5634,11 +5930,13 @@ mod tests {
                 .add_node_version(
                     node_id2,
                     vid,
-                    BiTemporalInterval::current((2000 + (i as i64) * 100).into()),
+                    (2000 + (i as i64) * 100).into(),
+                    (2000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5684,11 +5982,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v0,
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 from,
                 to,
                 PropertyMapBuilder::new().insert("version", 0i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5701,13 +6001,15 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     from,
                     to,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
 
@@ -5720,11 +6022,13 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v3,
-                BiTemporalInterval::current(1400.into()),
+                1400.into(),
+                1400.into(),
                 label,
                 from,
                 to,
                 PropertyMapBuilder::new().insert("version", 3i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5752,11 +6056,13 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5827,11 +6133,13 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
 
@@ -5849,9 +6157,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v9,
-                BiTemporalInterval::current(1900.into()),
+                1900.into(),
+                1900.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 9i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5866,9 +6176,11 @@ mod tests {
             .add_node_version(
                 node_id,
                 v10,
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 10i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5911,13 +6223,15 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     from,
                     to,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5947,13 +6261,15 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     vid,
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     from,
                     to,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5999,13 +6315,15 @@ mod tests {
             .add_node_version(
                 node_id,
                 v0,
-                BiTemporalInterval::current(0.into()),
+                0.into(),
+                0.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("counter", 0i64)
                     .insert("name", "test")
                     .insert("active", true)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6030,13 +6348,15 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    (i as i64 * 1000).into(),
+                    (i as i64 * 1000).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("counter", i as i64)
                         .insert("name", current_name.clone())
                         .insert("active", current_active)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6081,7 +6401,8 @@ mod tests {
             .add_edge_version(
                 edge_id,
                 v0,
-                BiTemporalInterval::current(0.into()),
+                0.into(),
+                0.into(),
                 label,
                 source,
                 target,
@@ -6089,6 +6410,7 @@ mod tests {
                     .insert("weight", 0.0f64)
                     .insert("type", "initial")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6106,7 +6428,8 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     vid,
-                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    (i as i64 * 1000).into(),
+                    (i as i64 * 1000).into(),
                     label,
                     source,
                     target,
@@ -6114,6 +6437,7 @@ mod tests {
                         .insert("weight", i as f64)
                         .insert("type", current_type.clone())
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6159,12 +6483,14 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    (i as i64 * 1000).into(),
+                    (i as i64 * 1000).into(),
                     label,
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .insert("sum", (i * (i + 1) / 2) as i64) // Cumulative sum for verification
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6210,13 +6536,15 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(0).unwrap(),
-                BiTemporalInterval::current(0.into()),
+                0.into(),
+                0.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("a", "value_a")
                     .insert("b", "value_b")
                     .insert("c", "value_c")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6225,12 +6553,14 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(1).unwrap(),
-                BiTemporalInterval::current(1000.into()),
+                1000.into(),
+                1000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("a", "value_a")
                     .insert("c", "new_value_c")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6239,13 +6569,15 @@ mod tests {
             .add_node_version(
                 node_id,
                 VersionId::new(2).unwrap(),
-                BiTemporalInterval::current(2000.into()),
+                2000.into(),
+                2000.into(),
                 label,
                 PropertyMapBuilder::new()
                     .insert("a", "value_a")
                     .insert("c", "new_value_c")
                     .insert("d", "value_d")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6291,9 +6623,11 @@ mod tests {
                 .add_node_version(
                     node_id,
                     vid,
-                    BiTemporalInterval::current((i as i64 * 1000).into()),
+                    (i as i64 * 1000).into(),
+                    (i as i64 * 1000).into(),
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6348,9 +6682,11 @@ mod tests {
                 .add_node_version(
                     node_id,
                     VersionId::new(i).unwrap(),
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6361,11 +6697,13 @@ mod tests {
                 .add_edge_version(
                     edge_id,
                     VersionId::new(100 + i).unwrap(),
-                    BiTemporalInterval::current((2000 + (i as i64) * 100).into()),
+                    (2000 + (i as i64) * 100).into(),
+                    (2000 + (i as i64) * 100).into(),
                     label,
                     node_id,
                     node_id,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6408,9 +6746,11 @@ mod tests {
                     .add_node_version(
                         node_id,
                         VersionId::new(node_idx * 100 + i).unwrap(),
-                        BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                        (1000 + (i as i64) * 100).into(),
+                        (1000 + (i as i64) * 100).into(),
                         label,
                         PropertyMapBuilder::new().insert("value", i as i64).build(),
+                        false, // not a tombstone
                     )
                     .unwrap();
             }
@@ -6425,11 +6765,13 @@ mod tests {
                     .add_edge_version(
                         edge_id,
                         VersionId::new(edge_idx * 1000 + i).unwrap(),
-                        BiTemporalInterval::current((2000 + (i as i64) * 100).into()),
+                        (2000 + (i as i64) * 100).into(),
+                        (2000 + (i as i64) * 100).into(),
                         label,
                         NodeId::new(1).unwrap(),
                         NodeId::new(2).unwrap(),
                         PropertyMapBuilder::new().insert("value", i as i64).build(),
+                        false, // not a tombstone
                     )
                     .unwrap();
             }
@@ -6469,9 +6811,11 @@ mod tests {
                 .add_node_version(
                     node_id,
                     VersionId::new(i).unwrap(),
-                    BiTemporalInterval::current((1000 + (i as i64) * 100).into()),
+                    (1000 + (i as i64) * 100).into(),
+                    (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6533,7 +6877,15 @@ mod tests {
                 .build();
 
             storage
-                .add_node_version(node_id, version_id, temporal, label, props)
+                .add_node_version(
+                    node_id,
+                    version_id,
+                    temporal.valid_time().start(),
+                    temporal.transaction_time().start(),
+                    label,
+                    props,
+                    false, // not a tombstone
+                )
                 .unwrap();
         }
 
@@ -6592,13 +6944,16 @@ mod tests {
         // Add 10 consecutive versions
         for i in 0..10 {
             let version_id = VersionId::new(100 + i).unwrap();
-            let temporal = BiTemporalInterval::current((1000 + (i as i64) * 100).into());
+            let timestamp = (1000 + (i as i64) * 100).into();
             let props = PropertyMapBuilder::new()
                 .insert("strength", i as i64)
                 .build();
 
             storage
-                .add_edge_version(edge_id, version_id, temporal, label, from, to, props)
+                .add_edge_version(
+                    edge_id, version_id, timestamp, timestamp, label, from, to, props,
+                    false, // not a tombstone
+                )
                 .unwrap();
         }
 

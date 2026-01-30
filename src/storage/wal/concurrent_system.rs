@@ -703,7 +703,7 @@ mod tests {
     use crate::GLOBAL_INTERNER;
     use crate::core::id::NodeId;
     use crate::core::property::PropertyMap;
-    use crate::core::temporal::{BiTemporalInterval, time};
+    use crate::core::temporal::time;
     use tempfile::tempdir;
 
     fn create_test_operation(id: u64) -> WalOperation {
@@ -711,7 +711,7 @@ mod tests {
             node_id: NodeId::new(id).unwrap(),
             label: GLOBAL_INTERNER.intern(format!("Node{}", id)).unwrap(),
             properties: PropertyMap::new(),
-            temporal: BiTemporalInterval::current(time::now()),
+            valid_from: time::now(),
         }
     }
 

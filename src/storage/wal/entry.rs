@@ -4,7 +4,7 @@ use crate::core::{
     id::{EdgeId, NodeId, VersionId},
     interning::InternedString,
     property::PropertyMap,
-    temporal::{BiTemporalInterval, Timestamp, time},
+    temporal::{Timestamp, time},
 };
 
 /// Log Sequence Number - monotonically increasing identifier for WAL entries
@@ -34,8 +34,8 @@ pub enum WalOperation {
         label: InternedString,
         /// The node properties
         properties: PropertyMap,
-        /// The bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When the node became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
     /// Create a new edge
     CreateEdge {
@@ -49,8 +49,8 @@ pub enum WalOperation {
         label: InternedString,
         /// The edge properties
         properties: PropertyMap,
-        /// The bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When the edge became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
     /// Update node (creates new version)
     UpdateNode {
@@ -62,8 +62,8 @@ pub enum WalOperation {
         label: InternedString,
         /// The new properties
         properties: PropertyMap,
-        /// The bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When this update became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
     /// Update edge (creates new version)
     UpdateEdge {
@@ -75,22 +75,22 @@ pub enum WalOperation {
         label: InternedString,
         /// The new properties
         properties: PropertyMap,
-        /// The bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When this update became valid in reality (user-controlled)
+        valid_from: Timestamp,
     },
     /// Delete a node
     DeleteNode {
         /// The node ID
         node_id: NodeId,
-        /// The bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When the deletion became valid (typically commit time)
+        valid_from: Timestamp,
     },
     /// Delete an edge
     DeleteEdge {
         /// The edge ID
         edge_id: EdgeId,
-        /// The bi-temporal interval
-        temporal: BiTemporalInterval,
+        /// When the deletion became valid (typically commit time)
+        valid_from: Timestamp,
     },
     /// Checkpoint marker - indicates a snapshot was taken
     Checkpoint {

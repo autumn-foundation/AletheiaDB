@@ -549,12 +549,120 @@ impl<S: QueryState> QueryBuilder<S> {
         self
     }
 
-    /// Set temporal context: query across a time range
+    /// Set temporal context: query as of a specific valid time only.
+    ///
+    /// Transaction time will resolve to "now" during query execution.
+    /// This enables querying "what was valid at time T" regardless of when it was recorded.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // "Who did Alice know on 2024-01-15?"
+    /// let results = db.query()
+    ///     .as_of_valid_time(jan_15)
+    ///     .start(alice_id)
+    ///     .traverse("KNOWS")
+    ///     .execute(&db)?;
+    /// ```
+    #[must_use]
+    pub fn as_of_valid_time(mut self, valid_time: Timestamp) -> Self {
+        let mut ctx = self.temporal_context.take().unwrap_or_default();
+        ctx.valid_time_as_of = Some(valid_time);
+        self.temporal_context = Some(ctx);
+        self
+    }
+
+    /// Set temporal context: query as of a specific transaction time only.
+    ///
+    /// Valid time will resolve to "now" during query execution.
+    /// This enables querying "what did we know at time T" regardless of when facts were valid.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // "What did we know about Alice on 2024-01-15?"
+    /// let results = db.query()
+    ///     .as_of_transaction_time(jan_15)
+    ///     .start(alice_id)
+    ///     .execute(&db)?;
+    /// ```
+    #[must_use]
+    pub fn as_of_transaction_time(mut self, transaction_time: Timestamp) -> Self {
+        let mut ctx = self.temporal_context.take().unwrap_or_default();
+        ctx.transaction_time_as_of = Some(transaction_time);
+        self.temporal_context = Some(ctx);
+        self
+    }
+
+    /// Set temporal context: query across a valid time range.
+    ///
+    /// Transaction time will resolve to "now" during query execution.
+    /// This enables querying "what was valid between time T1 and T2".
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Start of the valid time range (inclusive)
+    /// * `end` - End of the valid time range (inclusive)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // "Who did Alice know during Q1 2024?"
+    /// let results = db.query()
+    ///     .valid_time_between(jan_1, mar_31)
+    ///     .start(alice_id)
+    ///     .traverse("KNOWS")
+    ///     .execute(&db)?;
+    /// ```
+    #[must_use]
+    pub fn valid_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
+        let mut ctx = self.temporal_context.take().unwrap_or_default();
+        ctx.valid_time_between = Some(TimeRange::between(start, end).unwrap());
+        self.temporal_context = Some(ctx);
+        self
+    }
+
+    /// Set temporal context: query across a transaction time range.
+    ///
+    /// Valid time will resolve to "now" during query execution.
+    /// This enables querying "what we knew between time T1 and T2".
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - Start of the transaction time range (inclusive)
+    /// * `end` - End of the transaction time range (inclusive)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // "What did we learn about Alice during Q1 2024?"
+    /// let results = db.query()
+    ///     .transaction_time_between(jan_1, mar_31)
+    ///     .start(alice_id)
+    ///     .execute(&db)?;
+    /// ```
+    #[must_use]
+    pub fn transaction_time_between(mut self, start: Timestamp, end: Timestamp) -> Self {
+        let mut ctx = self.temporal_context.take().unwrap_or_default();
+        ctx.transaction_time_between = Some(TimeRange::between(start, end).unwrap());
+        self.temporal_context = Some(ctx);
+        self
+    }
+
+    /// Set temporal context: query across a valid time range.
+    ///
+    /// This is an alias for [`valid_time_between()`](Self::valid_time_between).
+    /// Transaction time will resolve to "now" during query execution.
+    ///
+    /// # Deprecated
+    ///
+    /// Prefer using [`valid_time_between()`](Self::valid_time_between) or
+    /// [`transaction_time_between()`](Self::transaction_time_between) for clarity.
     #[must_use]
     pub fn between(mut self, start: Timestamp, end: Timestamp) -> Self {
-        self.temporal_context = Some(TemporalContext::between(
-            TimeRange::between(start, end).unwrap(),
-        ));
+        let mut ctx = self.temporal_context.take().unwrap_or_default();
+        ctx.valid_time_between = Some(TimeRange::between(start, end).unwrap());
+        self.temporal_context = Some(ctx);
         self
     }
 
@@ -1030,7 +1138,14 @@ mod tests {
             .build();
 
         assert!(query.is_temporal());
-        assert!(query.temporal_context.as_ref().unwrap().as_of.is_some());
+        assert!(
+            query
+                .temporal_context
+                .as_ref()
+                .unwrap()
+                .as_of_tuple()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1041,7 +1156,14 @@ mod tests {
             .build();
 
         assert!(query.is_temporal());
-        assert!(query.temporal_context.as_ref().unwrap().between.is_some());
+        assert!(
+            query
+                .temporal_context
+                .as_ref()
+                .unwrap()
+                .valid_time_between
+                .is_some()
+        );
     }
 
     #[test]
@@ -1385,5 +1507,183 @@ mod tests {
             }
             _ => panic!("Expected VectorSearch operation"),
         }
+    }
+
+    // ==================== Phase 7: Independent Dimension Query Methods ====================
+
+    #[test]
+    fn test_as_of_valid_time_only() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let ts = HybridTimestamp::new(1000, 0).unwrap();
+        let query = QueryBuilder::new()
+            .as_of_valid_time(ts)
+            .start(test_node_id())
+            .build();
+
+        assert!(query.is_temporal());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert_eq!(ctx.valid_time_as_of, Some(ts));
+        assert_eq!(ctx.transaction_time_as_of, None); // Not set
+    }
+
+    #[test]
+    fn test_as_of_transaction_time_only() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let ts = HybridTimestamp::new(1000, 0).unwrap();
+        let query = QueryBuilder::new()
+            .as_of_transaction_time(ts)
+            .start(test_node_id())
+            .build();
+
+        assert!(query.is_temporal());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert_eq!(ctx.transaction_time_as_of, Some(ts));
+        assert_eq!(ctx.valid_time_as_of, None); // Not set
+    }
+
+    #[test]
+    fn test_valid_time_between_method() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let start = HybridTimestamp::new(1000, 0).unwrap();
+        let end = HybridTimestamp::new(2000, 0).unwrap();
+
+        let query = QueryBuilder::new()
+            .valid_time_between(start, end)
+            .start(test_node_id())
+            .build();
+
+        assert!(query.is_temporal());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.valid_time_between.is_some());
+        assert!(ctx.transaction_time_between.is_none());
+
+        let range = ctx.valid_time_between.as_ref().unwrap();
+        assert_eq!(range.start(), start);
+        assert_eq!(range.end(), end);
+    }
+
+    #[test]
+    fn test_transaction_time_between_method() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let start = HybridTimestamp::new(1000, 0).unwrap();
+        let end = HybridTimestamp::new(2000, 0).unwrap();
+
+        let query = QueryBuilder::new()
+            .transaction_time_between(start, end)
+            .start(test_node_id())
+            .build();
+
+        assert!(query.is_temporal());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert!(ctx.transaction_time_between.is_some());
+        assert!(ctx.valid_time_between.is_none());
+
+        let range = ctx.transaction_time_between.as_ref().unwrap();
+        assert_eq!(range.start(), start);
+        assert_eq!(range.end(), end);
+    }
+
+    #[test]
+    fn test_combine_both_dimensions_with_as_of() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_ts = HybridTimestamp::new(1000, 0).unwrap();
+        let tx_ts = HybridTimestamp::new(2000, 0).unwrap();
+
+        // Using the combined as_of method (backward compatibility test)
+        let query = QueryBuilder::new()
+            .as_of(valid_ts, tx_ts)
+            .start(test_node_id())
+            .build();
+
+        assert!(query.is_temporal());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert_eq!(ctx.valid_time_as_of, Some(valid_ts));
+        assert_eq!(ctx.transaction_time_as_of, Some(tx_ts));
+    }
+
+    #[test]
+    fn test_combine_both_dimensions_independently() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_ts = HybridTimestamp::new(1000, 0).unwrap();
+        let tx_ts = HybridTimestamp::new(2000, 0).unwrap();
+
+        // Using separate methods should achieve same result
+        let query = QueryBuilder::new()
+            .as_of_valid_time(valid_ts)
+            .as_of_transaction_time(tx_ts)
+            .start(test_node_id())
+            .build();
+
+        assert!(query.is_temporal());
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert_eq!(ctx.valid_time_as_of, Some(valid_ts));
+        assert_eq!(ctx.transaction_time_as_of, Some(tx_ts));
+    }
+
+    #[test]
+    fn test_temporal_methods_fluent_chaining() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let valid_ts = HybridTimestamp::new(1000, 0).unwrap();
+
+        // Should work with all query operations
+        let query = QueryBuilder::new()
+            .as_of_valid_time(valid_ts)
+            .start(test_node_id())
+            .traverse("KNOWS")
+            .filter(Predicate::eq("status", "active"))
+            .limit(10)
+            .build();
+
+        assert!(query.is_temporal());
+        assert_eq!(query.operation_count(), 4); // start + traverse + filter + limit
+    }
+
+    #[test]
+    fn test_temporal_method_overwrites_previous() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let ts1 = HybridTimestamp::new(1000, 0).unwrap();
+        let ts2 = HybridTimestamp::new(2000, 0).unwrap();
+
+        // Later call should overwrite earlier
+        let query = QueryBuilder::new()
+            .as_of_valid_time(ts1)
+            .as_of_valid_time(ts2) // This should overwrite ts1
+            .start(test_node_id())
+            .build();
+
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert_eq!(ctx.valid_time_as_of, Some(ts2)); // Should be ts2, not ts1
+    }
+
+    #[test]
+    fn test_mixed_range_and_point_queries() {
+        use crate::core::hlc::HybridTimestamp;
+
+        let point_ts = HybridTimestamp::new(1500, 0).unwrap();
+        let range_start = HybridTimestamp::new(1000, 0).unwrap();
+        let range_end = HybridTimestamp::new(2000, 0).unwrap();
+
+        // Valid time as point, transaction time as range
+        let query = QueryBuilder::new()
+            .as_of_valid_time(point_ts)
+            .transaction_time_between(range_start, range_end)
+            .start(test_node_id())
+            .build();
+
+        let ctx = query.temporal_context.as_ref().unwrap();
+        assert_eq!(ctx.valid_time_as_of, Some(point_ts));
+        assert!(ctx.transaction_time_between.is_some());
+
+        let tx_range = ctx.transaction_time_between.as_ref().unwrap();
+        assert_eq!(tx_range.start(), range_start);
+        assert_eq!(tx_range.end(), range_end);
     }
 }
