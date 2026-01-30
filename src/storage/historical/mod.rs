@@ -918,7 +918,7 @@ impl HistoricalStorage {
                     .map(|v| v.node_id.to_string())
                     .unwrap_or_else(|| format!("version {}", version_id));
                 return Err(TemporalError::MaxDepthExceeded {
-                    max_depth: self.max_reconstruction_depth,
+                    max_depth: MAX_RECONSTRUCTION_DEPTH,
                     entity_id,
                 }
                 .into());
@@ -1016,7 +1016,7 @@ impl HistoricalStorage {
                     .map(|v| v.edge_id.to_string())
                     .unwrap_or_else(|| format!("version {}", version_id));
                 return Err(TemporalError::MaxDepthExceeded {
-                    max_depth: self.max_reconstruction_depth,
+                    max_depth: MAX_RECONSTRUCTION_DEPTH,
                     entity_id,
                 }
                 .into());
