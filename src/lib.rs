@@ -97,7 +97,9 @@ pub use core::{
     Timestamp, VersionId,
 };
 
-pub use api::{ReadOps, ReadTransaction, TxId, TxState, WriteOps, WriteTransaction};
+pub use api::{
+    ReadOps, ReadTransaction, TxId, TxState, VectorIndexBuilder, WriteOps, WriteTransaction,
+};
 pub use db::GallifreyDB;
 pub use index::{
     AdjacencyIndex, CurrentIndexes, TemporalIndexes,
