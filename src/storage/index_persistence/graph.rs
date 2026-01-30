@@ -778,3 +778,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "graph_delta_tests.rs"]
+mod delta_tests;

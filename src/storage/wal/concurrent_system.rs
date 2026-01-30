@@ -756,17 +756,21 @@ mod tests {
         assert_eq!(wal.total_appends(), 10);
 
         // Explicit flush - ensure all entries are durable.
-        // We use a loop to wait for persistence because even with wal.flush(),
-        // the background thread might have stolen some entries and be in the process
-        // of flushing them (race condition).
+        // Note: The background flush thread may have already flushed some/all
+        // entries, so we check total_flushed() rather than the return stats.
+        // This makes the test deterministic regardless of timing.
+        wal.flush().unwrap();
+
+        // Wait for flush to complete (handle race with background thread)
         let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(5);
         while wal.total_flushed() < 10 {
-            if start.elapsed() > std::time::Duration::from_secs(5) {
-                break; // Let assertion fail with detailed error
+            // LCOV_EXCL_START
+            if start.elapsed() > timeout {
+                break;
             }
-            // Trigger flush to ensure any remaining buffered entries are processed
-            let _ = wal.flush();
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            // LCOV_EXCL_STOP
+            std::thread::sleep(Duration::from_millis(10));
         }
 
         assert_eq!(wal.total_flushed(), 10, "All 10 entries should be flushed");

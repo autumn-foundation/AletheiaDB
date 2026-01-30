@@ -41,7 +41,7 @@ pub(crate) fn spawn_background_persistence_thread(
     tracker: Arc<PersistenceTracker>,
     policies: PersistencePolicies,
     stopped_flag: Arc<AtomicBool>,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // Wrap entire thread in panic handler to prevent silent failures
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -74,7 +74,7 @@ pub(crate) fn spawn_background_persistence_thread(
                 let graph_seconds = tracker.seconds_since_graph_persist();
                 if (graph_mutations >= policies.graph.mutation_threshold as u64
                     || graph_seconds >= policies.graph.time_interval_secs as u64)
-                    && let Err(e) = persist_graph_index(&current, &manager, &tracker)
+                    && let Err(e) = persist_graph_index(&current, &manager, Some(&tracker))
                 {
                     eprintln!(
                         "Background persistence: Failed to persist graph index: {}",
@@ -138,5 +138,5 @@ pub(crate) fn spawn_background_persistence_thread(
                 eprintln!("You MUST restart the database to restore automatic persistence.");
             }
         }
-    });
+    })
 }
