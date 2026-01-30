@@ -8,7 +8,7 @@
 use gallifreydb::PropertyMapBuilder;
 use gallifreydb::core::GLOBAL_INTERNER;
 use gallifreydb::core::id::{NodeId, VersionId};
-use gallifreydb::core::temporal::{BiTemporalInterval, time};
+use gallifreydb::core::temporal::time;
 use gallifreydb::storage::historical::HistoricalStorage;
 use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
 use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
@@ -54,9 +54,11 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
         .add_node_version(
             node_id,
             v1_id,
-            BiTemporalInterval::current(time::now()),
+            time::now(),
+            time::now(),
             label,
             props_v1.clone(),
+            false, // not a tombstone
         )
         .unwrap();
 
@@ -70,9 +72,11 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
         .add_node_version(
             node_id,
             v2_id,
-            BiTemporalInterval::current(time::now()),
+            time::now(),
+            time::now(),
             label,
             props_v2.clone(),
+            false, // not a tombstone
         )
         .unwrap();
 
@@ -86,9 +90,11 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
         .add_node_version(
             node_id,
             v3_id,
-            BiTemporalInterval::current(time::now()),
+            time::now(),
+            time::now(),
             label,
             props_v3.clone(),
+            false, // not a tombstone
         )
         .unwrap();
 
@@ -102,9 +108,11 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
         .add_node_version(
             node_id,
             v4_id,
-            BiTemporalInterval::current(time::now()),
+            time::now(),
+            time::now(),
             label,
             props_v4.clone(),
+            false, // not a tombstone
         )
         .unwrap();
 
@@ -118,9 +126,11 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
         .add_node_version(
             node_id,
             v5_id,
-            BiTemporalInterval::current(time::now()),
+            time::now(),
+            time::now(),
             label,
             props_v5.clone(),
+            false, // not a tombstone
         )
         .unwrap();
 
@@ -221,9 +231,11 @@ fn test_reconstruct_properties_for_version_in_cold_storage() {
         .add_node_version(
             node_id,
             v1_id,
-            BiTemporalInterval::current(time::now()),
+            time::now(),
+            time::now(),
             label,
             props_v1.clone(),
+            false, // not a tombstone
         )
         .unwrap();
 
@@ -234,9 +246,11 @@ fn test_reconstruct_properties_for_version_in_cold_storage() {
         .add_node_version(
             node_id,
             v2_id,
-            BiTemporalInterval::current(time::now()),
+            time::now(),
+            time::now(),
             label,
             props_v2.clone(),
+            false, // not a tombstone
         )
         .unwrap();
 
