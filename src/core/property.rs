@@ -3464,7 +3464,10 @@ mod tests {
     fn test_from_iter_duplicate_keys() {
         // Test that FromIterator handles duplicate keys correctly with size tracking
         let items = vec![
-            (GLOBAL_INTERNER.intern("key").unwrap(), PropertyValue::Int(1)),
+            (
+                GLOBAL_INTERNER.intern("key").unwrap(),
+                PropertyValue::Int(1),
+            ),
             (
                 GLOBAL_INTERNER.intern("key").unwrap(),
                 PropertyValue::Int(2),
