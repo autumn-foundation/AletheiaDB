@@ -881,10 +881,13 @@ impl WriteTransaction {
             commit_timestamp,
             label,
             properties,
+            false, // not a tombstone
         )?;
 
         // Index in temporal indexes with bi-temporal interval
+        // Use the same temporal interval logic as historical storage (no tombstone closing for regular writes)
         let temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
+        // Note: For regular creates/updates, is_tombstone=false, so no closing needed
         self.temporal_indexes
             .insert_node_version(node_id, version_id, temporal)?;
 
@@ -977,6 +980,7 @@ impl WriteTransaction {
             source,
             target,
             properties,
+            false, // not a tombstone
         )?;
 
         // Index in temporal indexes with bi-temporal interval
@@ -1015,6 +1019,7 @@ impl WriteTransaction {
         // Add tombstone version to historical storage
         // Tombstones use the provided valid_from (when deletion became valid)
         // and commit_timestamp (when deletion was recorded)
+        // The is_tombstone=true flag closes the valid_time immediately
         historical.add_node_version(
             node_id,
             tombstone_id,
@@ -1022,10 +1027,14 @@ impl WriteTransaction {
             commit_timestamp,
             node.label,
             node.properties.clone(),
+            true, // is_tombstone
         )?;
 
         // Index the tombstone version
-        let tombstone_temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
+        // CRITICAL: Tombstones must have closed valid_time intervals
+        let mut tombstone_temporal =
+            BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
+        tombstone_temporal = tombstone_temporal.close_valid_time(commit_timestamp);
         self.temporal_indexes
             .insert_node_version(node_id, tombstone_id, tombstone_temporal)?;
 
@@ -1063,6 +1072,7 @@ impl WriteTransaction {
         // Add tombstone version to historical storage
         // Tombstones use the provided valid_from (when deletion became valid)
         // and commit_timestamp (when deletion was recorded)
+        // The is_tombstone=true flag closes the valid_time immediately
         historical.add_edge_version(
             edge_id,
             tombstone_id,
@@ -1072,10 +1082,14 @@ impl WriteTransaction {
             edge.source,
             edge.target,
             edge.properties.clone(),
+            true, // is_tombstone
         )?;
 
         // Create bi-temporal interval for tombstone (valid_from user-controlled, tx_time = commit)
-        let tombstone_temporal = BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
+        // CRITICAL: Tombstones must have closed valid_time intervals
+        let mut tombstone_temporal =
+            BiTemporalInterval::with_valid_time(valid_from, commit_timestamp);
+        tombstone_temporal = tombstone_temporal.close_valid_time(commit_timestamp);
 
         // Index the tombstone version
         self.temporal_indexes

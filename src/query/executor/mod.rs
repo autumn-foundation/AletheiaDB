@@ -390,6 +390,7 @@ mod tests {
                 now,
                 alice_label,
                 alice_props,
+                false, // not a tombstone
             )
             .unwrap();
             hist.add_node_version(
@@ -399,6 +400,7 @@ mod tests {
                 now,
                 bob_label,
                 bob_props,
+                false, // not a tombstone
             )
             .unwrap();
         }

@@ -17,6 +17,7 @@ use std::time::Instant;
 #[test]
 fn test_version_lookup_correctness_many_versions() {
     use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
+    use gallifreydb::storage::index_persistence::PersistenceConfig;
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -24,8 +25,15 @@ fn test_version_lookup_correctness_many_versions() {
         .expect("Failed to set max versions")
         .build();
 
+    // Disable persistence to avoid stale index data
+    let persistence_config = PersistenceConfig {
+        enabled: false,
+        ..Default::default()
+    };
+
     let config = GallifreyDBConfigBuilder::new()
         .historical(historical_config)
+        .persistence(persistence_config)
         .build();
 
     let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
@@ -68,14 +76,16 @@ fn test_version_lookup_correctness_many_versions() {
 
     // Test: Query at the beginning of each version interval
     for (expected_version_idx, &timestamp) in version_timestamps.iter().enumerate() {
-        let query_time = Timestamp::from(timestamp.wallclock() + 1i64); // Just after version start
+        // Query at valid_time + 1, but use a tx_time far enough in the future to see the version
+        let query_valid_time = Timestamp::from(timestamp.wallclock() + 1i64);
+        let query_tx_time = Timestamp::from(timestamp.wallclock() + 1000i64); // 1ms in future
 
         let version_id = hist_guard
-            .find_node_version_at_time(node_id, query_time, query_time)
+            .find_node_version_at_time(node_id, query_valid_time, query_tx_time)
             .unwrap_or_else(|| {
                 panic!(
-                    "Should find version at timestamp {} (expected version index {})",
-                    query_time, expected_version_idx
+                    "Should find version at timestamp (valid={}, tx={}) (expected version index {})",
+                    query_valid_time, query_tx_time, expected_version_idx
                 )
             });
 
@@ -90,8 +100,9 @@ fn test_version_lookup_correctness_many_versions() {
 
         assert!(
             version_number.is_some(),
-            "Version property should exist for version at timestamp {}",
-            query_time
+            "Version property should exist for version at timestamp (valid={}, tx={})",
+            query_valid_time,
+            query_tx_time
         );
 
         // Note: The version number might not match expected_version_idx exactly
@@ -219,7 +230,20 @@ fn test_version_lookup_performance_scaling() {
 /// Test edge version lookup with many versions.
 #[test]
 fn test_edge_version_lookup_correctness_many_versions() {
-    let db = GallifreyDB::new().expect("Failed to create database");
+    use gallifreydb::config::GallifreyDBConfigBuilder;
+    use gallifreydb::storage::index_persistence::PersistenceConfig;
+
+    // Disable persistence to avoid stale index data
+    let persistence_config = PersistenceConfig {
+        enabled: false,
+        ..Default::default()
+    };
+
+    let config = GallifreyDBConfigBuilder::new()
+        .persistence(persistence_config)
+        .build();
+
+    let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
 
     // Create source and target nodes
     let source = db
@@ -269,11 +293,19 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
     // Test a few representative timestamps
     for &idx in &[0, NUM_VERSIONS / 4, NUM_VERSIONS / 2, NUM_VERSIONS - 1] {
-        let query_time = version_timestamps[idx];
+        let valid_timestamp = version_timestamps[idx];
+        // Query with tx_time far enough in future to see the version
+        let query_valid_time = valid_timestamp;
+        let query_tx_time = Timestamp::from(valid_timestamp.wallclock() + 1000i64);
 
         let version_id = hist_guard
-            .find_edge_version_at_time(edge_id, query_time, query_time)
-            .unwrap_or_else(|| panic!("Should find edge version at timestamp {}", query_time));
+            .find_edge_version_at_time(edge_id, query_valid_time, query_tx_time)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Should find edge version at timestamp (valid={}, tx={})",
+                    query_valid_time, query_tx_time
+                )
+            });
 
         let props = hist_guard
             .reconstruct_edge_properties(version_id)
@@ -284,8 +316,9 @@ fn test_edge_version_lookup_correctness_many_versions() {
             .and_then(|v: &gallifreydb::core::property::PropertyValue| v.as_int());
         assert!(
             weight.is_some(),
-            "Weight property should exist at timestamp {}",
-            query_time
+            "Weight property should exist at timestamp (valid={}, tx={})",
+            query_valid_time,
+            query_tx_time
         );
     }
 

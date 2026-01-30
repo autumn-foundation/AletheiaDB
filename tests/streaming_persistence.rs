@@ -176,6 +176,7 @@ fn test_streaming_with_temporal_versions() {
                     timestamp,
                     label,
                     updated_props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }

@@ -1129,6 +1129,7 @@ impl CheckpointManager {
                         commit_timestamp,
                         interned_label,
                         properties,
+                        false, // not a tombstone
                     )?;
 
                     max_version_id = max_version_id.max(next_version_id - 1);
@@ -1172,6 +1173,7 @@ impl CheckpointManager {
                         source,
                         target,
                         properties,
+                        false, // not a tombstone
                     )?;
 
                     max_version_id = max_version_id.max(next_version_id - 1);
@@ -1217,6 +1219,7 @@ impl CheckpointManager {
                         commit_timestamp,
                         interned_label,
                         properties,
+                        false, // not a tombstone
                     )?;
                 }
                 WalOperation::UpdateEdge {
@@ -1266,6 +1269,7 @@ impl CheckpointManager {
                         current_edge.source,
                         current_edge.target,
                         properties,
+                        false, // not a tombstone
                     )?;
                 }
                 WalOperation::DeleteNode {
@@ -1286,6 +1290,7 @@ impl CheckpointManager {
                     next_version_id += 1;
 
                     // Tombstones use commit_timestamp for both valid_from and tx_time
+                    // The is_tombstone=true flag closes the valid_time immediately
                     historical.add_node_version(
                         node_id,
                         tombstone_version_id,
@@ -1293,6 +1298,7 @@ impl CheckpointManager {
                         commit_timestamp,
                         node.label,
                         node.properties.clone(),
+                        true, // is_tombstone
                     )?;
 
                     current.delete_node_direct(node_id, commit_timestamp)?;
@@ -1316,6 +1322,7 @@ impl CheckpointManager {
                     next_version_id += 1;
 
                     // Tombstones use commit_timestamp for both valid_from and tx_time
+                    // The is_tombstone=true flag closes the valid_time immediately
                     historical.add_edge_version(
                         edge_id,
                         tombstone_version_id,
@@ -1325,6 +1332,7 @@ impl CheckpointManager {
                         edge.source,
                         edge.target,
                         edge.properties.clone(),
+                        true, // is_tombstone
                     )?;
 
                     current.delete_edge_direct(edge_id)?;
@@ -2407,6 +2415,7 @@ mod tests {
                 now,
                 label,
                 anchor_props,
+                false, // not a tombstone
             )?;
 
             let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
@@ -2494,6 +2503,7 @@ mod tests {
                 NodeId::new(1)?,
                 NodeId::new(2)?,
                 PropertyMapBuilder::new().insert("strength", 5i64).build(),
+                false, // not a tombstone
             )?;
 
             let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
@@ -2621,6 +2631,7 @@ mod tests {
                 now, // tx_time
                 label,
                 PropertyMapBuilder::new().insert("deleted", true).build(),
+                false, // not a tombstone
             )?;
 
             let stats = manager.create_checkpoint(LSN(0), &current, &historical)?;
@@ -2864,6 +2875,7 @@ mod tests {
                 now,
                 label,
                 PropertyMapBuilder::new().insert("v", 100i64).build(),
+                false, // not a tombstone
             )?;
 
             manager.create_checkpoint(LSN(0), &current, &historical)?;

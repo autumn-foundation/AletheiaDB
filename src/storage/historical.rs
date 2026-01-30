@@ -506,6 +506,7 @@ impl HistoricalStorage {
     /// This will automatically determine whether to create an anchor or delta
     /// based on the version chain length.
     /// Returns an error if the version limit for this entity is exceeded (DoS protection).
+    #[allow(clippy::too_many_arguments)]
     pub fn add_node_version(
         &mut self,
         node_id: NodeId,
@@ -514,9 +515,16 @@ impl HistoricalStorage {
         tx_time: Timestamp,
         label: InternedString,
         properties: PropertyMap,
+        is_tombstone: bool,
     ) -> Result<()> {
         // Construct bi-temporal interval from separate dimensions
-        let temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+        let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+
+        // For tombstones, close the valid_time immediately to create an empty interval
+        // This marks that the entity is not valid at any point after deletion
+        if is_tombstone {
+            temporal = temporal.close_valid_time(tx_time);
+        }
 
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.node_version_counts.get(&node_id).copied().unwrap_or(0);
@@ -698,9 +706,16 @@ impl HistoricalStorage {
         source: NodeId,
         target: NodeId,
         properties: PropertyMap,
+        is_tombstone: bool,
     ) -> Result<()> {
         // Construct bi-temporal interval from separate dimensions
-        let temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+        let mut temporal = BiTemporalInterval::with_valid_time(valid_from, tx_time);
+
+        // For tombstones, close the valid_time immediately to create an empty interval
+        // This marks that the entity is not valid at any point after deletion
+        if is_tombstone {
+            temporal = temporal.close_valid_time(tx_time);
+        }
 
         // Check capacity limit using cached count (O(1) operation, DoS protection)
         let version_count = self.edge_version_counts.get(&edge_id).copied().unwrap_or(0);
@@ -2530,6 +2545,7 @@ mod tests {
                 temporal.transaction_time().start(),
                 label,
                 props,
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2568,6 +2584,7 @@ mod tests {
                     temporal.transaction_time().start(),
                     label,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
 
@@ -2618,6 +2635,7 @@ mod tests {
                     .insert("name", "Alice")
                     .insert("age", 30i64)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2634,6 +2652,7 @@ mod tests {
                     .insert("name", "Alice")
                     .insert("age", 31i64)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2663,6 +2682,7 @@ mod tests {
                 0.into(),
                 label,
                 PropertyMapBuilder::new().insert("age", 30i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2674,6 +2694,7 @@ mod tests {
                 0.into(),
                 label,
                 PropertyMapBuilder::new().insert("age", 31i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2685,6 +2706,7 @@ mod tests {
                 0.into(),
                 label,
                 PropertyMapBuilder::new().insert("age", 32i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2724,6 +2746,7 @@ mod tests {
                     (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -2736,6 +2759,7 @@ mod tests {
             1300.into(),
             label,
             PropertyMapBuilder::new().build(),
+            false, // not a tombstone
         );
 
         assert!(result.is_err());
@@ -2778,6 +2802,7 @@ mod tests {
                     source,
                     target,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -2792,6 +2817,7 @@ mod tests {
             source,
             target,
             PropertyMapBuilder::new().build(),
+            false, // not a tombstone
         );
 
         assert!(result.is_err());
@@ -2828,6 +2854,7 @@ mod tests {
                     (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -2883,6 +2910,7 @@ mod tests {
                 temporal.transaction_time().start(),
                 label,
                 props,
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2919,6 +2947,7 @@ mod tests {
                     .insert("title", "Doc")
                     .insert_vector("embedding", &embedding_v1)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2936,6 +2965,7 @@ mod tests {
                     .insert("title", "Doc")
                     .insert_vector("embedding", &embedding_v2)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2978,6 +3008,7 @@ mod tests {
                     .insert("title", "Same Title")
                     .insert_vector("embedding", &embedding_v1)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2995,6 +3026,7 @@ mod tests {
                     .insert("title", "Same Title") // Unchanged
                     .insert_vector("embedding", &embedding_v2) // Changed
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3037,6 +3069,7 @@ mod tests {
                     .insert("title", "V1 Title")
                     .insert_vector("embedding", &embedding)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3053,6 +3086,7 @@ mod tests {
                     .insert("title", "V2 Title")
                     .insert_vector("embedding", &embedding) // Unchanged
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3105,6 +3139,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert_vector("embedding", emb)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -3169,6 +3204,7 @@ mod tests {
                 source,
                 target,
                 props,
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3213,6 +3249,7 @@ mod tests {
                     .insert("weight", 0.5f64)
                     .insert_vector("embedding", &embedding_v1)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3232,6 +3269,7 @@ mod tests {
                     .insert("weight", 0.9f64)
                     .insert_vector("embedding", &embedding_v2)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3271,6 +3309,7 @@ mod tests {
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &embedding)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3310,6 +3349,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert_vector("embedding", emb)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -3364,6 +3404,7 @@ mod tests {
                     .insert("name", "empty")
                     .insert_vector("embedding", &empty_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3380,6 +3421,7 @@ mod tests {
                     .insert("name", "updated")
                     .insert_vector("embedding", &empty_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3421,6 +3463,7 @@ mod tests {
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &special_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3459,6 +3502,7 @@ mod tests {
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &nan_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3474,6 +3518,7 @@ mod tests {
                 PropertyMapBuilder::new()
                     .insert_vector("embedding", &nan_vec)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3521,6 +3566,7 @@ mod tests {
                 timestamp,
                 label,
                 props.clone(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3557,6 +3603,7 @@ mod tests {
                 1000.into(),
                 label,
                 PropertyMapBuilder::new().insert("value", 1i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3569,6 +3616,7 @@ mod tests {
                 2000.into(),
                 label,
                 PropertyMapBuilder::new().insert("value", 2i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3581,6 +3629,7 @@ mod tests {
                 3000.into(),
                 label,
                 PropertyMapBuilder::new().insert("value", 3i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3593,6 +3642,7 @@ mod tests {
                 4000.into(),
                 label,
                 PropertyMapBuilder::new().insert("value", 4i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3639,6 +3689,7 @@ mod tests {
                 source,
                 target,
                 props,
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3684,6 +3735,7 @@ mod tests {
                     timestamp,
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             // Reconstruct to populate cache
@@ -3703,6 +3755,7 @@ mod tests {
                     node_id,
                     node_id,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             // Reconstruct to populate cache
@@ -3730,7 +3783,15 @@ mod tests {
             .build();
 
         storage
-            .add_node_version(node_id, version_id, 1000.into(), 1000.into(), label, props)
+            .add_node_version(
+                node_id,
+                version_id,
+                1000.into(),
+                1000.into(),
+                label,
+                props,
+                false,
+            )
             .unwrap();
 
         // First read
@@ -3768,6 +3829,7 @@ mod tests {
                 temporal.transaction_time().start(),
                 label,
                 props,
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3806,6 +3868,7 @@ mod tests {
                 source,
                 target,
                 props,
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3911,6 +3974,7 @@ mod tests {
                     (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -3951,6 +4015,7 @@ mod tests {
                     source,
                     target,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -3982,6 +4047,7 @@ mod tests {
                 1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -3996,6 +4062,7 @@ mod tests {
                 node_id,
                 node_id,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4025,6 +4092,7 @@ mod tests {
                 timestamp.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4078,6 +4146,7 @@ mod tests {
                 1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4115,6 +4184,7 @@ mod tests {
             1000.into(),
             label,
             PropertyMapBuilder::new().build(),
+            false, // not a tombstone
         );
 
         assert!(result.is_ok());
@@ -4157,6 +4227,7 @@ mod tests {
                 1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4186,6 +4257,7 @@ mod tests {
                 1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4219,6 +4291,7 @@ mod tests {
                 1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4257,6 +4330,7 @@ mod tests {
             1000.into(),
             label,
             PropertyMapBuilder::new().build(),
+            false, // not a tombstone
         );
 
         assert!(result.is_ok());
@@ -4303,6 +4377,7 @@ mod tests {
                     (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4350,6 +4425,7 @@ mod tests {
                 1000.into(),
                 label,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4364,6 +4440,7 @@ mod tests {
                 node1_id,
                 node2_id,
                 PropertyMapBuilder::new().build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4414,6 +4491,7 @@ mod tests {
                 0.into(),
                 label,
                 PropertyMapBuilder::new().insert("counter", 0i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4431,6 +4509,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("counter", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4477,6 +4556,7 @@ mod tests {
                 0.into(),
                 label,
                 PropertyMapBuilder::new().insert("counter", 0i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4494,6 +4574,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("counter", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4543,6 +4624,7 @@ mod tests {
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 0.0f64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4560,6 +4642,7 @@ mod tests {
                     source,
                     target,
                     PropertyMapBuilder::new().insert("weight", i as f64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4610,6 +4693,7 @@ mod tests {
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 0.0f64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4627,6 +4711,7 @@ mod tests {
                     source,
                     target,
                     PropertyMapBuilder::new().insert("weight", i as f64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4673,6 +4758,7 @@ mod tests {
                 timestamp,
                 label,
                 props.clone(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4728,6 +4814,7 @@ mod tests {
                 source,
                 target,
                 props.clone(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -4781,6 +4868,7 @@ mod tests {
                     temporal.transaction_time().start(),
                     label,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4846,6 +4934,7 @@ mod tests {
                     temporal.transaction_time().start(),
                     label,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4919,6 +5008,7 @@ mod tests {
                     temporal.transaction_time().start(),
                     label,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -4968,6 +5058,7 @@ mod tests {
                     temporal.transaction_time().start(),
                     label,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5061,6 +5152,7 @@ mod tests {
                     temporal.transaction_time().start(),
                     label,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5123,6 +5215,7 @@ mod tests {
                     temporal.transaction_time().start(),
                     label,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5197,6 +5290,7 @@ mod tests {
                     temporal.transaction_time().start(),
                     label,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5264,6 +5358,7 @@ mod tests {
                     source,
                     target,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
 
@@ -5318,6 +5413,7 @@ mod tests {
                     .insert("weight", 10i64)
                     .insert("since", "2020")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5336,6 +5432,7 @@ mod tests {
                     .insert("weight", 20i64)
                     .insert("since", "2020")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5374,6 +5471,7 @@ mod tests {
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 10i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5387,6 +5485,7 @@ mod tests {
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 20i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5400,6 +5499,7 @@ mod tests {
                 source,
                 target,
                 PropertyMapBuilder::new().insert("weight", 30i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5445,6 +5545,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5485,6 +5586,7 @@ mod tests {
                 source,
                 target,
                 props,
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5531,6 +5633,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             node_version_ids.push(node_vid);
@@ -5549,6 +5652,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             edge_version_ids.push(edge_vid);
@@ -5644,6 +5748,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             version_ids.push(vid);
@@ -5671,6 +5776,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
             version_ids.push(vid);
@@ -5705,6 +5811,7 @@ mod tests {
                 1000.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 0i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5724,6 +5831,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
 
@@ -5741,6 +5849,7 @@ mod tests {
                 1600.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 5i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5757,6 +5866,7 @@ mod tests {
                 1700.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 6i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5779,6 +5889,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5830,6 +5941,7 @@ mod tests {
                 from,
                 to,
                 PropertyMapBuilder::new().insert("version", 0i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5850,6 +5962,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
 
@@ -5868,6 +5981,7 @@ mod tests {
                 from,
                 to,
                 PropertyMapBuilder::new().insert("version", 3i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -5901,6 +6015,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -5977,6 +6092,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
 
@@ -5998,6 +6114,7 @@ mod tests {
                 1900.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 9i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6016,6 +6133,7 @@ mod tests {
                 2000.into(),
                 label,
                 PropertyMapBuilder::new().insert("version", 10i64).build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6066,6 +6184,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6103,6 +6222,7 @@ mod tests {
                     PropertyMapBuilder::new()
                         .insert("version", i as i64)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6156,6 +6276,7 @@ mod tests {
                     .insert("name", "test")
                     .insert("active", true)
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6188,6 +6309,7 @@ mod tests {
                         .insert("name", current_name.clone())
                         .insert("active", current_active)
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6241,6 +6363,7 @@ mod tests {
                     .insert("weight", 0.0f64)
                     .insert("type", "initial")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6267,6 +6390,7 @@ mod tests {
                         .insert("weight", i as f64)
                         .insert("type", current_type.clone())
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6319,6 +6443,7 @@ mod tests {
                         .insert("version", i as i64)
                         .insert("sum", (i * (i + 1) / 2) as i64) // Cumulative sum for verification
                         .build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6372,6 +6497,7 @@ mod tests {
                     .insert("b", "value_b")
                     .insert("c", "value_c")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6387,6 +6513,7 @@ mod tests {
                     .insert("a", "value_a")
                     .insert("c", "new_value_c")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6403,6 +6530,7 @@ mod tests {
                     .insert("c", "new_value_c")
                     .insert("d", "value_d")
                     .build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -6452,6 +6580,7 @@ mod tests {
                     (i as i64 * 1000).into(),
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6510,6 +6639,7 @@ mod tests {
                     (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6526,6 +6656,7 @@ mod tests {
                     node_id,
                     node_id,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6572,6 +6703,7 @@ mod tests {
                         (1000 + (i as i64) * 100).into(),
                         label,
                         PropertyMapBuilder::new().insert("value", i as i64).build(),
+                        false, // not a tombstone
                     )
                     .unwrap();
             }
@@ -6592,6 +6724,7 @@ mod tests {
                         NodeId::new(1).unwrap(),
                         NodeId::new(2).unwrap(),
                         PropertyMapBuilder::new().insert("value", i as i64).build(),
+                        false, // not a tombstone
                     )
                     .unwrap();
             }
@@ -6635,6 +6768,7 @@ mod tests {
                     (1000 + (i as i64) * 100).into(),
                     label,
                     PropertyMapBuilder::new().insert("value", i as i64).build(),
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6703,6 +6837,7 @@ mod tests {
                     temporal.transaction_time().start(),
                     label,
                     props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }
@@ -6770,6 +6905,7 @@ mod tests {
             storage
                 .add_edge_version(
                     edge_id, version_id, timestamp, timestamp, label, from, to, props,
+                    false, // not a tombstone
                 )
                 .unwrap();
         }

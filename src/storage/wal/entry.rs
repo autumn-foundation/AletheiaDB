@@ -4,7 +4,7 @@ use crate::core::{
     id::{EdgeId, NodeId, VersionId},
     interning::InternedString,
     property::PropertyMap,
-    temporal::{BiTemporalInterval, Timestamp, time},
+    temporal::{Timestamp, time},
 };
 
 /// Log Sequence Number - monotonically increasing identifier for WAL entries

@@ -26,15 +26,15 @@ fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
 ///
 /// Variable sizes by operation:
 /// - `CreateNode`: 1 (op type) + 8 (node_id) + 4 (label len) + label bytes +
-///   properties size + 48 (BiTemporalInterval)
+///   properties size + 12 (Timestamp)
 /// - `CreateEdge`: 1 (op type) + 8 (edge_id) + 8 (source) + 8 (target) +
-///   4 (label len) + label bytes + properties size + 48 (BiTemporalInterval)
+///   4 (label len) + label bytes + properties size + 12 (Timestamp)
 /// - `UpdateNode`: 1 (op type) + 8 (node_id) + 8 (version_id) + 4 (label len) +
-///   label bytes + properties size + 48 (BiTemporalInterval)
+///   label bytes + properties size + 12 (Timestamp)
 /// - `UpdateEdge`: 1 (op type) + 8 (edge_id) + 8 (version_id) + 4 (label len) +
-///   label bytes + properties size + 48 (BiTemporalInterval)
-/// - `DeleteNode`: 1 (op type) + 8 (node_id) + 48 (BiTemporalInterval) = 57 bytes
-/// - `DeleteEdge`: 1 (op type) + 8 (edge_id) + 48 (BiTemporalInterval) = 57 bytes
+///   label bytes + properties size + 12 (Timestamp)
+/// - `DeleteNode`: 1 (op type) + 8 (node_id) + 12 (Timestamp) = 21 bytes
+/// - `DeleteEdge`: 1 (op type) + 8 (edge_id) + 12 (Timestamp) = 21 bytes
 /// - `Checkpoint`: 1 (op type) + 8 (lsn) + 12 (timestamp) = 21 bytes
 ///
 /// # Returns
@@ -50,37 +50,37 @@ fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
 pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
     // Fixed overhead: LSN (8) + Timestamp (12) + Checksum (4)
     const FIXED_OVERHEAD: usize = 24;
-    // BiTemporalInterval is always 48 bytes (2 * TimeRange, each 24 bytes)
-    const TEMPORAL_SIZE: usize = 48;
+    // Timestamp (HybridTimestamp) is always 12 bytes (wallclock + logical)
+    const TIMESTAMP_SIZE: usize = 12;
 
     let variable_size = match operation {
         WalOperation::CreateNode { properties, .. } => {
-            // op type (1) + node_id (8) + label (4-byte InternedString ID) + properties + temporal (48)
-            let base = 1 + 8 + 4 + TEMPORAL_SIZE;
+            // op type (1) + node_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+            let base = 1 + 8 + 4 + TIMESTAMP_SIZE;
             base + properties.serialized_size()
         }
         WalOperation::CreateEdge { properties, .. } => {
-            // op type (1) + edge_id (8) + source (8) + target (8) + label (4-byte InternedString ID) + properties + temporal (48)
-            let base = 1 + 8 + 8 + 8 + 4 + TEMPORAL_SIZE;
+            // op type (1) + edge_id (8) + source (8) + target (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+            let base = 1 + 8 + 8 + 8 + 4 + TIMESTAMP_SIZE;
             base + properties.serialized_size()
         }
         WalOperation::UpdateNode { properties, .. } => {
-            // op type (1) + node_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + temporal (48)
-            let base = 1 + 8 + 8 + 4 + TEMPORAL_SIZE;
+            // op type (1) + node_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+            let base = 1 + 8 + 8 + 4 + TIMESTAMP_SIZE;
             base + properties.serialized_size()
         }
         WalOperation::UpdateEdge { properties, .. } => {
-            // op type (1) + edge_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + temporal (48)
-            let base = 1 + 8 + 8 + 4 + TEMPORAL_SIZE;
+            // op type (1) + edge_id (8) + version_id (8) + label (4-byte InternedString ID) + properties + valid_from (12)
+            let base = 1 + 8 + 8 + 4 + TIMESTAMP_SIZE;
             base + properties.serialized_size()
         }
         WalOperation::DeleteNode { .. } => {
-            // op type (1) + node_id (8) + temporal (48)
-            1 + 8 + TEMPORAL_SIZE
+            // op type (1) + node_id (8) + valid_from (12)
+            1 + 8 + TIMESTAMP_SIZE
         }
         WalOperation::DeleteEdge { .. } => {
-            // op type (1) + edge_id (8) + temporal (48)
-            1 + 8 + TEMPORAL_SIZE
+            // op type (1) + edge_id (8) + valid_from (12)
+            1 + 8 + TIMESTAMP_SIZE
         }
         WalOperation::Checkpoint { .. } => {
             // op type (1) + lsn (8) + timestamp (12)
@@ -112,13 +112,13 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
             node_id,
             label,
             properties,
-            temporal,
+            valid_from,
         } => {
             buffer.push(1); // operation type
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
-            temporal.serialize_into(buffer);
+            valid_from.serialize_into(buffer);
         }
         WalOperation::CreateEdge {
             edge_id,
@@ -126,7 +126,7 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
             target,
             label,
             properties,
-            temporal,
+            valid_from,
         } => {
             buffer.push(2); // operation type
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
@@ -134,45 +134,51 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
             buffer.extend_from_slice(&target.as_u64().to_le_bytes());
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
-            temporal.serialize_into(buffer);
+            valid_from.serialize_into(buffer);
         }
         WalOperation::UpdateNode {
             node_id,
             version_id,
             label,
             properties,
-            temporal,
+            valid_from,
         } => {
             buffer.push(3); // operation type
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
-            temporal.serialize_into(buffer);
+            valid_from.serialize_into(buffer);
         }
         WalOperation::UpdateEdge {
             edge_id,
             version_id,
             label,
             properties,
-            temporal,
+            valid_from,
         } => {
             buffer.push(4); // operation type
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
             buffer.extend_from_slice(&version_id.as_u64().to_le_bytes());
             serialize_interned_string(*label, buffer);
             properties.serialize_into(buffer)?;
-            temporal.serialize_into(buffer);
+            valid_from.serialize_into(buffer);
         }
-        WalOperation::DeleteNode { node_id, temporal } => {
+        WalOperation::DeleteNode {
+            node_id,
+            valid_from,
+        } => {
             buffer.push(6); // operation type
             buffer.extend_from_slice(&node_id.as_u64().to_le_bytes());
-            temporal.serialize_into(buffer);
+            valid_from.serialize_into(buffer);
         }
-        WalOperation::DeleteEdge { edge_id, temporal } => {
+        WalOperation::DeleteEdge {
+            edge_id,
+            valid_from,
+        } => {
             buffer.push(7); // operation type
             buffer.extend_from_slice(&edge_id.as_u64().to_le_bytes());
-            temporal.serialize_into(buffer);
+            valid_from.serialize_into(buffer);
         }
         WalOperation::Checkpoint { lsn, timestamp } => {
             buffer.push(5); // operation type
@@ -201,15 +207,8 @@ mod tests {
     use crate::core::NodeId;
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
-    use crate::core::temporal::{BiTemporalInterval, Timestamp};
+    use crate::core::temporal::Timestamp;
     use crate::storage::wal::entry::LSN; // Imported only for tests
-
-    /// Helper to create a test temporal interval
-    fn test_temporal() -> BiTemporalInterval {
-        use crate::core::hlc::HybridTimestamp;
-        let timestamp = HybridTimestamp::new_unchecked(1000000, 0);
-        BiTemporalInterval::current(timestamp)
-    }
 
     /// Helper to create a test timestamp
     fn test_timestamp() -> Timestamp {
@@ -244,16 +243,16 @@ mod tests {
 
     #[test]
     fn test_estimate_capacity_delete_node() {
-        // DeleteNode: op type (1) + node_id (8) + temporal (48) = 57 bytes
+        // DeleteNode: op type (1) + node_id (8) + valid_from (12) = 21 bytes
         // Fixed overhead: 24 bytes
-        // Total: 81 bytes
+        // Total: 45 bytes
         let op = WalOperation::DeleteNode {
             node_id: NodeId::new(1).unwrap(),
-            temporal: test_temporal(),
+            valid_from: test_timestamp(),
         };
 
         let estimated = estimate_entry_capacity(&op);
-        assert_eq!(estimated, 81, "DeleteNode should be exactly 81 bytes");
+        assert_eq!(estimated, 45, "DeleteNode should be exactly 45 bytes");
 
         // Verify by actually serializing
         let entry = WalEntry::new(LSN(1), op);
@@ -269,16 +268,16 @@ mod tests {
 
     #[test]
     fn test_estimate_capacity_delete_edge() {
-        // DeleteEdge: op type (1) + edge_id (8) + temporal (48) = 57 bytes
+        // DeleteEdge: op type (1) + edge_id (8) + valid_from (12) = 21 bytes
         // Fixed overhead: 24 bytes
-        // Total: 81 bytes
+        // Total: 45 bytes
         let op = WalOperation::DeleteEdge {
             edge_id: EdgeId::new(1).unwrap(),
-            temporal: test_temporal(),
+            valid_from: test_timestamp(),
         };
 
         let estimated = estimate_entry_capacity(&op);
-        assert_eq!(estimated, 81, "DeleteEdge should be exactly 81 bytes");
+        assert_eq!(estimated, 45, "DeleteEdge should be exactly 45 bytes");
 
         // Verify by actually serializing
         let entry = WalEntry::new(LSN(1), op);
@@ -296,19 +295,19 @@ mod tests {
     fn test_estimate_capacity_create_node_empty_properties() {
         // CreateNode with empty properties:
         // Fixed: 24 bytes (LSN + Timestamp + Checksum)
-        // op type (1) + node_id (8) + label (4-byte InternedString) + properties (4 for empty count) + temporal (48)
-        // = 24 + 1 + 8 + 4 + 4 + 48 = 89 bytes
+        // op type (1) + node_id (8) + label (4-byte InternedString) + properties (4 for empty count) + valid_from (12)
+        // = 24 + 1 + 8 + 4 + 4 + 12 = 53 bytes
         let op = WalOperation::CreateNode {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("test").unwrap(),
             properties: PropertyMapBuilder::new().build(),
-            temporal: test_temporal(),
+            valid_from: test_timestamp(),
         };
 
         let estimated = estimate_entry_capacity(&op);
         assert_eq!(
-            estimated, 89,
-            "CreateNode with empty properties should be 89 bytes"
+            estimated, 53,
+            "CreateNode with empty properties should be 53 bytes"
         );
 
         // Verify by actually serializing
@@ -336,7 +335,7 @@ mod tests {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("Person").unwrap(),
             properties,
-            temporal: test_temporal(),
+            valid_from: test_timestamp(),
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -377,7 +376,7 @@ mod tests {
             target: NodeId::new(2).unwrap(),
             label: GLOBAL_INTERNER.intern("KNOWS").unwrap(),
             properties,
-            temporal: test_temporal(),
+            valid_from: test_timestamp(),
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -415,7 +414,7 @@ mod tests {
             node_id: NodeId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("Document").unwrap(),
             properties,
-            temporal: test_temporal(),
+            valid_from: test_timestamp(),
         };
 
         let estimated = estimate_entry_capacity(&op);
@@ -455,7 +454,7 @@ mod tests {
             version_id: crate::core::VersionId::new(1).unwrap(),
             label: GLOBAL_INTERNER.intern("LargeNode").unwrap(),
             properties,
-            temporal: test_temporal(),
+            valid_from: test_timestamp(),
         };
 
         let estimated = estimate_entry_capacity(&op);

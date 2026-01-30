@@ -57,6 +57,7 @@ fn bench_add_node_version_with_varying_anchor_intervals(c: &mut Criterion) {
 
                             black_box(storage.add_node_version(
                                 node_id, version_id, valid_from, tx_time, label, properties,
+                                false, // not a tombstone
                             ))
                             .unwrap();
                         }
@@ -109,6 +110,7 @@ fn bench_single_add_at_chain_positions(c: &mut Criterion) {
                             storage
                                 .add_node_version(
                                     node_id, version_id, valid_from, tx_time, label, properties,
+                                    false, // not a tombstone
                                 )
                                 .unwrap();
                         }
@@ -127,6 +129,7 @@ fn bench_single_add_at_chain_positions(c: &mut Criterion) {
 
                         black_box(storage.add_node_version(
                             node_id, version_id, valid_from, tx_time, label, properties,
+                            false, // not a tombstone
                         ))
                         .unwrap();
                     },
@@ -174,6 +177,7 @@ fn bench_bulk_insert_multiple_entities(c: &mut Criterion) {
 
                                 black_box(storage.add_node_version(
                                     node_id, version_id, valid_from, tx_time, label, properties,
+                                    false, // not a tombstone
                                 ))
                                 .unwrap();
                             }
@@ -227,6 +231,7 @@ fn bench_stats_with_varying_version_counts(c: &mut Criterion) {
                     storage
                         .add_node_version(
                             node_id, version_id, valid_from, tx_time, label, properties,
+                            false, // not a tombstone
                         )
                         .unwrap();
                 }
@@ -288,6 +293,7 @@ fn bench_delta_creation_with_caching(c: &mut Criterion) {
 
                             black_box(storage.add_node_version(
                                 node_id, version_id, valid_from, tx_time, label, properties,
+                                false, // not a tombstone
                             ))
                             .unwrap();
                         }
@@ -348,6 +354,7 @@ fn bench_interleaved_multi_entity_updates(c: &mut Criterion) {
 
                                 black_box(storage.add_node_version(
                                     node_id, version_id, valid_from, tx_time, label, properties,
+                                    false, // not a tombstone
                                 ))
                                 .unwrap();
                             }

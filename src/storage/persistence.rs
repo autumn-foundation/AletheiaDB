@@ -768,6 +768,7 @@ impl PersistenceManager {
             tx_time,
             interned_label,
             properties,
+            false, // not a tombstone
         )?;
 
         Ok(())
@@ -835,6 +836,7 @@ impl PersistenceManager {
             source,
             target,
             properties,
+            false, // not a tombstone
         )?;
 
         Ok(())
@@ -899,6 +901,7 @@ impl PersistenceManager {
             tx_time,
             interned_label,
             properties,
+            false, // not a tombstone
         )?;
 
         Ok(())
@@ -969,6 +972,7 @@ impl PersistenceManager {
             source,
             target,
             properties,
+            false, // not a tombstone
         )?;
 
         Ok(())
@@ -980,7 +984,7 @@ impl PersistenceManager {
         current: &CurrentStorage,
         historical: &mut HistoricalStorage,
         node_id: NodeId,
-        _valid_from: Timestamp,
+        valid_from: Timestamp,
         tx_time: Timestamp,
         next_version_id: &mut u64,
     ) -> Result<()> {
@@ -1001,14 +1005,18 @@ impl PersistenceManager {
         *next_version_id += 1;
 
         // Add tombstone version to historical storage with the node's label and properties
-        // Tombstones use commit_timestamp for both valid_from and tx_time
+        // CRITICAL: Tombstone uses valid_from (when deletion became valid in reality)
+        // and commit_timestamp (when deletion was recorded in database)
+        // This preserves true bi-temporal semantics for deletions
+        // The is_tombstone=true flag closes the valid_time immediately
         historical.add_node_version(
             node_id,
             tombstone_version_id,
-            commit_timestamp,
+            valid_from,
             commit_timestamp,
             node.label,
             node.properties.clone(),
+            true, // is_tombstone
         )?;
 
         // Delete from current storage
@@ -1023,7 +1031,7 @@ impl PersistenceManager {
         current: &CurrentStorage,
         historical: &mut HistoricalStorage,
         edge_id: EdgeId,
-        _valid_from: Timestamp,
+        valid_from: Timestamp,
         tx_time: Timestamp,
         next_version_id: &mut u64,
     ) -> Result<()> {
@@ -1044,16 +1052,20 @@ impl PersistenceManager {
         *next_version_id += 1;
 
         // Add tombstone version to historical storage with the edge's data
-        // Tombstones use commit_timestamp for both valid_from and tx_time
+        // CRITICAL: Tombstone uses valid_from (when deletion became valid in reality)
+        // and commit_timestamp (when deletion was recorded in database)
+        // This preserves true bi-temporal semantics for deletions
+        // The is_tombstone=true flag closes the valid_time immediately
         historical.add_edge_version(
             edge_id,
             tombstone_version_id,
-            commit_timestamp,
+            valid_from,
             commit_timestamp,
             edge.label,
             edge.source,
             edge.target,
             edge.properties.clone(),
+            true, // is_tombstone
         )?;
 
         // Delete from current storage

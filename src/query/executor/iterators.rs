@@ -2405,6 +2405,7 @@ mod tests {
                 now,
                 label,
                 props,
+                false, // not a tombstone
             )
             .unwrap();
         }
@@ -2455,8 +2456,10 @@ mod tests {
                 .insert("name", format!("Person{}", i).as_str())
                 .build();
 
-            hist.add_node_version(node_id, version_id, timestamp, timestamp, label, props)
-                .unwrap();
+            hist.add_node_version(
+                node_id, version_id, timestamp, timestamp, label, props, false,
+            )
+            .unwrap();
         }
         drop(hist);
 
@@ -2524,8 +2527,10 @@ mod tests {
 
         {
             let mut hist = historical.write();
-            hist.add_node_version(node_id, version_id, timestamp, timestamp, label, props)
-                .unwrap();
+            hist.add_node_version(
+                node_id, version_id, timestamp, timestamp, label, props, false,
+            )
+            .unwrap();
         }
 
         // Test the get_temporal_version helper method directly
@@ -2667,8 +2672,10 @@ mod tests {
 
         {
             let mut hist = historical.write();
-            hist.add_node_version(node_id, version_id, timestamp, timestamp, label, props)
-                .unwrap();
+            hist.add_node_version(
+                node_id, version_id, timestamp, timestamp, label, props, false,
+            )
+            .unwrap();
         }
 
         // Test filter_node orchestrator with matching label
@@ -2713,6 +2720,7 @@ mod tests {
                 timestamp,
                 person_label,
                 props,
+                false, // not a tombstone
             )
             .unwrap();
         }
@@ -2776,8 +2784,10 @@ mod tests {
                     .insert("name", format!("Person{}", i).as_str())
                     .build();
 
-                hist.add_node_version(node_id, version_id, timestamp, timestamp, label, props)
-                    .unwrap();
+                hist.add_node_version(
+                    node_id, version_id, timestamp, timestamp, label, props, false,
+                )
+                .unwrap();
             }
 
             // Add Company node
@@ -2789,6 +2799,7 @@ mod tests {
                 timestamp,
                 company_label,
                 PropertyMapBuilder::new().insert("name", "Acme").build(),
+                false, // not a tombstone
             )
             .unwrap();
         }
@@ -2837,6 +2848,7 @@ mod tests {
                 timestamp,
                 person_label,
                 PropertyMapBuilder::new().insert("name", "Alice").build(),
+                false, // not a tombstone
             )
             .unwrap();
 
@@ -2848,6 +2860,7 @@ mod tests {
                 timestamp,
                 company_label,
                 PropertyMapBuilder::new().insert("name", "Acme").build(),
+                false, // not a tombstone
             )
             .unwrap();
         }
