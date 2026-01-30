@@ -863,6 +863,12 @@ pub trait EntityVersion: TemporalVersion {
 
     /// Get a mutable reference to the version data.
     fn data_mut(&mut self) -> &mut VersionData;
+
+    /// Get a reference to the version data.
+    fn data(&self) -> &VersionData;
+
+    /// Get the entity ID as a string for error reporting.
+    fn entity_id_string(&self) -> String;
 }
 
 impl EntityVersion for NodeVersion {
@@ -893,6 +899,14 @@ impl EntityVersion for NodeVersion {
     fn data_mut(&mut self) -> &mut VersionData {
         &mut self.data
     }
+
+    fn data(&self) -> &VersionData {
+        &self.data
+    }
+
+    fn entity_id_string(&self) -> String {
+        self.node_id.to_string()
+    }
 }
 
 impl EntityVersion for EdgeVersion {
@@ -922,6 +936,14 @@ impl EntityVersion for EdgeVersion {
 
     fn data_mut(&mut self) -> &mut VersionData {
         &mut self.data
+    }
+
+    fn data(&self) -> &VersionData {
+        &self.data
+    }
+
+    fn entity_id_string(&self) -> String {
+        self.edge_id.to_string()
     }
 }
 
