@@ -29,13 +29,13 @@ use tracing;
 
 /// Configuration types and constants for historical storage.
 pub mod config;
-pub use config::{
-    DEFAULT_MAX_VERSIONS_PER_ENTITY, DEFAULT_MAX_VERSION_AGE_MS, MAX_RECONSTRUCTION_DEPTH,
-    PreAnchorHook, RetentionPolicy,
-};
 use config::{
     ANCHOR_CACHE_SIZE_RATIO, AnchorHookContext, DEFAULT_RECONSTRUCTION_CACHE_SIZE,
     MIN_ANCHOR_CACHE_SIZE,
+};
+pub use config::{
+    DEFAULT_MAX_VERSION_AGE_MS, DEFAULT_MAX_VERSIONS_PER_ENTITY, MAX_RECONSTRUCTION_DEPTH,
+    PreAnchorHook, RetentionPolicy,
 };
 
 /// Historical storage for versioned nodes and edges.
