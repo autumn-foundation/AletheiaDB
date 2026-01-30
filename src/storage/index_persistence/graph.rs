@@ -833,12 +833,11 @@ mod tests {
 
     #[test]
     fn test_load_oversized_graph_file() {
-        use std::io::Write;
         let dir = tempdir().unwrap();
         let path = dir.path().join("oversized.idx");
 
         // Create a file slightly larger than the test limit (10MB)
-        let mut file = std::fs::File::create(&path).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
         // Use seek to create a sparse file quickly without writing 10MB of zeros
         file.set_len(MAX_GRAPH_FILE_SIZE + 10).unwrap();
 

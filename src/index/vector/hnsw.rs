@@ -1973,7 +1973,6 @@ mod tests {
 
     #[test]
     fn test_load_oversized_mapping_file() {
-        use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_index.usearch");
         let mappings_path = path.with_extension("usearch.mappings");
