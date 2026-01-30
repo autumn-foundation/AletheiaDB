@@ -1200,6 +1200,10 @@ impl From<SparseVec> for PropertyValue {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyMap {
     inner: Arc<HashMap<PropertyKey, PropertyValue>>,
+    /// Cached serialized size in bytes.
+    /// This allows O(1) access to the size without iterating the map,
+    /// which is critical for performance in the WAL write path.
+    cached_size: usize,
 }
 
 impl PropertyMap {
@@ -1207,6 +1211,7 @@ impl PropertyMap {
     pub fn new() -> Self {
         PropertyMap {
             inner: Arc::new(HashMap::new()),
+            cached_size: 4, // 4 bytes for count field
         }
     }
 
@@ -1214,6 +1219,7 @@ impl PropertyMap {
     pub fn with_capacity(capacity: usize) -> Self {
         PropertyMap {
             inner: Arc::new(HashMap::with_capacity(capacity)),
+            cached_size: 4, // 4 bytes for count field
         }
     }
 
@@ -1422,6 +1428,7 @@ impl PropertyMap {
         Ok((
             PropertyMap {
                 inner: Arc::new(map),
+                cached_size: offset, // offset is exactly the consumed bytes
             },
             offset,
         ))
@@ -1455,21 +1462,14 @@ impl PropertyMap {
     ///
     /// This is used to pre-allocate buffers for serialization, avoiding reallocation
     /// overhead during high-throughput operations.
+    ///
+    /// # Performance Optimization (Issue #Bolt-22)
+    ///
+    /// This returns a pre-calculated cached size (O(1)), avoiding map iteration.
+    /// The size is updated incrementally during construction via `PropertyMapBuilder`.
+    #[inline]
     pub fn serialized_size(&self) -> usize {
-        if self.is_empty() {
-            return 4; // Count field
-        }
-
-        let mut size = 4; // Count field
-        for (key, value) in self.inner.iter() {
-            // Key: length prefix (4) + key bytes
-            // Use with_str to avoid Arc cloning overhead (Issue #405)
-            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256); // Conservative fallback if key missing (corruption)
-
-            size += 4 + key_len;
-            size += value.serialized_size();
-        }
-        size
+        self.cached_size
     }
 }
 
@@ -1481,8 +1481,17 @@ impl Default for PropertyMap {
 
 impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
     fn from_iter<I: IntoIterator<Item = (PropertyKey, PropertyValue)>>(iter: I) -> Self {
+        let map: HashMap<PropertyKey, PropertyValue> = iter.into_iter().collect();
+        // We have to iterate to calculate size since we collected into HashMap directly
+        let mut size = 4; // Count field
+        for (key, value) in map.iter() {
+            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
+            size += 4 + key_len + value.serialized_size();
+        }
+
         PropertyMap {
-            inner: Arc::new(iter.into_iter().collect()),
+            inner: Arc::new(map),
+            cached_size: size,
         }
     }
 }
@@ -1490,6 +1499,7 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
 /// Builder for creating or modifying property maps with copy-on-write semantics.
 pub struct PropertyMapBuilder {
     map: HashMap<PropertyKey, PropertyValue>,
+    current_size: usize,
 }
 
 impl PropertyMapBuilder {
@@ -1497,6 +1507,7 @@ impl PropertyMapBuilder {
     pub fn new() -> Self {
         PropertyMapBuilder {
             map: HashMap::new(),
+            current_size: 4, // 4 bytes for count field
         }
     }
 
@@ -1505,8 +1516,9 @@ impl PropertyMapBuilder {
     /// This will clone the underlying HashMap if the Arc has multiple references,
     /// implementing copy-on-write semantics.
     pub fn from_map(prop_map: PropertyMap) -> Self {
+        let current_size = prop_map.cached_size;
         let map = Arc::try_unwrap(prop_map.inner).unwrap_or_else(|arc| (*arc).clone());
-        PropertyMapBuilder { map }
+        PropertyMapBuilder { map, current_size }
     }
 
     /// Insert a property.
@@ -1517,7 +1529,21 @@ impl PropertyMapBuilder {
         let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
             return self;
         };
-        self.map.insert(interned_key, value.into());
+
+        let value = value.into();
+        let val_size = value.serialized_size();
+        let key_len = key.len(); // Fast length check from &str
+
+        if let Some(old_val) = self.map.insert(interned_key, value) {
+            // Key existed, subtract old value size, add new value size.
+            // Key size remains unchanged.
+            self.current_size -= old_val.serialized_size();
+            self.current_size += val_size;
+        } else {
+            // New entry: add key prefix(4) + key len + value size
+            self.current_size += 4 + key_len + val_size;
+        }
+
         self
     }
 
@@ -1526,7 +1552,16 @@ impl PropertyMapBuilder {
     /// This is more efficient than `insert()` when you already have a PropertyKey.
     /// For internal use and performance-critical paths.
     pub fn insert_by_key(mut self, key: PropertyKey, value: PropertyValue) -> Self {
-        self.map.insert(key, value);
+        let val_size = value.serialized_size();
+
+        if let Some(old_val) = self.map.insert(key, value) {
+            self.current_size -= old_val.serialized_size();
+            self.current_size += val_size;
+        } else {
+            // New entry - need to lookup key length
+            let key_len = GLOBAL_INTERNER.with_str(key, |s| s.len()).unwrap_or(256);
+            self.current_size += 4 + key_len + val_size;
+        }
         self
     }
 
@@ -1571,7 +1606,10 @@ impl PropertyMapBuilder {
     /// This is more efficient than `remove()` when you already have an InternedString.
     /// For internal use and performance-critical paths.
     pub fn remove_by_key(mut self, key: &PropertyKey) -> Self {
-        self.map.remove(key);
+        if let Some(old_val) = self.map.remove(key) {
+            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
+            self.current_size -= 4 + key_len + old_val.serialized_size();
+        }
         self
     }
 
@@ -1579,6 +1617,7 @@ impl PropertyMapBuilder {
     pub fn build(self) -> PropertyMap {
         PropertyMap {
             inner: Arc::new(self.map),
+            cached_size: self.current_size,
         }
     }
 }
@@ -2686,6 +2725,7 @@ mod tests {
         inner_map.insert(invalid_key, PropertyValue::Int(42));
         let map = PropertyMap {
             inner: Arc::new(inner_map),
+            cached_size: 100, // Dummy value
         };
 
         // Serialization should return an error, not panic
@@ -2719,6 +2759,7 @@ mod tests {
         inner_map.insert(invalid_key, PropertyValue::Bool(true));
         let map = PropertyMap {
             inner: Arc::new(inner_map),
+            cached_size: 100, // Dummy value
         };
 
         let mut buffer = Vec::new();
