@@ -651,7 +651,11 @@ impl VectorIndex for ShardedVectorIndex {
 
     fn add_batch_ref(&self, items: &[(NodeId, &[f32])]) -> Result<()> {
         // Group item indices by shard first
-        let mut shard_indices: Vec<Vec<usize>> = vec![Vec::new(); self.shards.len()];
+        // Pre-allocate to avoid resizing: assume uniform distribution
+        let capacity = items.len() / self.shards.len() + 1;
+        let mut shard_indices: Vec<Vec<usize>> = (0..self.shards.len())
+            .map(|_| Vec::with_capacity(capacity))
+            .collect();
 
         for (idx, (id, _)) in items.iter().enumerate() {
             let shard_idx = self.shard_for_id(*id);
@@ -674,7 +678,11 @@ impl VectorIndex for ShardedVectorIndex {
 
     fn remove_batch(&self, ids: &[NodeId]) -> Result<()> {
         // Group IDs by shard
-        let mut shard_ids: Vec<Vec<NodeId>> = vec![Vec::new(); self.shards.len()];
+        // Pre-allocate to avoid resizing: assume uniform distribution
+        let capacity = ids.len() / self.shards.len() + 1;
+        let mut shard_ids: Vec<Vec<NodeId>> = (0..self.shards.len())
+            .map(|_| Vec::with_capacity(capacity))
+            .collect();
 
         for id in ids {
             let shard_idx = self.shard_for_id(*id);
