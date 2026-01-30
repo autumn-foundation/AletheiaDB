@@ -1389,6 +1389,8 @@ impl PropertyMap {
         let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
         let mut offset = 4;
         let mut map = HashMap::with_capacity(count);
+        // Track the actual logical size of the map to validate against consumed bytes
+        let mut calculated_size: usize = 4;
 
         for _ in 0..count {
             // Read key length
@@ -1419,15 +1421,47 @@ impl PropertyMap {
 
             // Read value
             let (value, consumed) = PropertyValue::deserialize(&bytes[offset..])?;
+
+            // Validate size consistency
+            let key_size = 4 + key_len;
+            calculated_size = calculated_size
+                .saturating_add(key_size)
+                .saturating_add(value.serialized_size());
+
             offset += consumed;
 
-            map.insert(key, value);
+            if map.insert(key, value).is_some() {
+                // If we encounter a duplicate key, the map's logical size shrinks (replacement),
+                // but the input stream 'offset' keeps growing. This mismatch indicates
+                // a non-canonical or corrupted stream (standard serialization implies unique keys).
+                //
+                // We enforce strict validation: offset (consumed bytes) must match
+                // the logical size of the constructed map.
+                return Err(StorageError::CorruptedData(format!(
+                    "Duplicate property key found during deserialization: '{}'. \
+                     This indicates corrupted data or invalid serialization format.",
+                    key_str
+                ))
+                .into());
+            }
+        }
+
+        // Final validation: The bytes consumed must match the logical size of the map.
+        // If they differ, it implies hidden data, duplicates (caught above), or
+        // inconsistent size calculations.
+        if offset != calculated_size {
+            return Err(StorageError::CorruptedData(format!(
+                "PropertyMap deserialization size mismatch: consumed {} bytes but logical size is {}. \
+                 Data corruption suspected.",
+                offset, calculated_size
+            ))
+            .into());
         }
 
         Ok((
             PropertyMap {
                 inner: Arc::new(map),
-                cached_size: offset, // offset is exactly the consumed bytes/size
+                cached_size: calculated_size,
             },
             offset,
         ))
@@ -3424,5 +3458,55 @@ mod tests {
         let serialized = map.serialize().unwrap();
         assert_eq!(map.serialized_size(), serialized.len());
         assert_eq!(map.cached_size, serialized.len());
+    }
+
+    #[test]
+    fn test_from_iter_duplicate_keys() {
+        // Test that FromIterator handles duplicate keys correctly with size tracking
+        let items = vec![
+            (GLOBAL_INTERNER.intern("key").unwrap(), PropertyValue::Int(1)),
+            (
+                GLOBAL_INTERNER.intern("key").unwrap(),
+                PropertyValue::Int(2),
+            ), // duplicate!
+        ];
+        let map: PropertyMap = items.into_iter().collect();
+
+        // Logical result: {"key": 2}
+        // Size: 4 (count) + 4 (len) + 3 ("key") + 9 (Int) = 20
+
+        let serialized = map.serialize().unwrap();
+        assert_eq!(map.cached_size, serialized.len());
+        assert_eq!(map.len(), 1); // Should only have one entry
+        assert_eq!(map.get("key").and_then(|v| v.as_int()), Some(2));
+    }
+
+    #[test]
+    fn test_deserialize_duplicate_keys_errors() {
+        // Construct a buffer with duplicate keys manually
+        // [count: 2][key: "a"][val: 1][key: "a"][val: 2]
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&2u32.to_le_bytes()); // Count: 2
+
+        // Entry 1: "a" -> 1
+        let key = "a";
+        buffer.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(key.as_bytes());
+        PropertyValue::Int(1).serialize_into(&mut buffer);
+
+        // Entry 2: "a" -> 2 (Duplicate!)
+        buffer.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(key.as_bytes());
+        PropertyValue::Int(2).serialize_into(&mut buffer);
+
+        // Deserialization should fail
+        let result = PropertyMap::deserialize(&buffer);
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(msg.contains("Duplicate property key"));
+            }
+            _ => panic!("Expected CorruptedData error"),
+        }
     }
 }

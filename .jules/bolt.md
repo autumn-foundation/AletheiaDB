@@ -5,7 +5,3 @@
 ## 2026-06-15 - WAL Serialization Optimization
 **Learning:** `PropertyMap::serialized_size()` was O(N) with expensive interner lookups, called per-entry in WAL append for buffer reservation.
 **Action:** Cached serialization size in `PropertyMap` during construction (O(1) access), moving cost to mutation time (incremental updates) and eliminating N lookups during WAL append.
-
-## 2026-06-21 - [PropertyMap size caching]
-**Learning:** `PropertyMap::serialized_size()` was O(N) with expensive interner lookups, called on hot path `WAL::estimate_entry_capacity`. Cached the size in the struct to make it O(1).
-**Action:** Always check complexity of methods called in hot loops or allocation paths. If immutable/copy-on-write, cache expensive properties.
