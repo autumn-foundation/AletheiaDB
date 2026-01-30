@@ -1201,7 +1201,23 @@ impl From<SparseVec> for PropertyValue {
 pub struct PropertyMap {
     inner: Arc<HashMap<PropertyKey, PropertyValue>>,
     /// Cached serialized size in bytes.
-    /// Calculated at creation time to allow O(1) size access for WAL reservation.
+    ///
+    /// # Invariants
+    ///
+    /// This field must strictly equal the result of `serialized_size()` if calculated
+    /// from scratch. It is calculated at creation time and maintained incrementally
+    /// by `PropertyMapBuilder` to allow O(1) access for WAL reservation.
+    ///
+    /// # Copy-on-Write Safety
+    ///
+    /// `PropertyMap` implements copy-on-write semantics. This struct is immutable once
+    /// created. Any modification (via `PropertyMapBuilder`) creates a *new* instance
+    /// with a new `cached_size`.
+    ///
+    /// While `inner` is wrapped in an `Arc` for cheap cloning, `cached_size` is
+    /// copied by value. This is safe because the underlying `HashMap` is never
+    /// mutated in place through shared references. The only way to "modify" a map
+    /// is to create a new one, which calculates its own fresh `cached_size`.
     cached_size: usize,
 }
 
@@ -1609,7 +1625,13 @@ impl PropertyMapBuilder {
             // We must look up the string length since we only have the ID.
             // This is a tradeoff: we pay lookup cost for new keys, but
             // avoid it for updates and for subsequent serialization size checks.
-            let key_len = GLOBAL_INTERNER.with_str(key, |s| s.len()).unwrap_or(256);
+            let key_len = GLOBAL_INTERNER.with_str(key, |s| s.len()).unwrap_or_else(|| {
+                // This should be unreachable if the PropertyKey is valid (which it should be).
+                // In debug builds, we panic to catch this state corruption.
+                // In release, we fallback to a safe estimate (256 bytes) to avoid crashing.
+                debug_assert!(false, "PropertyKey {} missing from interner", key.as_u32());
+                256
+            });
             let key_size = 4 + key_len;
             self.current_size = self
                 .current_size
