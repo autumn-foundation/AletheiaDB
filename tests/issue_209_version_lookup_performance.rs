@@ -48,8 +48,8 @@ fn test_version_lookup_correctness_many_versions() {
     let mut version_timestamps = Vec::new();
 
     for i in 0..NUM_VERSIONS {
-        // Small delay to ensure distinct timestamps
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Delay to ensure distinct timestamps and allow time for commit
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Update the node to create a new version
         let props = PropertyMapBuilder::new()
@@ -76,9 +76,11 @@ fn test_version_lookup_correctness_many_versions() {
 
     // Test: Query at the beginning of each version interval
     for (expected_version_idx, &timestamp) in version_timestamps.iter().enumerate() {
-        // Query at valid_time + 1, but use a tx_time far enough in the future to see the version
+        // Query at valid_time + 1, but use a tx_time far enough in the future to see the version.
+        // We use 5ms offset to be safe against commit latency on slow CI runners, but
+        // safely within the 10ms interval before the next version.
         let query_valid_time = Timestamp::from(timestamp.wallclock() + 1i64);
-        let query_tx_time = Timestamp::from(timestamp.wallclock() + 1000i64); // 1ms in future
+        let query_tx_time = Timestamp::from(timestamp.wallclock() + 5000i64); // 5ms in future
 
         let version_id = hist_guard
             .find_node_version_at_time(node_id, query_valid_time, query_tx_time)
@@ -131,6 +133,7 @@ fn test_version_lookup_correctness_many_versions() {
 #[test]
 fn test_version_lookup_performance_scaling() {
     use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
+    use gallifreydb::storage::index_persistence::PersistenceConfig;
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -138,8 +141,16 @@ fn test_version_lookup_performance_scaling() {
         .expect("Failed to set max versions")
         .build();
 
+    // Disable persistence to ensure clean state and avoid CapacityExceeded errors
+    // from loading previous test runs
+    let persistence_config = PersistenceConfig {
+        enabled: false,
+        ..Default::default()
+    };
+
     let config = GallifreyDBConfigBuilder::new()
         .historical(historical_config)
+        .persistence(persistence_config)
         .build();
 
     let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
@@ -155,7 +166,7 @@ fn test_version_lookup_performance_scaling() {
 
     println!("Creating {} versions...", NUM_VERSIONS);
     for i in 0..NUM_VERSIONS {
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         let props = PropertyMapBuilder::new()
             .insert("version", i as i64)
@@ -193,17 +204,19 @@ fn test_version_lookup_performance_scaling() {
     println!("---------------------|-----------|------------------");
 
     for (idx, description) in test_positions {
-        let query_time = version_timestamps[idx];
+        let query_valid_time = version_timestamps[idx];
+        // Use a safe future transaction time to ensure visibility
+        let query_tx_time = Timestamp::from(query_valid_time.wallclock() + 5000i64);
 
         // Warm up
         for _ in 0..10 {
-            let _ = hist_guard.find_node_version_at_time(node_id, query_time, query_time);
+            let _ = hist_guard.find_node_version_at_time(node_id, query_valid_time, query_tx_time);
         }
 
         // Measure 100 lookups
         let start = Instant::now();
         for _ in 0..100 {
-            let _ = hist_guard.find_node_version_at_time(node_id, query_time, query_time);
+            let _ = hist_guard.find_node_version_at_time(node_id, query_valid_time, query_tx_time);
         }
         let elapsed = start.elapsed();
         let avg_micros = elapsed.as_micros() / 100;
@@ -269,7 +282,7 @@ fn test_edge_version_lookup_correctness_many_versions() {
     let mut version_timestamps = Vec::new();
 
     for i in 0..NUM_VERSIONS {
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         let props = PropertyMapBuilder::new().insert("weight", i as i64).build();
 
@@ -294,9 +307,10 @@ fn test_edge_version_lookup_correctness_many_versions() {
     // Test a few representative timestamps
     for &idx in &[0, NUM_VERSIONS / 4, NUM_VERSIONS / 2, NUM_VERSIONS - 1] {
         let valid_timestamp = version_timestamps[idx];
-        // Query with tx_time far enough in future to see the version
+        // Query with tx_time far enough in future to see the version.
+        // We use 5ms offset to be safe against commit latency on slow CI runners.
         let query_valid_time = valid_timestamp;
-        let query_tx_time = Timestamp::from(valid_timestamp.wallclock() + 1000i64);
+        let query_tx_time = Timestamp::from(valid_timestamp.wallclock() + 5000i64);
 
         let version_id = hist_guard
             .find_edge_version_at_time(edge_id, query_valid_time, query_tx_time)
