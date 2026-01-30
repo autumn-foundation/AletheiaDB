@@ -147,7 +147,8 @@ impl PredicatePushdown {
 
                     // PUSH: VectorRank
                     // Filter(VectorRank(Input)) -> VectorRank(Filter(Input))
-                    // Safe because reranking doesn't create/destroy rows or change row content.
+                    // Note: VectorRank does not modify row contents, but with a non-None `top_k`
+                    // this transformation can change which rows are selected into the top-k set.
                     LogicalOp::Unary {
                         op:
                             UnaryOp::VectorRank {
