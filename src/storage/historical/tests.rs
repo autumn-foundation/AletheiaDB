@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::core::interning::GLOBAL_INTERNER;
 use crate::core::observer::{StorageEvent, StorageObserver};
@@ -4399,4 +4398,11 @@ fn test_edge_delta_creation_caches_properties() {
         let props = storage.reconstruct_edge_properties(version_id).unwrap();
         assert_eq!(props.get("strength").unwrap().as_int().unwrap(), i as i64);
     }
+}
+
+#[test]
+fn test_retention_policy_unbounded() {
+    let policy = RetentionPolicy::unbounded();
+    assert_eq!(policy.max_versions_per_entity, usize::MAX);
+    assert_eq!(policy.max_age_ms, i64::MAX);
 }
