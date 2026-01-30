@@ -20,11 +20,18 @@ mod tests {
         // OR crash with stack overflow if not protected.
         // We want it to return an error gracefully.
         let result = Parser::parse(&query);
-        assert!(result.is_err(), "Parser should return error for deep nesting");
+        assert!(
+            result.is_err(),
+            "Parser should return error for deep nesting"
+        );
 
         // Verify the error message mentions recursion limit
         if let Err(e) = result {
-            assert!(e.message.contains("Recursion limit exceeded"), "Error should mention recursion limit, got: {}", e.message);
+            assert!(
+                e.message.contains("Recursion limit exceeded"),
+                "Error should mention recursion limit, got: {}",
+                e.message
+            );
         }
     }
 }
