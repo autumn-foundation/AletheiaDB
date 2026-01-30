@@ -20,3 +20,12 @@
 2. Extracted serialization logic to `src/storage/wal/serialization.rs`.
 3. Moved property serialization sizing logic to `core::property::PropertyMap::serialized_size` to improve cohesion.
 4. Converted `src/storage/wal.rs` into a clean facade module.
+
+## 2026-01-30 - Refactoring Historical Storage Blob
+**Tangle:** `src/storage/historical.rs` was a massive 6900+ line file ("The Blob") containing configuration, statistics, core storage logic, and thousands of lines of tests, making navigation and maintenance difficult.
+**Blueprint:**
+1. Created `src/storage/historical/` directory module.
+2. Extracted `RetentionPolicy` and constants to `config.rs`.
+3. Extracted `CacheMetrics` and `HistoricalStats` to `stats.rs`.
+4. Extracted tests to `tests.rs`.
+5. Kept core logic in `mod.rs`, significantly reducing file size and improving cohesion.
