@@ -3,6 +3,41 @@
 //! Moves filter operations as close to data sources as possible,
 //! reducing the number of rows processed by expensive operations
 //! like traversals and joins.
+//!
+//! # Theory: Filter Early
+//!
+//! The "Filter Early" principle is fundamental to query optimization. By applying
+//! predicates (filters) as early as possible in the query pipeline, we reduce the
+//! cardinality (number of rows) that subsequent operators must process.
+//!
+//! For example, if a `VectorRank` operation is O(N log k) (with limit k) and a filter
+//! removes 90% of the rows, pushing the filter before the rank significantly reduces
+//! the workload.
+//!
+//! # Optimization Strategy
+//!
+//! This rule recursively traverses the logical plan and attempts to "bubble down"
+//! `Filter` operators through other unary operators where safe.
+//!
+//! ## Capabilities
+//!
+//! Currently, this rule supports pushing filters through:
+//! - **VectorRank (without limit)**: Safe because ranking all items then filtering produces the same result as filtering then ranking.
+//! - **Sort**: Sorting is commutative with filtering.
+//!
+//! ## Limitations
+//!
+//! - **VectorRank (with limit)**: Cannot push filter past a Top-K operation. Filtering *after* finding top-K is semantically different from finding top-K *after* filtering.
+//! - **Traversals**: We conservatively do *not* push filters through traversals yet.
+//! - **Scans**: Filters cannot be pushed below scans (they are the leaves).
+//! - **Joins**: Filter pushdown through joins is handled by separate logic (future work).
+//!
+//! # Safety
+//!
+//! Pushdown is safe when:
+//! 1. **No Side Effects**: The operator being swapped doesn't produce side effects that the filter depends on.
+//! 2. **Semantic Equivalence**: The result set remains identical.
+//!    - **CRITICAL**: Filters must NOT be pushed past `Limit` or `Top-K` operations, as this changes the result set.
 
 use crate::query::plan::{LogicalOp, LogicalPlan, UnaryOp};
 use crate::utils::error::Result;
@@ -16,18 +51,38 @@ use super::{OptimizationRule, Statistics};
 ///
 /// # Example Transformation
 ///
-/// Before:
+/// **Before**: Filter is applied *after* sorting (expensive).
 /// ```text
 /// Filter(name = "Alice")
-///   Traverse(KNOWS)
-///     NodeLookup([1])
+///   Sort(score DESC)
+///     VectorSearch(...)
 /// ```
 ///
-/// After (if filter can apply to traversal targets):
+/// **After**: Filter is applied *before* sorting (cheaper).
 /// ```text
-/// Traverse(KNOWS)
+/// Sort(score DESC)
 ///   Filter(name = "Alice")
-///     NodeLookup([1])
+///     VectorSearch(...)
+/// ```
+///
+/// # Complex Example
+///
+/// Pushing through multiple layers:
+///
+/// ```text
+/// Filter(active = true)
+///   Sort(created DESC)
+///     VectorRank(top_k=None)
+///       Scan(...)
+/// ```
+///
+/// Becomes:
+///
+/// ```text
+/// Sort(created DESC)
+///   VectorRank(top_k=None)
+///     Filter(active = true)  <-- Pushed down
+///       Scan(...)
 /// ```
 pub struct PredicatePushdown;
 
@@ -53,27 +108,30 @@ impl OptimizationRule for PredicatePushdown {
 
 impl PredicatePushdown {
     /// Recursively push down filters where possible.
+    ///
+    /// This method traverses the plan tree. When it encounters a `Filter` operator,
+    /// it attempts to move it below its input operator if that operator type allows it.
     fn push_down(&self, op: &LogicalOp) -> Result<(LogicalOp, bool)> {
         match op {
-            // Filter above Traverse: can push down if filter applies to source nodes
+            // Filter operation: this is what we want to push down
             LogicalOp::Unary {
                 op: UnaryOp::Filter(predicate),
                 input,
             } => {
-                // First, recursively optimize the input
+                // First, recursively optimize the input (bottom-up approach)
                 let (optimized_input, input_changed) = self.push_down(input)?;
 
-                // Check if we can push the filter below the input operation
+                // Check if we can push the filter below the optimized input operator
                 match &optimized_input {
-                    // Can't push below scans (they are the source)
+                    // STOP: Can't push below scans (they are the source)
                     LogicalOp::Scan(_) => Ok((
                         LogicalOp::unary(UnaryOp::Filter(predicate.clone()), optimized_input),
                         input_changed,
                     )),
 
-                    // For traversal, we can push the filter to apply to source nodes
-                    // if the predicate applies to the source, not the target
-                    // For now, keep filter above (conservative approach)
+                    // STOP: For traversal, we generally can't push blindly.
+                    // We need to know if the predicate applies to the source or target.
+                    // Current implementation is conservative and stops here.
                     LogicalOp::Unary {
                         op: UnaryOp::Traverse { .. },
                         ..
@@ -82,7 +140,9 @@ impl PredicatePushdown {
                         input_changed,
                     )),
 
-                    // Push filter below VectorRank (reranking doesn't change what we filter)
+                    // PUSH: VectorRank
+                    // Only safe if top_k is None (pure re-scoring).
+                    // If top_k is set, pushing filter changes semantics (Top-K then Filter != Filter then Top-K).
                     LogicalOp::Unary {
                         op:
                             UnaryOp::VectorRank {
@@ -92,22 +152,35 @@ impl PredicatePushdown {
                             },
                         input: vector_input,
                     } => {
-                        // Push filter below vector rank
-                        let filter_then_rank = LogicalOp::unary(
-                            UnaryOp::VectorRank {
-                                embedding: embedding.clone(),
-                                top_k: *top_k,
-                                property_key: property_key.clone(),
-                            },
-                            LogicalOp::unary(
-                                UnaryOp::Filter(predicate.clone()),
-                                (**vector_input).clone(),
-                            ),
-                        );
-                        Ok((filter_then_rank, true))
+                        if top_k.is_some() {
+                            // STOP: Has limit, unsafe to push down
+                            Ok((
+                                LogicalOp::unary(
+                                    UnaryOp::Filter(predicate.clone()),
+                                    optimized_input,
+                                ),
+                                input_changed,
+                            ))
+                        } else {
+                            // SAFE: No limit, just re-scoring
+                            let filter_then_rank = LogicalOp::unary(
+                                UnaryOp::VectorRank {
+                                    embedding: embedding.clone(),
+                                    top_k: *top_k,
+                                    property_key: property_key.clone(),
+                                },
+                                LogicalOp::unary(
+                                    UnaryOp::Filter(predicate.clone()),
+                                    (**vector_input).clone(),
+                                ),
+                            );
+                            Ok((filter_then_rank, true))
+                        }
                     }
 
-                    // Push filter below Sort (filtering doesn't affect sort order)
+                    // PUSH: Sort
+                    // Filter(Sort(Input)) -> Sort(Filter(Input))
+                    // Safe because sorting is purely a reordering operation.
                     LogicalOp::Unary {
                         op: UnaryOp::Sort { key, descending },
                         input: sort_input,
@@ -125,7 +198,7 @@ impl PredicatePushdown {
                         Ok((filter_then_sort, true))
                     }
 
-                    // Default: keep filter where it is
+                    // Default: STOP. Keep filter where it is.
                     _ => Ok((
                         LogicalOp::unary(UnaryOp::Filter(predicate.clone()), optimized_input),
                         input_changed,
@@ -133,13 +206,13 @@ impl PredicatePushdown {
                 }
             }
 
-            // Recursively optimize other unary operations
+            // Not a filter: just recurse down (pass-through)
             LogicalOp::Unary { op, input } => {
                 let (optimized_input, changed) = self.push_down(input)?;
                 Ok((LogicalOp::unary(op.clone(), optimized_input), changed))
             }
 
-            // Recursively optimize binary operations
+            // Binary op: recurse down both branches
             LogicalOp::Binary { op, left, right } => {
                 let (opt_left, left_changed) = self.push_down(left)?;
                 let (opt_right, right_changed) = self.push_down(right)?;
@@ -149,7 +222,7 @@ impl PredicatePushdown {
                 ))
             }
 
-            // Leaf nodes don't change
+            // Leaf nodes: no change possible
             LogicalOp::Scan(_) | LogicalOp::Empty => Ok((op.clone(), false)),
         }
     }
@@ -182,17 +255,18 @@ mod tests {
     }
 
     #[test]
-    fn test_push_filter_below_vector_rank() {
+    fn test_push_filter_below_vector_rank_no_limit() {
         let rule = PredicatePushdown;
         let stats = test_stats();
 
-        // Filter(VectorRank(Scan)) -> VectorRank(Filter(Scan))
+        // Filter(VectorRank(top_k=None, Scan)) -> VectorRank(Filter(Scan))
+        // Should push down because no limit
         let plan = LogicalPlan::new(LogicalOp::unary(
             UnaryOp::Filter(Predicate::eq("name", "Alice")),
             LogicalOp::unary(
                 UnaryOp::VectorRank {
                     embedding: Arc::from([0.1f32; 4].as_slice()),
-                    top_k: Some(10),
+                    top_k: None,
                     property_key: None,
                 },
                 LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
@@ -211,6 +285,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_stop_filter_at_vector_rank_with_limit() {
+        let rule = PredicatePushdown;
+        let stats = test_stats();
+
+        // Filter(VectorRank(top_k=Some(10), Scan))
+        // Should NOT push down because limit exists
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("name", "Alice")),
+            LogicalOp::unary(
+                UnaryOp::VectorRank {
+                    embedding: Arc::from([0.1f32; 4].as_slice()),
+                    top_k: Some(10),
+                    property_key: None,
+                },
+                LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+            ),
+        ));
+
+        let result = rule.apply(&plan, &stats).unwrap();
+        // Should return None because pushdown was blocked
+        assert!(result.is_none());
     }
 
     #[test]
@@ -242,5 +340,78 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_multi_level_pushdown() {
+        let rule = PredicatePushdown;
+        let stats = test_stats();
+
+        // Filter -> Sort -> VectorRank(no limit) -> Scan
+        // Should become: Sort -> VectorRank -> Filter -> Scan
+        let plan = LogicalPlan::new(LogicalOp::unary(
+            UnaryOp::Filter(Predicate::eq("active", true)),
+            LogicalOp::unary(
+                UnaryOp::Sort {
+                    key: SortKey::Property("created".to_string()),
+                    descending: true,
+                },
+                LogicalOp::unary(
+                    UnaryOp::VectorRank {
+                        embedding: Arc::from([0.1f32; 4].as_slice()),
+                        top_k: None,
+                        property_key: None,
+                    },
+                    LogicalOp::Scan(ScanOp::NodeLookup(vec![NodeId::new(1).unwrap()])),
+                ),
+            ),
+        ));
+
+        // Simulate planner loop to get full pushdown
+        let mut current_plan = plan;
+        let mut changed = true;
+        let mut iterations = 0;
+
+        while changed && iterations < 10 {
+            let result = rule.apply(&current_plan, &stats).unwrap();
+            if let Some(new_plan) = result {
+                current_plan = new_plan;
+                changed = true;
+            } else {
+                changed = false;
+            }
+            iterations += 1;
+        }
+
+        // Now verify full pushdown: Sort -> VectorRank -> Filter -> Scan
+        let root = &current_plan.root;
+
+        // Root should be Sort
+        if let LogicalOp::Unary {
+            op: UnaryOp::Sort { .. },
+            input: sort_input,
+        } = root
+        {
+            // Next should be VectorRank
+            if let LogicalOp::Unary {
+                op: UnaryOp::VectorRank { .. },
+                input: rank_input,
+            } = sort_input.as_ref()
+            {
+                // Next should be Filter
+                assert!(matches!(
+                    rank_input.as_ref(),
+                    LogicalOp::Unary {
+                        op: UnaryOp::Filter(_),
+                        ..
+                    }
+                ));
+            } else {
+                // If it failed here, print what we got
+                panic!("Expected VectorRank below Sort, got {:?}", sort_input);
+            }
+        } else {
+            panic!("Expected Sort at root, got {:?}", root);
+        }
     }
 }
