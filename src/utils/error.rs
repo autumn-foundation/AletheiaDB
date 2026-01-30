@@ -395,7 +395,7 @@ pub enum TemporalError {
     },
     /// Valid time is too far in the future.
     ///
-    /// This prevents users from backdating facts decades or centuries into the future,
+    /// This prevents users from forward-dating facts decades or centuries into the future,
     /// which could be either an accident or a DoS attack attempting to fill the database
     /// with far-future timestamps.
     ValidTimeTooFarInFuture {

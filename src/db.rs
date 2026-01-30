@@ -1321,11 +1321,38 @@ impl GallifreyDB {
     /// ```
     pub fn diff_node_versions(
         &self,
-        _node_id: NodeId,
+        node_id: NodeId,
         from_version: crate::core::id::VersionId,
         to_version: crate::core::id::VersionId,
     ) -> Result<crate::query::VersionDiff> {
         let historical = self.historical.read_or_err()?;
+
+        // Validate that both versions belong to the requested node
+        let from_ver = historical
+            .get_node_version(from_version)
+            .ok_or(StorageError::VersionNotFound(from_version))?;
+        let to_ver = historical
+            .get_node_version(to_version)
+            .ok_or(StorageError::VersionNotFound(to_version))?;
+
+        if from_ver.node_id != node_id {
+            return Err(StorageError::InconsistentState {
+                reason: format!(
+                    "Version {} belongs to node {}, not node {}",
+                    from_version, from_ver.node_id, node_id
+                ),
+            }
+            .into());
+        }
+        if to_ver.node_id != node_id {
+            return Err(StorageError::InconsistentState {
+                reason: format!(
+                    "Version {} belongs to node {}, not node {}",
+                    to_version, to_ver.node_id, node_id
+                ),
+            }
+            .into());
+        }
 
         // Reconstruct both versions
         let from_props = historical.reconstruct_node_properties(from_version)?;
@@ -1411,11 +1438,38 @@ impl GallifreyDB {
     /// Shows which properties were added, removed, or modified.
     pub fn diff_edge_versions(
         &self,
-        _edge_id: EdgeId,
+        edge_id: EdgeId,
         from_version: crate::core::id::VersionId,
         to_version: crate::core::id::VersionId,
     ) -> Result<crate::query::VersionDiff> {
         let historical = self.historical.read_or_err()?;
+
+        // Validate that both versions belong to the requested edge
+        let from_ver = historical
+            .get_edge_version(from_version)
+            .ok_or(StorageError::VersionNotFound(from_version))?;
+        let to_ver = historical
+            .get_edge_version(to_version)
+            .ok_or(StorageError::VersionNotFound(to_version))?;
+
+        if from_ver.edge_id != edge_id {
+            return Err(StorageError::InconsistentState {
+                reason: format!(
+                    "Version {} belongs to edge {}, not edge {}",
+                    from_version, from_ver.edge_id, edge_id
+                ),
+            }
+            .into());
+        }
+        if to_ver.edge_id != edge_id {
+            return Err(StorageError::InconsistentState {
+                reason: format!(
+                    "Version {} belongs to edge {}, not edge {}",
+                    to_version, to_ver.edge_id, edge_id
+                ),
+            }
+            .into());
+        }
 
         // Reconstruct both versions
         let from_props = historical.reconstruct_edge_properties(from_version)?;

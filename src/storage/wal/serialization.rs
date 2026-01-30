@@ -25,14 +25,14 @@ fn serialize_interned_string(s: InternedString, buffer: &mut Vec<u8>) {
 /// - Total fixed: 24 bytes
 ///
 /// Variable sizes by operation:
-/// - `CreateNode`: 1 (op type) + 8 (node_id) + 4 (label len) + label bytes +
+/// - `CreateNode`: 1 (op type) + 8 (node_id) + 4 (label ID) +
 ///   properties size + 12 (Timestamp)
 /// - `CreateEdge`: 1 (op type) + 8 (edge_id) + 8 (source) + 8 (target) +
-///   4 (label len) + label bytes + properties size + 12 (Timestamp)
-/// - `UpdateNode`: 1 (op type) + 8 (node_id) + 8 (version_id) + 4 (label len) +
-///   label bytes + properties size + 12 (Timestamp)
-/// - `UpdateEdge`: 1 (op type) + 8 (edge_id) + 8 (version_id) + 4 (label len) +
-///   label bytes + properties size + 12 (Timestamp)
+///   4 (label ID) + properties size + 12 (Timestamp)
+/// - `UpdateNode`: 1 (op type) + 8 (node_id) + 8 (version_id) + 4 (label ID) +
+///   properties size + 12 (Timestamp)
+/// - `UpdateEdge`: 1 (op type) + 8 (edge_id) + 8 (version_id) + 4 (label ID) +
+///   properties size + 12 (Timestamp)
 /// - `DeleteNode`: 1 (op type) + 8 (node_id) + 12 (Timestamp) = 21 bytes
 /// - `DeleteEdge`: 1 (op type) + 8 (edge_id) + 12 (Timestamp) = 21 bytes
 /// - `Checkpoint`: 1 (op type) + 8 (lsn) + 12 (timestamp) = 21 bytes
