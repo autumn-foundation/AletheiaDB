@@ -588,7 +588,22 @@ pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError
     }
 
     // Clean up extra whitespace
-    cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let new_cleaned = {
+        let mut parts = cleaned.split_whitespace();
+        if let Some(first) = parts.next() {
+            // Reserve approximate capacity to avoid reallocations
+            let mut s = String::with_capacity(cleaned.len());
+            s.push_str(first);
+            for part in parts {
+                s.push(' ');
+                s.push_str(part);
+            }
+            s
+        } else {
+            String::new()
+        }
+    };
+    cleaned = new_cleaned;
 
     Ok(ExtractedTemporal {
         cleaned_sql: cleaned,
