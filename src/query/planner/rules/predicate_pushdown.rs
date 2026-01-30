@@ -39,7 +39,10 @@
 //! Pushdown is safe when:
 //! 1. **No Side Effects**: The operator being swapped doesn't produce side effects that the filter depends on.
 //! 2. **Semantic Equivalence**: The result set remains identical.
-//!    - For `VectorRank` and `Sort`, removing a row before or after doesn't change the relative order of remaining rows.
+//!    - For `Sort`, removing a row before or after doesn't change the relative order of remaining rows.
+//!    - For `VectorRank`, this holds only when ranking over the full population (for example, when `top_k` is `None`);
+//!      if a `top_k` limit is applied, filtering before ranking can change which rows appear in the top-k results and is
+//!      therefore not semantically equivalent to filtering after ranking.
 
 use crate::query::plan::{LogicalOp, LogicalPlan, UnaryOp};
 use crate::utils::error::Result;
