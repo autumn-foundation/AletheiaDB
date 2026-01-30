@@ -1481,12 +1481,17 @@ impl Default for PropertyMap {
 
 impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
     fn from_iter<I: IntoIterator<Item = (PropertyKey, PropertyValue)>>(iter: I) -> Self {
-        let map: HashMap<PropertyKey, PropertyValue> = iter.into_iter().collect();
-        // We have to iterate to calculate size since we collected into HashMap directly
+        let iter = iter.into_iter();
+        let (lower, _) = iter.size_hint();
+        let mut map = HashMap::with_capacity(lower);
         let mut size = 4; // Count field
-        for (key, value) in map.iter() {
-            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
+
+        for (key, value) in iter {
+            let key_len = GLOBAL_INTERNER
+                .with_str(key, |s| s.len())
+                .expect("PropertyKey not found in interner during FromIterator");
             size += 4 + key_len + value.serialized_size();
+            map.insert(key, value);
         }
 
         PropertyMap {
@@ -1559,7 +1564,9 @@ impl PropertyMapBuilder {
             self.current_size += val_size;
         } else {
             // New entry - need to lookup key length
-            let key_len = GLOBAL_INTERNER.with_str(key, |s| s.len()).unwrap_or(256);
+            let key_len = GLOBAL_INTERNER
+                .with_str(key, |s| s.len())
+                .expect("PropertyKey not found in interner during insert_by_key");
             self.current_size += 4 + key_len + val_size;
         }
         self
@@ -1607,7 +1614,9 @@ impl PropertyMapBuilder {
     /// For internal use and performance-critical paths.
     pub fn remove_by_key(mut self, key: &PropertyKey) -> Self {
         if let Some(old_val) = self.map.remove(key) {
-            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
+            let key_len = GLOBAL_INTERNER
+                .with_str(*key, |s| s.len())
+                .expect("PropertyKey not found in interner during remove_by_key");
             self.current_size -= 4 + key_len + old_val.serialized_size();
         }
         self
@@ -3354,5 +3363,41 @@ mod tests {
         let predicted = map.serialized_size();
         let actual = map.serialize().unwrap().len();
         assert_eq!(predicted, actual);
+    }
+
+    #[test]
+    fn test_property_map_mutation_size_invariant() {
+        // Test that serialized_size remains correct through various mutations
+        let mut builder = PropertyMapBuilder::new();
+
+        // Initial insert
+        builder = builder.insert("name", "Alice");
+        let map1 = builder.build();
+        assert_eq!(map1.serialized_size(), map1.serialize().unwrap().len());
+
+        // Re-use builder (clone happens inside)
+        let mut builder = map1.builder();
+
+        // Add another property
+        builder = builder.insert("age", 30);
+        let map2 = builder.build();
+        assert_eq!(map2.serialized_size(), map2.serialize().unwrap().len());
+
+        // Update existing property (different size value)
+        // "Alice" (5 bytes) -> "Bob" (3 bytes)
+        let mut builder = map2.builder();
+        builder = builder.insert("name", "Bob");
+        let map3 = builder.build();
+        assert_eq!(map3.serialized_size(), map3.serialize().unwrap().len());
+
+        // Remove property
+        let mut builder = map3.builder();
+        builder = builder.remove("age");
+        let map4 = builder.build();
+        assert_eq!(map4.serialized_size(), map4.serialize().unwrap().len());
+
+        // Final verification
+        assert_eq!(map4.get("name").and_then(|v| v.as_str()), Some("Bob"));
+        assert!(map4.get("age").is_none());
     }
 }
