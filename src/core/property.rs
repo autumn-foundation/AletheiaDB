@@ -1625,13 +1625,15 @@ impl PropertyMapBuilder {
             // We must look up the string length since we only have the ID.
             // This is a tradeoff: we pay lookup cost for new keys, but
             // avoid it for updates and for subsequent serialization size checks.
-            let key_len = GLOBAL_INTERNER.with_str(key, |s| s.len()).unwrap_or_else(|| {
-                // This should be unreachable if the PropertyKey is valid (which it should be).
-                // In debug builds, we panic to catch this state corruption.
-                // In release, we fallback to a safe estimate (256 bytes) to avoid crashing.
-                debug_assert!(false, "PropertyKey {} missing from interner", key.as_u32());
-                256
-            });
+            let key_len = GLOBAL_INTERNER
+                .with_str(key, |s| s.len())
+                .unwrap_or_else(|| {
+                    // This should be unreachable if the PropertyKey is valid (which it should be).
+                    // In debug builds, we panic to catch this state corruption.
+                    // In release, we fallback to a safe estimate (256 bytes) to avoid crashing.
+                    debug_assert!(false, "PropertyKey {} missing from interner", key.as_u32());
+                    256
+                });
             let key_size = 4 + key_len;
             self.current_size = self
                 .current_size
