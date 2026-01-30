@@ -48,8 +48,8 @@ fn test_version_lookup_correctness_many_versions() {
     let mut version_timestamps = Vec::new();
 
     for i in 0..NUM_VERSIONS {
-        // Small delay to ensure distinct timestamps
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Increase delay to ensure distinct timestamps and stable windows on CI
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Update the node to create a new version
         let props = PropertyMapBuilder::new()

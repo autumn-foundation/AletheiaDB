@@ -1956,4 +1956,44 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn test_load_mappings_overflow_header() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.usearch");
+        let mappings_path = path.with_extension("usearch.mappings");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        index.save(&path)?;
+
+        // Modify count to be HUGE (u64::MAX) to trigger arithmetic overflow check
+        let mut data = std::fs::read(&mappings_path).unwrap();
+        let count_offset = 5;
+        let huge_count = u64::MAX;
+
+        // Write huge count
+        let count_bytes = huge_count.to_le_bytes();
+        data[count_offset..count_offset+8].copy_from_slice(&count_bytes);
+
+        // Update CRC (checksum calculation is still valid, only logic check fails)
+        let crc_offset = data.len() - 4;
+        let mut hasher = Hasher::new();
+        hasher.update(&data[..crc_offset]);
+        let new_crc = hasher.finalize();
+        data[crc_offset..].copy_from_slice(&new_crc.to_le_bytes());
+
+        std::fs::write(&mappings_path, &data).unwrap();
+
+        let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("overflow"), "Expected overflow error, got: {}", msg);
+            }
+            Ok(_) => panic!("Expected IndexError with overflow message, got: Ok(_)"),
+            Err(e) => panic!("Expected IndexError with overflow message, got: Err({:?})", e),
+        }
+        Ok(())
+    }
 }
