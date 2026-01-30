@@ -1127,8 +1127,8 @@ mod tests {
     fn test_persist_delta_preserves_logical_timestamp() {
         // Test that Delta version persistence preserves logical timestamps
         // even though they are currently unused in restoration (for future proofing)
-        use crate::core::hlc::HybridTimestamp;
         use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
         use crate::storage::version::PropertyDelta;
         use std::collections::HashMap;
 
@@ -1143,7 +1143,7 @@ mod tests {
         let mut changed = HashMap::new();
         changed.insert(
             GLOBAL_INTERNER.intern("age").unwrap(),
-            crate::core::property::PropertyValue::Int(31)
+            crate::core::property::PropertyValue::Int(31),
         );
 
         let delta = PropertyDelta {
@@ -1170,7 +1170,12 @@ mod tests {
         assert_eq!(entry.tx_time_logical, logical);
 
         // Verify delta-specific fields
-        if let PersistedVersionType::Delta { base_anchor_tx, base_anchor_tx_logical, .. } = entry.version_type {
+        if let PersistedVersionType::Delta {
+            base_anchor_tx,
+            base_anchor_tx_logical,
+            ..
+        } = entry.version_type
+        {
             assert_eq!(base_anchor_tx, wallclock);
             assert_eq!(base_anchor_tx_logical, logical);
         } else {
@@ -1179,14 +1184,17 @@ mod tests {
 
         // Restore and verify (logical timestamp should be preserved in temporal)
         let restored = restore_node_version(&entry).unwrap();
-        assert_eq!(restored.temporal.transaction_time().start().logical(), logical);
+        assert_eq!(
+            restored.temporal.transaction_time().start().logical(),
+            logical
+        );
     }
 
     #[test]
     fn test_hlc_logical_component_persistence_loss() {
         // Regression test for HLC logical counter loss during index persistence
-        use crate::core::hlc::HybridTimestamp;
         use crate::core::GLOBAL_INTERNER;
+        use crate::core::hlc::HybridTimestamp;
 
         let wallclock = 1_000_000_000;
         let logical: u32 = 42; // Non-zero logical counter
