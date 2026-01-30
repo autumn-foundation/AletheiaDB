@@ -43,6 +43,16 @@ Public HTTP and MCP endpoints could be vectors for DoS attacks via large inputs 
   - Vector dimensions validated against index configuration.
   - WAL segment reading limits file size to 1GB to prevent memory map exhaustion.
 
+## 2026-02-03 - Graph Persistence DoS Hardening
+
+**Threat:** Unbounded File Read / Memory Exhaustion
+The `load_graph_index` and `load_mappings_with_integrity` functions read entire files into memory without size checks. An attacker could supply a maliciously crafted large file (or sparse file), causing the application to panic or crash due to Out Of Memory (OOM) or address space exhaustion (DoS).
+
+**Defense:** File Size Limits
+- Enforced `MAX_GRAPH_FILE_SIZE` (4GB) in `src/storage/index_persistence/graph.rs` before reading or mapping graph index files.
+- Enforced `MAX_MAPPING_FILE_SIZE` (1GB) in `src/index/vector/hnsw.rs` before reading HNSW mapping files.
+- Added tests `test_load_oversized_graph_file` and `test_load_oversized_mapping_file` to verify rejection of oversized files (using lowered limits for testing).
+
 ## Open Risks
 - `usearch` FFI boundaries rely on the C++ library behaving correctly regarding pointer validity. We added panic guards for null pointers, but full memory safety depends on `usearch` correctness.
 - The `usearch` dependency points to a fork (`madmax983/USearch`). This fork contains Rust-specific fixes (move semantics) not yet in upstream. We have pinned the specific commit to ensure stability, but future upstream security patches will need manual cherry-picking.

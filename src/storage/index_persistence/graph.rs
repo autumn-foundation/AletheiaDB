@@ -15,6 +15,12 @@ use super::formats::{
 };
 use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
 
+#[cfg(not(test))]
+const MAX_GRAPH_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4 GB
+
+#[cfg(test)]
+const MAX_GRAPH_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB for testing
+
 /// Convert PropertyValue to PersistedPropertyValue.
 ///
 /// # Errors
@@ -159,7 +165,24 @@ pub fn save_graph_index(data: &GraphIndexData, path: &Path) -> Result<()> {
 ///
 /// Automatically detects zstd compression by checking for magic bytes.
 pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
-    let bytes = fs::read(path)?;
+    let mut file = fs::File::open(path)?;
+
+    // Validate file size before reading to prevent DoS via memory exhaustion
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_GRAPH_FILE_SIZE {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Graph index file too large: {} bytes (limit: {} bytes)",
+                metadata.len(),
+                MAX_GRAPH_FILE_SIZE
+            ),
+        });
+    }
+
+    // Pre-allocate buffer based on file size
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    use std::io::Read;
+    file.read_to_end(&mut bytes)?;
 
     // Check minimum size (must have at least 4 bytes for CRC)
     if bytes.len() < 4 {
@@ -312,8 +335,22 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
     use memmap2::Mmap;
     use std::fs::File;
 
-    // Open file and create memory map
+    // Open file first to avoid TOCTOU race condition
     let file = File::open(path)?;
+
+    // Validate file size before mapping to prevent DoS via address space exhaustion
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_GRAPH_FILE_SIZE {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Graph index file too large: {} bytes (limit: {} bytes)",
+                metadata.len(),
+                MAX_GRAPH_FILE_SIZE
+            ),
+        });
+    }
+
+    // Create memory map
     let mmap = unsafe { Mmap::map(&file)? };
 
     // Check minimum size (must have at least 4 bytes for CRC)
@@ -562,8 +599,24 @@ pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Resul
     // Load base index
     let mut base = load_graph_index(base_path)?;
 
+    let mut file = fs::File::open(delta_path)?;
+
+    // Validate delta file size before reading
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_GRAPH_FILE_SIZE {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Graph delta file too large: {} bytes (limit: {} bytes)",
+                metadata.len(),
+                MAX_GRAPH_FILE_SIZE
+            ),
+        });
+    }
+
     // Load and decompress delta
-    let bytes = fs::read(delta_path)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    use std::io::Read;
+    file.read_to_end(&mut bytes)?;
 
     // Check minimum size (must have at least 4 bytes for CRC)
     if bytes.len() < 4 {
@@ -776,6 +829,42 @@ mod tests {
         } else {
             panic!("Expected vector property");
         }
+    }
+
+    #[test]
+    fn test_load_oversized_graph_file() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("oversized.idx");
+
+        // Create a file slightly larger than the test limit (10MB)
+        let mut file = std::fs::File::create(&path).unwrap();
+        // Use seek to create a sparse file quickly without writing 10MB of zeros
+        file.set_len(MAX_GRAPH_FILE_SIZE + 10).unwrap();
+
+        // Test load_graph_index
+        let result = load_graph_index(&path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("too large"));
+        assert!(err_msg.contains("limit: 10485760 bytes")); // 10MB
+
+        // Test load_graph_index_mmap
+        let result = load_graph_index_mmap(&path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("too large"));
+
+        // Test load_graph_index_with_delta (using valid base but oversized delta)
+        let base_path = dir.path().join("base.idx");
+        let data = new_graph_index_data();
+        // Ensure base is small enough
+        save_graph_index(&data, &base_path).unwrap();
+
+        let result = load_graph_index_with_delta(&base_path, &path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("too large"));
     }
 }
 
