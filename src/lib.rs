@@ -63,6 +63,9 @@ pub mod index;
 pub mod query;
 pub mod storage;
 pub mod utils;
+// Experimental features ("Nova")
+#[cfg(any(feature = "nova", test))] // Allow in tests for verification
+pub mod experimental;
 // Optional embedding generation module
 #[cfg(feature = "embeddings")]
 pub mod embeddings;
