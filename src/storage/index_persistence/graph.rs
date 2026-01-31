@@ -825,6 +825,32 @@ mod tests {
             _ => panic!("Expected SizeLimitExceeded error, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_load_graph_index_mmap_success() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("valid_mmap.idx");
+
+        // Create a valid index (small enough to pass size check)
+        let mut data = new_graph_index_data();
+        data.node_count = 1;
+        data.nodes.push(PersistedNode {
+            id: 1,
+            label_idx: GLOBAL_INTERNER.intern("MmapNode").unwrap().as_u32(),
+            version_id: 1,
+            properties: PersistedPropertyMap { entries: vec![] },
+        });
+
+        save_graph_index(&data, &path).unwrap();
+
+        // Attempt load via mmap
+        let result = load_graph_index_mmap(&path);
+
+        assert!(result.is_ok());
+        let loaded = result.unwrap();
+        assert_eq!(loaded.node_count, 1);
+        assert_eq!(loaded.magic, super::GRAPH_MAGIC);
+    }
 }
 
 #[cfg(test)]
