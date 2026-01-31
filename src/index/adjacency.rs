@@ -154,10 +154,7 @@ impl AdjacencyIndex {
         edges.sort_by_key(|(src, target, _, _)| (*src, *target));
 
         // Max node id is the source of the last edge after sorting
-        let max_node_id = edges
-            .last()
-            .map(|(src, _, _, _)| src.as_u64())
-            .unwrap_or(0);
+        let max_node_id = edges.last().map(|(src, _, _, _)| src.as_u64()).unwrap_or(0);
 
         // Pre-allocate assuming some average degree > 1 to avoid resizing
         let estimated_nodes = (edge_count / 4).max(16);
