@@ -159,6 +159,18 @@ pub fn save_graph_index(data: &GraphIndexData, path: &Path) -> Result<()> {
 ///
 /// Automatically detects zstd compression by checking for magic bytes.
 pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
+    // Check file size before reading to prevent OOM/DoS
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > super::MAX_GRAPH_INDEX_SIZE {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Graph index file size {} exceeds limit {}",
+                metadata.len(),
+                super::MAX_GRAPH_INDEX_SIZE
+            ),
+        });
+    }
+
     let bytes = fs::read(path)?;
 
     // Check minimum size (must have at least 4 bytes for CRC)
@@ -559,8 +571,20 @@ pub fn save_graph_index_delta(
 /// let reconstructed_data = load_graph_index_with_delta(&base_path, &delta_path)?;
 /// ```
 pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Result<GraphIndexData> {
-    // Load base index
+    // Load base index (this performs size check internally)
     let mut base = load_graph_index(base_path)?;
+
+    // Check delta file size
+    let metadata = fs::metadata(delta_path)?;
+    if metadata.len() > super::MAX_GRAPH_INDEX_SIZE {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Graph index delta file size {} exceeds limit {}",
+                metadata.len(),
+                super::MAX_GRAPH_INDEX_SIZE
+            ),
+        });
+    }
 
     // Load and decompress delta
     let bytes = fs::read(delta_path)?;

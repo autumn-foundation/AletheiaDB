@@ -90,6 +90,9 @@ pub mod vector;
 /// Background persistence worker thread.
 pub mod worker;
 
+#[cfg(test)]
+mod dos_tests;
+
 pub use api::{
     IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus,
 };
@@ -132,6 +135,34 @@ pub const MAX_STRING_LENGTH: usize = 1_048_576; // 1MB
 /// 100K dimensions aligns with the documented maximum.
 /// At 4 bytes per f32, this is 400KB per vector.
 pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
+
+/// Maximum size of a graph index file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading graph indexes.
+/// Default: 4GB.
+#[cfg(not(test))]
+pub const MAX_GRAPH_INDEX_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4GB
+
+/// Maximum size of a graph index file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading graph indexes.
+/// Default: 10MB (test mode).
+#[cfg(test)]
+pub const MAX_GRAPH_INDEX_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+
+/// Maximum size of a vector index metadata/mappings file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading vector index metadata.
+/// Default: 1GB.
+#[cfg(not(test))]
+pub const MAX_VECTOR_INDEX_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+
+/// Maximum size of a vector index metadata/mappings file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading vector index metadata.
+/// Default: 5MB (test mode).
+#[cfg(test)]
+pub const MAX_VECTOR_INDEX_SIZE: u64 = 5 * 1024 * 1024; // 5MB
 
 /// Atomically write data to a file using write-temp-then-rename pattern.
 ///
