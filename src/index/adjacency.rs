@@ -153,8 +153,12 @@ impl AdjacencyIndex {
         // This avoids using a HashMap for grouping, reducing memory allocations and hashing overhead.
         edges.sort_by_key(|(src, target, _, _)| (*src, *target));
 
-        // Max node id is the source of the last edge after sorting
-        let max_node_id = edges.last().map(|(src, _, _, _)| src.as_u64()).unwrap_or(0);
+        // Max node id is the maximum of all source and target IDs
+        let max_node_id = edges
+            .iter()
+            .flat_map(|(src, target, _, _)| [src.as_u64(), target.as_u64()])
+            .max()
+            .unwrap_or(0);
 
         // Pre-allocate assuming some average degree > 1 to avoid resizing
         let estimated_nodes = (edge_count / 4).max(16);
@@ -637,5 +641,30 @@ mod tests {
                 assert!(entry.target.as_u64() < node_count as u64);
             }
         }
+    }
+
+    #[test]
+    fn test_max_node_id_from_target() {
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let edges = vec![
+            (
+                NodeId::new(1).unwrap(),
+                NodeId::new(1000).unwrap(),
+                EdgeId::new(0).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(2).unwrap(),
+                NodeId::new(500).unwrap(),
+                EdgeId::new(1).unwrap(),
+                knows,
+            ),
+        ];
+        let index = AdjacencyIndex::build(edges);
+        assert_eq!(
+            index.max_node_id(),
+            1000,
+            "max_node_id should consider target nodes"
+        );
     }
 }
