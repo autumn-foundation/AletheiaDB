@@ -943,6 +943,7 @@ impl EntityVersion for EdgeVersion {
     }
 
     fn entity_id_string(&self) -> String {
+        // Correctly use edge_id for EdgeVersion
         self.edge_id.to_string()
     }
 }
