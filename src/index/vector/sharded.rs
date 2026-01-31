@@ -652,7 +652,7 @@ impl VectorIndex for ShardedVectorIndex {
     fn add_batch_ref(&self, items: &[(NodeId, &[f32])]) -> Result<()> {
         // Group item indices by shard first
         // Pre-allocate to avoid resizing: assume uniform distribution
-        let capacity = items.len() / self.shards.len() + 1;
+        let capacity = (items.len() + self.shards.len() - 1) / self.shards.len();
         let mut shard_indices: Vec<Vec<usize>> = (0..self.shards.len())
             .map(|_| Vec::with_capacity(capacity))
             .collect();
