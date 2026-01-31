@@ -20,3 +20,7 @@
 2. Extracted serialization logic to `src/storage/wal/serialization.rs`.
 3. Moved property serialization sizing logic to `core::property::PropertyMap::serialized_size` to improve cohesion.
 4. Converted `src/storage/wal.rs` into a clean facade module.
+
+## 2026-01-30 - Splitting HistoricalStorage
+**Tangle:** `src/storage/historical.rs` was a 7000-line "Blob" containing mixed storage logic and 4400 lines of tests, making it hard to navigate and maintain.
+**Blueprint:** Refactored into `src/storage/historical/` directory. Moved tests to `tests.rs` (~4400 lines), leaving the core logic in `mod.rs` (~2600 lines). This separates concerns and makes the core logic more accessible.
