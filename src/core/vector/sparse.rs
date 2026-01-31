@@ -148,7 +148,7 @@ impl SparseVec {
             for (idx, val) in &index_value_pairs {
                 // Check NaN
                 if val.is_nan() {
-                    return Err(VectorError::ContainsNaN { count: 1 }.into());
+                    return Err(VectorError::ContainsNaN { count: 1 }.into()); // Note: This only reports the first NaN occurrence.
                 }
                 // Check Infinity
                 if val.is_infinite() {
@@ -488,7 +488,7 @@ pub fn sparse_cosine_similarity(a: &SparseVec, b: &SparseVec) -> Result<f32> {
     let mag_b = b.magnitude();
 
     // Handle zero magnitude vectors
-    if mag_a < SQUARED_MAGNITUDE_THRESHOLD || mag_b < SQUARED_MAGNITUDE_THRESHOLD {
+    if mag_a * mag_a < SQUARED_MAGNITUDE_THRESHOLD || mag_b * mag_b < SQUARED_MAGNITUDE_THRESHOLD {
         return Ok(0.0);
     }
 

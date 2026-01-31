@@ -565,7 +565,7 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 /// Unlike two-vector functions like [`cosine_similarity`], normalization functions
 /// do not validate against `MAX_VECTOR_DIMENSIONS`. This is intentional because:
 /// - Single-vector operations don't have dimension mismatch issues
-/// - Dimension limits are enforced at storage time (see [`PropertyValue::vector`])
+/// - Dimension limits are enforced at storage time (see [`crate::core::PropertyValue::Vector`])
 /// - Additional checks would add overhead without safety benefit
 #[inline]
 pub fn normalize(v: &[f32]) -> Vec<f32> {
