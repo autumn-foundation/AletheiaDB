@@ -296,10 +296,10 @@ mod tests {
 
         let invalid = HybridTimestamp::new(MAX_VALID_TIMESTAMP + 1, 0);
         assert!(invalid.is_err());
-        match invalid {
-            Err(TemporalError::InvalidTimestamp { .. }) => {}
-            _ => panic!("Expected InvalidTimestamp error"),
-        }
+        assert!(matches!(
+            invalid,
+            Err(TemporalError::InvalidTimestamp { .. })
+        ));
     }
 
     #[test]
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn test_logical_overflow() {
         // We can use new_unchecked to create a timestamp at the limit
-        // new_unchecked is pub(crate), so it is visible within this crate (including this test module)
+        // new_unchecked is pub(crate), so it is visible to the child test module
         let t_max = HybridTimestamp::new_unchecked(1000, u32::MAX);
 
         // Overflow in send
