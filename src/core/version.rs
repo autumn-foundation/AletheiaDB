@@ -11,11 +11,9 @@ use crate::core::temporal::Timestamp;
 pub struct VersionMetadata {
     /// Transaction that created this version
     ///
-    /// Note: `TxId(0)` is used as a sentinel for versions whose creating transaction
-    /// is unknown, recovered, or comes from pre-existing/migrated data. This includes
-    /// historical versions reconstructed from storage where the original transaction
-    /// ID was not preserved, as well as migration/recovery paths that cannot associate
-    /// the data with a specific user transaction.
+    /// Note: For historical versions reconstructed from storage (not currently in memory),
+    /// this may be `TxId(0)` if the creating transaction ID was not preserved in the
+    /// historical storage format.
     pub created_by_tx: TxId,
 
     /// When this version was committed (None if uncommitted)

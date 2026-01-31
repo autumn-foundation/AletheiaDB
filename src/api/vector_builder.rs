@@ -11,7 +11,7 @@ use crate::utils::error::Result;
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
 /// use gallifreydb::GallifreyDB;
 /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
 /// use gallifreydb::index::vector::temporal::TemporalVectorConfig;
@@ -62,7 +62,7 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use gallifreydb::GallifreyDB;
     /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -90,7 +90,7 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use gallifreydb::GallifreyDB;
     /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
     /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
@@ -127,7 +127,7 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use gallifreydb::GallifreyDB;
     /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {

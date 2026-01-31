@@ -11,17 +11,20 @@
 //!
 //! Compaction periodically merges delta → frozen in background thread.
 
-use crate::core::id::{EdgeId, NodeId};
-use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
 use arc_swap::{ArcSwap, Guard};
 use chrono::{DateTime, Utc};
-use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
+use dashmap::mapref::one::Ref;
 use smallvec::SmallVec;
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+
+use crate::core::id::{EdgeId, NodeId};
+use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
 
 /// Incremental CSR adjacency index with O(1) writes and fast reads.
 ///
@@ -354,6 +357,11 @@ impl IncrementalAdjacencyIndex {
 
         let frozen = self.frozen.load();
 
+        // Memory usage note:
+        // Compaction temporarily increases memory usage as we build the new frozen index
+        // while the old one, delta, and tombstones are still in memory.
+        // Peak memory ~ 2 * (frozen + delta).
+
         // 1. Drain Tombstones
         // We use a local set to filter edges during this compaction.
         // Using DashMap::retain to remove them from the main set.
@@ -371,12 +379,13 @@ impl IncrementalAdjacencyIndex {
         // Use retain to atomically move entries from DashMap to local buffer.
         // This prevents race conditions where new edges inserted during iteration
         // would be lost by a subsequent clear().
-        let mut local_delta = Vec::new();
+        let delta_count_estimate = self.stats.delta_edge_count.load(Ordering::Relaxed);
+        let mut local_delta = Vec::with_capacity(delta_count_estimate);
         let mut drained_edge_count = 0;
 
         self.delta.retain(|source, edges| {
             for entry in edges.iter() {
-                local_delta.push((*source, entry.clone()));
+                local_delta.push((*source, *entry));
                 drained_edge_count += 1;
             }
             false // Remove from main map
@@ -612,8 +621,6 @@ impl Default for IncrementalAdjacencyIndex {
 // ============================================================================
 // Background Compaction Scheduler - Phase 5
 // ============================================================================
-
-use std::thread::{self, JoinHandle};
 
 /// Background compaction scheduler for automatic threshold monitoring.
 ///
