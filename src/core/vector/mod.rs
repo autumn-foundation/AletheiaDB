@@ -76,14 +76,20 @@
 //!
 //! See `docs/VECTOR_SEARCH_DESIGN.md` for the complete design.
 
+/// Vector-related constants.
 pub mod constants;
+/// Distance metrics for vector operations.
 pub mod metric;
+/// High-level vector operations (similarity, normalization, etc.).
 pub mod ops;
 pub(crate) mod simd;
+/// Sparse vector implementation.
 pub mod sparse;
 #[cfg(test)]
 mod tests;
+/// Vector type definitions.
 pub mod types;
+/// Vector validation functions.
 pub mod validation;
 
 // Re-export commonly used types and functions
