@@ -81,31 +81,123 @@ use crate::utils::error::Result;
 
 /// Common read operations available in all transaction types
 pub trait ReadOps {
-    /// Get a node by ID (current state)
+    /// Get a node by ID.
+    ///
+    /// This returns the node state visible in the current transaction snapshot.
+    ///
+    /// # Snapshot Isolation
+    ///
+    /// If the node has been modified or deleted by another transaction after this
+    /// transaction started, `get_node` will return the version visible at the start
+    /// of this transaction (Snapshot Isolation).
+    ///
+    /// # Performance
+    ///
+    /// - **Fast Path**: O(1) lookup in current storage (hash map)
+    /// - **Slow Path**: O(log N) lookup in historical storage if not found in current (or version not visible)
     fn get_node(&self, id: NodeId) -> Result<Node>;
 
-    /// Get an edge by ID (current state)
+    /// Get an edge by ID.
+    ///
+    /// This returns the edge state visible in the current transaction snapshot.
+    ///
+    /// # Snapshot Isolation
+    ///
+    /// If the edge has been modified or deleted by another transaction after this
+    /// transaction started, `get_edge` will return the version visible at the start
+    /// of this transaction (Snapshot Isolation).
     fn get_edge(&self, id: EdgeId) -> Result<Edge>;
 
-    /// Get outgoing edges from a node
+    /// Get outgoing edges from a node.
+    ///
+    /// Returns all edges where `source == node_id` that are visible in the current snapshot.
+    ///
+    /// # Ordering
+    ///
+    /// The order of edges is **not guaranteed**. Do not rely on edges being returned
+    /// in insertion order or sorted by ID. The internal storage may reorder edges
+    /// during compaction or persistence.
+    ///
+    /// # Snapshot Isolation
+    ///
+    /// This method filters edges to ensure only those visible in the current transaction
+    /// snapshot are returned. Edges created by concurrent transactions will not be seen.
+    ///
+    /// # Performance
+    ///
+    /// - **Time**: O(degree) to collect visible edges
+    /// - **Space**: Allocates a new `Vec` containing all edge IDs
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let edges = tx.get_outgoing_edges(node_id);
+    /// for edge_id in edges {
+    ///     let edge = tx.get_edge(edge_id)?;
+    ///     println!("-> {}", edge.target);
+    /// }
+    /// ```
     fn get_outgoing_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
 
-    /// Get incoming edges to a node
+    /// Get incoming edges to a node.
+    ///
+    /// Returns all edges where `target == node_id` that are visible in the current snapshot.
+    ///
+    /// # Ordering
+    ///
+    /// The order of edges is **not guaranteed**.
+    ///
+    /// # Snapshot Isolation
+    ///
+    /// This method filters edges to ensure only those visible in the current transaction
+    /// snapshot are returned.
+    ///
+    /// # Performance
+    ///
+    /// - **Time**: O(degree) to collect visible edges
+    /// - **Space**: Allocates a new `Vec` containing all edge IDs
     fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId>;
 
-    /// Get outgoing edges with a specific label
+    /// Get outgoing edges with a specific label.
+    ///
+    /// Returns all edges where `source == node_id` AND `label == label` that are
+    /// visible in the current snapshot.
+    ///
+    /// # Ordering
+    ///
+    /// The order of edges is **not guaranteed**.
+    ///
+    /// # Performance
+    ///
+    /// - **Time**: O(degree) scan with label filtering
+    /// - **Space**: Allocates a new `Vec` containing matching edge IDs
     fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId>;
 
-    /// Get node count
+    /// Get the approximate number of nodes in the database.
+    ///
+    /// # Consistency Note
+    ///
+    /// This returns the **current** count of committed nodes in the storage engine.
+    /// Unlike `get_node()`, this count is **NOT snapshot-isolated**. It may include
+    /// nodes created by transactions that committed after this read transaction started.
+    ///
+    /// This design choice enables O(1) performance without scanning the entire
+    /// database to filter visibility for every node.
     fn node_count(&self) -> usize;
 
-    /// Get edge count
+    /// Get the approximate number of edges in the database.
+    ///
+    /// # Consistency Note
+    ///
+    /// This returns the **current** count of committed edges in the storage engine.
+    /// Unlike `get_edge()`, this count is **NOT snapshot-isolated**. It may include
+    /// edges created by transactions that committed after this read transaction started.
     fn edge_count(&self) -> usize;
 }
 
 /// Write operations (only available in write transactions)
 pub trait WriteOps: ReadOps {
-    /// Create a new node with optional backdated valid_from time
+    /// Create a new node with optional backdated valid_from time.
     ///
     /// # Arguments
     ///
@@ -125,12 +217,24 @@ pub trait WriteOps: ReadOps {
         valid_from: Option<Timestamp>,
     ) -> Result<NodeId>;
 
-    /// Create a new node (delegates to create_node_with_valid_time with None)
+    /// Create a new node.
+    ///
+    /// This is a convenience method that sets `valid_from` to the transaction commit time.
+    /// Use this for facts that become true exactly when they are recorded.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let node_id = tx.create_node(
+    ///     "Person",
+    ///     properties! { "name" => "Alice", "age" => 30 }
+    /// )?;
+    /// ```
     fn create_node(&mut self, label: &str, properties: PropertyMap) -> Result<NodeId> {
         self.create_node_with_valid_time(label, properties, None)
     }
 
-    /// Create a new edge with optional backdated valid_from time
+    /// Create a new edge with optional backdated valid_from time.
     fn create_edge_with_valid_time(
         &mut self,
         source: NodeId,
@@ -140,7 +244,20 @@ pub trait WriteOps: ReadOps {
         valid_from: Option<Timestamp>,
     ) -> Result<EdgeId>;
 
-    /// Create a new edge (delegates to create_edge_with_valid_time with None)
+    /// Create a new edge.
+    ///
+    /// This is a convenience method that sets `valid_from` to the transaction commit time.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let edge_id = tx.create_edge(
+    ///     alice_id,
+    ///     bob_id,
+    ///     "KNOWS",
+    ///     properties! { "since" => 2024 }
+    /// )?;
+    /// ```
     fn create_edge(
         &mut self,
         source: NodeId,
@@ -151,7 +268,10 @@ pub trait WriteOps: ReadOps {
         self.create_edge_with_valid_time(source, target, label, properties, None)
     }
 
-    /// Update a node's properties with optional backdated valid_from time
+    /// Update a node's properties with optional backdated valid_from time.
+    ///
+    /// This merges the new properties with existing ones (PATCH semantics).
+    /// Existing properties not in the map are preserved.
     fn update_node_with_valid_time(
         &mut self,
         node_id: NodeId,
@@ -159,12 +279,28 @@ pub trait WriteOps: ReadOps {
         valid_from: Option<Timestamp>,
     ) -> Result<()>;
 
-    /// Update a node's properties (delegates to update_node_with_valid_time with None)
+    /// Update a node's properties.
+    ///
+    /// This performs a PATCH update: only the specified properties are updated;
+    /// others are preserved. To delete a property, set it to `PropertyValue::Null` (future feature)
+    /// or explicit delete (not yet implemented).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Only updates "age", preserves "name"
+    /// tx.update_node(
+    ///     node_id,
+    ///     properties! { "age" => 31 }
+    /// )?;
+    /// ```
     fn update_node(&mut self, node_id: NodeId, properties: PropertyMap) -> Result<()> {
         self.update_node_with_valid_time(node_id, properties, None)
     }
 
-    /// Update an edge's properties with optional backdated valid_from time
+    /// Update an edge's properties with optional backdated valid_from time.
+    ///
+    /// This merges the new properties with existing ones (PATCH semantics).
     fn update_edge_with_valid_time(
         &mut self,
         edge_id: EdgeId,
@@ -172,12 +308,24 @@ pub trait WriteOps: ReadOps {
         valid_from: Option<Timestamp>,
     ) -> Result<()>;
 
-    /// Update an edge's properties (delegates to update_edge_with_valid_time with None)
+    /// Update an edge's properties.
+    ///
+    /// This performs a PATCH update: only the specified properties are updated;
+    /// others are preserved.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// tx.update_edge(
+    ///     edge_id,
+    ///     properties! { "strength" => 0.95 }
+    /// )?;
+    /// ```
     fn update_edge(&mut self, edge_id: EdgeId, properties: PropertyMap) -> Result<()> {
         self.update_edge_with_valid_time(edge_id, properties, None)
     }
 
-    /// Delete a node with optional backdated valid_from time (without deleting connected edges)
+    /// Delete a node with optional backdated valid_from time (without deleting connected edges).
     ///
     /// # Warning
     ///
@@ -194,12 +342,15 @@ pub trait WriteOps: ReadOps {
         valid_from: Option<Timestamp>,
     ) -> Result<()>;
 
-    /// Delete a node (delegates to delete_node_with_valid_time with None)
+    /// Delete a node (leaves connected edges).
+    ///
+    /// **Warning**: This leaves orphaned edges. Use [`delete_node_cascade`](Self::delete_node_cascade)
+    /// for safe deletion.
     fn delete_node(&mut self, node_id: NodeId) -> Result<()> {
         self.delete_node_with_valid_time(node_id, None)
     }
 
-    /// Delete a node and all connected edges (cascade delete)
+    /// Delete a node and all connected edges (cascade delete).
     ///
     /// This method deletes both the node and all edges where the node
     /// appears as either the source or target. This prevents orphaned edges
