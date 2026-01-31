@@ -650,9 +650,18 @@ impl VectorIndex for ShardedVectorIndex {
     }
 
     fn add_batch_ref(&self, items: &[(NodeId, &[f32])]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
         // Group item indices by shard first
         // Pre-allocate to avoid resizing: assume uniform distribution
-        let capacity = (items.len() + self.shards.len() - 1) / self.shards.len();
+        // Safety: constructor clamps num_shards >= 1, but checked_div protects against potential future bugs
+        let capacity = items
+            .len()
+            .checked_div(self.shards.len())
+            .unwrap_or(items.len())
+            + 1;
         let mut shard_indices: Vec<Vec<usize>> = (0..self.shards.len())
             .map(|_| Vec::with_capacity(capacity))
             .collect();
@@ -677,9 +686,18 @@ impl VectorIndex for ShardedVectorIndex {
     }
 
     fn remove_batch(&self, ids: &[NodeId]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
         // Group IDs by shard
         // Pre-allocate to avoid resizing: assume uniform distribution
-        let capacity = (ids.len() + self.shards.len() - 1) / self.shards.len();
+        // Safety: constructor clamps num_shards >= 1, but checked_div protects against potential future bugs
+        let capacity = ids
+            .len()
+            .checked_div(self.shards.len())
+            .unwrap_or(ids.len())
+            + 1;
         let mut shard_ids: Vec<Vec<NodeId>> = (0..self.shards.len())
             .map(|_| Vec::with_capacity(capacity))
             .collect();
