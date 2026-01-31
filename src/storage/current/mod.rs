@@ -16,6 +16,8 @@ use crate::index::vector::{TemporalSearchResults, VectorIndex};
 use crate::utils::error::{Result, StorageError};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 mod iterators;
 mod stats;
@@ -35,8 +37,6 @@ use vector::{TemporalVectorIndexEntry, TemporalVectorIndexState, VectorIndexEntr
 ///
 /// Override via configuration if your use case requires more properties.
 pub const DEFAULT_MAX_VECTOR_PROPERTIES: usize = 10;
-use parking_lot::RwLock;
-use std::sync::Arc;
 
 /// Current-state storage engine.
 ///
