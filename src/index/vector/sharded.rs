@@ -679,7 +679,7 @@ impl VectorIndex for ShardedVectorIndex {
     fn remove_batch(&self, ids: &[NodeId]) -> Result<()> {
         // Group IDs by shard
         // Pre-allocate to avoid resizing: assume uniform distribution
-        let capacity = ids.len() / self.shards.len() + 1;
+        let capacity = (ids.len() + self.shards.len() - 1) / self.shards.len();
         let mut shard_ids: Vec<Vec<NodeId>> = (0..self.shards.len())
             .map(|_| Vec::with_capacity(capacity))
             .collect();
