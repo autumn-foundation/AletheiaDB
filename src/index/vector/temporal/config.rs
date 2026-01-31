@@ -180,6 +180,12 @@ impl TemporalVectorConfig {
     }
 }
 
+impl Default for TemporalVectorConfig {
+    fn default() -> Self {
+        Self::default_temporal_only()
+    }
+}
+
 /// Snapshot creation strategies.
 ///
 /// Determines when temporal vector index snapshots are created.
