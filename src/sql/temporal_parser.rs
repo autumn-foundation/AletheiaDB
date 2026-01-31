@@ -588,7 +588,7 @@ pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError
     }
 
     // Clean up extra whitespace
-    let new_cleaned = {
+    cleaned = {
         let mut parts = cleaned.split_whitespace();
         if let Some(first) = parts.next() {
             // Reserve approximate capacity to avoid reallocations
@@ -603,7 +603,6 @@ pub fn extract_temporal_clauses(sql: &str) -> Result<ExtractedTemporal, SqlError
             String::new()
         }
     };
-    cleaned = new_cleaned;
 
     Ok(ExtractedTemporal {
         cleaned_sql: cleaned,

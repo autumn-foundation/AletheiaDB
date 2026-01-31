@@ -45,12 +45,14 @@ fn test_version_lookup_correctness_many_versions() {
 
     // Create 1000 versions with distinct timestamps
     const NUM_VERSIONS: usize = 1000;
+    const COMMIT_LATENCY_BUFFER_MS: u64 = 10;
+    const QUERY_VISIBILITY_OFFSET_MS: u64 = 5;
+
     let mut version_timestamps = Vec::new();
 
     for i in 0..NUM_VERSIONS {
-        // Increase delay to ensure distinct timestamps and stable windows on CI
-        // This mitigates test flakiness on slower runners where clock resolution might be coarse
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Delay to ensure distinct timestamps and allow time for commit
+        std::thread::sleep(std::time::Duration::from_millis(COMMIT_LATENCY_BUFFER_MS));
 
         // Update the node to create a new version
         let props = PropertyMapBuilder::new()
@@ -78,10 +80,11 @@ fn test_version_lookup_correctness_many_versions() {
     // Test: Query at the beginning of each version interval
     for (expected_version_idx, &timestamp) in version_timestamps.iter().enumerate() {
         // Query at valid_time + 1, but use a tx_time far enough in the future to see the version.
-        // We use 5ms offset to be safe against commit latency on slow CI runners, but
-        // safely within the 10ms interval before the next version.
+        // We use an offset to be safe against commit latency on slow CI runners, but
+        // safely within the interval before the next version.
         let query_valid_time = Timestamp::from(timestamp.wallclock() + 1i64);
-        let query_tx_time = Timestamp::from(timestamp.wallclock() + 5000i64); // 5ms in future
+        let query_tx_time =
+            Timestamp::from(timestamp.wallclock() + (QUERY_VISIBILITY_OFFSET_MS * 1000) as i64);
 
         let version_id = hist_guard
             .find_node_version_at_time(node_id, query_valid_time, query_tx_time)
@@ -163,11 +166,14 @@ fn test_version_lookup_performance_scaling() {
 
     // Create 1000 versions
     const NUM_VERSIONS: usize = 1000;
+    const COMMIT_LATENCY_BUFFER_MS: u64 = 10;
+    const QUERY_VISIBILITY_OFFSET_MS: u64 = 5;
+
     let mut version_timestamps = Vec::new();
 
     println!("Creating {} versions...", NUM_VERSIONS);
     for i in 0..NUM_VERSIONS {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(COMMIT_LATENCY_BUFFER_MS));
 
         let props = PropertyMapBuilder::new()
             .insert("version", i as i64)
@@ -207,7 +213,9 @@ fn test_version_lookup_performance_scaling() {
     for (idx, description) in test_positions {
         let query_valid_time = version_timestamps[idx];
         // Use a safe future transaction time to ensure visibility
-        let query_tx_time = Timestamp::from(query_valid_time.wallclock() + 5000i64);
+        let query_tx_time = Timestamp::from(
+            query_valid_time.wallclock() + (QUERY_VISIBILITY_OFFSET_MS * 1000) as i64,
+        );
 
         // Warm up
         for _ in 0..10 {
@@ -280,10 +288,13 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
     // Create many versions (stay within default 1000 limit)
     const NUM_VERSIONS: usize = 100;
+    const COMMIT_LATENCY_BUFFER_MS: u64 = 10;
+    const QUERY_VISIBILITY_OFFSET_MS: u64 = 5;
+
     let mut version_timestamps = Vec::new();
 
     for i in 0..NUM_VERSIONS {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(COMMIT_LATENCY_BUFFER_MS));
 
         let props = PropertyMapBuilder::new().insert("weight", i as i64).build();
 
@@ -309,9 +320,11 @@ fn test_edge_version_lookup_correctness_many_versions() {
     for &idx in &[0, NUM_VERSIONS / 4, NUM_VERSIONS / 2, NUM_VERSIONS - 1] {
         let valid_timestamp = version_timestamps[idx];
         // Query with tx_time far enough in future to see the version.
-        // We use 5ms offset to be safe against commit latency on slow CI runners.
+        // We use an offset to be safe against commit latency on slow CI runners.
         let query_valid_time = valid_timestamp;
-        let query_tx_time = Timestamp::from(valid_timestamp.wallclock() + 5000i64);
+        let query_tx_time = Timestamp::from(
+            valid_timestamp.wallclock() + (QUERY_VISIBILITY_OFFSET_MS * 1000) as i64,
+        );
 
         let version_id = hist_guard
             .find_edge_version_at_time(edge_id, query_valid_time, query_tx_time)

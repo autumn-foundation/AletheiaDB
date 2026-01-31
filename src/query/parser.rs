@@ -11,9 +11,6 @@ use crate::index::vector::DistanceMetric;
 use super::ast::*;
 use super::lexer::{Lexer, LexerError, Token};
 
-/// Maximum recursion depth for parsing expressions to prevent stack overflow.
-const MAX_RECURSION_DEPTH: usize = 100;
-
 /// Error type for parser errors.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -712,60 +709,53 @@ impl Parser {
         }
 
         self.advance(); // WHERE
-        let predicate = self.parse_predicate(0)?;
+        let predicate = self.parse_predicate()?;
 
         Ok(Some(WhereClause { predicate }))
     }
 
-    fn parse_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
-        self.parse_or_predicate(depth)
+    fn parse_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
+        self.parse_or_predicate()
     }
 
-    fn parse_or_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
-        let mut left = self.parse_and_predicate(depth)?;
+    fn parse_or_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
+        let mut left = self.parse_and_predicate()?;
 
         while self.check(&Token::Or) {
             self.advance();
-            let right = self.parse_and_predicate(depth)?;
+            let right = self.parse_and_predicate()?;
             left = PredicateExpr::Or(Box::new(left), Box::new(right));
         }
 
         Ok(left)
     }
 
-    fn parse_and_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
-        let mut left = self.parse_not_predicate(depth)?;
+    fn parse_and_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
+        let mut left = self.parse_not_predicate()?;
 
         while self.check(&Token::And) {
             self.advance();
-            let right = self.parse_not_predicate(depth)?;
+            let right = self.parse_not_predicate()?;
             left = PredicateExpr::And(Box::new(left), Box::new(right));
         }
 
         Ok(left)
     }
 
-    fn parse_not_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
-        if depth > MAX_RECURSION_DEPTH {
-            return Err(self.error(
-                format!("Recursion limit exceeded (max {})", MAX_RECURSION_DEPTH),
-                None,
-            ));
-        }
-
+    fn parse_not_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
         if self.check(&Token::Not) {
             self.advance();
-            let pred = self.parse_not_predicate(depth + 1)?;
+            let pred = self.parse_not_predicate()?;
             return Ok(PredicateExpr::Not(Box::new(pred)));
         }
 
-        self.parse_primary_predicate(depth)
+        self.parse_primary_predicate()
     }
 
-    fn parse_primary_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
+    fn parse_primary_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
         // Parenthesized predicate
         if self.check(&Token::LeftParen) {
-            return self.parse_grouped_predicate(depth);
+            return self.parse_grouped_predicate();
         }
 
         // EXISTS(n.prop)
@@ -795,16 +785,9 @@ impl Parser {
         self.parse_comparison_predicate(expr)
     }
 
-    fn parse_grouped_predicate(&mut self, depth: usize) -> Result<PredicateExpr, ParseError> {
-        if depth > MAX_RECURSION_DEPTH {
-            return Err(self.error(
-                format!("Recursion limit exceeded (max {})", MAX_RECURSION_DEPTH),
-                None,
-            ));
-        }
-
+    fn parse_grouped_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
         self.advance();
-        let pred = self.parse_predicate(depth + 1)?;
+        let pred = self.parse_predicate()?;
         self.expect(&Token::RightParen)?;
         Ok(PredicateExpr::Grouped(Box::new(pred)))
     }

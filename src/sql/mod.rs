@@ -63,6 +63,7 @@ pub use converter::{SqlConverter, parse_sql, parse_sql_with_params};
 pub use error::SqlError;
 pub use parser::SqlParser;
 pub use temporal::TemporalClause;
+pub use temporal_parser::extract_temporal_clauses;
 
 #[cfg(test)]
 mod tests;

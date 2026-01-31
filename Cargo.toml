@@ -358,3 +358,9 @@ name = "edge_iteration"
 harness = false
 path = "benches/edge_iteration.rs"
 required-features = []
+
+[[bench]]
+name = "sql_parser_bench"
+harness = false
+path = "benches/sql_parser_bench.rs"
+required-features = ["sql"]
