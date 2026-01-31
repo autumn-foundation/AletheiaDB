@@ -831,41 +831,9 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("get_node_at_time").entered();
 
-        // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
-        let version_ids =
-            self.temporal_indexes
-                .find_node_version_at_point(node_id, valid_time, transaction_time);
-
-        // Early return if no candidates - avoid unnecessary lock acquisition
-        if version_ids.is_empty() {
-            return Err(StorageError::NodeNotFound(node_id).into());
-        }
-
-        let historical = self.historical.read_or_err()?;
-
-        // IMPORTANT: Double-check visibility with historical storage.
-        // This is intentional and NOT redundant: the temporal index stores intervals at
-        // insertion time, but deletions close the valid_time interval in historical storage.
-        // Without this check, deleted nodes would incorrectly appear as visible.
-        for version_id in version_ids {
-            if let Some(version) = historical.get_node_version(version_id)
-                && version.temporal.is_visible_at(valid_time, transaction_time)
-            {
-                // Reconstruct properties
-                let properties = historical.reconstruct_node_properties(version_id)?;
-
-                // Build node from version
-                return Ok(Node::new(
-                    version.node_id,
-                    version.label,
-                    properties,
-                    version.id,
-                ));
-            }
-        }
-
-        // No visible version found
-        Err(StorageError::NodeNotFound(node_id).into())
+        self.historical
+            .read_or_err()?
+            .get_node_at_time(node_id, valid_time, transaction_time)
     }
 
     /// Get an edge as it existed at a specific point in bi-temporal space.
@@ -881,41 +849,9 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("get_edge_at_time").entered();
 
-        // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
-        let version_ids =
-            self.temporal_indexes
-                .find_edge_version_at_point(edge_id, valid_time, transaction_time);
-
-        // Early return if no candidates - avoid unnecessary lock acquisition
-        if version_ids.is_empty() {
-            return Err(StorageError::EdgeNotFound(edge_id).into());
-        }
-
-        let historical = self.historical.read_or_err()?;
-
-        // IMPORTANT: Double-check visibility with historical storage.
-        // This is intentional and NOT redundant: the temporal index stores intervals at
-        // insertion time, but deletions close the valid_time interval in historical storage.
-        // Without this check, deleted edges would incorrectly appear as visible.
-        for version_id in version_ids {
-            if let Some(version) = historical.get_edge_version(version_id)
-                && version.temporal.is_visible_at(valid_time, transaction_time)
-            {
-                let properties = historical.reconstruct_edge_properties(version_id)?;
-
-                return Ok(Edge::new(
-                    version.edge_id,
-                    version.label,
-                    version.source,
-                    version.target,
-                    properties,
-                    version.id,
-                ));
-            }
-        }
-
-        // No visible version found
-        Err(StorageError::EdgeNotFound(edge_id).into())
+        self.historical
+            .read_or_err()?
+            .get_edge_at_time(edge_id, valid_time, transaction_time)
     }
 
     /// Get multiple nodes as they existed at a specific point in bi-temporal space.
@@ -992,52 +928,9 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("get_nodes_at_time").entered();
 
-        // Single lock acquisition for all queries
-        let historical = self.historical.read_or_err()?;
-
-        // Process each node ID, propagating errors properly
-        node_ids
-            .iter()
-            .map(|&node_id| {
-                // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
-                // Use iterator API to avoid Vec allocation when only first match is needed (Issue #197)
-                let node = self
-                    .temporal_indexes
-                    .find_node_version_at_point_iter(node_id, valid_time, transaction_time)
-                    .find_map(|version_id| {
-                        match historical.get_node_version(version_id) {
-                            Some(version)
-                                if version.temporal.is_visible_at(valid_time, transaction_time) =>
-                            {
-                                // Reconstruct properties - return None on error to continue to next candidate
-                                // Note: Batch queries treat reconstruction errors as "not found" to allow
-                                // partial results. Errors are logged when observability is enabled.
-                                match historical.reconstruct_node_properties(version_id) {
-                                    Ok(properties) => Some(Node::new(
-                                        version.node_id,
-                                        version.label,
-                                        properties,
-                                        version.id,
-                                    )),
-                                    Err(_e) => {
-                                        #[cfg(feature = "observability")]
-                                        tracing::error!(
-                                            version_id = %version_id,
-                                            node_id = %node_id,
-                                            error = %_e,
-                                            "Property reconstruction failed in batch query"
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                            _ => None, // Version missing or not visible - continue to next candidate
-                        }
-                    });
-
-                Ok((node_id, node))
-            })
-            .collect()
+        self.historical
+            .read_or_err()?
+            .get_nodes_at_time(node_ids, valid_time, transaction_time)
     }
 
     /// Get multiple edges as they existed at a specific point in bi-temporal space.
@@ -1109,54 +1002,9 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("get_edges_at_time").entered();
 
-        // Single lock acquisition for all queries
-        let historical = self.historical.read_or_err()?;
-
-        // Process each edge ID, propagating errors properly
-        edge_ids
-            .iter()
-            .map(|&edge_id| {
-                // Use temporal index for efficient O(log n) candidate lookup (Issue #194 fix)
-                // Use iterator API to avoid Vec allocation when only first match is needed (Issue #197)
-                let edge = self
-                    .temporal_indexes
-                    .find_edge_version_at_point_iter(edge_id, valid_time, transaction_time)
-                    .find_map(|version_id| {
-                        match historical.get_edge_version(version_id) {
-                            Some(version)
-                                if version.temporal.is_visible_at(valid_time, transaction_time) =>
-                            {
-                                // Reconstruct properties - return None on error to continue to next candidate
-                                // Note: Batch queries treat reconstruction errors as "not found" to allow
-                                // partial results. Errors are logged when observability is enabled.
-                                match historical.reconstruct_edge_properties(version_id) {
-                                    Ok(properties) => Some(Edge::new(
-                                        version.edge_id,
-                                        version.label,
-                                        version.source,
-                                        version.target,
-                                        properties,
-                                        version.id,
-                                    )),
-                                    Err(_e) => {
-                                        #[cfg(feature = "observability")]
-                                        tracing::error!(
-                                            version_id = %version_id,
-                                            edge_id = %edge_id,
-                                            error = %_e,
-                                            "Property reconstruction failed in batch query"
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                            _ => None, // Version missing or not visible - continue to next candidate
-                        }
-                    });
-
-                Ok((edge_id, edge))
-            })
-            .collect()
+        self.historical
+            .read_or_err()?
+            .get_edges_at_time(edge_ids, valid_time, transaction_time)
     }
 
     // ========================================================================
@@ -1210,46 +1058,7 @@ impl GallifreyDB {
     /// println!("Alice has {} versions", history.version_count());
     /// ```
     pub fn get_node_history(&self, node_id: NodeId) -> Result<crate::query::EntityHistory> {
-        use crate::query::VersionInfo;
-
-        let historical = self.historical.read_or_err()?;
-
-        // Get the current version ID
-        let current_version_id = historical
-            .get_current_node_version(node_id)
-            .ok_or(StorageError::NodeNotFound(node_id))?;
-
-        // Traverse the version chain backwards to get all versions in order
-        let mut version_ids = Vec::new();
-        let mut current_id = Some(current_version_id);
-
-        while let Some(vid) = current_id {
-            version_ids.push(vid);
-            current_id = historical
-                .get_node_version(vid)
-                .and_then(|v| v.prev_version);
-        }
-
-        // Reverse to get oldest-first order
-        version_ids.reverse();
-
-        // Build VersionInfo for each version
-        let mut versions = Vec::with_capacity(version_ids.len());
-        for (version_number, version_id) in version_ids.iter().enumerate() {
-            if let Some(version) = historical.get_node_version(*version_id) {
-                let properties = historical.reconstruct_node_properties(*version_id)?;
-
-                versions.push(VersionInfo {
-                    version_number: (version_number + 1) as u64, // 1-indexed
-                    version_id: *version_id,
-                    temporal: version.temporal,
-                    properties,
-                    label: version.label.to_string(),
-                });
-            }
-        }
-
-        Ok(crate::query::EntityHistory { versions })
+        self.historical.read_or_err()?.get_node_history(node_id)
     }
 
     /// Get a node at a specific logical version number.
@@ -1263,50 +1072,9 @@ impl GallifreyDB {
     /// let v2 = db.get_node_at_version(alice_id, 2)?;  // After first update
     /// ```
     pub fn get_node_at_version(&self, node_id: NodeId, version_number: u64) -> Result<Node> {
-        let historical = self.historical.read_or_err()?;
-
-        // Get the current version ID
-        let current_version_id = historical
-            .get_current_node_version(node_id)
-            .ok_or(StorageError::NodeNotFound(node_id))?;
-
-        // Traverse the version chain backwards to collect all versions
-        let mut version_ids = Vec::new();
-        let mut current_id = Some(current_version_id);
-
-        while let Some(vid) = current_id {
-            version_ids.push(vid);
-            current_id = historical
-                .get_node_version(vid)
-                .and_then(|v| v.prev_version);
-        }
-
-        // Reverse to get oldest-first order
-        version_ids.reverse();
-
-        // Convert 1-indexed version number to 0-indexed array index
-        let index = version_number
-            .checked_sub(1)
-            .ok_or(StorageError::NodeNotFound(node_id))? as usize;
-
-        // Get the version ID at that index
-        let version_id = version_ids
-            .get(index)
-            .ok_or(StorageError::NodeNotFound(node_id))?;
-
-        // Reconstruct the node from that version
-        let version = historical
-            .get_node_version(*version_id)
-            .ok_or(StorageError::VersionNotFound(*version_id))?;
-
-        let properties = historical.reconstruct_node_properties(*version_id)?;
-
-        Ok(Node::new(
-            version.node_id,
-            version.label,
-            properties,
-            version.id,
-        ))
+        self.historical
+            .read_or_err()?
+            .get_node_at_version(node_id, version_number)
     }
 
     /// Compute the difference between two versions of a node.
@@ -1331,46 +1099,9 @@ impl GallifreyDB {
         from_version: crate::core::id::VersionId,
         to_version: crate::core::id::VersionId,
     ) -> Result<crate::query::VersionDiff> {
-        let historical = self.historical.read_or_err()?;
-
-        // Validate that both versions belong to the requested node
-        let from_ver = historical
-            .get_node_version(from_version)
-            .ok_or(StorageError::VersionNotFound(from_version))?;
-        let to_ver = historical
-            .get_node_version(to_version)
-            .ok_or(StorageError::VersionNotFound(to_version))?;
-
-        if from_ver.node_id != node_id {
-            return Err(StorageError::InconsistentState {
-                reason: format!(
-                    "Version {} belongs to node {}, not node {}",
-                    from_version, from_ver.node_id, node_id
-                ),
-            }
-            .into());
-        }
-        if to_ver.node_id != node_id {
-            return Err(StorageError::InconsistentState {
-                reason: format!(
-                    "Version {} belongs to node {}, not node {}",
-                    to_version, to_ver.node_id, node_id
-                ),
-            }
-            .into());
-        }
-
-        // Reconstruct both versions
-        let from_props = historical.reconstruct_node_properties(from_version)?;
-        let to_props = historical.reconstruct_node_properties(to_version)?;
-
-        // Compute diff
-        Ok(crate::query::VersionDiff::compute(
-            &from_props,
-            &to_props,
-            from_version,
-            to_version,
-        ))
+        self.historical
+            .read_or_err()?
+            .diff_node_versions(node_id, from_version, to_version)
     }
 
     /// Get an edge at a specific valid time.
@@ -1397,46 +1128,7 @@ impl GallifreyDB {
     ///
     /// Returns all versions in chronological order (oldest first).
     pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<crate::query::EntityHistory> {
-        use crate::query::VersionInfo;
-
-        let historical = self.historical.read_or_err()?;
-
-        // Get the current version ID
-        let current_version_id = historical
-            .get_current_edge_version(edge_id)
-            .ok_or(StorageError::EdgeNotFound(edge_id))?;
-
-        // Traverse the version chain backwards to get all versions
-        let mut version_ids = Vec::new();
-        let mut current_id = Some(current_version_id);
-
-        while let Some(vid) = current_id {
-            version_ids.push(vid);
-            current_id = historical
-                .get_edge_version(vid)
-                .and_then(|v| v.prev_version);
-        }
-
-        // Reverse to get oldest-first order
-        version_ids.reverse();
-
-        // Build VersionInfo for each version
-        let mut versions = Vec::with_capacity(version_ids.len());
-        for (version_number, version_id) in version_ids.iter().enumerate() {
-            if let Some(version) = historical.get_edge_version(*version_id) {
-                let properties = historical.reconstruct_edge_properties(*version_id)?;
-
-                versions.push(VersionInfo {
-                    version_number: (version_number + 1) as u64, // 1-indexed
-                    version_id: *version_id,
-                    temporal: version.temporal,
-                    properties,
-                    label: version.label.to_string(),
-                });
-            }
-        }
-
-        Ok(crate::query::EntityHistory { versions })
+        self.historical.read_or_err()?.get_edge_history(edge_id)
     }
 
     /// Compute the difference between two versions of an edge.
@@ -1448,46 +1140,9 @@ impl GallifreyDB {
         from_version: crate::core::id::VersionId,
         to_version: crate::core::id::VersionId,
     ) -> Result<crate::query::VersionDiff> {
-        let historical = self.historical.read_or_err()?;
-
-        // Validate that both versions belong to the requested edge
-        let from_ver = historical
-            .get_edge_version(from_version)
-            .ok_or(StorageError::VersionNotFound(from_version))?;
-        let to_ver = historical
-            .get_edge_version(to_version)
-            .ok_or(StorageError::VersionNotFound(to_version))?;
-
-        if from_ver.edge_id != edge_id {
-            return Err(StorageError::InconsistentState {
-                reason: format!(
-                    "Version {} belongs to edge {}, not edge {}",
-                    from_version, from_ver.edge_id, edge_id
-                ),
-            }
-            .into());
-        }
-        if to_ver.edge_id != edge_id {
-            return Err(StorageError::InconsistentState {
-                reason: format!(
-                    "Version {} belongs to edge {}, not edge {}",
-                    to_version, to_ver.edge_id, edge_id
-                ),
-            }
-            .into());
-        }
-
-        // Reconstruct both versions
-        let from_props = historical.reconstruct_edge_properties(from_version)?;
-        let to_props = historical.reconstruct_edge_properties(to_version)?;
-
-        // Compute diff
-        Ok(crate::query::VersionDiff::compute(
-            &from_props,
-            &to_props,
-            from_version,
-            to_version,
-        ))
+        self.historical
+            .read_or_err()?
+            .diff_edge_versions(edge_id, from_version, to_version)
     }
 
     // ========================================================================
