@@ -1107,37 +1107,30 @@ fn load_mappings_with_integrity(
     }
 
     // Open file first to avoid TOCTOU race condition
-    let mut file = std::fs::File::open(mappings_path).map_err(|e| {
-        Error::Vector(VectorError::IndexError(format!(
-            "Failed to open mappings file: {}",
-            e
-        )))
-    })?;
+    let mut file = std::fs::File::open(mappings_path)?;
 
     // Validate file size to prevent DoS
-    let metadata = file.metadata().map_err(|e| {
-        Error::Vector(VectorError::IndexError(format!(
-            "Failed to get mapping file metadata: {}",
-            e
-        )))
-    })?;
+    let metadata = file.metadata()?;
 
     if metadata.len() > MAX_MAPPING_FILE_SIZE {
-        return Err(Error::Vector(VectorError::IndexError(format!(
-            "Mapping file too large: {} bytes (limit: {} bytes)",
-            metadata.len(),
-            MAX_MAPPING_FILE_SIZE
-        ))));
+        return Err(Error::Vector(VectorError::SizeLimitExceeded {
+            message: format!(
+                "Mapping file too large: {} bytes (limit: {} bytes)",
+                metadata.len(),
+                MAX_MAPPING_FILE_SIZE
+            ),
+        }));
     }
 
     // Read data
-    let mut file_data = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut file_data).map_err(|e| {
-        Error::Vector(VectorError::IndexError(format!(
-            "Failed to read mappings: {}",
-            e
-        )))
+    let capacity: usize = metadata.len().try_into().map_err(|_| {
+        Error::Vector(VectorError::SizeLimitExceeded {
+            message: format!("File size {} exceeds platform capacity", metadata.len()),
+        })
     })?;
+
+    let mut file_data = Vec::with_capacity(capacity);
+    file.read_to_end(&mut file_data)?;
 
     // Minimum size: magic(4) + version(1) + count(8) + crc(4) = 17 bytes
     if file_data.len() < 17 {
@@ -1984,9 +1977,9 @@ mod tests {
         let result = load_mappings_with_integrity(&mappings_path);
         assert!(result.is_err());
         match result {
-            Err(Error::Vector(VectorError::IndexError(msg))) => {
-                assert!(msg.contains("too large"));
-                assert!(msg.contains("limit: 10485760 bytes")); // 10MB
+            Err(Error::Vector(VectorError::SizeLimitExceeded { message })) => {
+                assert!(message.contains("too large"));
+                assert!(message.contains("limit: 10485760 bytes")); // 10MB
             }
             Ok(_) => panic!("Expected oversized file error, got Ok"),
             Err(e) => panic!("Expected oversized file error, got {:?}", e),

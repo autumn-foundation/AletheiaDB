@@ -798,11 +798,19 @@ pub enum VectorError {
     },
     /// Error from underlying vector index implementation.
     IndexError(String),
+    /// Size limit exceeded (DoS protection).
+    SizeLimitExceeded {
+        /// Description of the size limit violation
+        message: String,
+    },
 }
 
 impl fmt::Display for VectorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            VectorError::SizeLimitExceeded { message } => {
+                write!(f, "Size limit exceeded: {}", message)
+            }
             VectorError::DimensionMismatch { expected, actual } => {
                 write!(
                     f,

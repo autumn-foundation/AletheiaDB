@@ -1,6 +1,7 @@
 //! Graph index persistence.
 
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -181,7 +182,6 @@ pub fn load_graph_index(path: &Path) -> Result<GraphIndexData> {
 
     // Pre-allocate buffer based on file size
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    use std::io::Read;
     file.read_to_end(&mut bytes)?;
 
     // Check minimum size (must have at least 4 bytes for CRC)
@@ -614,16 +614,7 @@ pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Resul
     }
 
     // Load and decompress delta
-    let capacity: usize = metadata.len().try_into().map_err(|_| {
-        IndexPersistenceError::SizeLimitExceeded {
-            message: format!(
-                "Graph delta file size {} exceeds platform capacity",
-                metadata.len()
-            ),
-        }
-    })?;
-    let mut bytes = Vec::with_capacity(capacity);
-    use std::io::Read;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.read_to_end(&mut bytes)?;
 
     // Check minimum size (must have at least 4 bytes for CRC)
