@@ -304,7 +304,10 @@ mod tests {
         assert_eq!(config, expected);
 
         // Verify defaults
-        assert_eq!(config.snapshot_strategy, SnapshotStrategy::TransactionInterval(10));
+        assert_eq!(
+            config.snapshot_strategy,
+            SnapshotStrategy::TransactionInterval(10)
+        );
         assert_eq!(config.retention_policy, RetentionPolicy::KeepN(100));
         assert_eq!(config.max_snapshots, 100);
         assert_eq!(config.full_snapshot_interval, 10);

@@ -15,11 +15,12 @@ use crate::core::id::{EdgeId, NodeId};
 use crate::index::adjacency::{AdjacencyEntry, AdjacencyIndex};
 use arc_swap::{ArcSwap, Guard};
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
+use dashmap::DashMap;
 use smallvec::SmallVec;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Incremental CSR adjacency index with O(1) writes and fast reads.
@@ -353,51 +354,72 @@ impl IncrementalAdjacencyIndex {
 
         let frozen = self.frozen.load();
 
-        // Estimate capacity: frozen + delta - tombstones
-        let estimated_capacity = frozen.edge_count()
-            + self.stats.delta_edge_count.load(Ordering::Relaxed)
-            - self.stats.tombstone_count.load(Ordering::Relaxed);
+        // 1. Drain Tombstones
+        // We use a local set to filter edges during this compaction.
+        // Using DashMap::retain to remove them from the main set.
+        let mut local_tombstones = HashSet::new();
+        self.tombstones.retain(|edge_id, _| {
+            local_tombstones.insert(*edge_id);
+            false // Remove from main map
+        });
+        // Subtract drained tombstones from stats
+        self.stats
+            .tombstone_count
+            .fetch_sub(local_tombstones.len(), Ordering::Relaxed);
 
+        // 2. Drain Delta
+        // Use retain to atomically move entries from DashMap to local buffer.
+        // This prevents race conditions where new edges inserted during iteration
+        // would be lost by a subsequent clear().
+        let mut local_delta = Vec::new();
+        let mut drained_edge_count = 0;
+
+        self.delta.retain(|source, edges| {
+            for entry in edges.iter() {
+                local_delta.push((*source, entry.clone()));
+                drained_edge_count += 1;
+            }
+            false // Remove from main map
+        });
+        // Subtract drained delta edges from stats
+        self.stats
+            .delta_edge_count
+            .fetch_sub(drained_edge_count, Ordering::Relaxed);
+
+        // Estimate capacity: frozen + delta (we don't subtract tombstones to stay safe)
+        let estimated_capacity = frozen.edge_count() + drained_edge_count;
         let mut all_edges = Vec::with_capacity(estimated_capacity);
 
-        // 1. Collect edges from frozen (excluding tombstones)
-        // Use iter_nodes() for efficient sparse graph iteration - O(nodes_with_edges) not O(max_node_id)
+        // 3. Collect edges from frozen (excluding tombstones)
+        // Use iter_nodes() for efficient sparse graph iteration
         for node_id in frozen.iter_nodes() {
             let frozen_slice = frozen.get_adjacency(node_id);
             for adj in frozen_slice {
-                if !self.tombstones.contains_key(&adj.edge_id) {
+                if !local_tombstones.contains(&adj.edge_id) {
                     all_edges.push((node_id, adj.target, adj.edge_id, adj.label));
                 }
             }
         }
 
-        // 2. Collect edges from delta (excluding tombstones)
-        for entry in self.delta.iter() {
-            let source = *entry.key();
-            for adj in entry.value().iter() {
-                if !self.tombstones.contains_key(&adj.edge_id) {
-                    all_edges.push((source, adj.target, adj.edge_id, adj.label));
-                }
+        // 4. Collect edges from delta (filtering with local_tombstones)
+        // Note: Delta might contain edges that were also tombstoned just before drain
+        for (source, adj) in local_delta {
+            if !local_tombstones.contains(&adj.edge_id) {
+                all_edges.push((source, adj.target, adj.edge_id, adj.label));
             }
         }
 
-        // 3. Build new frozen CSR
+        // 5. Build new frozen CSR
         let new_frozen = AdjacencyIndex::build(all_edges);
         let new_edge_count = new_frozen.edge_count();
 
-        // 4. Atomic swap (lock-free for readers!)
+        // 6. Atomic swap (lock-free for readers!)
         self.frozen.store(Arc::new(new_frozen));
 
-        // 5. Clear delta and tombstones
-        self.delta.clear();
-        self.tombstones.clear();
-
-        // 6. Update statistics
+        // 7. Update statistics
         self.stats
             .frozen_edge_count
             .store(new_edge_count, Ordering::Release);
-        self.stats.delta_edge_count.store(0, Ordering::Release);
-        self.stats.tombstone_count.store(0, Ordering::Release);
         self.stats
             .last_compaction
             .store(Utc::now().timestamp() as u64, Ordering::Release);
@@ -591,7 +613,6 @@ impl Default for IncrementalAdjacencyIndex {
 // Background Compaction Scheduler - Phase 5
 // ============================================================================
 
-use std::sync::atomic::AtomicBool;
 use std::thread::{self, JoinHandle};
 
 /// Background compaction scheduler for automatic threshold monitoring.
