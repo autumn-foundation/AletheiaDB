@@ -664,130 +664,109 @@ impl TraversalIterator {
         }
     }
 
+    /// Collect and filter edges in a specific direction into a buffer.
+    ///
+    /// This helper reduces code duplication for Outgoing/Incoming/Both traversals
+    /// while avoiding intermediate allocations by pushing to a provided buffer.
+    fn collect_neighbors_in_direction(
+        &self,
+        node_id: NodeId,
+        direction: Direction,
+        historical_guard: &Option<parking_lot::RwLockReadGuard<'_, HistoricalStorage>>,
+        neighbors: &mut Vec<(NodeId, crate::core::EdgeId)>,
+    ) {
+        match direction {
+            Direction::Outgoing => {
+                if let Some(ref label) = self.label {
+                    neighbors.extend(
+                        self.current
+                            .get_outgoing_edges_with_label_iter(node_id, label)
+                            .filter_map(|edge_id| {
+                                if !self.edge_visible_at_time(edge_id, historical_guard) {
+                                    return None;
+                                }
+                                self.current
+                                    .get_edge_target(edge_id)
+                                    .ok()
+                                    .map(|target| (target, edge_id))
+                            }),
+                    );
+                } else {
+                    neighbors.extend(
+                        self.current
+                            .get_outgoing_edges_iter(node_id)
+                            .filter_map(|edge_id| {
+                                if !self.edge_visible_at_time(edge_id, historical_guard) {
+                                    return None;
+                                }
+                                self.current
+                                    .get_edge_target(edge_id)
+                                    .ok()
+                                    .map(|target| (target, edge_id))
+                            }),
+                    );
+                }
+            }
+            Direction::Incoming => {
+                if let Some(ref label) = self.label {
+                    neighbors.extend(
+                        self.current
+                            .get_incoming_edges_with_label_iter(node_id, label)
+                            .filter_map(|edge_id| {
+                                if !self.edge_visible_at_time(edge_id, historical_guard) {
+                                    return None;
+                                }
+                                self.current
+                                    .get_edge_source(edge_id)
+                                    .ok()
+                                    .map(|source| (source, edge_id))
+                            }),
+                    );
+                } else {
+                    neighbors.extend(
+                        self.current
+                            .get_incoming_edges_iter(node_id)
+                            .filter_map(|edge_id| {
+                                if !self.edge_visible_at_time(edge_id, historical_guard) {
+                                    return None;
+                                }
+                                self.current
+                                    .get_edge_source(edge_id)
+                                    .ok()
+                                    .map(|source| (source, edge_id))
+                            }),
+                    );
+                }
+            }
+            Direction::Both => {
+                self.collect_neighbors_in_direction(
+                    node_id,
+                    Direction::Outgoing,
+                    historical_guard,
+                    neighbors,
+                );
+                self.collect_neighbors_in_direction(
+                    node_id,
+                    Direction::Incoming,
+                    historical_guard,
+                    neighbors,
+                );
+            }
+        }
+    }
+
     fn get_neighbors(&self, node_id: NodeId) -> Vec<(NodeId, crate::core::EdgeId)> {
         // Acquire historical lock ONCE for all edge checks in this call.
         // This avoids the performance regression of acquiring per-edge locks.
         let historical_guard = self.temporal_context.map(|_| self.historical.read());
-
-        match self.direction {
-            Direction::Outgoing => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
-                if let Some(ref label) = self.label {
-                    self.current
-                        .get_outgoing_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
-                } else {
-                    self.current
-                        .get_outgoing_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_target(edge_id)
-                                .ok()
-                                .map(|target| (target, edge_id))
-                        })
-                        .collect()
-                }
-            }
-            Direction::Incoming => {
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
-                if let Some(ref label) = self.label {
-                    self.current
-                        .get_incoming_edges_with_label_iter(node_id, label)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
-                } else {
-                    self.current
-                        .get_incoming_edges_iter(node_id)
-                        .filter_map(|edge_id| {
-                            if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                                return None;
-                            }
-                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                            self.current
-                                .get_edge_source(edge_id)
-                                .ok()
-                                .map(|source| (source, edge_id))
-                        })
-                        .collect()
-                }
-            }
-            Direction::Both => {
-                let mut neighbors = Vec::new();
-
-                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
-                // Helper closure to process edges and add to neighbors
-                // Zero-copy: only get target NodeId, not full Edge (Issue #190)
-                let mut process_outgoing = |edge_id| {
-                    if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                        return;
-                    }
-                    if let Ok(target) = self.current.get_edge_target(edge_id) {
-                        neighbors.push((target, edge_id));
-                    }
-                };
-
-                if let Some(ref label) = self.label {
-                    for edge_id in self
-                        .current
-                        .get_outgoing_edges_with_label_iter(node_id, label)
-                    {
-                        process_outgoing(edge_id);
-                    }
-                } else {
-                    for edge_id in self.current.get_outgoing_edges_iter(node_id) {
-                        process_outgoing(edge_id);
-                    }
-                }
-
-                // Zero-copy: only get source NodeId, not full Edge (Issue #190)
-                let mut process_incoming = |edge_id| {
-                    if !self.edge_visible_at_time(edge_id, &historical_guard) {
-                        return;
-                    }
-                    if let Ok(source) = self.current.get_edge_source(edge_id) {
-                        neighbors.push((source, edge_id));
-                    }
-                };
-
-                if let Some(ref label) = self.label {
-                    for edge_id in self
-                        .current
-                        .get_incoming_edges_with_label_iter(node_id, label)
-                    {
-                        process_incoming(edge_id);
-                    }
-                } else {
-                    for edge_id in self.current.get_incoming_edges_iter(node_id) {
-                        process_incoming(edge_id);
-                    }
-                }
-
-                neighbors
-            }
-        }
+        let mut neighbors = Vec::new();
+        self.collect_neighbors_in_direction(
+            node_id,
+            self.direction,
+            &historical_guard,
+            &mut neighbors,
+        );
+        neighbors
     }
 }
 
@@ -859,17 +838,22 @@ impl FilterIterator {
     }
 
     fn evaluate(&self, node: &Node) -> bool {
-        self.evaluate_predicate(&self.predicate, node)
+        PredicateEvaluator::evaluate(&self.predicate, node)
     }
+}
 
-    fn evaluate_predicate(&self, predicate: &Predicate, node: &Node) -> bool {
+/// Helper struct for evaluating predicates.
+struct PredicateEvaluator;
+
+impl PredicateEvaluator {
+    fn evaluate(predicate: &Predicate, node: &Node) -> bool {
         match predicate {
             Predicate::True => true,
             Predicate::False => false,
 
             Predicate::Eq { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    self.compare_eq(prop, value)
+                    Self::compare_eq(prop, value)
                 } else {
                     false
                 }
@@ -877,7 +861,7 @@ impl FilterIterator {
 
             Predicate::Ne { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    !self.compare_eq(prop, value)
+                    !Self::compare_eq(prop, value)
                 } else {
                     true // Non-existent != anything
                 }
@@ -885,7 +869,7 @@ impl FilterIterator {
 
             Predicate::Gt { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    self.compare_gt(prop, value)
+                    Self::compare_gt(prop, value)
                 } else {
                     false
                 }
@@ -893,7 +877,7 @@ impl FilterIterator {
 
             Predicate::Lt { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    self.compare_lt(prop, value)
+                    Self::compare_lt(prop, value)
                 } else {
                     false
                 }
@@ -901,7 +885,7 @@ impl FilterIterator {
 
             Predicate::Gte { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    self.compare_gte(prop, value)
+                    Self::compare_gte(prop, value)
                 } else {
                     false
                 }
@@ -909,7 +893,7 @@ impl FilterIterator {
 
             Predicate::Lte { key, value } => {
                 if let Some(prop) = node.properties.get(key) {
-                    self.compare_lte(prop, value)
+                    Self::compare_lte(prop, value)
                 } else {
                     false
                 }
@@ -945,22 +929,22 @@ impl FilterIterator {
 
             Predicate::In { key, values } => {
                 if let Some(prop) = node.properties.get(key) {
-                    values.iter().any(|v| self.compare_eq(prop, v))
+                    values.iter().any(|v| Self::compare_eq(prop, v))
                 } else {
                     false
                 }
             }
 
-            Predicate::And(preds) => preds.iter().all(|p| self.evaluate_predicate(p, node)),
+            Predicate::And(preds) => preds.iter().all(|p| Self::evaluate(p, node)),
 
-            Predicate::Or(preds) => preds.iter().any(|p| self.evaluate_predicate(p, node)),
+            Predicate::Or(preds) => preds.iter().any(|p| Self::evaluate(p, node)),
 
-            Predicate::Not(pred) => !self.evaluate_predicate(pred, node),
+            Predicate::Not(pred) => !Self::evaluate(pred, node),
             // All variants covered - no default case needed
         }
     }
 
-    fn compare_eq(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
+    fn compare_eq(prop: &PropertyValue, value: &PredicateValue) -> bool {
         match (prop, value) {
             (PropertyValue::Bool(a), PredicateValue::Bool(b)) => a == b,
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a == b,
@@ -971,7 +955,7 @@ impl FilterIterator {
         }
     }
 
-    fn compare_gt(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
+    fn compare_gt(prop: &PropertyValue, value: &PredicateValue) -> bool {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a > b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a > b,
@@ -979,7 +963,7 @@ impl FilterIterator {
         }
     }
 
-    fn compare_lt(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
+    fn compare_lt(prop: &PropertyValue, value: &PredicateValue) -> bool {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a < b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a < b,
@@ -987,7 +971,7 @@ impl FilterIterator {
         }
     }
 
-    fn compare_gte(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
+    fn compare_gte(prop: &PropertyValue, value: &PredicateValue) -> bool {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a >= b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a >= b,
@@ -995,7 +979,7 @@ impl FilterIterator {
         }
     }
 
-    fn compare_lte(&self, prop: &PropertyValue, value: &PredicateValue) -> bool {
+    fn compare_lte(prop: &PropertyValue, value: &PredicateValue) -> bool {
         match (prop, value) {
             (PropertyValue::Int(a), PredicateValue::Int(b)) => a <= b,
             (PropertyValue::Float(a), PredicateValue::Float(b)) => a <= b,
