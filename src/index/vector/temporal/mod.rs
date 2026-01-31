@@ -299,7 +299,7 @@ impl TemporalVectorIndex {
         // Phase 2: **ATOMICITY FIX** - Add to HNSW index FIRST
         // If any HNSW insertion fails, we rollback all previous insertions
         // This ensures atomicity - either all vectors are added or none
-        let mut added_to_hnsw = Vec::new();
+        let mut added_to_hnsw = Vec::with_capacity(batch.len());
         for (id, vector, _timestamp) in batch {
             match self.current.add(*id, vector) {
                 Ok(()) => {
@@ -1114,7 +1114,7 @@ impl TemporalVectorIndex {
         }
 
         let evolution = self.semantic_evolution(node_id, time_range)?;
-        let mut drift = Vec::new();
+        let mut drift = Vec::with_capacity(evolution.len());
 
         for (timestamp, vector) in evolution {
             let similarity = cosine_similarity(reference_embedding, &vector)?;
@@ -1136,7 +1136,7 @@ impl TemporalVectorIndex {
             return Ok(Vec::new());
         }
 
-        let mut drift = Vec::new();
+        let mut drift = Vec::with_capacity(evolution.len().saturating_sub(1));
 
         for window in evolution.windows(2) {
             let (_prev_timestamp, prev_vector) = &window[0];
