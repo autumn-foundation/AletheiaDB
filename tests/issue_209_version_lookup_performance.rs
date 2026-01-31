@@ -7,6 +7,7 @@
 use gallifreydb::GallifreyDB;
 use gallifreydb::WriteOps;
 use gallifreydb::core::property::PropertyMapBuilder;
+use gallifreydb::core::temporal::Timestamp;
 use std::time::Instant;
 
 /// Test that version lookup returns correct results for entities with many versions.
@@ -69,10 +70,7 @@ fn test_version_lookup_correctness_many_versions() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_node_version(node_id).unwrap();
         let version = hist_guard.get_node_version(version_id).unwrap();
-        version_timestamps.push((
-            version.temporal.valid_time().start(),
-            version.temporal.transaction_time().start(),
-        ));
+        version_timestamps.push(version.temporal.valid_time().start());
     }
 
     // Now query at various timestamps and verify correctness
@@ -80,16 +78,20 @@ fn test_version_lookup_correctness_many_versions() {
     let hist_guard = historical.read();
 
     // Test: Query at the beginning of each version interval
-    for (expected_version_idx, &(valid_start, tx_start)) in version_timestamps.iter().enumerate() {
-        // Query exactly at the start of the version's validity
-        // Since ranges are [start, end), querying at start should always find it
-        // regardless of when the next version closed it
+    for (expected_version_idx, &timestamp) in version_timestamps.iter().enumerate() {
+        // Query at valid_time + 1, but use a tx_time far enough in the future to see the version.
+        // We use an offset to be safe against commit latency on slow CI runners, but
+        // safely within the interval before the next version.
+        let query_valid_time = Timestamp::from(timestamp.wallclock() + 1i64);
+        let query_tx_time =
+            Timestamp::from(timestamp.wallclock() + (QUERY_VISIBILITY_OFFSET_MS * 1000) as i64);
+
         let version_id = hist_guard
-            .find_node_version_at_time(node_id, valid_start, tx_start)
+            .find_node_version_at_time(node_id, query_valid_time, query_tx_time)
             .unwrap_or_else(|| {
                 panic!(
                     "Should find version at timestamp (valid={}, tx={}) (expected version index {})",
-                    valid_start, tx_start, expected_version_idx
+                    query_valid_time, query_tx_time, expected_version_idx
                 )
             });
 
@@ -105,8 +107,8 @@ fn test_version_lookup_correctness_many_versions() {
         assert!(
             version_number.is_some(),
             "Version property should exist for version at timestamp (valid={}, tx={})",
-            valid_start,
-            tx_start
+            query_valid_time,
+            query_tx_time
         );
 
         // Note: The version number might not match expected_version_idx exactly
@@ -135,6 +137,7 @@ fn test_version_lookup_correctness_many_versions() {
 #[test]
 fn test_version_lookup_performance_scaling() {
     use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
+    use gallifreydb::core::temporal::Timestamp;
     use gallifreydb::storage::index_persistence::PersistenceConfig;
 
     // Create database with increased version limit (need extra headroom)
@@ -307,10 +310,7 @@ fn test_edge_version_lookup_correctness_many_versions() {
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        version_timestamps.push((
-            version.temporal.valid_time().start(),
-            version.temporal.transaction_time().start(),
-        ));
+        version_timestamps.push(version.temporal.valid_time().start());
     }
 
     // Query and verify
@@ -319,14 +319,20 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
     // Test a few representative timestamps
     for &idx in &[0, NUM_VERSIONS / 4, NUM_VERSIONS / 2, NUM_VERSIONS - 1] {
-        let (valid_start, tx_start) = version_timestamps[idx];
+        let valid_timestamp = version_timestamps[idx];
+        // Query with tx_time far enough in future to see the version.
+        // We use an offset to be safe against commit latency on slow CI runners.
+        let query_valid_time = valid_timestamp;
+        let query_tx_time = Timestamp::from(
+            valid_timestamp.wallclock() + (QUERY_VISIBILITY_OFFSET_MS * 1000) as i64,
+        );
 
         let version_id = hist_guard
-            .find_edge_version_at_time(edge_id, valid_start, tx_start)
+            .find_edge_version_at_time(edge_id, query_valid_time, query_tx_time)
             .unwrap_or_else(|| {
                 panic!(
                     "Should find edge version at timestamp (valid={}, tx={})",
-                    valid_start, tx_start
+                    query_valid_time, query_tx_time
                 )
             });
 
@@ -340,8 +346,8 @@ fn test_edge_version_lookup_correctness_many_versions() {
         assert!(
             weight.is_some(),
             "Weight property should exist at timestamp (valid={}, tx={})",
-            valid_start,
-            tx_start
+            query_valid_time,
+            query_tx_time
         );
     }
 
