@@ -1105,7 +1105,7 @@ fn scale_in_place(v: &mut [f32], scalar: f32) {
 /// - Scalar implementation on other platforms
 #[inline]
 fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
-    debug_assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     {
         // Use runtime detection for best available instruction set
@@ -1148,7 +1148,7 @@ fn dot_and_magnitudes(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
 /// - Scalar implementation on other platforms
 #[inline]
 fn squared_diff_sum(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), b.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         // Use runtime detection for best available instruction set.
@@ -1176,7 +1176,7 @@ fn squared_diff_sum(a: &[f32], b: &[f32]) -> f32 {
 /// - Scalar implementation on other platforms
 #[inline]
 fn dot_product_sum(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), b.len());
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         // Use runtime detection for best available instruction set.
@@ -5302,5 +5302,15 @@ mod proptests {
         let dense_dist = euclidean_distance(&dense_a, &dense_b).unwrap();
 
         assert!((sparse_dist - dense_dist).abs() < 1e-5);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_internal_safety_in_release() {
+        let a = vec![1.0; 4];
+        let b = vec![1.0; 3]; // Mismatch
+        // This calls dot_and_magnitudes internally
+        // We use dot_and_magnitudes because it is one of the functions we are hardening
+        let _ = super::dot_and_magnitudes(&a, &b);
     }
 }

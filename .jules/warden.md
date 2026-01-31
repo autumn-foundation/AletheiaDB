@@ -63,3 +63,10 @@ Arithmetic operations on file offsets (`src/storage/wal/segment_reader.rs`) and 
 - `usearch` FFI boundaries rely on the C++ library behaving correctly regarding pointer validity. We added panic guards for null pointers, but full memory safety depends on `usearch` correctness.
 - The `usearch` dependency points to a fork (`madmax983/USearch`). This fork contains Rust-specific fixes (move semantics) not yet in upstream. We have pinned the specific commit to ensure stability, but future upstream security patches will need manual cherry-picking.
 - `mmap` usage in `src/storage/wal/segment_reader.rs` is inherently unsafe against external file truncation (SIGBUS risk), though file size is checked before mapping.
+
+## 2026-02-12 - SIMD Hardening
+**Threat:** Buffer Over-read in Release Builds
+Internal SIMD helper functions in `src/core/vector.rs` used `debug_assert_eq!` to check dimension equality. In release builds, this check is stripped, allowing `unsafe` SIMD intrinsics to potentially read past the end of a buffer if dimensions mismatch (Undefined Behavior/Crash).
+
+**Defense:** Runtime Assertion
+Replaced `debug_assert_eq!` with `assert_eq!` in `dot_and_magnitudes`, `squared_diff_sum`, and `dot_product_sum`. This ensures that even in optimized release builds, dimension mismatches trigger a safe panic rather than UB. Verified with a regression test `test_internal_safety_in_release`.
