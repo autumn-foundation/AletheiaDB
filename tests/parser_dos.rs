@@ -25,5 +25,9 @@ fn test_parser_stack_overflow_protection() {
 
     assert!(result.is_err(), "Parser should reject deeply nested query");
     let err = result.unwrap_err();
-    assert!(err.message.contains("Recursion limit"), "Error should mention recursion limit, got: {}", err.message);
+    assert!(
+        err.message.contains("Recursion limit"),
+        "Error should mention recursion limit, got: {}",
+        err.message
+    );
 }
