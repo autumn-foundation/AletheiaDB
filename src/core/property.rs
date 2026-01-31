@@ -507,6 +507,7 @@ impl PropertyValue {
     /// Internal recursive deserialization helper with depth tracking.
     fn deserialize_recursive(bytes: &[u8], depth: usize) -> Result<(Self, usize)> {
         // Prevent recursion-based stack overflow DoS
+        // Depth 0 = top level, depth 100 = maximum nesting level
         if depth > MAX_RECURSION_DEPTH {
             return Err(StorageError::CorruptedData(format!(
                 "Property value recursion depth limit exceeded (max {})",

@@ -1,10 +1,13 @@
-use gallifreydb::core::property::{PropertyValue, TAG_ARRAY, TAG_NULL, MAX_RECURSION_DEPTH};
+use gallifreydb::core::property::{PropertyValue, TAG_ARRAY, TAG_NULL};
 
 #[test]
 fn test_recursive_array_stack_overflow_protection() {
+    // Note: Only arrays support nesting. Vectors contain primitives (f32/f64)
+    // and cannot trigger recursion-based stack overflow.
+
     // Construct a deeply nested array: [[[[...]]]]
     // Format: [TAG_ARRAY][count:1][TAG_ARRAY][count:1]...[TAG_NULL]
-    let depth = (MAX_RECURSION_DEPTH + 1) as usize;
+    let depth = 150;
     let mut bytes = Vec::new();
 
     for _ in 0..depth {
