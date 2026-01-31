@@ -76,7 +76,10 @@ impl Parser {
         parser.parse_query()
     }
 
-    fn enter_recursion(&mut self, context: &str) -> Result<(), ParseError> {
+    fn with_recursion<F, T>(&mut self, context: &str, f: F) -> Result<T, ParseError>
+    where
+        F: FnOnce(&mut Self) -> Result<T, ParseError>,
+    {
         if self.depth >= MAX_RECURSION_DEPTH {
             return Err(self.error(
                 format!("Recursion limit reached in {}", context),
@@ -84,13 +87,9 @@ impl Parser {
             ));
         }
         self.depth += 1;
-        Ok(())
-    }
-
-    fn exit_recursion(&mut self) {
-        if self.depth > 0 {
-            self.depth -= 1;
-        }
+        let result = f(self);
+        self.depth -= 1;
+        result
     }
 
     /// Parse a complete query.
@@ -737,10 +736,7 @@ impl Parser {
     }
 
     fn parse_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
-        self.enter_recursion("predicate")?;
-        let result = self.parse_or_predicate();
-        self.exit_recursion();
-        result
+        self.with_recursion("predicate", |p| p.parse_or_predicate())
     }
 
     fn parse_or_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
@@ -769,14 +765,14 @@ impl Parser {
 
     fn parse_not_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
         if self.check(&Token::Not) {
-            self.enter_recursion("NOT predicate")?;
-            self.advance();
-            let result = self.parse_not_predicate();
-            self.exit_recursion();
-            return result.map(|pred| PredicateExpr::Not(Box::new(pred)));
+            self.with_recursion("NOT predicate", |p| {
+                p.advance();
+                let pred = p.parse_not_predicate()?;
+                Ok(PredicateExpr::Not(Box::new(pred)))
+            })
+        } else {
+            self.parse_primary_predicate()
         }
-
-        self.parse_primary_predicate()
     }
 
     fn parse_primary_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
