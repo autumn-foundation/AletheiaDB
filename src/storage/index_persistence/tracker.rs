@@ -1,3 +1,29 @@
+//! Persistence mutation tracker.
+//!
+//! This module provides a thread-safe tracker for index mutations and persistence timestamps.
+//! It serves as the shared state synchronization point between the main application thread
+//! (which records mutations) and the background persistence worker (which checks counters
+//! and resets them after saving).
+//!
+//! # Purpose
+//!
+//! The `PersistenceTracker` solves the problem of "when should we save indexes?":
+//! - Tracks how many changes have occurred since the last save.
+//! - Tracks how much time has passed since the last save.
+//! - Allows the background worker to atomically check and reset these counters.
+//!
+//! # Thread Safety
+//!
+//! All internal counters are atomic (`AtomicU64`, `AtomicBool`), allowing concurrent access
+//! without locking. The main thread can increment counters while the background thread
+//! reads or resets them.
+//!
+//! # Usage
+//!
+//! 1. **Main Thread**: Calls `record_*_mutation()` when modifying data.
+//! 2. **Worker Thread**: Calls `get_*_mutations()` and `seconds_since_*_persist()` to check policies.
+//! 3. **Worker Thread**: Calls `reset_*_mutations()` after successful persistence.
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Tracks persistence state for automatic index persistence.
