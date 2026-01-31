@@ -70,3 +70,14 @@ Internal SIMD helper functions in `src/core/vector.rs` used `debug_assert_eq!` t
 
 **Defense:** Runtime Assertion
 Replaced `debug_assert_eq!` with `assert_eq!` in `dot_and_magnitudes`, `squared_diff_sum`, and `dot_product_sum`. This ensures that even in optimized release builds, dimension mismatches trigger a safe panic rather than UB. Verified with a regression test `test_internal_safety_in_release`.
+
+## 2026-02-18 - DoS Hardening in Graph Index Loading
+
+**Threat:** Resource Exhaustion via Memory Map
+The `load_graph_index_mmap` function in `src/storage/index_persistence/graph.rs` used `unsafe` memory mapping without validating the file size. A malicious user could supply a massive file (e.g., a sparse file > 4GB) to cause a Denial of Service via address space exhaustion (on 32-bit systems) or OOM.
+
+**Defense:** Size Check & Safety Hardening
+- Implemented a `MAX_GRAPH_INDEX_SIZE` limit (4GB in production, 10MB in tests).
+- Added explicit file size validation before calling `Mmap::map`.
+- Added safety comments to the `unsafe` block justifying the operation (read-only access).
+- Verified with `test_load_graph_index_mmap_too_large`.

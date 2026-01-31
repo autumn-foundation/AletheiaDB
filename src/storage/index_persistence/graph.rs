@@ -15,6 +15,13 @@ use super::formats::{
 };
 use super::{DELTA_MAGIC, GRAPH_MAGIC, MANIFEST_VERSION};
 
+/// Maximum size for memory-mapped graph index files.
+/// 4GB in production, 10MB in tests for easier validation.
+#[cfg(not(test))]
+const MAX_GRAPH_INDEX_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4GB
+#[cfg(test)]
+const MAX_GRAPH_INDEX_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+
 /// Convert PropertyValue to PersistedPropertyValue.
 ///
 /// # Errors
@@ -312,8 +319,24 @@ pub fn load_graph_index_mmap(path: &Path) -> Result<GraphIndexData> {
     use memmap2::Mmap;
     use std::fs::File;
 
-    // Open file and create memory map
+    // Open file
     let file = File::open(path)?;
+
+    // Validate file size before mapping to prevent DoS/OOM
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_GRAPH_INDEX_SIZE {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Graph index too large: {} bytes (max: {} bytes)",
+                metadata.len(),
+                MAX_GRAPH_INDEX_SIZE
+            ),
+        });
+    }
+
+    // SAFETY: We checked the file size against a reasonable limit (MAX_GRAPH_INDEX_SIZE)
+    // to prevent address space exhaustion. We only read from the map, never write.
+    // The file is opened read-only.
     let mmap = unsafe { Mmap::map(&file)? };
 
     // Check minimum size (must have at least 4 bytes for CRC)
@@ -775,6 +798,31 @@ mod tests {
             assert_eq!(v.len(), super::super::MAX_VECTOR_DIMENSIONS);
         } else {
             panic!("Expected vector property");
+        }
+    }
+
+    #[test]
+    fn test_load_graph_index_mmap_too_large() {
+        use std::fs::File;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("oversized_index.idx");
+
+        let file = File::create(&path).unwrap();
+
+        // Create a sparse file > MAX_GRAPH_INDEX_SIZE (10MB in test)
+        let size = super::MAX_GRAPH_INDEX_SIZE + 1024 * 1024; // +1MB
+        file.set_len(size).unwrap();
+
+        // Attempt load
+        let result = load_graph_index_mmap(&path);
+
+        assert!(result.is_err());
+        match result {
+            Err(IndexPersistenceError::SizeLimitExceeded { message }) => {
+                assert!(message.contains("Graph index too large"));
+            }
+            _ => panic!("Expected SizeLimitExceeded error, got {:?}", result),
         }
     }
 }
