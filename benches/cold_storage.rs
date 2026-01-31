@@ -31,9 +31,8 @@ use gallifreydb::core::id::{NodeId, VersionId};
 use gallifreydb::core::interning::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::temporal::BiTemporalInterval;
-use gallifreydb::storage::cold_storage::{
-    ColdStorage, ColdStorageConfig, CompressionAlgorithm, FileColdStorage,
-};
+use gallifreydb::storage::cold_storage::{ColdStorage, CompressionAlgorithm};
+use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
 use gallifreydb::storage::version::NodeVersion;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -98,14 +97,11 @@ fn bench_write_latency(c: &mut Criterion) {
         CompressionAlgorithm::Zstd,
     ] {
         let temp_dir = TempDir::new().expect("Failed to create temp directory for write benchmark");
-        let config = ColdStorageConfig {
-            compression,
-            sync_writes: false,
-            batch_size: 1000,
-            enable_checksums: true,
-        };
-        let storage = FileColdStorage::new(temp_dir.path(), config)
-            .expect("Failed to create FileColdStorage for write benchmark");
+        let config = RedbConfig::default()
+            .compression(compression)
+            .enable_checksums(true);
+        let storage = RedbColdStorage::new(temp_dir.path().join("bench.redb"), config)
+            .expect("Failed to create RedbColdStorage for write benchmark");
 
         let compression_name = match compression {
             CompressionAlgorithm::None => "no_compression",
@@ -147,14 +143,11 @@ fn bench_read_latency(c: &mut Criterion) {
     ] {
         // Setup: Create storage with pre-populated data
         let temp_dir = TempDir::new().expect("Failed to create temp directory for read benchmark");
-        let config = ColdStorageConfig {
-            compression,
-            sync_writes: false,
-            batch_size: 1000,
-            enable_checksums: true,
-        };
-        let storage = FileColdStorage::new(temp_dir.path(), config)
-            .expect("Failed to create FileColdStorage for read benchmark");
+        let config = RedbConfig::default()
+            .compression(compression)
+            .enable_checksums(true);
+        let storage = RedbColdStorage::new(temp_dir.path().join("bench.redb"), config)
+            .expect("Failed to create RedbColdStorage for read benchmark");
 
         // Pre-populate with 1000 versions
         let versions = create_test_versions(1000);
@@ -202,14 +195,11 @@ fn bench_batch_write_throughput(c: &mut Criterion) {
         for compression in [CompressionAlgorithm::Fast, CompressionAlgorithm::Zstd] {
             let temp_dir =
                 TempDir::new().expect("Failed to create temp directory for batch write benchmark");
-            let config = ColdStorageConfig {
-                compression,
-                sync_writes: false,
-                batch_size,
-                enable_checksums: true,
-            };
-            let storage = FileColdStorage::new(temp_dir.path(), config)
-                .expect("Failed to create FileColdStorage for batch write benchmark");
+            let config = RedbConfig::default()
+                .compression(compression)
+                .enable_checksums(true);
+            let storage = RedbColdStorage::new(temp_dir.path().join("bench.redb"), config)
+                .expect("Failed to create RedbColdStorage for batch write benchmark");
 
             let versions = create_test_versions(batch_size);
 
@@ -241,14 +231,11 @@ fn bench_read_latency_percentiles(c: &mut Criterion) {
     // Setup: Create storage with realistic dataset
     let temp_dir =
         TempDir::new().expect("Failed to create temp directory for percentile benchmark");
-    let config = ColdStorageConfig {
-        compression: CompressionAlgorithm::Zstd,
-        sync_writes: false,
-        batch_size: 1000,
-        enable_checksums: true,
-    };
-    let storage = FileColdStorage::new(temp_dir.path(), config)
-        .expect("Failed to create FileColdStorage for percentile benchmark");
+    let config = RedbConfig::default()
+        .compression(CompressionAlgorithm::Zstd)
+        .enable_checksums(true);
+    let storage = RedbColdStorage::new(temp_dir.path().join("bench.redb"), config)
+        .expect("Failed to create RedbColdStorage for percentile benchmark");
 
     // Pre-populate with 10k versions
     let versions = create_test_versions(10000);
@@ -300,14 +287,11 @@ fn bench_read_latency_percentiles(c: &mut Criterion) {
 fn bench_sustained_write_throughput(c: &mut Criterion) {
     let temp_dir =
         TempDir::new().expect("Failed to create temp directory for sustained write benchmark");
-    let config = ColdStorageConfig {
-        compression: CompressionAlgorithm::Zstd,
-        sync_writes: false,
-        batch_size: 1000,
-        enable_checksums: true,
-    };
-    let storage = FileColdStorage::new(temp_dir.path(), config)
-        .expect("Failed to create FileColdStorage for sustained write benchmark");
+    let config = RedbConfig::default()
+        .compression(CompressionAlgorithm::Zstd)
+        .enable_checksums(true);
+    let storage = RedbColdStorage::new(temp_dir.path().join("bench.redb"), config)
+        .expect("Failed to create RedbColdStorage for sustained write benchmark");
 
     let batch_size = 10000;
     let versions = create_test_versions(batch_size);
@@ -350,14 +334,11 @@ fn bench_compression_ratio(c: &mut Criterion) {
     ] {
         let temp_dir =
             TempDir::new().expect("Failed to create temp directory for compression benchmark");
-        let config = ColdStorageConfig {
-            compression,
-            sync_writes: false,
-            batch_size: 1000,
-            enable_checksums: true,
-        };
-        let storage = FileColdStorage::new(temp_dir.path(), config)
-            .expect("Failed to create FileColdStorage for compression benchmark");
+        let config = RedbConfig::default()
+            .compression(compression)
+            .enable_checksums(true);
+        let storage = RedbColdStorage::new(temp_dir.path().join("bench.redb"), config)
+            .expect("Failed to create RedbColdStorage for compression benchmark");
 
         // Store 1000 versions to get stable compression metrics
         let versions = create_test_versions(1000);
@@ -407,14 +388,11 @@ fn bench_mixed_workload(c: &mut Criterion) {
                 // Setup: Create and pre-populate storage (not timed)
                 let temp_dir = TempDir::new()
                     .expect("Failed to create temp directory for mixed workload benchmark");
-                let config = ColdStorageConfig {
-                    compression: CompressionAlgorithm::Zstd,
-                    sync_writes: false,
-                    batch_size: 1000,
-                    enable_checksums: true,
-                };
-                let storage = FileColdStorage::new(temp_dir.path(), config)
-                    .expect("Failed to create FileColdStorage for mixed workload benchmark");
+                let config = RedbConfig::default()
+                    .compression(CompressionAlgorithm::Zstd)
+                    .enable_checksums(true);
+                let storage = RedbColdStorage::new(temp_dir.path().join("bench.redb"), config)
+                    .expect("Failed to create RedbColdStorage for mixed workload benchmark");
 
                 // Pre-populate with 1000 versions
                 let initial_versions = create_test_versions(1000);
@@ -424,7 +402,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
 
                 (storage, temp_dir)
             },
-            |(storage, _temp_dir)| {
+            |(storage, _temp_dir): (RedbColdStorage, TempDir)| {
                 // Measured routine: Run mixed workload
                 let mut write_id = 1000u64;
                 let mut read_id = 0u64;

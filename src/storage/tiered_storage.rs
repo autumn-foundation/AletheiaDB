@@ -32,11 +32,11 @@
 //!
 //! ```ignore
 //! use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
-//! use gallifreydb::storage::cold_storage::FileColdStorage;
+//! use gallifreydb::storage::redb_cold_storage::RedbColdStorage;
 //!
 //! // Create tiered storage
 //! let config = TieredStorageConfig::default();
-//! let cold = FileColdStorage::with_default_config("data/cold")?;
+//! let cold = RedbColdStorage::with_default_config("data/cold.redb")?;
 //! let tiered = TieredStorage::new(config, Box::new(cold));
 //!
 //! // Transparently access data from any tier
