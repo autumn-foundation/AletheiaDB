@@ -1825,7 +1825,8 @@ fn test_simd_explicit_coverage() {
         unsafe {
             // dot_and_magnitudes_sse2
             let (dot, mag_a, mag_b) = super::simd::x86_ops::dot_and_magnitudes_sse2(&a, &b);
-            assert!(!dot.is_nan());
+            // Expected: 1*8 + ... = 120.0
+            assert!((dot - 120.0).abs() < 1e-5);
             assert!(mag_a > 0.0);
             assert!(mag_b > 0.0);
 
@@ -1845,6 +1846,8 @@ fn test_simd_explicit_coverage() {
     }
 
     // 2. Test AVX2 (Conditional)
+    // We explicitly test this branch even if the dispatcher might prefer it,
+    // to ensure the specific function logic is correct.
     if is_x86_feature_detected!("avx2") {
         unsafe {
             // scale_in_place_avx2 only needs AVX2
@@ -1856,7 +1859,7 @@ fn test_simd_explicit_coverage() {
             if is_x86_feature_detected!("fma") {
                 // dot_and_magnitudes_avx2
                 let (dot, mag_a, _mag_b) = super::simd::x86_ops::dot_and_magnitudes_avx2(&a, &b);
-                assert!(!dot.is_nan());
+                assert!((dot - 120.0).abs() < 1e-5);
                 assert!(mag_a > 0.0);
 
                 // dot_product_avx2
