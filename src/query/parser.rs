@@ -11,6 +11,9 @@ use crate::index::vector::DistanceMetric;
 use super::ast::*;
 use super::lexer::{Lexer, LexerError, Token};
 
+/// Maximum recursion depth for parser to prevent stack overflow DoS.
+const MAX_RECURSION_DEPTH: usize = 200;
+
 /// Error type for parser errors.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -58,6 +61,7 @@ impl From<LexerError> for ParseError {
 pub struct Parser {
     tokens: Vec<Token>,
     position: usize,
+    recursion_depth: usize,
 }
 
 impl Parser {
@@ -67,6 +71,7 @@ impl Parser {
         let mut parser = Parser {
             tokens,
             position: 0,
+            recursion_depth: 0,
         };
         parser.parse_query()
     }
@@ -715,7 +720,21 @@ impl Parser {
     }
 
     fn parse_predicate(&mut self) -> Result<PredicateExpr, ParseError> {
-        self.parse_or_predicate()
+        self.check_recursion_limit()?;
+        let result = self.parse_or_predicate();
+        self.recursion_depth -= 1;
+        result
+    }
+
+    fn check_recursion_limit(&mut self) -> Result<(), ParseError> {
+        self.recursion_depth += 1;
+        if self.recursion_depth > MAX_RECURSION_DEPTH {
+            return Err(self.error(
+                format!("Recursion limit exceeded (max {})", MAX_RECURSION_DEPTH),
+                None,
+            ));
+        }
+        Ok(())
     }
 
     fn parse_or_predicate(&mut self) -> Result<PredicateExpr, ParseError> {

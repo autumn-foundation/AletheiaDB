@@ -549,20 +549,24 @@ impl PropertyValue {
                 let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
                 offset = 5;
 
-                if bytes.len() < offset + len {
+                let end = offset.checked_add(len).ok_or_else(|| {
+                    StorageError::CorruptedData("String length overflow".to_string())
+                })?;
+
+                if bytes.len() < end {
                     return Err(StorageError::CorruptedData(format!(
                         "Buffer too short for String data: need {} bytes, have {}",
-                        offset + len,
+                        end,
                         bytes.len()
                     ))
                     .into());
                 }
 
-                let string_data = &bytes[offset..offset + len];
+                let string_data = &bytes[offset..end];
                 let s = std::str::from_utf8(string_data).map_err(|e| {
                     StorageError::CorruptedData(format!("Invalid UTF-8 in String: {}", e))
                 })?;
-                Ok((PropertyValue::String(Arc::from(s)), offset + len))
+                Ok((PropertyValue::String(Arc::from(s)), end))
             }
 
             TAG_BYTES => {
@@ -575,17 +579,21 @@ impl PropertyValue {
                 let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
                 offset = 5;
 
-                if bytes.len() < offset + len {
+                let end = offset.checked_add(len).ok_or_else(|| {
+                    StorageError::CorruptedData("Bytes length overflow".to_string())
+                })?;
+
+                if bytes.len() < end {
                     return Err(StorageError::CorruptedData(format!(
                         "Buffer too short for Bytes data: need {} bytes, have {}",
-                        offset + len,
+                        end,
                         bytes.len()
                     ))
                     .into());
                 }
 
-                let byte_data = &bytes[offset..offset + len];
-                Ok((PropertyValue::Bytes(Arc::from(byte_data)), offset + len))
+                let byte_data = &bytes[offset..end];
+                Ok((PropertyValue::Bytes(Arc::from(byte_data)), end))
             }
 
             TAG_ARRAY => {
@@ -617,7 +625,9 @@ impl PropertyValue {
                     }
                     let (item, consumed) = PropertyValue::deserialize(&bytes[offset..])?;
                     items.push(item);
-                    offset += consumed;
+                    offset = offset.checked_add(consumed).ok_or_else(|| {
+                        StorageError::CorruptedData("Array size overflow".to_string())
+                    })?;
                 }
                 Ok((PropertyValue::Array(Arc::new(items)), offset))
             }

@@ -43,7 +43,23 @@ Public HTTP and MCP endpoints could be vectors for DoS attacks via large inputs 
   - Vector dimensions validated against index configuration.
   - WAL segment reading limits file size to 1GB to prevent memory map exhaustion.
 
+## 2026-02-05 - DoS Prevention: Recursion & Overflow
+
+**Threat:** Stack Overflow in GQL Parser
+The GQL parser (`src/query/parser.rs`) used unbounded recursion for nested predicates. A malicious query with deeply nested parentheses (e.g., `MATCH (n) WHERE (((...)))`) could cause a stack overflow and crash the server (DoS).
+
+**Defense:** Recursion Depth Limit
+Introduced `recursion_depth` tracking in `Parser` struct and a `MAX_RECURSION_DEPTH` limit (200). `parse_predicate` now checks this limit and returns a specific `ParseError` instead of crashing.
+- Verified with `tests/parser_dos.rs`.
+
+**Threat:** Integer Overflow in Property Deserialization
+In `src/core/property.rs`, deserialization logic used unchecked addition (`offset + len`) for string/bytes length checks. On 32-bit platforms, a malicious large `len` could cause integer wraparound, bypassing bounds checks and leading to panics or out-of-bounds reads.
+
+**Defense:** Checked Arithmetic
+Replaced unchecked addition with `offset.checked_add(len)` in `PropertyValue::deserialize`. Returns `StorageError::CorruptedData` on overflow.
+
 ## Open Risks
 - `usearch` FFI boundaries rely on the C++ library behaving correctly regarding pointer validity. We added panic guards for null pointers, but full memory safety depends on `usearch` correctness.
 - The `usearch` dependency points to a fork (`madmax983/USearch`). This fork contains Rust-specific fixes (move semantics) not yet in upstream. We have pinned the specific commit to ensure stability, but future upstream security patches will need manual cherry-picking.
 - `mmap` usage in `src/storage/wal/segment_reader.rs` is inherently unsafe against external file truncation (SIGBUS risk), though file size is checked before mapping.
+- `PropertyValue::deserialize` is recursive for `TAG_ARRAY` and does not have a depth limit. A maliciously nested array property could still cause stack overflow.
