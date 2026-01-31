@@ -438,7 +438,7 @@ impl PropertyValue {
     /// | Array  | [tag:1][count:4][elements...]              |
     /// | Vector | [tag:1][dim:4][f32_values:dim*4]           |
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buffer = Vec::new();
+        let mut buffer = Vec::with_capacity(self.serialized_size());
         self.serialize_into(&mut buffer);
         buffer
     }
@@ -996,6 +996,10 @@ pub fn serialize_sparse_vector(sv: &SparseVec) -> Vec<u8> {
 ///
 /// This is more efficient when serializing as part of a larger structure.
 pub fn serialize_sparse_vector_into(sv: &SparseVec, buffer: &mut Vec<u8>) {
+    // Reserve space to avoid reallocations:
+    // tag (1) + dimension (4) + nnz (4) + indices (nnz * 4) + values (nnz * 4)
+    buffer.reserve(1 + 4 + 4 + sv.nnz() * 8);
+
     buffer.push(TAG_SPARSE_VECTOR);
     buffer.extend_from_slice(&(sv.dimension() as u32).to_le_bytes());
     buffer.extend_from_slice(&(sv.nnz() as u32).to_le_bytes());
@@ -1381,7 +1385,7 @@ impl PropertyMap {
     /// Returns an error if any PropertyKey cannot be resolved from the interner.
     /// This should never happen in practice as all keys are created via interning.
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        let mut buffer = Vec::new();
+        let mut buffer = Vec::with_capacity(self.cached_size);
         self.serialize_into(&mut buffer)?;
         Ok(buffer)
     }
@@ -1393,6 +1397,9 @@ impl PropertyMap {
     /// Returns `StorageError::InconsistentState` if any PropertyKey cannot be
     /// resolved from the interner, indicating data corruption.
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<()> {
+        // Reserve space for the entire map to avoid reallocations
+        buffer.reserve(self.cached_size);
+
         buffer.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
         for (key, value) in self.inner.iter() {
             // Serialize key: resolve InternedString to actual string
