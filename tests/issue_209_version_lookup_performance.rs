@@ -7,7 +7,6 @@
 use gallifreydb::GallifreyDB;
 use gallifreydb::WriteOps;
 use gallifreydb::core::property::PropertyMapBuilder;
-use gallifreydb::core::temporal::Timestamp;
 use std::time::Instant;
 
 /// Test that version lookup returns correct results for entities with many versions.
@@ -45,6 +44,7 @@ fn test_version_lookup_correctness_many_versions() {
 
     // Create 1000 versions with distinct timestamps
     const NUM_VERSIONS: usize = 1000;
+    // Capture both valid_time and transaction_time for accurate querying
     let mut version_timestamps = Vec::new();
 
     for i in 0..NUM_VERSIONS {
@@ -62,12 +62,15 @@ fn test_version_lookup_correctness_many_versions() {
         })
         .expect("Failed to update node");
 
-        // Capture the timestamp of this version
+        // Capture the timestamps of this version
         let historical = db.__test_historical_storage();
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_node_version(node_id).unwrap();
         let version = hist_guard.get_node_version(version_id).unwrap();
-        version_timestamps.push(version.temporal.valid_time().start());
+        version_timestamps.push((
+            version.temporal.valid_time().start(),
+            version.temporal.transaction_time().start(),
+        ));
     }
 
     // Now query at various timestamps and verify correctness
@@ -75,10 +78,12 @@ fn test_version_lookup_correctness_many_versions() {
     let hist_guard = historical.read();
 
     // Test: Query at the beginning of each version interval
-    for (expected_version_idx, &timestamp) in version_timestamps.iter().enumerate() {
-        // Query at valid_time + 1, but use a tx_time far enough in the future to see the version
-        let query_valid_time = Timestamp::from(timestamp.wallclock() + 1i64);
-        let query_tx_time = Timestamp::from(timestamp.wallclock() + 1000i64); // 1ms in future
+    for (expected_version_idx, &(valid_start, tx_start)) in version_timestamps.iter().enumerate() {
+        // Query at the exact start times captured from the version.
+        // This ensures we are inside the valid/tx intervals regardless of
+        // variable gaps between start_time and commit_time.
+        let query_valid_time = valid_start;
+        let query_tx_time = tx_start;
 
         let version_id = hist_guard
             .find_node_version_at_time(node_id, query_valid_time, query_tx_time)
@@ -131,6 +136,7 @@ fn test_version_lookup_correctness_many_versions() {
 #[test]
 fn test_version_lookup_performance_scaling() {
     use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
+    use gallifreydb::storage::index_persistence::PersistenceConfig;
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -138,8 +144,15 @@ fn test_version_lookup_performance_scaling() {
         .expect("Failed to set max versions")
         .build();
 
+    // Disable persistence to avoid stale index data and side effects
+    let persistence_config = PersistenceConfig {
+        enabled: false,
+        ..Default::default()
+    };
+
     let config = GallifreyDBConfigBuilder::new()
         .historical(historical_config)
+        .persistence(persistence_config)
         .build();
 
     let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
@@ -167,12 +180,15 @@ fn test_version_lookup_performance_scaling() {
         })
         .expect("Failed to update node");
 
-        // Capture the timestamp of this version
+        // Capture the timestamps of this version
         let historical = db.__test_historical_storage();
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_node_version(node_id).unwrap();
         let version = hist_guard.get_node_version(version_id).unwrap();
-        version_timestamps.push(version.temporal.valid_time().start());
+        version_timestamps.push((
+            version.temporal.valid_time().start(),
+            version.temporal.transaction_time().start(),
+        ));
     }
 
     // Measure lookup performance
@@ -193,17 +209,17 @@ fn test_version_lookup_performance_scaling() {
     println!("---------------------|-----------|------------------");
 
     for (idx, description) in test_positions {
-        let query_time = version_timestamps[idx];
+        let (valid_time, tx_time) = version_timestamps[idx];
 
         // Warm up
         for _ in 0..10 {
-            let _ = hist_guard.find_node_version_at_time(node_id, query_time, query_time);
+            let _ = hist_guard.find_node_version_at_time(node_id, valid_time, tx_time);
         }
 
         // Measure 100 lookups
         let start = Instant::now();
         for _ in 0..100 {
-            let _ = hist_guard.find_node_version_at_time(node_id, query_time, query_time);
+            let _ = hist_guard.find_node_version_at_time(node_id, valid_time, tx_time);
         }
         let elapsed = start.elapsed();
         let avg_micros = elapsed.as_micros() / 100;
@@ -279,12 +295,15 @@ fn test_edge_version_lookup_correctness_many_versions() {
         })
         .expect("Failed to update edge");
 
-        // Capture the timestamp of this version
+        // Capture the timestamps of this version
         let historical = db.__test_historical_storage();
         let hist_guard = historical.read();
         let version_id = hist_guard.get_current_edge_version(edge_id).unwrap();
         let version = hist_guard.get_edge_version(version_id).unwrap();
-        version_timestamps.push(version.temporal.valid_time().start());
+        version_timestamps.push((
+            version.temporal.valid_time().start(),
+            version.temporal.transaction_time().start(),
+        ));
     }
 
     // Query and verify
@@ -293,10 +312,7 @@ fn test_edge_version_lookup_correctness_many_versions() {
 
     // Test a few representative timestamps
     for &idx in &[0, NUM_VERSIONS / 4, NUM_VERSIONS / 2, NUM_VERSIONS - 1] {
-        let valid_timestamp = version_timestamps[idx];
-        // Query with tx_time far enough in future to see the version
-        let query_valid_time = valid_timestamp;
-        let query_tx_time = Timestamp::from(valid_timestamp.wallclock() + 1000i64);
+        let (query_valid_time, query_tx_time) = version_timestamps[idx];
 
         let version_id = hist_guard
             .find_edge_version_at_time(edge_id, query_valid_time, query_tx_time)
