@@ -677,6 +677,7 @@ impl TraversalIterator {
     ) {
         match direction {
             Direction::Outgoing => {
+                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 if let Some(ref label) = self.label {
                     neighbors.extend(
                         self.current
@@ -685,6 +686,7 @@ impl TraversalIterator {
                                 if !self.edge_visible_at_time(edge_id, historical_guard) {
                                     return None;
                                 }
+                                // Zero-copy: only get target NodeId, not full Edge (Issue #190)
                                 self.current
                                     .get_edge_target(edge_id)
                                     .ok()
@@ -697,6 +699,7 @@ impl TraversalIterator {
                             if !self.edge_visible_at_time(edge_id, historical_guard) {
                                 return None;
                             }
+                            // Zero-copy: only get target NodeId, not full Edge (Issue #190)
                             self.current
                                 .get_edge_target(edge_id)
                                 .ok()
@@ -706,6 +709,7 @@ impl TraversalIterator {
                 }
             }
             Direction::Incoming => {
+                // Use iterator methods to avoid intermediate Vec allocation (Issue #187)
                 if let Some(ref label) = self.label {
                     neighbors.extend(
                         self.current
@@ -714,6 +718,7 @@ impl TraversalIterator {
                                 if !self.edge_visible_at_time(edge_id, historical_guard) {
                                     return None;
                                 }
+                                // Zero-copy: only get source NodeId, not full Edge (Issue #190)
                                 self.current
                                     .get_edge_source(edge_id)
                                     .ok()
@@ -726,6 +731,7 @@ impl TraversalIterator {
                             if !self.edge_visible_at_time(edge_id, historical_guard) {
                                 return None;
                             }
+                            // Zero-copy: only get source NodeId, not full Edge (Issue #190)
                             self.current
                                 .get_edge_source(edge_id)
                                 .ok()
@@ -755,7 +761,13 @@ impl TraversalIterator {
         // Acquire historical lock ONCE for all edge checks in this call.
         // This avoids the performance regression of acquiring per-edge locks.
         let historical_guard = self.temporal_context.map(|_| self.historical.read());
-        let mut neighbors = Vec::new();
+
+        // Estimate capacity to avoid reallocations
+        // For simple graphs, 16 is a reasonable default for average degree
+        // For Direction::Both, we expect 2x the edges
+        let estimated_capacity = if matches!(self.direction, Direction::Both) { 32 } else { 16 };
+        let mut neighbors = Vec::with_capacity(estimated_capacity);
+
         self.collect_neighbors_in_direction(
             node_id,
             self.direction,
@@ -839,6 +851,9 @@ impl FilterIterator {
 }
 
 /// Helper struct for evaluating predicates.
+///
+/// This is a zero-sized struct that acts as a namespace for predicate evaluation logic.
+/// It separates the complex predicate matching code from the iteration logic.
 struct PredicateEvaluator;
 
 impl PredicateEvaluator {
