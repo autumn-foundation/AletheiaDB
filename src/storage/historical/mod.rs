@@ -1710,12 +1710,18 @@ impl HistoricalStorage {
     }
 
     /// Get a node as it existed at a specific point in bi-temporal space.
+    ///
+    /// Uses the temporal index for O(log n) candidate lookup, then verifies
+    /// visibility (handles closed intervals from deletions).
     pub fn get_node_at_time(
         &self,
         node_id: NodeId,
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Node> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_node_at_time").entered();
+
         let version_id = self
             .find_node_version_at_time(node_id, valid_time, transaction_time)
             .ok_or(StorageError::NodeNotFound(node_id))?;
@@ -1736,12 +1742,18 @@ impl HistoricalStorage {
     }
 
     /// Get an edge as it existed at a specific point in bi-temporal space.
+    ///
+    /// Uses the temporal index for O(log n) candidate lookup, then verifies
+    /// visibility (handles closed intervals from deletions).
     pub fn get_edge_at_time(
         &self,
         edge_id: EdgeId,
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Edge> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_edge_at_time").entered();
+
         let version_id = self
             .find_edge_version_at_time(edge_id, valid_time, transaction_time)
             .ok_or(StorageError::EdgeNotFound(edge_id))?;
@@ -1764,12 +1776,18 @@ impl HistoricalStorage {
     }
 
     /// Get multiple nodes as they existed at a specific point in bi-temporal space.
+    ///
+    /// This retrieves nodes in batch to minimize overhead.
+    /// If a node is not found or not visible at the time, the Option will be None.
     pub fn get_nodes_at_time(
         &self,
         node_ids: &[NodeId],
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Vec<(NodeId, Option<Node>)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_nodes_at_time").entered();
+
         let mut results = Vec::with_capacity(node_ids.len());
 
         for &node_id in node_ids {
@@ -1811,12 +1829,18 @@ impl HistoricalStorage {
     }
 
     /// Get multiple edges as they existed at a specific point in bi-temporal space.
+    ///
+    /// This retrieves edges in batch to minimize overhead.
+    /// If an edge is not found or not visible at the time, the Option will be None.
     pub fn get_edges_at_time(
         &self,
         edge_ids: &[EdgeId],
         valid_time: Timestamp,
         transaction_time: Timestamp,
     ) -> Result<Vec<(EdgeId, Option<Edge>)>> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_edges_at_time").entered();
+
         let mut results = Vec::with_capacity(edge_ids.len());
 
         for &edge_id in edge_ids {
@@ -1860,7 +1884,12 @@ impl HistoricalStorage {
     }
 
     /// Get the complete version history of a node.
+    ///
+    /// Returns all versions in chronological order (oldest first).
     pub fn get_node_history(&self, node_id: NodeId) -> Result<EntityHistory> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_node_history").entered();
+
         // Get the current version ID
         let current_version_id = self
             .get_current_node_version(node_id)
@@ -1898,7 +1927,12 @@ impl HistoricalStorage {
     }
 
     /// Get a node at a specific logical version number.
+    ///
+    /// Version numbers are 1-indexed (1 = first version, 2 = second version, etc.).
     pub fn get_node_at_version(&self, node_id: NodeId, version_number: u64) -> Result<Node> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_node_at_version").entered();
+
         // Get the current version ID
         let current_version_id = self
             .get_current_node_version(node_id)
@@ -1942,12 +1976,17 @@ impl HistoricalStorage {
     }
 
     /// Compute the difference between two versions of a node.
+    ///
+    /// Shows which properties were added, removed, or modified.
     pub fn diff_node_versions(
         &self,
         node_id: NodeId,
         from_version: VersionId,
         to_version: VersionId,
     ) -> Result<VersionDiff> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("diff_node_versions").entered();
+
         // Validate that both versions belong to the requested node
         let from_ver = self
             .get_node_version(from_version)
@@ -1989,7 +2028,12 @@ impl HistoricalStorage {
     }
 
     /// Get the complete version history of an edge.
+    ///
+    /// Returns all versions in chronological order (oldest first).
     pub fn get_edge_history(&self, edge_id: EdgeId) -> Result<EntityHistory> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("get_edge_history").entered();
+
         // Get the current version ID
         let current_version_id = self
             .get_current_edge_version(edge_id)
@@ -2027,12 +2071,17 @@ impl HistoricalStorage {
     }
 
     /// Compute the difference between two versions of an edge.
+    ///
+    /// Shows which properties were added, removed, or modified.
     pub fn diff_edge_versions(
         &self,
         edge_id: EdgeId,
         from_version: VersionId,
         to_version: VersionId,
     ) -> Result<VersionDiff> {
+        #[cfg(feature = "observability")]
+        let _span = tracing::info_span!("diff_edge_versions").entered();
+
         // Validate that both versions belong to the requested edge
         let from_ver = self
             .get_edge_version(from_version)
