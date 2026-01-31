@@ -1856,8 +1856,7 @@ mod unit_tests {
                 // Others need FMA + AVX2
                 if is_x86_feature_detected!("fma") {
                     // dot_and_magnitudes_avx2
-                    let (dot, mag_a, _mag_b) =
-                        super::simd::internal::dot_and_magnitudes_avx2(&a, &b);
+                    let (dot, mag_a, _mag_b) = super::simd::internal::dot_and_magnitudes_avx2(&a, &b);
                     assert!(!dot.is_nan());
                     assert!(mag_a > 0.0);
 
@@ -1879,6 +1878,34 @@ mod unit_tests {
 // ============================================================================
 
 #[cfg(test)]
+    #[test]
+    fn test_scalar_fallback_coverage() {
+        // Explicitly test scalar fallbacks to ensure code coverage,
+        // as they are skipped by dispatchers on x86_64/AVX2 systems.
+        let a = vec![1.0, 2.0, 3.0, 4.0];
+        let b = vec![4.0, 3.0, 2.0, 1.0];
+
+        // dot_and_magnitudes_scalar
+        let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes_scalar(&a, &b);
+        assert!((dot - 20.0).abs() < 1e-5); // 4+6+6+4 = 20
+        assert!((mag_a - 30.0).abs() < 1e-5); // 1+4+9+16 = 30
+        assert!((mag_b - 30.0).abs() < 1e-5);
+
+        // dot_product_scalar
+        let dot_p = super::simd::dot_product_scalar(&a, &b);
+        assert!((dot_p - 20.0).abs() < 1e-5);
+
+        // squared_diff_sum_scalar
+        let sq_diff = super::simd::squared_diff_sum_scalar(&a, &b);
+        // (1-4)^2 + (2-3)^2 + (3-2)^2 + (4-1)^2 = 9 + 1 + 1 + 9 = 20
+        assert!((sq_diff - 20.0).abs() < 1e-5);
+
+        // scale_in_place_scalar
+        let mut v = a.clone();
+        super::simd::scale_in_place_scalar(&mut v, 2.0);
+        assert!((v[0] - 2.0).abs() < 1e-5);
+        assert!((v[3] - 8.0).abs() < 1e-5);
+    }
 mod proptests {
     use super::*;
     use proptest::prelude::*;

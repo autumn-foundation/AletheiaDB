@@ -463,7 +463,7 @@ pub(crate) fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
-fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi).sum()
 }
 
