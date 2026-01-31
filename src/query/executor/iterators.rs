@@ -692,19 +692,17 @@ impl TraversalIterator {
                             }),
                     );
                 } else {
-                    neighbors.extend(
-                        self.current
-                            .get_outgoing_edges_iter(node_id)
-                            .filter_map(|edge_id| {
-                                if !self.edge_visible_at_time(edge_id, historical_guard) {
-                                    return None;
-                                }
-                                self.current
-                                    .get_edge_target(edge_id)
-                                    .ok()
-                                    .map(|target| (target, edge_id))
-                            }),
-                    );
+                    neighbors.extend(self.current.get_outgoing_edges_iter(node_id).filter_map(
+                        |edge_id| {
+                            if !self.edge_visible_at_time(edge_id, historical_guard) {
+                                return None;
+                            }
+                            self.current
+                                .get_edge_target(edge_id)
+                                .ok()
+                                .map(|target| (target, edge_id))
+                        },
+                    ));
                 }
             }
             Direction::Incoming => {
@@ -723,19 +721,17 @@ impl TraversalIterator {
                             }),
                     );
                 } else {
-                    neighbors.extend(
-                        self.current
-                            .get_incoming_edges_iter(node_id)
-                            .filter_map(|edge_id| {
-                                if !self.edge_visible_at_time(edge_id, historical_guard) {
-                                    return None;
-                                }
-                                self.current
-                                    .get_edge_source(edge_id)
-                                    .ok()
-                                    .map(|source| (source, edge_id))
-                            }),
-                    );
+                    neighbors.extend(self.current.get_incoming_edges_iter(node_id).filter_map(
+                        |edge_id| {
+                            if !self.edge_visible_at_time(edge_id, historical_guard) {
+                                return None;
+                            }
+                            self.current
+                                .get_edge_source(edge_id)
+                                .ok()
+                                .map(|source| (source, edge_id))
+                        },
+                    ));
                 }
             }
             Direction::Both => {
@@ -2986,8 +2982,8 @@ mod tests {
     #[test]
     fn test_traversal_iterator_with_temporal_context() {
         use crate::core::id::VersionId;
-        use crate::storage::version::AnchorConfig;
         use crate::core::temporal::time;
+        use crate::storage::version::AnchorConfig;
 
         // Setup storage
         let current = Arc::new(CurrentStorage::new());
@@ -2996,9 +2992,15 @@ mod tests {
         )));
 
         // Create nodes
-        let n1 = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
-        let n2 = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
-        let n3 = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+        let n1 = current
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n2 = current
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n3 = current
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // Timestamps
         let t1 = time::now();
@@ -3008,7 +3010,9 @@ mod tests {
         let t4 = Timestamp::from(t1.wallclock() + 3000);
 
         // Create edge e1: n1 -> n2 at t1 (persisted)
-        let e1 = current.create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+        let e1 = current
+            .create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // Add historical version for e1 at t1
         {
@@ -3023,11 +3027,14 @@ mod tests {
                 n2,
                 PropertyMapBuilder::new().build(),
                 false, // not tombstone
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // Create edge e2: n1 -> n3 at t3 (persisted)
-        let e2 = current.create_edge(n1, n3, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+        let e2 = current
+            .create_edge(n1, n3, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // Add historical version for e2 at t3
         {
@@ -3042,7 +3049,8 @@ mod tests {
                 n3,
                 PropertyMapBuilder::new().build(),
                 false, // not tombstone
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // Test 1: Query at t2 (should see e1, but not e2)
