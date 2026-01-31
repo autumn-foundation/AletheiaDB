@@ -52,6 +52,10 @@ pub const MAX_ARRAY_ELEMENTS: usize = 1_000_000;
 /// Set to 100,000 - far exceeds typical embedding sizes (384-4096 dimensions).
 pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 
+/// Maximum recursion depth for nested properties (e.g., arrays of arrays).
+/// Set to 100 to prevent stack overflow from malicious input.
+pub const MAX_RECURSION_DEPTH: usize = 100;
+
 /// Property key type.
 ///
 /// Uses interned strings for memory efficiency and O(1) equality comparisons.
@@ -490,7 +494,27 @@ impl PropertyValue {
     /// Deserialize a PropertyValue from bytes.
     ///
     /// Returns the deserialized value and the number of bytes consumed.
+    ///
+    /// # Recursion Depth
+    ///
+    /// This function implements recursion depth checking to prevent stack overflow
+    /// attacks via deeply nested structures (e.g., Array of Array of ...).
+    /// The maximum depth is defined by [`MAX_RECURSION_DEPTH`].
     pub fn deserialize(bytes: &[u8]) -> Result<(Self, usize)> {
+        Self::deserialize_recursive(bytes, 0)
+    }
+
+    /// Internal recursive deserialization helper with depth tracking.
+    fn deserialize_recursive(bytes: &[u8], depth: usize) -> Result<(Self, usize)> {
+        // Prevent recursion-based stack overflow DoS
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(StorageError::CorruptedData(format!(
+                "Property value recursion depth limit exceeded (max {})",
+                MAX_RECURSION_DEPTH
+            ))
+            .into());
+        }
+
         if bytes.is_empty() {
             return Err(StorageError::CorruptedData(
                 "Empty buffer when deserializing PropertyValue".to_string(),
@@ -615,7 +639,9 @@ impl PropertyValue {
                         )
                         .into());
                     }
-                    let (item, consumed) = PropertyValue::deserialize(&bytes[offset..])?;
+                    // Recursive call with depth increment
+                    let (item, consumed) =
+                        PropertyValue::deserialize_recursive(&bytes[offset..], depth + 1)?;
                     items.push(item);
                     offset += consumed;
                 }
@@ -3535,5 +3561,85 @@ mod tests {
             }
             _ => panic!("Expected CorruptedData error"),
         }
+    }
+
+    #[test]
+    fn test_deserialize_recursion_limit() {
+        // Construct a deeply nested array exceeding the recursion limit
+        // Format: [TAG_ARRAY][count:1][TAG_ARRAY][count:1]...[TAG_NULL]
+        let depth = MAX_RECURSION_DEPTH + 1;
+        let mut bytes = Vec::new();
+
+        for _ in 0..depth {
+            bytes.push(TAG_ARRAY);
+            bytes.extend_from_slice(&(1u32).to_le_bytes()); // Count = 1
+        }
+
+        // Terminate with a Null value
+        bytes.push(TAG_NULL);
+
+        // Try to deserialize
+        let result = PropertyValue::deserialize(&bytes);
+
+        // Should fail with recursion limit error
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(msg.contains("recursion depth limit exceeded"));
+            }
+            _ => panic!("Expected CorruptedData error for recursion limit"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_recursion_limit_boundary() {
+        // Construct a deeply nested array exactly AT the limit (should succeed)
+        let depth = MAX_RECURSION_DEPTH;
+        let mut bytes = Vec::new();
+
+        for _ in 0..depth {
+            bytes.push(TAG_ARRAY);
+            bytes.extend_from_slice(&(1u32).to_le_bytes()); // Count = 1
+        }
+
+        // Terminate with a Null value
+        bytes.push(TAG_NULL);
+
+        // Try to deserialize
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_ok(), "Should succeed at recursion limit boundary");
+    }
+
+    #[test]
+    fn test_deserialize_truncated_after_tag() {
+        // Buffer containing only a tag but no data
+        let bytes = vec![TAG_STRING]; // String expects length prefix
+        let result = PropertyValue::deserialize(&bytes);
+        assert!(result.is_err());
+        match result {
+            Err(crate::utils::error::Error::Storage(StorageError::CorruptedData(msg))) => {
+                assert!(msg.contains("Buffer too short"));
+            }
+            _ => panic!("Expected CorruptedData error"),
+        }
+    }
+
+    #[test]
+    fn test_estimated_heap_size_nested_array() {
+        // Create a nested array: [[[[...]]]] (depth 10) containing a string at the bottom
+        let mut value = PropertyValue::string("data");
+        for _ in 0..10 {
+            value = PropertyValue::array(vec![value]);
+        }
+
+        let size = value.estimated_heap_size();
+
+        // Size should be:
+        // 10 * (Vec capacity overhead + sizeof(PropertyValue)) + string length
+        // Vec capacity is at least 1.
+        let min_vec_size = std::mem::size_of::<PropertyValue>();
+        let expected_min = 10 * min_vec_size + 4; // "data".len() = 4
+
+        assert!(size >= expected_min);
     }
 }
