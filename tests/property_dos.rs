@@ -1,10 +1,10 @@
-use gallifreydb::core::property::{PropertyValue, TAG_ARRAY, TAG_NULL};
+use gallifreydb::core::property::{PropertyValue, TAG_ARRAY, TAG_NULL, MAX_RECURSION_DEPTH};
 
 #[test]
 fn test_recursive_array_stack_overflow_protection() {
     // Construct a deeply nested array: [[[[...]]]]
     // Format: [TAG_ARRAY][count:1][TAG_ARRAY][count:1]...[TAG_NULL]
-    let depth = 150;
+    let depth = (MAX_RECURSION_DEPTH + 1) as usize;
     let mut bytes = Vec::new();
 
     for _ in 0..depth {
