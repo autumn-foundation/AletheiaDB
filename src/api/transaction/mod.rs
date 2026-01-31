@@ -120,8 +120,16 @@ pub trait ReadOps {
     ///
     /// # Snapshot Isolation
     ///
-    /// This method filters edges to ensure only those visible in the current transaction
-    /// snapshot are returned. Edges created by concurrent transactions will not be seen.
+    /// For [`ReadTransaction`], this method filters edges to ensure only those visible in
+    /// the transaction's snapshot are returned, so edges created by concurrent
+    /// transactions after the snapshot was taken will not be seen.
+    ///
+    /// For [`WriteTransaction`], the current implementation delegates adjacency lookups
+    /// directly to the underlying current storage and does **not** (yet) apply a
+    /// snapshot-visibility filter or include uncommitted buffered writes. As a result,
+    /// it may (a) observe edges committed by other transactions after this transaction's
+    /// snapshot and (b) omit edges created in this transaction but not yet committed.
+    /// Prefer [`ReadTransaction`] when you require snapshot-isolated adjacency traversal.
     ///
     /// # Performance
     ///
