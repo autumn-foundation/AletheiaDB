@@ -14,6 +14,7 @@
 //! - **[`hlc`]**: Hybrid Logical Clock implementation for distributed timekeeping.
 
 pub mod graph;
+pub mod history;
 pub mod hlc;
 pub mod id;
 pub mod interning;
