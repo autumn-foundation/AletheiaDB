@@ -24,3 +24,7 @@
 ## 2026-01-30 - Splitting HistoricalStorage
 **Tangle:** `src/storage/historical.rs` was a 7000-line "Blob" containing mixed storage logic and 4400 lines of tests, making it hard to navigate and maintain.
 **Blueprint:** Refactored into `src/storage/historical/` directory. Moved tests to `tests.rs` (~4400 lines), leaving the core logic in `mod.rs` (~2600 lines). This separates concerns and makes the core logic more accessible.
+
+## 2026-02-01 - Splitting CurrentStorage
+**Tangle:** `src/storage/current.rs` was a "Blob" module containing storage implementation, iterators, statistics, vector index helpers, and extensive tests, making it difficult to maintain.
+**Blueprint:** Refactored into `src/storage/current/` directory. Extracted `iterators.rs`, `stats.rs`, and `vector.rs` to separate concerns. Moved tests to `tests.rs`, leaving `mod.rs` as a clean facade and core implementation.
