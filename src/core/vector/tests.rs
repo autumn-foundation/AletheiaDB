@@ -1871,6 +1871,32 @@ fn test_simd_explicit_coverage() {
     }
 }
 
+#[test]
+fn test_scalar_fallback_explicit_coverage() {
+    // Explicitly test scalar fallbacks to ensure code coverage regardless of CPU features
+    let a = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let b = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+
+    // dot_and_magnitudes_scalar
+    let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes_scalar(&a, &b);
+    // dot = 1*8 + 2*7 + ... = 8 + 14 + 18 + 20 + 20 + 18 + 14 + 8 = 120
+    assert!((dot - 120.0).abs() < 1e-5);
+    assert!(mag_a > 0.0);
+    assert!(mag_b > 0.0);
+
+    // dot_product_scalar
+    let dot_prod = super::simd::dot_product_scalar(&a, &b);
+    assert!((dot - dot_prod).abs() < 1e-5);
+
+    // squared_diff_sum_scalar
+    let sq_diff = super::simd::squared_diff_sum_scalar(&a, &b);
+    assert!(sq_diff >= 0.0);
+
+    // scale_in_place_scalar
+    let mut v = a.clone();
+    super::simd::scale_in_place_scalar(&mut v, 2.0);
+    assert!((v[0] - 2.0).abs() < 1e-5);
+}
 
 // ============================================================================
 // Property-Based Tests
