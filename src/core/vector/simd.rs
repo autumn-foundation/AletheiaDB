@@ -434,7 +434,7 @@ pub(crate) mod arch {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
-fn dot_and_magnitudes_scalar(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
+pub(crate) fn dot_and_magnitudes_scalar(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     a.iter().zip(b.iter()).fold(
         (0.0f32, 0.0f32, 0.0f32),
         |(dot, mag_a, mag_b), (&ai, &bi)| (dot + ai * bi, mag_a + ai * ai, mag_b + bi * bi),
@@ -449,7 +449,7 @@ fn dot_and_magnitudes_scalar(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
-fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
         .zip(b.iter())
         .map(|(&ai, &bi)| {
@@ -467,7 +467,7 @@ fn squared_diff_sum_scalar(a: &[f32], b: &[f32]) -> f32 {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
-fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi).sum()
 }
 
@@ -479,7 +479,7 @@ fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
     all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)),
     allow(dead_code)
 )]
-fn scale_in_place_scalar(v: &mut [f32], scalar: f32) {
+pub(crate) fn scale_in_place_scalar(v: &mut [f32], scalar: f32) {
     for x in v.iter_mut() {
         *x *= scalar;
     }

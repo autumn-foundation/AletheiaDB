@@ -2822,3 +2822,33 @@ fn test_dot_product_sum_mismatch_panics() {
     let b = vec![1.0, 2.0, 3.0];
     let _ = super::simd::dot_product_sum(&a, &b);
 }
+
+// Additional coverage tests to ensure fallbacks are exercised even on SIMD-capable hardware
+#[test]
+fn test_scalar_fallbacks() {
+    let a = vec![1.0, 2.0, 3.0, 4.0];
+    let b = vec![4.0, 3.0, 2.0, 1.0];
+    let mut v = a.clone();
+
+    // 1. dot_and_magnitudes_scalar
+    let (dot, mag_a, mag_b) = super::simd::dot_and_magnitudes_scalar(&a, &b);
+    assert!((dot - 20.0).abs() < 1e-5);
+    assert!((mag_a - 30.0).abs() < 1e-5);
+    assert!((mag_b - 30.0).abs() < 1e-5);
+
+    // 2. squared_diff_sum_scalar
+    let sq_diff = super::simd::squared_diff_sum_scalar(&a, &b);
+    // (1-4)^2 + (2-3)^2 + (3-2)^2 + (4-1)^2 = 9 + 1 + 1 + 9 = 20
+    assert!((sq_diff - 20.0).abs() < 1e-5);
+
+    // 3. dot_product_scalar
+    let dot_p = super::simd::dot_product_scalar(&a, &b);
+    assert!((dot_p - 20.0).abs() < 1e-5);
+
+    // 4. scale_in_place_scalar
+    super::simd::scale_in_place_scalar(&mut v, 2.0);
+    assert!((v[0] - 2.0).abs() < 1e-5);
+    assert!((v[1] - 4.0).abs() < 1e-5);
+    assert!((v[2] - 6.0).abs() < 1e-5);
+    assert!((v[3] - 8.0).abs() < 1e-5);
+}
