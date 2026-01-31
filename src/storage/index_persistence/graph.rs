@@ -614,7 +614,15 @@ pub fn load_graph_index_with_delta(base_path: &Path, delta_path: &Path) -> Resul
     }
 
     // Load and decompress delta
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let capacity: usize = metadata.len().try_into().map_err(|_| {
+        IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Graph delta file size {} exceeds platform capacity",
+                metadata.len()
+            ),
+        }
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
     use std::io::Read;
     file.read_to_end(&mut bytes)?;
 
