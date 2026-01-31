@@ -1114,8 +1114,7 @@ impl ResultIterator for VectorRerankIterator {
                 None => {
                     return Some(Err(crate::utils::error::Error::Vector(
                         crate::utils::error::VectorError::IndexError(
-                            "VectorRerank requires a vector index to be enabled. \
-                             Call db.enable_vector_index() first."
+                            "VectorRerank requires a vector index to be enabled.                              Call db.enable_vector_index() first."
                                 .to_string(),
                         ),
                     )));
@@ -2982,5 +2981,154 @@ mod tests {
             results.push(row);
         }
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_traversal_iterator_with_temporal_context() {
+        use crate::core::id::VersionId;
+        use crate::storage::version::AnchorConfig;
+        use crate::core::temporal::time;
+
+        // Setup storage
+        let current = Arc::new(CurrentStorage::new());
+        let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
+            AnchorConfig::default(),
+        )));
+
+        // Create nodes
+        let n1 = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+        let n2 = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+        let n3 = current.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+
+        // Timestamps
+        let t1 = time::now();
+        // Since we can't add to HybridTimestamp, we'll create new ones
+        let t2 = Timestamp::from(t1.wallclock() + 1000);
+        let t3 = Timestamp::from(t1.wallclock() + 2000);
+        let t4 = Timestamp::from(t1.wallclock() + 3000);
+
+        // Create edge e1: n1 -> n2 at t1 (persisted)
+        let e1 = current.create_edge(n1, n2, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+
+        // Add historical version for e1 at t1
+        {
+            let mut hist = historical.write();
+            hist.add_edge_version(
+                e1,
+                VersionId::new(1).unwrap(),
+                t1,
+                t1,
+                GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+                n1,
+                n2,
+                PropertyMapBuilder::new().build(),
+                false, // not tombstone
+            ).unwrap();
+        }
+
+        // Create edge e2: n1 -> n3 at t3 (persisted)
+        let e2 = current.create_edge(n1, n3, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+
+        // Add historical version for e2 at t3
+        {
+            let mut hist = historical.write();
+            hist.add_edge_version(
+                e2,
+                VersionId::new(2).unwrap(),
+                t3,
+                t3,
+                GLOBAL_INTERNER.intern("KNOWS").unwrap(),
+                n1,
+                n3,
+                PropertyMapBuilder::new().build(),
+                false, // not tombstone
+            ).unwrap();
+        }
+
+        // Test 1: Query at t2 (should see e1, but not e2)
+        // Direction: Outgoing
+        let input = Box::new(NodeLookupIterator::new(vec![n1], current.clone()));
+        let mut iter = TraversalIterator::new(
+            input,
+            Direction::Outgoing,
+            Some("KNOWS".to_string()),
+            1,
+            current.clone(),
+            historical.clone(),
+            Some((t2, t2)), // View at t2
+        );
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            results.push(row);
+        }
+
+        // Should only find n2
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entity.node_id(), Some(n2));
+
+        // Test 2: Query at t2
+        // Direction: Incoming (from n2 -> n1)
+        let input = Box::new(NodeLookupIterator::new(vec![n2], current.clone()));
+        let mut iter = TraversalIterator::new(
+            input,
+            Direction::Incoming,
+            Some("KNOWS".to_string()),
+            1,
+            current.clone(),
+            historical.clone(),
+            Some((t2, t2)), // View at t2
+        );
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            results.push(row);
+        }
+
+        // Should find n1
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entity.node_id(), Some(n1));
+
+        // Test 3: Query at t2
+        // Direction: Both (n1 -> n2)
+        let input = Box::new(NodeLookupIterator::new(vec![n1], current.clone()));
+        let mut iter = TraversalIterator::new(
+            input,
+            Direction::Both,
+            Some("KNOWS".to_string()),
+            1,
+            current.clone(),
+            historical.clone(),
+            Some((t2, t2)), // View at t2
+        );
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            results.push(row);
+        }
+
+        // Should find n2 (via outgoing)
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entity.node_id(), Some(n2));
+
+        // Test 4: Query at t4 (should see e1 and e2)
+        let input = Box::new(NodeLookupIterator::new(vec![n1], current.clone()));
+        let mut iter = TraversalIterator::new(
+            input,
+            Direction::Outgoing,
+            Some("KNOWS".to_string()),
+            1,
+            current.clone(),
+            historical.clone(),
+            Some((t4, t4)), // View at t4
+        );
+
+        let mut results = Vec::new();
+        while let Some(Ok(row)) = iter.next() {
+            results.push(row);
+        }
+
+        // Should find n2 and n3
+        assert_eq!(results.len(), 2);
     }
 }
