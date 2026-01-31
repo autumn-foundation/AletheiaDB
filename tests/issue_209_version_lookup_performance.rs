@@ -48,7 +48,8 @@ fn test_version_lookup_correctness_many_versions() {
     let mut version_timestamps = Vec::new();
 
     for i in 0..NUM_VERSIONS {
-        // Delay to ensure distinct timestamps and allow time for commit
+        // Increase delay to ensure distinct timestamps and stable windows on CI
+        // This mitigates test flakiness on slower runners where clock resolution might be coarse
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Update the node to create a new version
