@@ -83,7 +83,8 @@ fn test_version_lookup_correctness_many_versions() {
         // We use a small offset to ensure we are within the version's validity window
         // (which is now ~10ms wide due to the increased sleep)
         let query_valid_time = Timestamp::from(timestamp.wallclock() + 1i64);
-        let query_tx_time = Timestamp::from(timestamp.wallclock() + 1000i64);
+        // Use a 5ms buffer: > 1ms (latency) but < 10ms (next update interval)
+        let query_tx_time = Timestamp::from(timestamp.wallclock() + 5000i64);
 
         let version_id = hist_guard
             .find_node_version_at_time(node_id, query_valid_time, query_tx_time)
@@ -313,7 +314,8 @@ fn test_edge_version_lookup_correctness_many_versions() {
         let valid_timestamp = version_timestamps[idx];
         // Query with tx_time far enough in future to see the version
         let query_valid_time = valid_timestamp;
-        let query_tx_time = Timestamp::from(valid_timestamp.wallclock() + 1000i64);
+        // Use a 5ms buffer: > 1ms (latency) but < 10ms (next update interval)
+        let query_tx_time = Timestamp::from(valid_timestamp.wallclock() + 5000i64);
 
         let version_id = hist_guard
             .find_edge_version_at_time(edge_id, query_valid_time, query_tx_time)
