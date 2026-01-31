@@ -5303,6 +5303,16 @@ mod proptests {
 
         assert!((sparse_dist - dense_dist).abs() < 1e-5);
     }
+
+    #[test]
+    #[should_panic]
+    fn test_internal_safety_in_release() {
+        let a = vec![1.0; 4];
+        let b = vec![1.0; 3]; // Mismatch
+        // This calls dot_and_magnitudes internally
+        // We use dot_and_magnitudes because it is one of the functions we are hardening
+        let _ = super::dot_and_magnitudes(&a, &b);
+    }
 }
 
 #[cfg(test)]
