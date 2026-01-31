@@ -15,7 +15,6 @@
 
 use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
-use std::collections::HashMap;
 
 /// A single entry in the adjacency list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,46 +142,43 @@ impl AdjacencyIndex {
     ///
     /// This uses a sparse representation: only nodes with outgoing edges are stored,
     /// making it efficient even with large gaps in node IDs (O(num_nodes) instead of O(max_node_id)).
-    pub fn build(edges: Vec<(NodeId, NodeId, EdgeId, InternedString)>) -> Self {
+    pub fn build(mut edges: Vec<(NodeId, NodeId, EdgeId, InternedString)>) -> Self {
         if edges.is_empty() {
             return Self::new();
         }
 
-        // Capture edge count before consuming the vector
         let edge_count = edges.len();
 
-        // Find maximum node ID for bounds checking
+        // Sort by source node, then target node for deterministic ordering.
+        // This avoids using a HashMap for grouping, reducing memory allocations and hashing overhead.
+        edges.sort_by_key(|(src, target, _, _)| (*src, *target));
+
+        // Max node id is the maximum of all source and target IDs
         let max_node_id = edges
             .iter()
-            .map(|(src, _, _, _)| src.as_u64())
+            .flat_map(|(src, target, _, _)| [src.as_u64(), target.as_u64()])
             .max()
             .unwrap_or(0);
 
-        // Group edges by source node
-        let mut adjacency_map: HashMap<NodeId, Vec<AdjacencyEntry>> = HashMap::new();
-        for (source, target, edge_id, label) in edges {
-            adjacency_map
-                .entry(source)
-                .or_default()
-                .push(AdjacencyEntry::new(target, edge_id, label));
-        }
-
-        // Collect and sort node IDs that have outgoing edges
-        let mut node_ids: Vec<NodeId> = adjacency_map.keys().copied().collect();
-        node_ids.sort_by_key(|n| n.as_u64());
-
-        // Build CSR format with sparse representation
-        let mut offsets = Vec::with_capacity(node_ids.len() + 1);
+        // Pre-allocate assuming some average degree > 1 to avoid resizing
+        let estimated_nodes = (edge_count / 4).max(16);
+        let mut node_ids = Vec::with_capacity(estimated_nodes);
+        let mut offsets = Vec::with_capacity(estimated_nodes + 1);
         let mut flat_edges = Vec::with_capacity(edge_count);
 
         offsets.push(0);
 
-        // Iterate only through nodes that have edges (in sorted order)
-        for node_id in &node_ids {
-            if let Some(mut adj_list) = adjacency_map.remove(node_id) {
-                // Sort by target for deterministic ordering
-                adj_list.sort_by_key(|e| e.target);
-                flat_edges.extend(adj_list);
+        if !edges.is_empty() {
+            let mut current_source = edges[0].0;
+            node_ids.push(current_source);
+
+            for (source, target, edge_id, label) in edges {
+                if source != current_source {
+                    offsets.push(flat_edges.len());
+                    current_source = source;
+                    node_ids.push(current_source);
+                }
+                flat_edges.push(AdjacencyEntry::new(target, edge_id, label));
             }
             offsets.push(flat_edges.len());
         }
@@ -645,5 +641,30 @@ mod tests {
                 assert!(entry.target.as_u64() < node_count as u64);
             }
         }
+    }
+
+    #[test]
+    fn test_max_node_id_from_target() {
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+        let edges = vec![
+            (
+                NodeId::new(1).unwrap(),
+                NodeId::new(1000).unwrap(),
+                EdgeId::new(0).unwrap(),
+                knows,
+            ),
+            (
+                NodeId::new(2).unwrap(),
+                NodeId::new(500).unwrap(),
+                EdgeId::new(1).unwrap(),
+                knows,
+            ),
+        ];
+        let index = AdjacencyIndex::build(edges);
+        assert_eq!(
+            index.max_node_id(),
+            1000,
+            "max_node_id should consider target nodes"
+        );
     }
 }

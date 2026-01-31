@@ -5,3 +5,7 @@
 ## 2026-06-15 - WAL Serialization Optimization
 **Learning:** `PropertyMap::serialized_size()` was O(N) with expensive interner lookups, called per-entry in WAL append for buffer reservation.
 **Action:** Cached serialization size in `PropertyMap` during construction (O(1) access), moving cost to mutation time (incremental updates) and eliminating N lookups during WAL append.
+
+## 2026-06-25 - Sort-based vs HashMap-based grouping
+**Learning:** Building CSR structures using `HashMap<NodeId, Vec<Entry>>` introduces massive overhead (allocations per node + hashing) compared to sorting the edge list and iterating linearly.
+**Action:** For bulk construction of grouped data (like CSR), prefer sorting the flat list by group key (`edges.sort_by_key`) and iterating once, rather than inserting into a grouping HashMap.
