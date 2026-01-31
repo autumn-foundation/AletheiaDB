@@ -1110,7 +1110,7 @@ impl ResultIterator for VectorRerankIterator {
                 None => {
                     return Some(Err(crate::utils::error::Error::Vector(
                         crate::utils::error::VectorError::IndexError(
-                            "VectorRerank requires a vector index to be enabled.                              Call db.enable_vector_index() first."
+                            "VectorRerank requires a vector index to be enabled. Call db.enable_vector_index() first."
                                 .to_string(),
                         ),
                     )));
