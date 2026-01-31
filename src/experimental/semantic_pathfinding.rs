@@ -110,8 +110,8 @@ impl<'a> SemanticPathfinder<'a> {
                 // Calculate semantic cost of moving to target
                 let semantic_cost = self.calculate_semantic_cost(target, query_embedding)?;
 
-                // Total cost = current cost + semantic cost + structural cost (1.0 for hop)
-                // We add 1.0 structural cost to prefer shorter paths if semantics are equal.
+                // Total cost = current cost + semantic cost + structural cost (0.1 per hop)
+                // We add 0.1 structural cost to prefer shorter paths if semantics are equal.
                 // Adjustable weight could be added later.
                 let new_cost = cost + semantic_cost + 0.1; // Small structural cost
 
@@ -174,7 +174,7 @@ impl<'a> SemanticPathfinder<'a> {
 
                     // Check if target node existed at time T (and get embedding)
                     if let Ok(target_node) = self.db.get_node_at_time(target, time, time) {
-                         // Calculate semantic cost using historical embedding
+                        // Calculate semantic cost using historical embedding
                          let target_embedding = target_node
                             .properties
                             .get(&self.vector_property)
