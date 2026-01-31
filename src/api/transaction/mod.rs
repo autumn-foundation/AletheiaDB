@@ -120,16 +120,8 @@ pub trait ReadOps {
     ///
     /// # Snapshot Isolation
     ///
-    /// For [`ReadTransaction`], this method filters edges to ensure only those visible in
-    /// the transaction's snapshot are returned, so edges created by concurrent
-    /// transactions after the snapshot was taken will not be seen.
-    ///
-    /// For [`WriteTransaction`], the current implementation delegates adjacency lookups
-    /// directly to the underlying current storage and does **not** (yet) apply a
-    /// snapshot-visibility filter or include uncommitted buffered writes. As a result,
-    /// it may (a) observe edges committed by other transactions after this transaction's
-    /// snapshot and (b) omit edges created in this transaction but not yet committed.
-    /// Prefer [`ReadTransaction`] when you require snapshot-isolated adjacency traversal.
+    /// This method filters edges to ensure only those visible in the current transaction
+    /// snapshot are returned. Edges created by concurrent transactions will not be seen.
     ///
     /// # Performance
     ///
@@ -215,9 +207,10 @@ pub trait WriteOps: ReadOps {
     ///
     /// # Bi-Temporal Semantics
     ///
-    /// - If `valid_from` is None, both valid_time and transaction_time are set to commit time
-    /// - If `valid_from` is Some(ts), valid_time starts at ts, transaction_time at commit time
-    /// - This enables backdating facts: "created at commit_time, but valid since valid_from"
+    /// - If `valid_from` is None, `valid_time` starts at the **transaction start time**.
+    /// - `transaction_time` always starts at the **commit time**.
+    /// - This means by default, facts are considered valid from the moment the transaction began.
+    /// - If `valid_from` is Some(ts), valid_time starts at `ts`.
     fn create_node_with_valid_time(
         &mut self,
         label: &str,
@@ -227,8 +220,7 @@ pub trait WriteOps: ReadOps {
 
     /// Create a new node.
     ///
-    /// This is a convenience method that sets `valid_from` to the transaction commit time.
-    /// Use this for facts that become true exactly when they are recorded.
+    /// This is a convenience method that sets `valid_from` to the **transaction start time**.
     ///
     /// # Example
     ///
@@ -254,7 +246,7 @@ pub trait WriteOps: ReadOps {
 
     /// Create a new edge.
     ///
-    /// This is a convenience method that sets `valid_from` to the transaction commit time.
+    /// This is a convenience method that sets `valid_from` to the **transaction start time**.
     ///
     /// # Example
     ///
