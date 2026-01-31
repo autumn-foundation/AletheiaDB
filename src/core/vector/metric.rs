@@ -1,8 +1,8 @@
 //! Distance metric definition.
 
+use super::ops::{cosine_similarity, dot_product, euclidean_distance};
 use crate::utils::error::Result;
 use std::fmt;
-use super::ops::{cosine_similarity, euclidean_distance, dot_product};
 
 /// Specifies which distance or similarity metric to use for vector operations.
 ///

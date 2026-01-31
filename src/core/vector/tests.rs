@@ -1,6 +1,6 @@
-use super::*;
-use crate::core::property::MAX_VECTOR_DIMENSIONS;
-use crate::utils::error::{Error, VectorError};
+pub use super::*;
+pub use crate::core::property::MAX_VECTOR_DIMENSIONS;
+pub use crate::utils::error::{Error, VectorError};
 mod unit_tests {
     use super::*;
 
@@ -1856,7 +1856,8 @@ mod unit_tests {
                 // Others need FMA + AVX2
                 if is_x86_feature_detected!("fma") {
                     // dot_and_magnitudes_avx2
-                    let (dot, mag_a, _mag_b) = super::simd::internal::dot_and_magnitudes_avx2(&a, &b);
+                    let (dot, mag_a, _mag_b) =
+                        super::simd::internal::dot_and_magnitudes_avx2(&a, &b);
                     assert!(!dot.is_nan());
                     assert!(mag_a > 0.0);
 

@@ -76,19 +76,18 @@
 //!
 //! See `docs/VECTOR_SEARCH_DESIGN.md` for the complete design.
 
-
+pub mod metric;
+pub mod ops;
+pub(crate) mod simd;
+pub mod sparse;
 pub mod types;
 pub mod validation;
-pub(crate) mod simd;
-pub mod ops;
-pub mod sparse;
-pub mod metric;
 
 #[cfg(test)]
 mod tests;
 
-pub use types::*;
-pub use validation::*;
+pub use metric::*;
 pub use ops::*;
 pub use sparse::*;
-pub use metric::*;
+pub use types::*;
+pub use validation::*;

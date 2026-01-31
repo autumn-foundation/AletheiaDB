@@ -1,4 +1,3 @@
-
 /// SIMD-accelerated vector operations for x86/x86_64 platforms.
 ///
 /// Uses runtime feature detection to select the best available instruction set:

@@ -1,8 +1,8 @@
 //! Sparse vector implementation.
 
-use crate::utils::error::{Error, Result, VectorError};
-use crate::core::property::MAX_VECTOR_DIMENSIONS;
 use super::types::SQUARED_MAGNITUDE_THRESHOLD;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
+use crate::utils::error::{Error, Result, VectorError};
 
 /// A sparse vector representation optimized for vectors with many zero values.
 ///

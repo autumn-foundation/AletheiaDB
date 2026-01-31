@@ -1,9 +1,9 @@
 //! High-level vector operations.
 
-use crate::utils::error::Result;
-use super::types::{SQUARED_MAGNITUDE_THRESHOLD, NORMALIZATION_TOLERANCE};
+use super::simd::{dot_and_magnitudes, dot_product_sum, scale_in_place, squared_diff_sum};
+use super::types::{NORMALIZATION_TOLERANCE, SQUARED_MAGNITUDE_THRESHOLD};
 use super::validation::check_dimensions_match;
-use super::simd::{dot_and_magnitudes, squared_diff_sum, dot_product_sum, scale_in_place};
+use crate::utils::error::Result;
 
 /// Computes the cosine similarity between two vectors.
 ///
