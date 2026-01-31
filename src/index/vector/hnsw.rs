@@ -987,7 +987,15 @@ impl HnswIndex {
         let count = mappings.len() as u64;
 
         // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
-        let total_size = 4 + 1 + 8 + (mappings.len() * 16) + 4;
+        // Use checked arithmetic to prevent overflow
+        let count_size = mappings
+            .len()
+            .checked_mul(16)
+            .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
+        let total_size = count_size
+            .checked_add(4 + 1 + 8 + 4)
+            .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
+
         let mut file_data = Vec::with_capacity(total_size);
 
         // Write header
@@ -1147,8 +1155,18 @@ fn load_mappings_with_integrity(
     // Parse count
     let count = u64::from_le_bytes(file_data[5..13].try_into().unwrap()) as usize;
 
-    // Verify data size
-    let expected_size = 4 + 1 + 8 + (count * 16) + 4;
+    // Verify data size with checked arithmetic
+    let data_size = count.checked_mul(16).ok_or_else(|| {
+        Error::Vector(VectorError::IndexError(
+            "Mapping count too large (overflow)".to_string(),
+        ))
+    })?;
+    let expected_size = data_size.checked_add(4 + 1 + 8 + 4).ok_or_else(|| {
+        Error::Vector(VectorError::IndexError(
+            "Mapping file size too large (overflow)".to_string(),
+        ))
+    })?;
+
     if file_data.len() != expected_size {
         return Err(Error::Vector(VectorError::IndexError(format!(
             "Mapping file size mismatch: expected {} bytes, got {}",
@@ -1933,6 +1951,53 @@ mod tests {
             Ok(_) => panic!("Expected IndexError with size mismatch message, got: Ok(_)"),
             Err(e) => panic!(
                 "Expected IndexError with size mismatch message, got: Err({:?})",
+                e
+            ),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_mappings_overflow_header() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index.usearch");
+        let mappings_path = path.with_extension("usearch.mappings");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+        index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        index.save(&path)?;
+
+        // Modify count to be HUGE (u64::MAX) to trigger arithmetic overflow check
+        let mut data = std::fs::read(&mappings_path).unwrap();
+        let count_offset = 5;
+        let huge_count = u64::MAX;
+
+        // Write huge count
+        let count_bytes = huge_count.to_le_bytes();
+        data[count_offset..count_offset + 8].copy_from_slice(&count_bytes);
+
+        // Update CRC (checksum calculation is still valid, only logic check fails)
+        let crc_offset = data.len() - 4;
+        let mut hasher = Hasher::new();
+        hasher.update(&data[..crc_offset]);
+        let new_crc = hasher.finalize();
+        data[crc_offset..].copy_from_slice(&new_crc.to_le_bytes());
+
+        std::fs::write(&mappings_path, &data).unwrap();
+
+        let result = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine));
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(
+                    msg.contains("overflow"),
+                    "Expected overflow error, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("Expected IndexError with overflow message, got: Ok(_)"),
+            Err(e) => panic!(
+                "Expected IndexError with overflow message, got: Err({:?})",
                 e
             ),
         }
