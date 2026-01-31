@@ -72,7 +72,6 @@
 //!
 //! - Manhattan distance
 //! - Dimension validation helpers
-//! - Sparse vector support
 //!
 //! See `docs/VECTOR_SEARCH_DESIGN.md` for the complete design.
 
