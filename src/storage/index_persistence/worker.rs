@@ -1,3 +1,57 @@
+//! Background persistence worker.
+//!
+//! This module manages the background thread responsible for automatic index persistence.
+//! It implements the persistence loop, policy checking, and crash safety mechanisms.
+//!
+//! # Responsibilities
+//!
+//! - **Policy Enforcement**: Monitors mutation counts and time elapsed for each index type.
+//! - **Automatic Triggering**: Executes persistence operations when thresholds are met.
+//! - **Graceful Shutdown**: Ensures all indexes are saved one last time on shutdown.
+//! - **Crash Safety**: Isolates persistence failures from the main application thread.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌──────────────────────┐
+//! │  PersistenceTracker  │◄───────┐
+//! │ (Mutation Counters)  │        │ Checks
+//! └──────────────────────┘        │ Counters
+//!                                 │
+//! ┌──────────────────────┐   ┌────┴────────────┐
+//! │   Main Thread        │   │ Background      │
+//! │ (Writes/Mutations)   │   │ Persistence     │
+//! └──────────────────────┘   │ Worker Thread   │
+//!                            └────┬────────────┘
+//!                                 │
+//!                                 │ Triggers
+//!                                 │ Save
+//!                                 ▼
+//!                        ┌──────────────────────┐
+//!                        │ Operations Module    │
+//!                        │ (persist_*_index)    │
+//!                        └──────────────────────┘
+//! ```
+//!
+//! # Persistence Loop
+//!
+//! The worker thread runs in a loop with a 1-second sleep interval. In each iteration:
+//! 1. Checks for shutdown signal.
+//! 2. Evaluates policies for each index type (vector, graph, temporal, strings).
+//! 3. If a threshold is met (mutations or time), triggers persistence for that index.
+//! 4. Logs any errors but continues running (unless it panics).
+//!
+//! # Crash Safety
+//!
+//! The entire worker loop is wrapped in `std::panic::catch_unwind`. If the persistence
+//! logic panics (e.g., due to a bug or memory corruption):
+//! 1. The panic is caught and logged to stderr.
+//! 2. The `stopped_flag` is set to `true`.
+//! 3. The main application continues running, but automatic persistence stops.
+//! 4. Users are warned via stderr that persistence has failed.
+//!
+//! This ensures that a bug in the persistence layer doesn't crash the database.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
