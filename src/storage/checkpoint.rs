@@ -55,8 +55,8 @@ use crate::storage::index_persistence::{
     },
     graph::{persist_property_map, restore_property_map},
 };
+use crate::core::version::VersionData;
 use crate::storage::redb_cold_storage::RedbColdStorage;
-use crate::storage::version::VersionData;
 use crate::storage::wal::LSN;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use crate::utils::error::{Result, StorageError};
@@ -922,7 +922,7 @@ impl CheckpointManager {
         &self,
         manifest: &IndexManifest,
     ) -> Result<(HistoricalStorage, u64)> {
-        use crate::storage::version::PropertyDelta;
+        use crate::core::version::PropertyDelta;
 
         let mut historical = HistoricalStorage::new();
         let mut max_version_id: u64 = 0;
@@ -996,7 +996,7 @@ impl CheckpointManager {
                     }
                 };
 
-                let version = crate::storage::version::NodeVersion {
+                let version = crate::core::version::NodeVersion {
                     id: version_id,
                     node_id,
                     temporal,
@@ -1064,7 +1064,7 @@ impl CheckpointManager {
                     }
                 };
 
-                let version = crate::storage::version::EdgeVersion {
+                let version = crate::core::version::EdgeVersion {
                     id: version_id,
                     edge_id,
                     source,
@@ -3055,7 +3055,7 @@ mod tests {
         )?);
 
         // Store some data with LSN tracking
-        let node = crate::storage::version::NodeVersion::new_anchor(
+        let node = crate::core::version::NodeVersion::new_anchor(
             VersionId::new(1)?,
             NodeId::new(1)?,
             BiTemporalInterval::current(time::now()),
@@ -3122,7 +3122,7 @@ mod tests {
             RedbConfig::new(),
         )?);
 
-        let node = crate::storage::version::NodeVersion::new_anchor(
+        let node = crate::core::version::NodeVersion::new_anchor(
             VersionId::new(1)?,
             NodeId::new(1)?,
             BiTemporalInterval::current(time::now()),
@@ -3170,7 +3170,7 @@ mod tests {
             RedbConfig::new(),
         )?);
 
-        let node = crate::storage::version::NodeVersion::new_anchor(
+        let node = crate::core::version::NodeVersion::new_anchor(
             VersionId::new(1)?,
             NodeId::new(1)?,
             BiTemporalInterval::current(time::now()),
@@ -3232,7 +3232,7 @@ mod tests {
             RedbConfig::new(),
         )?);
 
-        let node = crate::storage::version::NodeVersion::new_anchor(
+        let node = crate::core::version::NodeVersion::new_anchor(
             VersionId::new(1)?,
             NodeId::new(1)?,
             BiTemporalInterval::current(time::now()),

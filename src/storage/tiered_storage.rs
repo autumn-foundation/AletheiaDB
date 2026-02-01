@@ -45,8 +45,8 @@
 //! ```
 
 use crate::core::id::VersionId;
+use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::redb_cold_storage::{ColdStorageStats, RedbColdStorage};
-use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::utils::error::Result;
 use parking_lot::Mutex;
 use quick_cache::sync::Cache;

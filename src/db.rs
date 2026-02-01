@@ -25,7 +25,7 @@ use crate::storage::index_persistence::operations::{
 };
 use crate::storage::index_persistence::tracker::PersistenceTracker;
 use crate::storage::index_persistence::worker::spawn_background_persistence_thread;
-use crate::storage::version::AnchorConfig;
+use crate::core::version::AnchorConfig;
 use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 use crate::storage::wal::{DurabilityMode, WriteOptions};
 use crate::utils::error::{Result, StorageError};
@@ -2980,7 +2980,7 @@ mod tests {
     #[test]
     fn test_with_config_returns_result() {
         // GallifreyDB::with_config() should return Result<Self>
-        let result = GallifreyDB::with_config(crate::storage::version::AnchorConfig::default());
+        let result = GallifreyDB::with_config(crate::core::version::AnchorConfig::default());
         assert!(
             result.is_ok(),
             "with_config() should succeed with default config"
@@ -3002,7 +3002,7 @@ mod tests {
     fn test_with_full_config_returns_result() {
         // GallifreyDB::with_full_config() should return Result<Self>
         let result = GallifreyDB::with_full_config(
-            crate::storage::version::AnchorConfig::default(),
+            crate::core::version::AnchorConfig::default(),
             crate::config::WalConfig::default(),
         );
         assert!(

@@ -28,3 +28,7 @@
 ## 2026-02-01 - Splitting CurrentStorage
 **Tangle:** `src/storage/current.rs` was a "Blob" module containing storage implementation, iterators, statistics, vector index helpers, and extensive tests, making it difficult to maintain.
 **Blueprint:** Refactored into `src/storage/current/` directory. Extracted `iterators.rs`, `stats.rs`, and `vector.rs` to separate concerns. Moved tests to `tests.rs`, leaving `mod.rs` as a clean facade and core implementation.
+
+## 2026-02-01 - Consolidating Versioning
+**Tangle:** Versioning logic was split between `core::version` (metadata) and `storage::version` (data), creating a false boundary and confusion. `storage` exported core domain primitives like `NodeVersion`.
+**Blueprint:** Consolidated all versioning logic into `src/core/version.rs`. Updated `storage` to re-export `core::version` for backward compatibility. This strengthens `core` as the domain definition and `storage` as the implementation.

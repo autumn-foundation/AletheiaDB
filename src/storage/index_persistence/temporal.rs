@@ -9,7 +9,7 @@ use crate::core::id::{EdgeId, NodeId};
 use crate::core::interning::InternedString;
 use crate::core::property::PropertyValue;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, TimeRange};
-use crate::storage::version::{EdgeVersion, NodeVersion, PropertyDelta, VersionData};
+use crate::core::version::{EdgeVersion, NodeVersion, PropertyDelta, VersionData};
 
 use super::error::{IndexPersistenceError, Result};
 use super::formats::{EdgeVersionEntry, NodeVersionEntry, PersistedVersionType, TemporalIndexData};
@@ -49,10 +49,10 @@ pub fn convert_node_version(version: &NodeVersion) -> Result<NodeVersionEntry> {
             // to prevent data loss. Use PropertyDelta::materialize_vector_deltas() first.
             for (key, vec_delta) in &delta.vector_deltas {
                 match vec_delta {
-                    crate::storage::version::VectorDelta::Full(vec) => {
+                    crate::core::version::VectorDelta::Full(vec) => {
                         builder = builder.insert_by_key(*key, PropertyValue::Vector(vec.clone()));
                     }
-                    crate::storage::version::VectorDelta::Sparse { .. } => {
+                    crate::core::version::VectorDelta::Sparse { .. } => {
                         // CRITICAL: Cannot persist sparse deltas without base vector
                         // This would cause silent data loss - return error instead
                         return Err(IndexPersistenceError::Serialization(format!(
@@ -135,10 +135,10 @@ pub fn convert_edge_version(version: &EdgeVersion) -> Result<EdgeVersionEntry> {
             // VectorDelta::Sparse instances MUST be materialized before persistence
             for (key, vec_delta) in &delta.vector_deltas {
                 match vec_delta {
-                    crate::storage::version::VectorDelta::Full(vec) => {
+                    crate::core::version::VectorDelta::Full(vec) => {
                         builder = builder.insert_by_key(*key, PropertyValue::Vector(vec.clone()));
                     }
-                    crate::storage::version::VectorDelta::Sparse { .. } => {
+                    crate::core::version::VectorDelta::Sparse { .. } => {
                         // CRITICAL: Cannot persist sparse deltas without base vector
                         return Err(IndexPersistenceError::Serialization(format!(
                             "Cannot persist EdgeVersion {}: VectorDelta::Sparse found for property key {:?}. \
@@ -538,7 +538,7 @@ mod tests {
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::{BiTemporalInterval, TimeRange};
     use crate::storage::index_persistence::formats::*;
-    use crate::storage::version::{NodeVersion, VersionData};
+    use crate::core::version::{NodeVersion, VersionData};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -622,7 +622,7 @@ mod tests {
     fn test_convert_node_version_delta() {
         // RED: This test will fail because convert_node_version doesn't exist yet
         use crate::core::GLOBAL_INTERNER;
-        use crate::storage::version::PropertyDelta;
+        use crate::core::version::PropertyDelta;
         use std::collections::HashMap;
 
         let mut changed = HashMap::new();
@@ -668,7 +668,7 @@ mod tests {
         // RED: This test will fail because convert_edge_version doesn't exist yet
         use crate::core::GLOBAL_INTERNER;
         use crate::core::id::EdgeId;
-        use crate::storage::version::EdgeVersion;
+        use crate::core::version::EdgeVersion;
 
         let props = PropertyMapBuilder::new()
             .insert("weight", 1.5f64)
@@ -923,7 +923,7 @@ mod tests {
     fn test_persist_delta_with_full_vector_delta() {
         // Test that VectorDelta::Full can be persisted successfully
         use crate::core::GLOBAL_INTERNER;
-        use crate::storage::version::{PropertyDelta, VectorDelta};
+        use crate::core::version::{PropertyDelta, VectorDelta};
 
         let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
         let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
@@ -959,7 +959,7 @@ mod tests {
     fn test_persist_delta_with_sparse_vector_delta_fails() {
         // Test that VectorDelta::Sparse causes persistence to fail (prevents data loss)
         use crate::core::GLOBAL_INTERNER;
-        use crate::storage::version::{PropertyDelta, VectorDelta};
+        use crate::core::version::{PropertyDelta, VectorDelta};
 
         let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
 
@@ -1006,7 +1006,7 @@ mod tests {
     fn test_materialize_vector_deltas() {
         // Test that PropertyDelta::materialize_vector_deltas() correctly converts Sparse to Full
         use crate::core::GLOBAL_INTERNER;
-        use crate::storage::version::{PropertyDelta, VectorDelta};
+        use crate::core::version::{PropertyDelta, VectorDelta};
 
         let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
 
@@ -1064,7 +1064,7 @@ mod tests {
     fn test_materialize_vector_deltas_missing_base() {
         // Test that materialization fails gracefully when base property is missing
         use crate::core::GLOBAL_INTERNER;
-        use crate::storage::version::{PropertyDelta, VectorDelta};
+        use crate::core::version::{PropertyDelta, VectorDelta};
 
         let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
         let base_props = PropertyMapBuilder::new().build(); // Empty base
@@ -1087,7 +1087,7 @@ mod tests {
     fn test_persist_materialized_delta_succeeds() {
         // Round-trip test: create sparse delta, materialize it, then persist
         use crate::core::GLOBAL_INTERNER;
-        use crate::storage::version::{PropertyDelta, VectorDelta};
+        use crate::core::version::{PropertyDelta, VectorDelta};
 
         let embedding_key = GLOBAL_INTERNER.intern("embedding").unwrap();
 
@@ -1140,7 +1140,7 @@ mod tests {
         // even though they are currently unused in restoration (for future proofing)
         use crate::core::GLOBAL_INTERNER;
         use crate::core::hlc::HybridTimestamp;
-        use crate::storage::version::PropertyDelta;
+        use crate::core::version::PropertyDelta;
         use std::collections::HashMap;
 
         let wallclock = 2_000_000_000;

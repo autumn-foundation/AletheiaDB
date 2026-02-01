@@ -330,7 +330,7 @@ mod tests {
     use crate::index::vector::DistanceMetric;
     use crate::index::vector::hnsw::HnswConfig;
     use crate::query::planner::physical::PhysicalOp;
-    use crate::storage::version::AnchorConfig;
+    use crate::core::version::AnchorConfig;
 
     fn create_test_storage() -> (Arc<CurrentStorage>, Arc<RwLock<HistoricalStorage>>) {
         let current = Arc::new(CurrentStorage::new());
