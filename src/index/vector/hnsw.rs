@@ -95,6 +95,7 @@ use parking_lot::RwLock;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
@@ -2038,7 +2039,6 @@ mod tests {
     #[test]
     fn test_zombie_vectors_race_coverage() {
         use std::thread;
-        use std::time::Duration;
 
         // 👺 Havoc Test: Zombie Vector Race Condition Coverage
         //
