@@ -23,6 +23,8 @@ memmap2 = "0.9"
 thiserror = "2.0"
 smallvec = "1.13"
 chrono = "0.4"
+comfy-table = "7.1"
+crossterm = "0.27"
 
 # Configuration support (optional TOML config files)
 serde = { version = "1.0", features = ["derive"], optional = true }

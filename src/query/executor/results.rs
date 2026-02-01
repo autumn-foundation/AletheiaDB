@@ -6,9 +6,14 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::VersionId;
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
+use crate::core::property::PropertyMap;
+use crate::core::interning::GLOBAL_INTERNER;
 use crate::utils::error::Result;
 
 use super::iterators::ResultIterator;
+
+use comfy_table::{Table, Row, Cell, Attribute};
+use crossterm::style::{Color, Stylize};
 
 /// A path through the graph, represented as a sequence of entity IDs.
 pub type Path = Vec<EntityId>;
@@ -272,6 +277,7 @@ impl Iterator for QueryResults {
 /// - Missing scores are padded with `0.0`
 /// - Missing paths are padded with empty vectors (`vec![]`)
 /// - Missing versions are padded with `VersionId(0)`
+/// - Missing properties are padded with empty `PropertyMap`
 ///
 /// **Important**: Users should check the source query type to distinguish padding from actual values.
 /// For example, a score of `0.0` could be either a padding value or an actual similarity score of zero.
@@ -287,6 +293,8 @@ impl Iterator for QueryResults {
 pub struct QueryResult {
     /// Node IDs from the query results
     pub nodes: Vec<NodeId>,
+    /// Properties for the nodes (optional)
+    pub properties: Option<Vec<PropertyMap>>,
     /// Similarity scores for ranked results (e.g., vector search)
     pub scores: Option<Vec<f32>>,
     /// Paths for traversal results
@@ -301,6 +309,7 @@ impl QueryResult {
     pub fn new() -> Self {
         QueryResult {
             nodes: Vec::new(),
+            properties: None,
             scores: None,
             paths: None,
             versions: None,
@@ -312,10 +321,18 @@ impl QueryResult {
     pub fn with_nodes(nodes: Vec<NodeId>) -> Self {
         QueryResult {
             nodes,
+            properties: None,
             scores: None,
             paths: None,
             versions: None,
         }
+    }
+
+    /// Add properties to this result
+    #[must_use]
+    pub fn with_properties(mut self, properties: Vec<PropertyMap>) -> Self {
+        self.properties = Some(properties);
+        self
     }
 
     /// Add scores to this result
@@ -396,42 +413,75 @@ impl Default for QueryResult {
 
 impl std::fmt::Display for QueryResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "QueryResult {{")?;
-        writeln!(f, "  nodes: {} items", self.nodes.len())?;
+        let mut table = Table::new();
+        table.load_preset(comfy_table::presets::UTF8_FULL);
+        table.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
 
-        if let Some(scores) = &self.scores {
-            writeln!(f, "  scores: {} items", scores.len())?;
-            if !scores.is_empty() {
-                // Check if any value is not normal (NaN or Inf)
-                let has_abnormal = scores.iter().any(|s| !s.is_finite());
-                if !has_abnormal {
-                    let min = scores.iter().copied().fold(f32::INFINITY, f32::min);
-                    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    writeln!(f, "    range: [{:.3}, {:.3}]", min, max)?;
+        let mut headers = vec![Cell::new("Node ID").add_attribute(Attribute::Bold)];
+        if self.properties.is_some() {
+            headers.push(Cell::new("Properties").add_attribute(Attribute::Bold));
+        }
+        if self.scores.is_some() {
+            headers.push(Cell::new("Score").add_attribute(Attribute::Bold));
+        }
+        if self.paths.is_some() {
+            headers.push(Cell::new("Path").add_attribute(Attribute::Bold));
+        }
+        if self.versions.is_some() {
+            headers.push(Cell::new("Version").add_attribute(Attribute::Bold));
+        }
+        table.set_header(headers);
+
+        for i in 0..self.nodes.len() {
+            let mut row = Row::new();
+            row.add_cell(Cell::new(format!("{}", self.nodes[i])));
+
+            if let Some(props) = &self.properties {
+                let mut prop_str = String::new();
+                let prop_map = &props[i];
+                if prop_map.is_empty() {
+                    prop_str = "{}".to_string();
+                } else {
+                    prop_str.push_str("{ ");
+                    for (j, (key, value)) in prop_map.iter().enumerate() {
+                        if j > 0 {
+                            prop_str.push_str(", ");
+                        }
+
+                        let key_str = GLOBAL_INTERNER.with_str(*key, |s| s.to_string()).unwrap_or_else(|| "UNKNOWN".to_string());
+                        prop_str.push_str(&format!("{}: ", key_str));
+
+                        if let Some(b) = value.as_bool() {
+                            if b {
+                                prop_str.push_str(&format!("{}", "true".with(Color::Green)));
+                            } else {
+                                prop_str.push_str("false");
+                            }
+                        } else {
+                             prop_str.push_str(&format!("{}", value));
+                        }
+                    }
+                    prop_str.push_str(" }");
                 }
+                row.add_cell(Cell::new(prop_str));
             }
-        } else {
-            writeln!(f, "  scores: None")?;
-        }
 
-        if let Some(paths) = &self.paths {
-            writeln!(f, "  paths: {} items", paths.len())?;
-            if !paths.is_empty() {
-                let total_hops: usize = paths.iter().map(|p| p.len()).sum();
-                let avg_hops = total_hops as f32 / paths.len() as f32;
-                writeln!(f, "    avg path length: {:.1}", avg_hops)?;
+            if let Some(scores) = &self.scores {
+                row.add_cell(Cell::new(format!("{:.4}", scores[i])));
             }
-        } else {
-            writeln!(f, "  paths: None")?;
+
+            if let Some(paths) = &self.paths {
+                 row.add_cell(Cell::new(format!("{:?}", paths[i])));
+            }
+
+            if let Some(versions) = &self.versions {
+                 row.add_cell(Cell::new(format!("{}", versions[i])));
+            }
+
+            table.add_row(row);
         }
 
-        if let Some(versions) = &self.versions {
-            writeln!(f, "  versions: {} items", versions.len())?;
-        } else {
-            writeln!(f, "  versions: None")?;
-        }
-
-        write!(f, "}}")
+        write!(f, "{}", table)
     }
 }
 
@@ -467,6 +517,7 @@ impl QueryResults {
         let has_any_scores = rows.iter().any(|r| r.score.is_some());
         let has_any_paths = rows.iter().any(|r| r.path.is_some());
         let has_any_versions = rows.iter().any(|r| r.timestamp.is_some());
+        let has_any_properties = rows.iter().any(|r| r.entity.as_node().is_some());
 
         // Second pass: extract data with padding
         let mut nodes = Vec::new();
@@ -485,11 +536,33 @@ impl QueryResults {
         } else {
             None
         };
+        let mut properties = if has_any_properties {
+            Some(Vec::new())
+        } else {
+            None
+        };
 
         for row in rows {
             // Extract node ID
             if let Some(node_id) = row.entity.node_id() {
                 nodes.push(node_id);
+            }
+
+            // Extract properties
+            if let Some(ref mut props) = properties {
+                if let Some(node) = row.entity.as_node() {
+                    props.push(node.properties.clone());
+                } else {
+                    // Pad with empty properties for Edge or just ID
+                    // For edges we might want to support properties too in the future,
+                    // but EntityResult doesn't easily expose them if it's EdgeId.
+                    // If it's Edge(e), we could extract.
+                    if let Some(edge) = row.entity.as_edge() {
+                        props.push(edge.properties.clone());
+                    } else {
+                        props.push(PropertyMap::default());
+                    }
+                }
             }
 
             // Extract or pad scores
@@ -538,6 +611,7 @@ impl QueryResults {
 
         Ok(QueryResult {
             nodes,
+            properties,
             scores,
             paths,
             versions,
@@ -895,6 +969,7 @@ mod tests {
         assert!(result.scores.is_none());
         assert!(result.paths.is_none());
         assert!(result.versions.is_none());
+        assert!(result.properties.is_none());
     }
 
     #[test]
@@ -956,17 +1031,20 @@ mod tests {
         let path2 = vec![EntityId::Node(NodeId::new(2).unwrap())];
         let paths = vec![path1, path2];
         let versions = vec![VersionId::new(100).unwrap(), VersionId::new(101).unwrap()];
+        let props = vec![PropertyMap::default(), PropertyMap::default()];
 
         let result = QueryResult::with_nodes(nodes.clone())
             .with_scores(scores.clone())
             .with_paths(paths.clone())
-            .with_versions(versions.clone());
+            .with_versions(versions.clone())
+            .with_properties(props.clone());
 
         assert_eq!(result.len(), 2);
         assert_eq!(result.nodes, nodes);
         assert_eq!(result.scores, Some(scores));
         assert_eq!(result.paths, Some(paths));
         assert_eq!(result.versions, Some(versions));
+        assert_eq!(result.properties, Some(props));
     }
 
     #[test]
@@ -1049,22 +1127,20 @@ mod tests {
         let result = QueryResult::with_nodes(nodes).with_scores(scores);
 
         let display = format!("{}", result);
-        assert!(display.contains("QueryResult"));
-        assert!(display.contains("nodes: 2 items"));
-        assert!(display.contains("scores: 2 items"));
-        assert!(display.contains("range:"));
+        // Table output contains borders
+        assert!(display.contains("Node ID"));
+        assert!(display.contains("Score"));
+        // We can't easily check for exact table layout without mocking terminal,
+        // but we can check if it contains the data.
+        assert!(display.contains("1"));
+        assert!(display.contains("0.9"));
     }
 
     #[test]
     fn test_query_result_display_empty() {
         let result = QueryResult::new();
         let display = format!("{}", result);
-
-        assert!(display.contains("QueryResult"));
-        assert!(display.contains("nodes: 0 items"));
-        assert!(display.contains("scores: None"));
-        assert!(display.contains("paths: None"));
-        assert!(display.contains("versions: None"));
+        assert!(display.contains("Node ID"));
     }
 
     #[test]
@@ -1083,8 +1159,7 @@ mod tests {
         let result = QueryResult::with_nodes(nodes).with_paths(paths);
 
         let display = format!("{}", result);
-        assert!(display.contains("paths: 2 items"));
-        assert!(display.contains("avg path length:"));
+        assert!(display.contains("Path"));
     }
 
     #[test]
@@ -1300,11 +1375,7 @@ mod tests {
         let result = QueryResult::with_nodes(nodes).with_scores(scores);
 
         let display = format!("{}", result);
-        assert!(display.contains("QueryResult"));
-        assert!(display.contains("nodes: 2 items"));
-        assert!(display.contains("scores: 2 items"));
-        // Should NOT contain "range:" because min/max are not finite
-        assert!(!display.contains("range:"));
+        assert!(display.contains("Score"));
     }
 
     #[test]
@@ -1314,9 +1385,7 @@ mod tests {
         let result = QueryResult::with_nodes(nodes).with_scores(scores);
 
         let display = format!("{}", result);
-        assert!(display.contains("scores: 1 items"));
-        // Should NOT contain "range:" because max is infinite
-        assert!(!display.contains("range:"));
+        assert!(display.contains("Score"));
     }
 
     #[test]
@@ -1339,5 +1408,47 @@ mod tests {
         assert_eq!(versions[0], VersionId::new(100).unwrap());
         assert_eq!(versions[1], VersionId::new(0).unwrap()); // Clamped
         assert_eq!(versions[2], VersionId::new(0).unwrap());
+    }
+
+    #[test]
+    fn test_collect_structured_with_properties() {
+        let mut props1 = PropertyMapBuilder::new();
+        props1 = props1.insert("name", "Alice").insert("age", 30);
+
+        let mut props2 = PropertyMapBuilder::new();
+        props2 = props2.insert("name", "Bob");
+
+        let node1 = Node::new(
+            NodeId::new(1).unwrap(),
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            props1.build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let node2 = Node::new(
+            NodeId::new(2).unwrap(),
+            GLOBAL_INTERNER.intern("Person").unwrap(),
+            props2.build(),
+            VersionId::new(1).unwrap(),
+        );
+
+        let rows = vec![
+            QueryRow::from_entity(EntityResult::Node(node1)),
+            QueryRow::from_entity(EntityResult::Node(node2)),
+        ];
+
+        let results = QueryResults::new(Box::new(MockIterator::new(rows)));
+        let structured = results.collect_structured().unwrap();
+
+        assert!(structured.properties.is_some());
+        let props = structured.properties.unwrap();
+        assert_eq!(props.len(), 2);
+
+        assert_eq!(
+            props[0].get("name").and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(props[0].get("age").and_then(|v| v.as_int()), Some(30));
+        assert_eq!(props[1].get("name").and_then(|v| v.as_str()), Some("Bob"));
     }
 }
