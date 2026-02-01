@@ -683,8 +683,26 @@ impl VectorIndex for HnswIndex {
                     }
                 };
 
+                // Re-acquire map lock (read) to ensure lock ordering (Map -> Index) and verify state.
+                // We must hold this lock BEFORE acquiring the index lock to avoid deadlock with the
+                // Occupied branch (which holds Map Write Lock -> waits for Index Lock).
+                let map_guard = self.id_mapping.get(&id);
+
                 // Insert into usearch index (auto-expand capacity if needed)
                 let index = self.inner.write();
+
+                // FIX: Check if we are still the owner of this ID (race condition fix - see issue #567)
+                // If the mapping was removed or changed by another thread while we waited for the lock,
+                // we should abort to avoid creating a zombie vector (one that exists in index but not in maps).
+                if let Some(current_key) = map_guard {
+                    if *current_key != key {
+                        // Replaced by another thread (it won the race). Abort our stale add.
+                        return Ok(());
+                    }
+                } else {
+                    // Removed by another thread (it won the race). Abort our stale add.
+                    return Ok(());
+                }
 
                 // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
