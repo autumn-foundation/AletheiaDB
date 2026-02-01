@@ -74,6 +74,7 @@ classDiagram
     }
 
     QueryEngine --> StorageTrait : Uses (Trait Bound)
+    %% Removed the circular dependency arrow
     RedbImplementation ..|> StorageTrait : Implements
     CurrentStorage --|> StorageTrait : Implements
     HistoricalStorage --|> StorageTrait : Implements
@@ -122,16 +123,19 @@ GallifreyDB's architecture separates current state from historical data for opti
 ```mermaid
 sequenceDiagram
     participant User
-    participant Current as Current Storage
+    participant Core as Core (QueryEngine)
+    participant Current as Storage (Current)
     participant WAL
-    participant Historical as Historical Storage
+    participant Historical as Storage (Historical)
 
-    Note over User, Current: Write Path
-    User->>Current: Write Transaction
+    Note over User, Core: Write Path
+    User->>Core: Write Transaction
+    Core->>Current: Commit Changes (via Trait)
     Current->>WAL: Append Entry
     WAL-->>Current: LSN
     Current->>Current: Update In-Memory State
-    Current-->>User: Success
+    Current-->>Core: Success
+    Core-->>User: Success
 
     rect rgb(240, 240, 240)
         Note right of Current: Async Background Process
@@ -139,13 +143,17 @@ sequenceDiagram
         Historical->>Historical: Compress & Index
     end
 
-    Note over User, Current: Query Path
-    User->>Current: Query (Latest)
-    Current-->>User: Result (Fast Path)
+    Note over User, Core: Query Path
+    User->>Core: Query (Latest)
+    Core->>Current: Get Node/Edge (via Trait)
+    Current-->>Core: Result
+    Core-->>User: Result (Fast Path)
 
-    User->>Historical: Query (Time Travel)
+    User->>Core: Query (Time Travel)
+    Core->>Historical: Get Version (via Trait)
     Historical->>Historical: Reconstruct State
-    Historical-->>User: Result (Temporal Path)
+    Historical-->>Core: Result
+    Core-->>User: Result (Temporal Path)
 ```
 
 ## Temporal Query Processing
