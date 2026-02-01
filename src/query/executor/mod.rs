@@ -327,10 +327,10 @@ mod tests {
     use super::*;
     use crate::core::id::NodeId;
     use crate::core::property::PropertyMapBuilder;
+    use crate::core::version::AnchorConfig;
     use crate::index::vector::DistanceMetric;
     use crate::index::vector::hnsw::HnswConfig;
     use crate::query::planner::physical::PhysicalOp;
-    use crate::core::version::AnchorConfig;
 
     fn create_test_storage() -> (Arc<CurrentStorage>, Arc<RwLock<HistoricalStorage>>) {
         let current = Arc::new(CurrentStorage::new());

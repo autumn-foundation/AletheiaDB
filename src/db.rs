@@ -12,6 +12,7 @@ use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, IdGenerator, NodeId};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{Timestamp, time};
+use crate::core::version::AnchorConfig;
 use crate::index::temporal::TemporalIndexes;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::{TemporalVectorConfig, VectorIndexObserver};
@@ -25,7 +26,6 @@ use crate::storage::index_persistence::operations::{
 };
 use crate::storage::index_persistence::tracker::PersistenceTracker;
 use crate::storage::index_persistence::worker::spawn_background_persistence_thread;
-use crate::core::version::AnchorConfig;
 use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 use crate::storage::wal::{DurabilityMode, WriteOptions};
 use crate::utils::error::{Result, StorageError};

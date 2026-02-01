@@ -537,8 +537,8 @@ mod tests {
     use crate::core::id::{NodeId, VersionId};
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::{BiTemporalInterval, TimeRange};
-    use crate::storage::index_persistence::formats::*;
     use crate::core::version::{NodeVersion, VersionData};
+    use crate::storage::index_persistence::formats::*;
     use std::sync::Arc;
     use tempfile::tempdir;
 

@@ -67,7 +67,6 @@ impl Default for VersionMetadata {
     }
 }
 
-
 /// Epsilon for floating-point comparisons in vector deltas.
 ///
 /// Used to determine if two f32 values are effectively equal, accounting for
@@ -977,7 +976,6 @@ impl EntityVersion for EdgeVersion {
         &mut self.data
     }
 }
-
 
 #[cfg(test)]
 mod metadata_tests {

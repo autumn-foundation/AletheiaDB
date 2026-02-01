@@ -2379,8 +2379,8 @@ mod tests {
 
     #[test]
     fn test_temporal_node_iterator_returns_current_state() {
-        use crate::storage::historical::HistoricalStorage;
         use crate::core::version::AnchorConfig;
+        use crate::storage::historical::HistoricalStorage;
 
         let current = Arc::new(CurrentStorage::new());
         let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
@@ -2421,8 +2421,8 @@ mod tests {
 
     #[test]
     fn test_temporal_node_iterator_empty() {
-        use crate::storage::historical::HistoricalStorage;
         use crate::core::version::AnchorConfig;
+        use crate::storage::historical::HistoricalStorage;
 
         let historical = Arc::new(RwLock::new(HistoricalStorage::with_config(
             AnchorConfig::default(),
