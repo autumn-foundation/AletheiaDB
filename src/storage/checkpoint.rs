@@ -45,7 +45,6 @@ use crate::core::GLOBAL_INTERNER;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
-use crate::storage::cold_storage::ColdStorage;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::{
@@ -56,6 +55,7 @@ use crate::storage::index_persistence::{
     },
     graph::{persist_property_map, restore_property_map},
 };
+use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::version::VersionData;
 use crate::storage::wal::LSN;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
@@ -481,7 +481,7 @@ impl CheckpointManager {
     pub fn recover_with_cold_storage(
         &mut self,
         wal: &ConcurrentWalSystem,
-        cold_storage: Option<&Arc<dyn ColdStorage>>,
+        cold_storage: Option<&Arc<RedbColdStorage>>,
     ) -> Result<RecoveryResult> {
         // Get flushed_lsn from cold storage if available
         let flushed_lsn = cold_storage.and_then(|cs| cs.get_flushed_lsn().ok().flatten());
@@ -3071,8 +3071,7 @@ mod tests {
         let mut manager = CheckpointManager::new(config)?;
 
         // Recovery should see the flushed_lsn
-        let cold: Arc<dyn ColdStorage> = cold_storage;
-        let result = manager.recover_with_cold_storage(&wal, Some(&cold))?;
+        let result = manager.recover_with_cold_storage(&wal, Some(&cold_storage))?;
 
         // Should have detected cold storage
         assert_eq!(result.flushed_lsn, Some(LSN(50)));
@@ -3137,8 +3136,7 @@ mod tests {
             let config = CheckpointConfig::with_data_dir(&data_dir);
             let mut manager = CheckpointManager::new(config)?;
 
-            let cold: Arc<dyn ColdStorage> = cold_storage;
-            let result = manager.recover_with_cold_storage(&wal, Some(&cold))?;
+            let result = manager.recover_with_cold_storage(&wal, Some(&cold_storage))?;
 
             // Should use flushed_lsn as effective recovery point
             assert_eq!(result.checkpoint_lsn, Some(LSN(50)));
@@ -3184,8 +3182,7 @@ mod tests {
         let config = CheckpointConfig::with_data_dir(&data_dir);
         let mut manager = CheckpointManager::new(config)?;
 
-        let cold: Arc<dyn ColdStorage> = cold_storage;
-        let result = manager.recover_with_cold_storage(&wal, Some(&cold))?;
+        let result = manager.recover_with_cold_storage(&wal, Some(&cold_storage))?;
 
         // Should have no WAL entries replayed
         assert_eq!(result.wal_entries_replayed, 0);
@@ -3247,8 +3244,7 @@ mod tests {
         let config = CheckpointConfig::with_data_dir(&data_dir);
         let mut manager = CheckpointManager::new(config)?;
 
-        let cold: Arc<dyn ColdStorage> = cold_storage;
-        let result = manager.recover_with_cold_storage(&wal, Some(&cold));
+        let result = manager.recover_with_cold_storage(&wal, Some(&cold_storage));
 
         // Should detect inconsistency
         assert!(result.is_err());

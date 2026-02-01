@@ -4,7 +4,7 @@
 //! using various algorithms with optional CRC32 checksums. It is used by all cold
 //! storage backends to ensure consistent data handling.
 
-use crate::storage::cold_storage::ColdStorageConfig;
+use crate::storage::redb_cold_storage::ColdStorageConfig;
 use crate::utils::error::{Result, StorageError};
 
 /// Compress data according to the configuration.
@@ -90,7 +90,7 @@ pub fn decompress(data: &[u8], config: &ColdStorageConfig) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::cold_storage::CompressionAlgorithm;
+    use crate::storage::redb_cold_storage::CompressionAlgorithm;
 
     #[test]
     fn test_compress_decompress_zstd() {

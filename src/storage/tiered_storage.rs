@@ -33,18 +33,19 @@
 //! ```ignore
 //! use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 //! use gallifreydb::storage::redb_cold_storage::RedbColdStorage;
+//! use std::sync::Arc;
 //!
 //! // Create tiered storage
 //! let config = TieredStorageConfig::default();
 //! let cold = RedbColdStorage::with_default_config("data/cold.redb")?;
-//! let tiered = TieredStorage::new(config, Box::new(cold));
+//! let tiered = TieredStorage::new(config, Arc::new(cold));
 //!
 //! // Transparently access data from any tier
 //! let version = tiered.get_node_version(version_id)?;
 //! ```
 
 use crate::core::id::VersionId;
-use crate::storage::cold_storage::{ColdStorage, ColdStorageStats};
+use crate::storage::redb_cold_storage::{ColdStorageStats, RedbColdStorage};
 use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::utils::error::Result;
 use parking_lot::Mutex;
@@ -279,7 +280,7 @@ impl AtomicTieredMetrics {
 /// - Metrics for monitoring access patterns
 pub struct TieredStorage {
     config: TieredStorageConfig,
-    cold: Arc<dyn ColdStorage>,
+    cold: Arc<RedbColdStorage>,
     /// Warm cache for node versions retrieved from cold storage.
     node_warm_cache: Cache<VersionId, Arc<NodeVersion>>,
     /// Warm cache for edge versions retrieved from cold storage.
@@ -294,11 +295,11 @@ impl TieredStorage {
     ///
     /// * `config` - Configuration for caching and prefetching
     /// * `cold` - Cold storage backend
-    pub fn new(config: TieredStorageConfig, cold: Box<dyn ColdStorage>) -> Self {
+    pub fn new(config: TieredStorageConfig, cold: Arc<RedbColdStorage>) -> Self {
         let warm_cache_size = config.warm_cache_size;
         Self {
             config,
-            cold: Arc::from(cold),
+            cold,
             node_warm_cache: Cache::new(warm_cache_size),
             edge_warm_cache: Cache::new(warm_cache_size),
             metrics: AtomicTieredMetrics::new(),
@@ -306,13 +307,13 @@ impl TieredStorage {
     }
 
     /// Create with default configuration.
-    pub fn with_default_config(cold: Box<dyn ColdStorage>) -> Self {
+    pub fn with_default_config(cold: Arc<RedbColdStorage>) -> Self {
         Self::new(TieredStorageConfig::default(), cold)
     }
 
     /// Get the cold storage backend.
-    pub fn cold_storage(&self) -> &dyn ColdStorage {
-        self.cold.as_ref()
+    pub fn cold_storage(&self) -> &RedbColdStorage {
+        &self.cold
     }
 
     /// Record a hot tier hit.
@@ -535,7 +536,7 @@ mod tests {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::BiTemporalInterval;
-    use crate::storage::cold_storage::InMemoryColdStorage;
+    use crate::storage::redb_cold_storage::RedbColdStorage;
 
     fn create_test_node_version(id: u64) -> NodeVersion {
         let properties = PropertyMapBuilder::new()
@@ -590,8 +591,10 @@ mod tests {
 
     #[test]
     fn test_tiered_storage_cold_lookup() {
-        let cold = InMemoryColdStorage::default_config();
-        let tiered = TieredStorage::with_default_config(Box::new(cold));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let tiered = TieredStorage::with_default_config(Arc::new(cold));
 
         // Store a version in cold storage
         let version = create_test_node_version(1);
@@ -609,8 +612,10 @@ mod tests {
 
     #[test]
     fn test_tiered_storage_warm_cache() {
-        let cold = InMemoryColdStorage::default_config();
-        let tiered = TieredStorage::with_default_config(Box::new(cold));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let tiered = TieredStorage::with_default_config(Arc::new(cold));
 
         let version = create_test_node_version(1);
         tiered.store_node_version(&version).unwrap();
@@ -630,8 +635,10 @@ mod tests {
 
     #[test]
     fn test_tiered_storage_miss() {
-        let cold = InMemoryColdStorage::default_config();
-        let tiered = TieredStorage::with_default_config(Box::new(cold));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let tiered = TieredStorage::with_default_config(Arc::new(cold));
 
         let result = tiered
             .get_node_version_cold(VersionId::new(999).unwrap())
@@ -644,13 +651,16 @@ mod tests {
 
     #[test]
     fn test_tiered_storage_prefetch() {
-        let cold = InMemoryColdStorage::default_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+
         let config = TieredStorageConfig {
             warm_cache_size: 100,
             enable_prefetch: true,
             prefetch_depth: 3,
         };
-        let tiered = TieredStorage::new(config, Box::new(cold));
+        let tiered = TieredStorage::new(config, Arc::new(cold));
 
         // Store a version chain in cold storage
         let versions = create_test_version_chain();
@@ -671,13 +681,16 @@ mod tests {
 
     #[test]
     fn test_tiered_storage_no_prefetch() {
-        let cold = InMemoryColdStorage::default_config();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+
         let config = TieredStorageConfig {
             warm_cache_size: 100,
             enable_prefetch: false,
             prefetch_depth: 3,
         };
-        let tiered = TieredStorage::new(config, Box::new(cold));
+        let tiered = TieredStorage::new(config, Arc::new(cold));
 
         let versions = create_test_version_chain();
         for v in &versions {
@@ -694,8 +707,10 @@ mod tests {
 
     #[test]
     fn test_tiered_storage_hot_hit_recording() {
-        let cold = InMemoryColdStorage::default_config();
-        let tiered = TieredStorage::with_default_config(Box::new(cold));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let tiered = TieredStorage::with_default_config(Arc::new(cold));
 
         // Record some hot hits
         tiered.record_hot_hit();
@@ -724,8 +739,10 @@ mod tests {
 
     #[test]
     fn test_batch_store() {
-        let cold = InMemoryColdStorage::default_config();
-        let tiered = TieredStorage::with_default_config(Box::new(cold));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let tiered = TieredStorage::with_default_config(Arc::new(cold));
 
         let versions: Vec<NodeVersion> = (1..=10).map(create_test_node_version).collect();
 
@@ -837,8 +854,10 @@ mod tests {
 
     #[test]
     fn test_cold_latency_tracking() {
-        let cold = InMemoryColdStorage::default_config();
-        let tiered = TieredStorage::with_default_config(Box::new(cold));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let cold = RedbColdStorage::with_default_config(&db_path).unwrap();
+        let tiered = TieredStorage::with_default_config(Arc::new(cold));
 
         // Store some versions
         for i in 1..=10 {
@@ -856,7 +875,5 @@ mod tests {
         let metrics = tiered.metrics();
         assert_eq!(metrics.cold_hits, 10);
         assert!(metrics.cold_latency.sample_count > 0);
-        // InMemory storage should be very fast
-        assert!(metrics.cold_latency.p99_us < 100_000); // Less than 100ms
     }
 }

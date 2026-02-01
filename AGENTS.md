@@ -238,7 +238,7 @@ use gallifreydb::storage::{
 let cold = RedbColdStorage::new("data/cold.redb", RedbConfig::new())?;
 
 // Create tiered storage
-let tiered = TieredStorage::new(TieredStorageConfig::default(), Box::new(cold));
+let tiered = TieredStorage::new(TieredStorageConfig::default(), Arc::new(cold));
 
 // Configure historical storage to use tiered access
 historical.set_tiered_storage(Arc::new(tiered));

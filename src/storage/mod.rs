@@ -12,7 +12,6 @@
 //! - Sharding: Horizontal scaling via domain-based partitioning (ADR-0014)
 
 pub mod checkpoint;
-pub mod cold_storage;
 pub mod compression;
 pub mod current;
 pub mod historical;
@@ -31,11 +30,6 @@ pub mod wal_reader;
 pub use checkpoint::{
     CheckpointConfig as UnifiedCheckpointConfig, CheckpointManager, CheckpointStats,
 };
-pub use cold_storage::{
-    AtomicColdStorageStats, ColdStorage, ColdStorageConfig, ColdStorageStats, CompressionAlgorithm,
-    InMemoryColdStorage, decode_edge_version, decode_node_version, encode_edge_version,
-    encode_node_version,
-};
 pub use current::{CurrentStats, CurrentStorage, DEFAULT_MAX_VECTOR_PROPERTIES, VectorIndexInfo};
 pub use historical::{CacheMetrics, HistoricalStats, HistoricalStorage};
 pub use migration::{
@@ -43,7 +37,11 @@ pub use migration::{
     MigrationStats,
 };
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
-pub use redb_cold_storage::{RedbColdStorage, RedbConfig};
+pub use redb_cold_storage::{
+    AtomicColdStorageStats, ColdStorageConfig, ColdStorageStats, CompressionAlgorithm,
+    RedbColdStorage, RedbConfig, decode_edge_version, decode_node_version, encode_edge_version,
+    encode_node_version,
+};
 pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot, StorageSnapshot};
 pub use tiered_storage::{
     LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
