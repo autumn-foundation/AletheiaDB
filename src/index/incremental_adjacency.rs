@@ -246,9 +246,13 @@ impl IncrementalAdjacencyIndex {
     /// The edge is added to the mutable delta layer and will be merged into
     /// the frozen CSR during the next compaction.
     pub fn insert(&self, source: NodeId, entry: AdjacencyEntry) {
-        self.delta.entry(source).or_default().push(entry);
-
+        // Increment stats BEFORE insertion to prevent race condition with compaction.
+        // If compaction runs concurrently, it might see the edge in `delta.retain()`
+        // and subtract from stats. If we increment after, the subtraction could underflow.
+        // By incrementing first, we ensure the count is always >= actual items in DashMap.
         self.stats.delta_edge_count.fetch_add(1, Ordering::Relaxed);
+
+        self.delta.entry(source).or_default().push(entry);
     }
 
     /// Mark an edge as deleted. O(1).
@@ -257,6 +261,9 @@ impl IncrementalAdjacencyIndex {
     /// until the next compaction. The tombstone includes temporal metadata
     /// for bi-temporal tracking and future GDPR compliance.
     pub fn delete(&self, edge_id: EdgeId) {
+        // Increment stats BEFORE insertion to prevent race condition with compaction.
+        self.stats.tombstone_count.fetch_add(1, Ordering::Relaxed);
+
         let tombstone = Tombstone {
             edge_id,
             deleted_at: Utc::now(),
@@ -264,7 +271,6 @@ impl IncrementalAdjacencyIndex {
         };
 
         self.tombstones.insert(edge_id, tombstone);
-        self.stats.tombstone_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get tombstone metadata for a deleted edge.
