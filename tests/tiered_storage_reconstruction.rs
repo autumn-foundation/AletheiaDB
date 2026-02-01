@@ -9,8 +9,8 @@ use gallifreydb::PropertyMapBuilder;
 use gallifreydb::core::GLOBAL_INTERNER;
 use gallifreydb::core::id::{NodeId, VersionId};
 use gallifreydb::core::temporal::time;
+use gallifreydb::storage::cold_storage::{ColdStorageConfig, RedbColdStorage};
 use gallifreydb::storage::historical::HistoricalStorage;
-use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
 use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -33,9 +33,10 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
     let cold_path = temp_dir.path().join("cold.redb");
 
     // Create cold storage and tiered storage
-    let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();
+    let cold = RedbColdStorage::new(&cold_path, ColdStorageConfig::new()).unwrap();
     let tiered_config = TieredStorageConfig::default();
-    let tiered = Arc::new(TieredStorage::new(tiered_config, Box::new(cold)));
+    // Removed Box::new() wrapper as per Razor refactoring
+    let tiered = Arc::new(TieredStorage::new(tiered_config, cold));
 
     // Create historical storage with tiered storage enabled
     let mut historical = HistoricalStorage::new();
@@ -177,9 +178,18 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
     );
 
     // Verify they're in cold storage via tiered access
-    assert!(historical.get_node_version_tiered(v2_id).unwrap().is_some());
-    assert!(historical.get_node_version_tiered(v3_id).unwrap().is_some());
-    assert!(historical.get_node_version_tiered(v4_id).unwrap().is_some());
+    assert!(historical
+        .get_node_version_tiered(v2_id)
+        .unwrap()
+        .is_some());
+    assert!(historical
+        .get_node_version_tiered(v3_id)
+        .unwrap()
+        .is_some());
+    assert!(historical
+        .get_node_version_tiered(v4_id)
+        .unwrap()
+        .is_some());
 
     // Clear the property cache to force actual reconstruction (not using cached values)
     println!("Clearing property cache to force chain traversal");
@@ -212,11 +222,8 @@ fn test_reconstruct_properties_for_version_in_cold_storage() {
     let temp_dir = TempDir::new().unwrap();
     let cold_path = temp_dir.path().join("cold.redb");
 
-    let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();
-    let tiered = Arc::new(TieredStorage::new(
-        TieredStorageConfig::default(),
-        Box::new(cold),
-    ));
+    let cold = RedbColdStorage::new(&cold_path, ColdStorageConfig::new()).unwrap();
+    let tiered = Arc::new(TieredStorage::new(TieredStorageConfig::default(), cold));
 
     let mut historical = HistoricalStorage::new();
     historical.set_tiered_storage(tiered.clone());

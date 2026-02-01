@@ -37,7 +37,7 @@
 //! ```
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
-use crate::storage::cold_storage::ColdStorage;
+use crate::storage::cold_storage::RedbColdStorage;
 use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use crate::storage::wal::flush_coordinator::FlushCoordinator;
@@ -444,7 +444,7 @@ impl MigrationCallback for DefaultMigrationCallback {}
 /// The service also implements `Drop` to ensure the worker thread is stopped
 /// when the service is dropped.
 pub struct MigrationService {
-    cold_storage: Arc<dyn ColdStorage>,
+    cold_storage: Arc<RedbColdStorage>,
     policy: MigrationPolicy,
     stats: Arc<AtomicMigrationStats>,
     running: Arc<AtomicBool>,
@@ -474,7 +474,7 @@ pub struct MigrationService {
 
 impl MigrationService {
     /// Create a new migration service.
-    pub fn new(cold_storage: Arc<dyn ColdStorage>, policy: MigrationPolicy) -> Self {
+    pub fn new(cold_storage: Arc<RedbColdStorage>, policy: MigrationPolicy) -> Self {
         Self {
             cold_storage,
             policy,
@@ -491,7 +491,7 @@ impl MigrationService {
 
     /// Create a new migration service with a custom callback.
     pub fn with_callback(
-        cold_storage: Arc<dyn ColdStorage>,
+        cold_storage: Arc<RedbColdStorage>,
         policy: MigrationPolicy,
         callback: Arc<dyn MigrationCallback>,
     ) -> Self {
@@ -1302,7 +1302,7 @@ mod tests {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::BiTemporalInterval;
-    use crate::storage::cold_storage::InMemoryColdStorage;
+    use crate::storage::cold_storage::RedbColdStorage;
     use crate::storage::version::EdgeVersion;
     use std::sync::atomic::AtomicUsize;
     use std::thread;
@@ -1381,9 +1381,9 @@ mod tests {
 
     #[test]
     fn test_migration_service_creation() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
         let policy = MigrationPolicy::default();
-        let service = MigrationService::new(cold, policy);
+        let service = MigrationService::new(Arc::new(cold), policy);
 
         assert!(!service.is_running());
         assert_eq!(service.stats().node_versions_migrated, 0);
@@ -1391,7 +1391,8 @@ mod tests {
 
     #[test]
     fn test_migrate_node_versions() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold.clone(), policy);
 
@@ -1412,7 +1413,8 @@ mod tests {
 
     #[test]
     fn test_migrate_disabled() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::disabled();
         let service = MigrationService::new(cold.clone(), policy);
 
@@ -1430,7 +1432,8 @@ mod tests {
 
     #[test]
     fn test_migration_batching() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder().batch_size(3).build();
         let service = MigrationService::new(cold.clone(), policy);
 
@@ -1448,7 +1451,8 @@ mod tests {
 
     #[test]
     fn test_identify_candidates_respects_min_hot_versions() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .min_hot_versions(2)
             .age_threshold(Duration::ZERO) // All versions are "old enough"
@@ -1478,7 +1482,8 @@ mod tests {
 
     #[test]
     fn test_identify_candidates_skips_head() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .min_hot_versions(1)
             .age_threshold(Duration::ZERO)
@@ -1540,7 +1545,8 @@ mod tests {
 
     #[test]
     fn test_migration_callback_filtering() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let callback = Arc::new(FilteringCallback {
             skip_version_ids: vec![2, 4, 6, 8, 10],
@@ -1575,7 +1581,8 @@ mod tests {
 
     #[test]
     fn test_background_worker_starts_and_stops() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .run_interval(Duration::from_millis(50))
             .enabled(true)
@@ -1599,7 +1606,8 @@ mod tests {
 
     #[test]
     fn test_graceful_shutdown_waits_for_inflight() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .run_interval(Duration::from_millis(50))
             .batch_size(10)
@@ -1641,7 +1649,8 @@ mod tests {
 
     #[test]
     fn test_multiple_start_stop_cycles() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .run_interval(Duration::from_millis(50))
             .build();
@@ -1659,7 +1668,8 @@ mod tests {
 
     #[test]
     fn test_double_start_is_noop() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let service = Arc::new(MigrationService::new(cold, policy));
 
@@ -1676,7 +1686,8 @@ mod tests {
 
     #[test]
     fn test_double_stop_is_noop() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let service = Arc::new(MigrationService::new(cold, policy));
 
@@ -1695,7 +1706,8 @@ mod tests {
 
     #[test]
     fn test_memory_pressure_trigger_enabled() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .memory_threshold_bytes(1000) // Low threshold
             .age_threshold(Duration::ZERO)
@@ -1710,7 +1722,8 @@ mod tests {
 
     #[test]
     fn test_combined_triggers() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .memory_threshold_bytes(1000)
             .age_threshold(Duration::from_secs(3600))
@@ -1729,7 +1742,8 @@ mod tests {
 
     #[test]
     fn test_access_tracking_records_access() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold, policy);
 
@@ -1745,7 +1759,8 @@ mod tests {
 
     #[test]
     fn test_lru_candidates_prioritized() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .age_threshold(Duration::ZERO) // All old enough
             .min_hot_versions(1)
@@ -1772,7 +1787,8 @@ mod tests {
 
     #[test]
     fn test_identify_candidates_with_lru() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .age_threshold(Duration::ZERO)
             .min_hot_versions(1)
@@ -1830,7 +1846,8 @@ mod tests {
 
     #[test]
     fn test_progress_tracking_callback() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder().batch_size(5).build();
 
         // Track progress updates
@@ -1920,7 +1937,8 @@ mod tests {
 
     #[test]
     fn test_migration_run_stats_updated() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold, policy);
 
@@ -1936,7 +1954,8 @@ mod tests {
 
     #[test]
     fn test_service_handles_empty_migration() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold, policy);
 
@@ -1985,7 +2004,8 @@ mod tests {
 
     #[test]
     fn test_migrate_edge_versions() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold.clone(), policy);
 
@@ -2006,7 +2026,8 @@ mod tests {
 
     #[test]
     fn test_migrate_edge_versions_disabled() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::disabled();
         let service = MigrationService::new(cold.clone(), policy);
 
@@ -2024,7 +2045,8 @@ mod tests {
 
     #[test]
     fn test_migrate_edge_versions_batching() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder().batch_size(3).build();
         let service = MigrationService::new(cold.clone(), policy);
 
@@ -2042,7 +2064,8 @@ mod tests {
 
     #[test]
     fn test_identify_edge_candidates_respects_min_hot_versions() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .min_hot_versions(2)
             .age_threshold(Duration::ZERO) // All versions are "old enough"
@@ -2072,7 +2095,8 @@ mod tests {
 
     #[test]
     fn test_identify_edge_candidates_skips_head() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .min_hot_versions(1)
             .age_threshold(Duration::ZERO)
@@ -2100,7 +2124,8 @@ mod tests {
 
     #[test]
     fn test_identify_edge_candidates_respects_age_threshold() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         // Set age threshold to 1 hour
         let policy = MigrationPolicy::builder()
             .min_hot_versions(1)
@@ -2178,7 +2203,8 @@ mod tests {
 
     #[test]
     fn test_edge_migration_callback_filtering() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let callback = Arc::new(EdgeFilteringCallback::new(vec![2, 4, 6, 8, 10]));
         let service = MigrationService::with_callback(cold.clone(), policy, callback.clone());
@@ -2283,12 +2309,12 @@ mod tests {
 
     #[test]
     fn test_service_policy_getter() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
         let policy = MigrationPolicy::builder()
             .age_threshold(Duration::from_secs(123456))
             .min_hot_versions(7)
             .build();
-        let service = MigrationService::new(cold, policy);
+        let service = MigrationService::new(Arc::new(cold), policy);
 
         assert_eq!(service.policy().age_threshold, Duration::from_secs(123456));
         assert_eq!(service.policy().min_hot_versions, 7);
@@ -2296,7 +2322,8 @@ mod tests {
 
     #[test]
     fn test_migrate_empty_edge_versions() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold.clone(), policy);
 
@@ -2310,7 +2337,8 @@ mod tests {
 
     #[test]
     fn test_identify_edge_candidates_empty_versions() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .age_threshold(Duration::ZERO)
             .build();
@@ -2331,7 +2359,8 @@ mod tests {
 
     #[test]
     fn test_identify_candidates_version_count_zero() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .min_hot_versions(1)
             .age_threshold(Duration::ZERO)
@@ -2429,7 +2458,8 @@ mod tests {
 
     #[test]
     fn test_identify_candidates_multiple_nodes() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .min_hot_versions(1)
             .age_threshold(Duration::ZERO)
@@ -2463,7 +2493,8 @@ mod tests {
 
     #[test]
     fn test_identify_edge_candidates_multiple_edges() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::builder()
             .min_hot_versions(1)
             .age_threshold(Duration::ZERO)
@@ -2554,7 +2585,8 @@ mod tests {
 
     #[test]
     fn test_clear_access_tracking() {
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        let cold = Arc::new(cold);
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold, policy);
 
@@ -2587,17 +2619,12 @@ mod tests {
 
     #[test]
     fn test_migration_updates_flushed_lsn() {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig, CompressionAlgorithm};
         use tempfile::tempdir;
 
         let temp_dir = tempdir().unwrap();
-        let cold = Arc::new(
-            RedbColdStorage::new(
-                temp_dir.path().join("cold.redb"),
-                RedbConfig::new().compression(crate::storage::CompressionAlgorithm::None),
-            )
-            .unwrap(),
-        );
+        let config = ColdStorageConfig::new().compression(CompressionAlgorithm::None);
+        let cold = Arc::new(RedbColdStorage::new(temp_dir.path().join("cold.redb"), config).unwrap());
 
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold.clone(), policy);
@@ -2626,7 +2653,7 @@ mod tests {
 
     #[test]
     fn test_migration_with_coordinator_set() {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig, CompressionAlgorithm};
         use crate::storage::wal::flush_coordinator::FlushCoordinatorConfig;
         use tempfile::tempdir;
 
@@ -2635,13 +2662,8 @@ mod tests {
         std::fs::create_dir_all(&wal_dir).unwrap();
 
         // Create cold storage
-        let cold = Arc::new(
-            RedbColdStorage::new(
-                temp_dir.path().join("cold.redb"),
-                RedbConfig::new().compression(crate::storage::CompressionAlgorithm::None),
-            )
-            .unwrap(),
-        );
+        let config = ColdStorageConfig::new().compression(CompressionAlgorithm::None);
+        let cold = Arc::new(RedbColdStorage::new(temp_dir.path().join("cold.redb"), config).unwrap());
 
         // Create flush coordinator
         let config = FlushCoordinatorConfig {
@@ -2683,75 +2705,7 @@ mod tests {
     #[test]
     fn test_migration_failure_does_not_truncate_wal() {
         use crate::storage::wal::flush_coordinator::FlushCoordinatorConfig;
-        use crate::utils::error::StorageError;
-        use std::sync::atomic::AtomicBool;
         use tempfile::tempdir;
-
-        // Create a failing cold storage that errors on batch store
-        // but tracks whether truncate was called (it shouldn't be)
-        struct FailingColdStorage {
-            store_called: AtomicBool,
-        }
-
-        impl ColdStorage for FailingColdStorage {
-            fn store_node_version(&self, _: &NodeVersion) -> Result<()> {
-                Err(StorageError::io_error("Test failure").into())
-            }
-
-            fn store_edge_version(&self, _: &EdgeVersion) -> Result<()> {
-                Err(StorageError::io_error("Test failure").into())
-            }
-
-            fn get_node_version(&self, _: VersionId) -> Result<Option<NodeVersion>> {
-                Ok(None)
-            }
-
-            fn get_edge_version(&self, _: VersionId) -> Result<Option<EdgeVersion>> {
-                Ok(None)
-            }
-
-            fn contains_node_version(&self, _: VersionId) -> Result<bool> {
-                Ok(false)
-            }
-
-            fn contains_edge_version(&self, _: VersionId) -> Result<bool> {
-                Ok(false)
-            }
-
-            fn delete_node_version(&self, _: VersionId) -> Result<bool> {
-                Ok(false)
-            }
-
-            fn delete_edge_version(&self, _: VersionId) -> Result<bool> {
-                Ok(false)
-            }
-
-            fn store_node_versions_batch(&self, _: &[NodeVersion]) -> Result<()> {
-                Err(StorageError::io_error("Test failure").into())
-            }
-
-            fn store_edge_versions_batch(&self, _: &[EdgeVersion]) -> Result<()> {
-                Err(StorageError::io_error("Test failure").into())
-            }
-
-            fn stats(&self) -> crate::storage::ColdStorageStats {
-                crate::storage::ColdStorageStats::default()
-            }
-
-            fn flush(&self) -> Result<()> {
-                Ok(())
-            }
-
-            fn store_batch_with_lsn(
-                &self,
-                _nodes: &[NodeVersion],
-                _edges: &[EdgeVersion],
-                _lsn: LSN,
-            ) -> Result<()> {
-                self.store_called.store(true, Ordering::SeqCst);
-                Err(StorageError::io_error("Simulated failure").into())
-            }
-        }
 
         let temp_dir = tempdir().unwrap();
         let wal_dir = temp_dir.path().join("wal");
@@ -2765,13 +2719,13 @@ mod tests {
         };
         let coordinator = Arc::new(FlushCoordinator::new(config).unwrap());
 
-        // Create migration service with failing cold storage
-        let cold = Arc::new(FailingColdStorage {
-            store_called: AtomicBool::new(false),
-        });
-        let cold_dyn: Arc<dyn ColdStorage> = cold.clone();
+        // Create failing cold storage
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
+        cold.set_fail_writes(true);
+        let cold = Arc::new(cold);
+
         let policy = MigrationPolicy::default();
-        let mut service = MigrationService::new(cold_dyn, policy);
+        let mut service = MigrationService::new(cold.clone(), policy);
         service.set_flush_coordinator(coordinator.clone());
 
         // Attempt migration - should fail
@@ -2780,28 +2734,17 @@ mod tests {
 
         // Should have failed
         assert!(result.is_err());
-
-        // Verify that store_batch_with_lsn was called
-        assert!(cold.store_called.load(Ordering::SeqCst));
-
-        // Since store failed, truncate_to_lsn should NOT have been called
-        // The key invariant is that WAL truncation only happens after successful cold storage flush
-        // We verify this by checking the error was propagated (which means truncate wasn't called)
+        assert!(result.unwrap_err().to_string().contains("Simulated write failure"));
     }
 
     #[test]
     fn test_migration_with_lsn_disabled_policy() {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig, CompressionAlgorithm};
         use tempfile::tempdir;
 
         let temp_dir = tempdir().unwrap();
-        let cold = Arc::new(
-            RedbColdStorage::new(
-                temp_dir.path().join("cold.redb"),
-                RedbConfig::new().compression(crate::storage::CompressionAlgorithm::None),
-            )
-            .unwrap(),
-        );
+        let config = ColdStorageConfig::new().compression(CompressionAlgorithm::None);
+        let cold = Arc::new(RedbColdStorage::new(temp_dir.path().join("cold.redb"), config).unwrap());
 
         // Disabled policy
         let policy = MigrationPolicy::disabled();
@@ -2859,9 +2802,9 @@ mod tests {
         };
         let coordinator = Arc::new(FlushCoordinator::new(config).unwrap());
 
-        let cold = Arc::new(InMemoryColdStorage::default_config());
+        let (cold, _dir) = RedbColdStorage::new_temp().unwrap();
         let policy = MigrationPolicy::default();
-        let mut service = MigrationService::new(cold, policy);
+        let mut service = MigrationService::new(Arc::new(cold), policy);
 
         // Initially no coordinator
         assert!(service.flush_coordinator().is_none());
@@ -2878,7 +2821,7 @@ mod tests {
     /// WAL_truncation_lsn <= cold_storage.get_flushed_lsn()
     #[test]
     fn test_truncation_uses_actual_flushed_lsn() {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
         use crate::storage::wal::flush_coordinator::FlushCoordinatorConfig;
         use tempfile::tempdir;
 
@@ -2891,7 +2834,7 @@ mod tests {
 
         // Create Redb cold storage with LSN tracking
         let db_path = temp_dir.path().join("test.redb");
-        let cold = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+        let cold = Arc::new(RedbColdStorage::new(&db_path, ColdStorageConfig::new()).unwrap());
         let policy = MigrationPolicy::default();
         let mut service = MigrationService::new(cold.clone(), policy);
         service.set_flush_coordinator(coordinator.clone());
@@ -2915,12 +2858,12 @@ mod tests {
     /// Test that no WAL truncation occurs when there's no flush coordinator
     #[test]
     fn test_no_truncation_without_coordinator() {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
         use tempfile::tempdir;
 
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.redb");
-        let cold = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+        let cold = Arc::new(RedbColdStorage::new(&db_path, ColdStorageConfig::new()).unwrap());
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold.clone(), policy);
 
@@ -2935,7 +2878,7 @@ mod tests {
     }
 
     /// Comprehensive test of the WAL truncation safety invariant:
-    /// WAL_truncation_lsn <= cold_storage.get_flushed_lsn()
+    /// WAL_truncation_lsn <= flushed_lsn
     ///
     /// This test simulates a scenario where:
     /// 1. Multiple batches are migrated with increasing LSNs
@@ -2943,7 +2886,7 @@ mod tests {
     /// 3. We verify the invariant is maintained even with concurrent operations
     #[test]
     fn test_lsn_invariant_maintained() {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
         use crate::storage::wal::flush_coordinator::FlushCoordinatorConfig;
         use tempfile::tempdir;
 
@@ -2955,7 +2898,7 @@ mod tests {
         let coordinator = Arc::new(FlushCoordinator::new(config).unwrap());
 
         let db_path = temp_dir.path().join("test.redb");
-        let cold = Arc::new(RedbColdStorage::new(&db_path, RedbConfig::new()).unwrap());
+        let cold = Arc::new(RedbColdStorage::new(&db_path, ColdStorageConfig::new()).unwrap());
         let policy = MigrationPolicy::default();
         let mut service = MigrationService::new(cold.clone(), policy);
         service.set_flush_coordinator(coordinator.clone());

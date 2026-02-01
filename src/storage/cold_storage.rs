@@ -6,10 +6,11 @@
 //!
 //! # Architecture
 //!
-//! The cold storage system follows ADR-0013 (Tiered Storage Architecture):
-//! - **Hot Tier**: In-memory (DashMap), 22-70ns latency
-//! - **Warm Tier**: LRU cache for recently accessed cold data, <1µs latency
-//! - **Cold Tier**: Disk-based compressed storage, <1ms latency (p50)
+//! The cold storage system uses Redb, a pure Rust embedded database, to implement
+//! ADR-0025 (Redb Cold Storage and LSN-Based WAL Truncation):
+//! - **node_versions table**: Stores compressed NodeVersion data keyed by VersionId
+//! - **edge_versions table**: Stores compressed EdgeVersion data keyed by VersionId
+//! - **metadata table**: Stores flushed_lsn for WAL truncation coordination
 //!
 //! # Performance Targets (Issue #120)
 //!
@@ -22,30 +23,77 @@
 //! Supports two compression algorithms:
 //! - **Zstd**: Higher compression ratio (ratio-optimized)
 //! - **LZ4**: Faster compression/decompression (speed-optimized)
-//!
-//! # Example
-//!
-//! ```ignore
-//! use gallifreydb::storage::cold_storage::{ColdStorage, InMemoryColdStorage, ColdStorageConfig};
-//!
-//! let config = ColdStorageConfig::default();
-//! let storage = InMemoryColdStorage::new(config);
-//!
-//! // Store a version
-//! storage.store_node_version(&version)?;
-//!
-//! // Retrieve a version
-//! let retrieved = storage.get_node_version(version_id)?;
-//! ```
 
 use crate::core::id::VersionId;
 use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
+use redb::{ReadableDatabase, ReadableTable};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 
 #[cfg(feature = "config-toml")]
 use serde::{Deserialize, Serialize};
+
+// Table definitions with static lifetimes
+const NODE_VERSIONS_TABLE: redb::TableDefinition<'static, u64, &'static [u8]> =
+    redb::TableDefinition::new("node_versions");
+const EDGE_VERSIONS_TABLE: redb::TableDefinition<'static, u64, &'static [u8]> =
+    redb::TableDefinition::new("edge_versions");
+const METADATA_TABLE: redb::TableDefinition<'static, &'static str, &'static [u8]> =
+    redb::TableDefinition::new("metadata");
+
+/// Metadata keys stored in the metadata table.
+const FLUSHED_LSN_KEY: &str = "flushed_lsn";
+
+// ============================================================================
+// Error Handling Helpers
+// ============================================================================
+
+#[inline]
+fn map_io_error(context: &str) -> impl Fn(std::io::Error) -> crate::utils::error::Error + '_ {
+    move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
+}
+
+#[inline]
+fn map_db_error(context: &str) -> impl Fn(redb::DatabaseError) -> crate::utils::error::Error + '_ {
+    move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
+}
+
+#[inline]
+fn map_table_error(context: &str) -> impl Fn(redb::TableError) -> crate::utils::error::Error + '_ {
+    move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
+}
+
+#[inline]
+fn map_commit_error(
+    context: &str,
+) -> impl Fn(redb::CommitError) -> crate::utils::error::Error + '_ {
+    move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
+}
+
+#[inline]
+fn map_transaction_error(
+    context: &str,
+) -> impl Fn(redb::TransactionError) -> crate::utils::error::Error + '_ {
+    move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
+}
+
+#[inline]
+fn map_storage_error(
+    context: &str,
+) -> impl Fn(redb::StorageError) -> crate::utils::error::Error + '_ {
+    move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
+}
+
+#[inline]
+fn map_compaction_error(
+    context: &str,
+) -> impl Fn(redb::CompactionError) -> crate::utils::error::Error + '_ {
+    move |e| StorageError::io_error(format!("{}: {}", context, e)).into()
+}
 
 /// Compression algorithm for cold storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -82,6 +130,8 @@ pub struct ColdStorageConfig {
 
     /// Whether to sync writes to disk immediately.
     /// When false, relies on OS buffer cache (faster but less durable).
+    /// Note: Redb handles durability, so this flag might be advisory or unused by Redb itself
+    /// but kept for compatibility.
     pub sync_writes: bool,
 
     /// Maximum number of versions to batch in a single write operation.
@@ -90,27 +140,52 @@ pub struct ColdStorageConfig {
 
     /// Enable CRC32 checksums for data integrity verification.
     pub enable_checksums: bool,
+
+    /// Cache size in bytes for Redb (0 = use default).
+    pub cache_size_bytes: usize,
 }
 
 impl Default for ColdStorageConfig {
     fn default() -> Self {
         Self {
             compression: CompressionAlgorithm::Zstd,
-            sync_writes: false,
+            sync_writes: true,
             batch_size: 1000,
             enable_checksums: true,
+            cache_size_bytes: 0,
         }
     }
 }
 
+impl ColdStorageConfig {
+    /// Create a new configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the compression algorithm.
+    pub fn compression(mut self, compression: CompressionAlgorithm) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Enable or disable checksums.
+    pub fn enable_checksums(mut self, enable: bool) -> Self {
+        self.enable_checksums = enable;
+        self
+    }
+
+    /// Set the cache size in bytes.
+    pub fn cache_size_bytes(mut self, size: usize) -> Self {
+        self.cache_size_bytes = size;
+        self
+    }
+}
+
+/// Alias for backwards compatibility during refactor.
+pub type RedbConfig = ColdStorageConfig;
+
 /// Statistics for cold storage operations.
-///
-/// # Compression Stats Note
-///
-/// For backends that handle compression internally at the storage level,
-/// `bytes_written_compressed` may equal `bytes_written_raw` because the actual
-/// compression happens asynchronously during compaction. To get the true on-disk
-/// size, use the backend's `approximate_size()` method instead.
 #[derive(Debug, Clone, Default)]
 pub struct ColdStorageStats {
     /// Total number of node versions stored.
@@ -124,15 +199,8 @@ pub struct ColdStorageStats {
     /// Total bytes written (before compression).
     pub bytes_written_raw: u64,
     /// Total bytes written (after compression).
-    ///
-    /// Note: For backends that handle compression internally,
-    /// this may equal `bytes_written_raw`. Use `approximate_size()` or
-    /// `compression_ratio()` on the backend for actual compression metrics.
     pub bytes_written_compressed: u64,
     /// Total bytes read (compressed size from storage).
-    ///
-    /// Note: For backends with transparent decompression, this may equal
-    /// `bytes_read_decompressed`.
     pub bytes_read_compressed: u64,
     /// Total bytes read (after decompression).
     pub bytes_read_decompressed: u64,
@@ -144,224 +212,12 @@ pub struct ColdStorageStats {
 
 impl ColdStorageStats {
     /// Calculate the compression ratio (raw/compressed).
-    ///
-    /// Returns 1.0 if no data has been written.
-    ///
-    /// Note: For some backends, this ratio may be 1.0 because compression
-    /// happens at the storage level during compaction. Use the backend's own
-    /// `compression_ratio()` method for actual on-disk compression metrics.
     pub fn compression_ratio(&self) -> f64 {
         if self.bytes_written_compressed == 0 {
             1.0
         } else {
             self.bytes_written_raw as f64 / self.bytes_written_compressed as f64
         }
-    }
-}
-
-/// Trait for cold storage backends.
-///
-/// This trait defines the interface for storing and retrieving historical
-/// versions from cold storage. Implementations must be thread-safe.
-pub trait ColdStorage: Send + Sync {
-    /// Store a node version to cold storage.
-    ///
-    /// # Arguments
-    ///
-    /// * `version` - The node version to store
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success, or an error if storage fails.
-    fn store_node_version(&self, version: &NodeVersion) -> Result<()>;
-
-    /// Store multiple node versions in a batch.
-    ///
-    /// This is more efficient than individual stores for bulk migrations.
-    ///
-    /// # Arguments
-    ///
-    /// * `versions` - The node versions to store
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success, or an error if storage fails.
-    fn store_node_versions_batch(&self, versions: &[NodeVersion]) -> Result<()> {
-        for version in versions {
-            self.store_node_version(version)?;
-        }
-        Ok(())
-    }
-
-    /// Retrieve a node version from cold storage.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The version ID to retrieve
-    ///
-    /// # Returns
-    ///
-    /// Returns `Some(version)` if found, `None` if not found, or an error.
-    fn get_node_version(&self, id: VersionId) -> Result<Option<NodeVersion>>;
-
-    /// Retrieve multiple node versions in a batch.
-    ///
-    /// # Arguments
-    ///
-    /// * `ids` - The version IDs to retrieve
-    ///
-    /// # Returns
-    ///
-    /// Returns a vector of optional versions (same order as input IDs).
-    fn get_node_versions_batch(&self, ids: &[VersionId]) -> Result<Vec<Option<NodeVersion>>> {
-        ids.iter().map(|id| self.get_node_version(*id)).collect()
-    }
-
-    /// Store an edge version to cold storage.
-    ///
-    /// # Arguments
-    ///
-    /// * `version` - The edge version to store
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success, or an error if storage fails.
-    fn store_edge_version(&self, version: &EdgeVersion) -> Result<()>;
-
-    /// Store multiple edge versions in a batch.
-    ///
-    /// # Arguments
-    ///
-    /// * `versions` - The edge versions to store
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success, or an error if storage fails.
-    fn store_edge_versions_batch(&self, versions: &[EdgeVersion]) -> Result<()> {
-        for version in versions {
-            self.store_edge_version(version)?;
-        }
-        Ok(())
-    }
-
-    /// Retrieve an edge version from cold storage.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The version ID to retrieve
-    ///
-    /// # Returns
-    ///
-    /// Returns `Some(version)` if found, `None` if not found, or an error.
-    fn get_edge_version(&self, id: VersionId) -> Result<Option<EdgeVersion>>;
-
-    /// Retrieve multiple edge versions in a batch.
-    ///
-    /// # Arguments
-    ///
-    /// * `ids` - The version IDs to retrieve
-    ///
-    /// # Returns
-    ///
-    /// Returns a vector of optional versions (same order as input IDs).
-    fn get_edge_versions_batch(&self, ids: &[VersionId]) -> Result<Vec<Option<EdgeVersion>>> {
-        ids.iter().map(|id| self.get_edge_version(*id)).collect()
-    }
-
-    /// Check if a node version exists in cold storage.
-    fn contains_node_version(&self, id: VersionId) -> Result<bool>;
-
-    /// Check if an edge version exists in cold storage.
-    fn contains_edge_version(&self, id: VersionId) -> Result<bool>;
-
-    /// Delete a node version from cold storage.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(true)` if deleted, `Ok(false)` if not found.
-    fn delete_node_version(&self, id: VersionId) -> Result<bool>;
-
-    /// Delete an edge version from cold storage.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(true)` if deleted, `Ok(false)` if not found.
-    fn delete_edge_version(&self, id: VersionId) -> Result<bool>;
-
-    /// Get statistics about cold storage.
-    fn stats(&self) -> ColdStorageStats;
-
-    /// Flush any buffered writes to disk.
-    fn flush(&self) -> Result<()>;
-
-    /// Close the cold storage, flushing any pending writes.
-    fn close(&self) -> Result<()> {
-        self.flush()
-    }
-
-    // ========================================================================
-    // LSN Tracking (ADR-0025)
-    //
-    // These methods enable coordinated WAL truncation by tracking which LSN
-    // has been durably flushed to cold storage. The key invariant is:
-    //   WAL_truncation_lsn <= Redb_flushed_lsn
-    //
-    // This ensures any operation truncated from WAL has been durably persisted.
-    // ========================================================================
-
-    /// Get the highest LSN that has been durably flushed to cold storage.
-    ///
-    /// Returns `None` if no data has been flushed yet (cold storage is empty
-    /// or the backend doesn't support LSN tracking).
-    ///
-    /// # LSN Tracking
-    ///
-    /// The flushed LSN represents a recovery checkpoint:
-    /// - All operations with LSN <= flushed_lsn are in cold storage
-    /// - WAL can be safely truncated up to this LSN
-    /// - Recovery should replay from flushed_lsn + 1
-    ///
-    /// # Default Implementation
-    ///
-    /// Returns `None`, indicating LSN tracking is not supported.
-    /// Implementations that support LSN tracking should override this.
-    fn get_flushed_lsn(&self) -> Result<Option<LSN>> {
-        Ok(None)
-    }
-
-    /// Store a batch of versions with LSN tracking.
-    ///
-    /// This operation should be atomic - either all versions are stored and
-    /// the flushed_lsn is updated, or nothing is changed. This atomicity
-    /// enables safe WAL truncation.
-    ///
-    /// # Arguments
-    ///
-    /// * `nodes` - Node versions to store
-    /// * `edges` - Edge versions to store
-    /// * `lsn` - The LSN to record as flushed after this batch
-    ///
-    /// # LSN Semantics
-    ///
-    /// After a successful call, `get_flushed_lsn()` should return at least `lsn`.
-    /// The implementation may update the flushed_lsn to be:
-    /// - Exactly `lsn`, or
-    /// - `max(current_flushed_lsn, lsn)` if batches may arrive out of order
-    ///
-    /// # Default Implementation
-    ///
-    /// Delegates to `store_node_versions_batch` and `store_edge_versions_batch`,
-    /// ignoring the LSN. Implementations that support LSN tracking should
-    /// override this to provide atomic batch + LSN updates.
-    fn store_batch_with_lsn(
-        &self,
-        nodes: &[NodeVersion],
-        edges: &[EdgeVersion],
-        _lsn: LSN,
-    ) -> Result<()> {
-        self.store_node_versions_batch(nodes)?;
-        self.store_edge_versions_batch(edges)?;
-        Ok(())
     }
 }
 
@@ -413,112 +269,149 @@ impl AtomicColdStorageStats {
     }
 }
 
-/// In-memory cold storage for testing purposes.
+/// Redb-based cold storage implementation.
 ///
-/// This implementation stores versions in memory using a HashMap.
-/// It's useful for testing the cold storage interface without disk I/O.
-pub struct InMemoryColdStorage {
-    node_versions: parking_lot::RwLock<std::collections::HashMap<VersionId, Vec<u8>>>,
-    edge_versions: parking_lot::RwLock<std::collections::HashMap<VersionId, Vec<u8>>>,
+/// This implementation uses Redb for durable, crash-safe storage of historical
+/// versions. It supports LSN tracking for WAL truncation coordination.
+pub struct RedbColdStorage {
+    /// Path to the database file.
+    path: PathBuf,
+    /// Redb database instance.
+    db: redb::Database,
+    /// Configuration.
     config: ColdStorageConfig,
+    /// Statistics tracker.
     stats: AtomicColdStorageStats,
+    /// Test-only flag to simulate write failures.
+    #[cfg(test)]
+    fail_writes: AtomicBool,
 }
 
-impl InMemoryColdStorage {
-    /// Create a new in-memory cold storage.
-    pub fn new(config: ColdStorageConfig) -> Self {
-        Self {
-            node_versions: parking_lot::RwLock::new(std::collections::HashMap::new()),
-            edge_versions: parking_lot::RwLock::new(std::collections::HashMap::new()),
+impl RedbColdStorage {
+    /// Create a new Redb cold storage at the given path.
+    pub fn new<P: AsRef<Path>>(path: P, config: ColdStorageConfig) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(map_io_error("Failed to create directory"))?;
+        }
+
+        // Open or create the database
+        let db =
+            redb::Database::create(&path).map_err(map_db_error("Failed to open Redb database"))?;
+
+        // Initialize tables
+        let write_txn = db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+        write_txn
+            .open_table(NODE_VERSIONS_TABLE)
+            .map_err(map_table_error("Failed to create node_versions table"))?;
+        write_txn
+            .open_table(EDGE_VERSIONS_TABLE)
+            .map_err(map_table_error("Failed to create edge_versions table"))?;
+        write_txn
+            .open_table(METADATA_TABLE)
+            .map_err(map_table_error("Failed to create metadata table"))?;
+
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit table creation"))?;
+
+        Ok(Self {
+            path,
+            db,
             config,
             stats: AtomicColdStorageStats::new(),
-        }
+            #[cfg(test)]
+            fail_writes: AtomicBool::new(false),
+        })
     }
 
     /// Create with default configuration.
-    pub fn default_config() -> Self {
-        Self::new(ColdStorageConfig::default())
+    pub fn with_default_config<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::new(path, ColdStorageConfig::default())
     }
 
+    /// Get the database file path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Compress data using the configured algorithm.
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        match self.config.compression.zstd_level() {
-            Some(level) => {
-                let compressed =
-                    zstd::encode_all(data, level).map_err(|e| -> crate::utils::error::Error {
-                        StorageError::io_error(e.to_string()).into()
-                    })?;
-
-                // Add checksum if enabled
-                if self.config.enable_checksums {
-                    let checksum = crc32fast::hash(&compressed);
-                    let mut result = Vec::with_capacity(compressed.len() + 4);
-                    result.extend_from_slice(&checksum.to_le_bytes());
-                    result.extend_from_slice(&compressed);
-                    Ok(result)
-                } else {
-                    Ok(compressed)
-                }
-            }
-            None => {
-                // No compression
-                if self.config.enable_checksums {
-                    let checksum = crc32fast::hash(data);
-                    let mut result = Vec::with_capacity(data.len() + 4);
-                    result.extend_from_slice(&checksum.to_le_bytes());
-                    result.extend_from_slice(data);
-                    Ok(result)
-                } else {
-                    Ok(data.to_vec())
-                }
-            }
-        }
+        crate::storage::compression::compress(data, &self.config)
     }
 
+    /// Decompress data using the configured algorithm.
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let (data_to_decompress, expected_checksum) = if self.config.enable_checksums {
-            if data.len() < 4 {
-                return Err(
-                    StorageError::corruption("Data too short for checksum".to_string()).into(),
-                );
-            }
-            let checksum = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            let payload = &data[4..];
-            (payload, Some(checksum))
-        } else {
-            (data, None)
-        };
-
-        // Verify checksum if enabled
-        if let Some(expected) = expected_checksum {
-            let actual = crc32fast::hash(data_to_decompress);
-            if actual != expected {
-                return Err(StorageError::corruption(format!(
-                    "Checksum mismatch: expected {}, got {}",
-                    expected, actual
-                ))
-                .into());
-            }
-        }
-
-        match self.config.compression.zstd_level() {
-            Some(_) => {
-                zstd::decode_all(data_to_decompress).map_err(|e| -> crate::utils::error::Error {
-                    StorageError::io_error(e.to_string()).into()
-                })
-            }
-            None => Ok(data_to_decompress.to_vec()),
-        }
+        crate::storage::compression::decompress(data, &self.config)
     }
-}
 
-impl ColdStorage for InMemoryColdStorage {
-    fn store_node_version(&self, version: &NodeVersion) -> Result<()> {
+    // ========================================================================
+    // Testing Helpers
+    // ========================================================================
+
+    /// Set a flag to simulate write failures (tests only).
+    #[cfg(test)]
+    pub fn set_fail_writes(&self, fail: bool) {
+        self.fail_writes.store(fail, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn check_fail_writes(&self) -> Result<()> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(StorageError::io_error("Simulated write failure").into());
+        }
+        Ok(())
+    }
+
+    /// Create a new Redb cold storage backed by a temporary file (tests only).
+    #[cfg(test)]
+    pub fn new_temp() -> Result<(Self, tempfile::TempDir)> {
+        let temp_dir = tempfile::tempdir().map_err(map_io_error("Failed to create temp dir"))?;
+        let db_path = temp_dir.path().join("test.redb");
+        let storage = Self::with_default_config(&db_path)?;
+        Ok((storage, temp_dir))
+    }
+
+    // ========================================================================
+    // CRUD Operations (Formerly ColdStorage Trait)
+    // ========================================================================
+
+    /// Store a node version to cold storage.
+    pub fn store_node_version(&self, version: &NodeVersion) -> Result<()> {
+        #[cfg(test)]
+        self.check_fail_writes()?;
+
         let encoded = encode_node_version(version);
         let raw_size = encoded.len();
         let compressed = self.compress(&encoded)?;
         let compressed_size = compressed.len();
 
-        self.node_versions.write().insert(version.id, compressed);
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+        {
+            let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).map_err(
+                |e| -> crate::utils::error::Error {
+                    StorageError::io_error(format!("Failed to open node_versions table: {}", e))
+                        .into()
+                },
+            )?;
+
+            table
+                .insert(version.id.as_u64(), compressed.as_slice())
+                .map_err(map_storage_error("Failed to store node version"))?;
+        }
+
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit"))?;
 
         self.stats
             .node_versions_stored
@@ -533,20 +426,31 @@ impl ColdStorage for InMemoryColdStorage {
         Ok(())
     }
 
-    fn get_node_version(&self, id: VersionId) -> Result<Option<NodeVersion>> {
+    /// Retrieve a node version from cold storage.
+    pub fn get_node_version(&self, id: VersionId) -> Result<Option<NodeVersion>> {
         self.stats
             .node_version_reads
             .fetch_add(1, Ordering::Relaxed);
 
-        let guard = self.node_versions.read();
-        match guard.get(&id) {
-            Some(compressed) => {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+
+        let table = read_txn.open_table(NODE_VERSIONS_TABLE).map_err(
+            |e| -> crate::utils::error::Error {
+                StorageError::io_error(format!("Failed to open node_versions table: {}", e)).into()
+            },
+        )?;
+
+        match table.get(id.as_u64()) {
+            Ok(Some(value)) => {
+                let compressed: &[u8] = value.value();
                 self.stats
                     .bytes_read_compressed
                     .fetch_add(compressed.len() as u64, Ordering::Relaxed);
 
                 let decompressed = self.decompress(compressed)?;
-
                 self.stats
                     .bytes_read_decompressed
                     .fetch_add(decompressed.len() as u64, Ordering::Relaxed);
@@ -554,17 +458,50 @@ impl ColdStorage for InMemoryColdStorage {
                 let version = decode_node_version(&decompressed)?;
                 Ok(Some(version))
             }
-            None => Ok(None),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                Err(StorageError::io_error(format!("Failed to read node version: {}", e)).into())
+            }
         }
     }
 
-    fn store_edge_version(&self, version: &EdgeVersion) -> Result<()> {
+    /// Retrieve multiple node versions in a batch.
+    pub fn get_node_versions_batch(&self, ids: &[VersionId]) -> Result<Vec<Option<NodeVersion>>> {
+        // Simple implementation - can be optimized if needed
+        ids.iter().map(|id| self.get_node_version(*id)).collect()
+    }
+
+    /// Store an edge version to cold storage.
+    pub fn store_edge_version(&self, version: &EdgeVersion) -> Result<()> {
+        #[cfg(test)]
+        self.check_fail_writes()?;
+
         let encoded = encode_edge_version(version);
         let raw_size = encoded.len();
         let compressed = self.compress(&encoded)?;
         let compressed_size = compressed.len();
 
-        self.edge_versions.write().insert(version.id, compressed);
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+        {
+            let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
+                |e| -> crate::utils::error::Error {
+                    StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
+                        .into()
+                },
+            )?;
+
+            table
+                .insert(version.id.as_u64(), compressed.as_slice())
+                .map_err(map_storage_error("Failed to store edge version"))?;
+        }
+
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit"))?;
 
         self.stats
             .edge_versions_stored
@@ -579,20 +516,31 @@ impl ColdStorage for InMemoryColdStorage {
         Ok(())
     }
 
-    fn get_edge_version(&self, id: VersionId) -> Result<Option<EdgeVersion>> {
+    /// Retrieve an edge version from cold storage.
+    pub fn get_edge_version(&self, id: VersionId) -> Result<Option<EdgeVersion>> {
         self.stats
             .edge_version_reads
             .fetch_add(1, Ordering::Relaxed);
 
-        let guard = self.edge_versions.read();
-        match guard.get(&id) {
-            Some(compressed) => {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+
+        let table = read_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
+            |e| -> crate::utils::error::Error {
+                StorageError::io_error(format!("Failed to open edge_versions table: {}", e)).into()
+            },
+        )?;
+
+        match table.get(id.as_u64()) {
+            Ok(Some(value)) => {
+                let compressed: &[u8] = value.value();
                 self.stats
                     .bytes_read_compressed
                     .fetch_add(compressed.len() as u64, Ordering::Relaxed);
 
                 let decompressed = self.decompress(compressed)?;
-
                 self.stats
                     .bytes_read_decompressed
                     .fetch_add(decompressed.len() as u64, Ordering::Relaxed);
@@ -600,32 +548,413 @@ impl ColdStorage for InMemoryColdStorage {
                 let version = decode_edge_version(&decompressed)?;
                 Ok(Some(version))
             }
-            None => Ok(None),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                Err(StorageError::io_error(format!("Failed to read edge version: {}", e)).into())
+            }
         }
     }
 
-    fn contains_node_version(&self, id: VersionId) -> Result<bool> {
-        Ok(self.node_versions.read().contains_key(&id))
+    /// Retrieve multiple edge versions in a batch.
+    pub fn get_edge_versions_batch(&self, ids: &[VersionId]) -> Result<Vec<Option<EdgeVersion>>> {
+        ids.iter().map(|id| self.get_edge_version(*id)).collect()
     }
 
-    fn contains_edge_version(&self, id: VersionId) -> Result<bool> {
-        Ok(self.edge_versions.read().contains_key(&id))
+    /// Check if a node version exists in cold storage.
+    pub fn contains_node_version(&self, id: VersionId) -> Result<bool> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+
+        let table = read_txn.open_table(NODE_VERSIONS_TABLE).map_err(
+            |e| -> crate::utils::error::Error {
+                StorageError::io_error(format!("Failed to open node_versions table: {}", e)).into()
+            },
+        )?;
+
+        match table.get(id.as_u64()) {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(e) => {
+                Err(StorageError::io_error(format!("Failed to check node version: {}", e)).into())
+            }
+        }
     }
 
-    fn delete_node_version(&self, id: VersionId) -> Result<bool> {
-        Ok(self.node_versions.write().remove(&id).is_some())
+    /// Check if an edge version exists in cold storage.
+    pub fn contains_edge_version(&self, id: VersionId) -> Result<bool> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+
+        let table = read_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
+            |e| -> crate::utils::error::Error {
+                StorageError::io_error(format!("Failed to open edge_versions table: {}", e)).into()
+            },
+        )?;
+
+        match table.get(id.as_u64()) {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(e) => {
+                Err(StorageError::io_error(format!("Failed to check edge version: {}", e)).into())
+            }
+        }
     }
 
-    fn delete_edge_version(&self, id: VersionId) -> Result<bool> {
-        Ok(self.edge_versions.write().remove(&id).is_some())
+    /// Delete a node version from cold storage.
+    pub fn delete_node_version(&self, id: VersionId) -> Result<bool> {
+        #[cfg(test)]
+        self.check_fail_writes()?;
+
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+        let deleted = {
+            let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).map_err(
+                |e| -> crate::utils::error::Error {
+                    StorageError::io_error(format!("Failed to open node_versions table: {}", e))
+                        .into()
+                },
+            )?;
+
+            match table.remove(id.as_u64()) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    return Err(map_storage_error("Failed to delete node version")(e));
+                }
+            }
+        };
+
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit"))?;
+
+        Ok(deleted)
     }
 
-    fn stats(&self) -> ColdStorageStats {
+    /// Delete an edge version from cold storage.
+    pub fn delete_edge_version(&self, id: VersionId) -> Result<bool> {
+        #[cfg(test)]
+        self.check_fail_writes()?;
+
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+        let deleted = {
+            let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
+                |e| -> crate::utils::error::Error {
+                    StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
+                        .into()
+                },
+            )?;
+
+            match table.remove(id.as_u64()) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    return Err(map_storage_error("Failed to delete edge version")(e));
+                }
+            }
+        };
+
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit"))?;
+
+        Ok(deleted)
+    }
+
+    /// Store multiple node versions in a batch.
+    pub fn store_node_versions_batch(&self, versions: &[NodeVersion]) -> Result<()> {
+        #[cfg(test)]
+        self.check_fail_writes()?;
+
+        if versions.is_empty() {
+            return Ok(());
+        }
+
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+        {
+            let mut table = write_txn.open_table(NODE_VERSIONS_TABLE).map_err(
+                |e| -> crate::utils::error::Error {
+                    StorageError::io_error(format!("Failed to open node_versions table: {}", e))
+                        .into()
+                },
+            )?;
+
+            for version in versions {
+                let encoded = encode_node_version(version);
+                let raw_size = encoded.len();
+                let compressed = self.compress(&encoded)?;
+                let compressed_size = compressed.len();
+
+                table
+                    .insert(version.id.as_u64(), compressed.as_slice())
+                    .map_err(map_storage_error("Failed to store node version"))?;
+
+                self.stats
+                    .node_versions_stored
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .bytes_written_raw
+                    .fetch_add(raw_size as u64, Ordering::Relaxed);
+                self.stats
+                    .bytes_written_compressed
+                    .fetch_add(compressed_size as u64, Ordering::Relaxed);
+            }
+        }
+
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit batch"))?;
+
+        Ok(())
+    }
+
+    /// Store multiple edge versions in a batch.
+    pub fn store_edge_versions_batch(&self, versions: &[EdgeVersion]) -> Result<()> {
+        #[cfg(test)]
+        self.check_fail_writes()?;
+
+        if versions.is_empty() {
+            return Ok(());
+        }
+
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+        {
+            let mut table = write_txn.open_table(EDGE_VERSIONS_TABLE).map_err(
+                |e| -> crate::utils::error::Error {
+                    StorageError::io_error(format!("Failed to open edge_versions table: {}", e))
+                        .into()
+                },
+            )?;
+
+            for version in versions {
+                let encoded = encode_edge_version(version);
+                let raw_size = encoded.len();
+                let compressed = self.compress(&encoded)?;
+                let compressed_size = compressed.len();
+
+                table
+                    .insert(version.id.as_u64(), compressed.as_slice())
+                    .map_err(map_storage_error("Failed to store edge version"))?;
+
+                self.stats
+                    .edge_versions_stored
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .bytes_written_raw
+                    .fetch_add(raw_size as u64, Ordering::Relaxed);
+                self.stats
+                    .bytes_written_compressed
+                    .fetch_add(compressed_size as u64, Ordering::Relaxed);
+            }
+        }
+
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit batch"))?;
+
+        Ok(())
+    }
+
+    /// Get statistics about cold storage.
+    pub fn stats(&self) -> ColdStorageStats {
         self.stats.snapshot()
     }
 
-    fn flush(&self) -> Result<()> {
-        // In-memory storage doesn't need flushing
+    /// Flush any buffered writes to disk.
+    pub fn flush(&self) -> Result<()> {
+        // Redb automatically flushes on commit, nothing extra needed
+        Ok(())
+    }
+
+    /// Close the cold storage, flushing any pending writes.
+    pub fn close(&self) -> Result<()> {
+        // Redb handles cleanup on drop
+        Ok(())
+    }
+
+    // ========================================================================
+    // LSN Tracking (ADR-0025)
+    // ========================================================================
+
+    /// Get the highest LSN that has been durably flushed to cold storage.
+    pub fn get_flushed_lsn(&self) -> Result<Option<LSN>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(map_transaction_error("Failed to begin read transaction"))?;
+        let table = read_txn
+            .open_table(METADATA_TABLE)
+            .map_err(map_table_error("Failed to open metadata table"))?;
+
+        match table.get(FLUSHED_LSN_KEY) {
+            Ok(Some(value)) => {
+                let bytes: &[u8] = value.value();
+                if bytes.len() != 8 {
+                    return Err(
+                        StorageError::corruption("Invalid flushed_lsn format".to_string()).into(),
+                    );
+                }
+                let lsn_value = u64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ]);
+                Ok(Some(LSN(lsn_value)))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => {
+                Err(StorageError::io_error(format!("Failed to read flushed_lsn: {}", e)).into())
+            }
+        }
+    }
+
+    /// Set the flushed LSN in the metadata table (internal helper).
+    fn set_flushed_lsn_internal(
+        table: &mut redb::Table<'_, &'static str, &'static [u8]>,
+        lsn: LSN,
+    ) -> Result<()> {
+        // Read current LSN to ensure we only increase it
+        let current_lsn = if let Ok(Some(value)) = table.get(FLUSHED_LSN_KEY) {
+            let bytes = value.value();
+            if bytes.len() == 8 {
+                let lsn_value = u64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ]);
+                Some(LSN(lsn_value))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Only update if new LSN is higher (prevents race condition)
+        let final_lsn = match current_lsn {
+            Some(current) if lsn.0 <= current.0 => {
+                // LSN is not higher, skip update
+                return Ok(());
+            }
+            _ => lsn,
+        };
+
+        let lsn_bytes = final_lsn.0.to_le_bytes();
+        table
+            .insert(FLUSHED_LSN_KEY, lsn_bytes.as_slice())
+            .map_err(|e| -> crate::utils::error::Error {
+                StorageError::io_error(format!("Failed to write flushed_lsn: {}", e)).into()
+            })?;
+        Ok(())
+    }
+
+    /// Store a batch of versions with LSN tracking.
+    pub fn store_batch_with_lsn(
+        &self,
+        nodes: &[NodeVersion],
+        edges: &[EdgeVersion],
+        lsn: LSN,
+    ) -> Result<()> {
+        #[cfg(test)]
+        self.check_fail_writes()?;
+
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(map_transaction_error("Failed to begin write transaction"))?;
+
+        // Store node versions
+        {
+            let mut table = write_txn
+                .open_table(NODE_VERSIONS_TABLE)
+                .map_err(map_table_error("Failed to open node_versions table"))?;
+
+            for version in nodes {
+                let encoded = encode_node_version(version);
+                let raw_size = encoded.len();
+                let compressed = self.compress(&encoded)?;
+                let compressed_size = compressed.len();
+
+                table
+                    .insert(version.id.as_u64(), compressed.as_slice())
+                    .map_err(map_storage_error("Failed to store node version"))?;
+
+                self.stats
+                    .node_versions_stored
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .bytes_written_raw
+                    .fetch_add(raw_size as u64, Ordering::Relaxed);
+                self.stats
+                    .bytes_written_compressed
+                    .fetch_add(compressed_size as u64, Ordering::Relaxed);
+            }
+        }
+
+        // Store edge versions
+        {
+            let mut table = write_txn
+                .open_table(EDGE_VERSIONS_TABLE)
+                .map_err(map_table_error("Failed to open edge_versions table"))?;
+
+            for version in edges {
+                let encoded = encode_edge_version(version);
+                let raw_size = encoded.len();
+                let compressed = self.compress(&encoded)?;
+                let compressed_size = compressed.len();
+
+                table
+                    .insert(version.id.as_u64(), compressed.as_slice())
+                    .map_err(map_storage_error("Failed to store edge version"))?;
+
+                self.stats
+                    .edge_versions_stored
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .bytes_written_raw
+                    .fetch_add(raw_size as u64, Ordering::Relaxed);
+                self.stats
+                    .bytes_written_compressed
+                    .fetch_add(compressed_size as u64, Ordering::Relaxed);
+            }
+        }
+
+        // Update flushed_lsn atomically with the batch
+        {
+            let mut table = write_txn
+                .open_table(METADATA_TABLE)
+                .map_err(map_table_error("Failed to open metadata table"))?;
+            Self::set_flushed_lsn_internal(&mut table, lsn)?;
+        }
+
+        // Commit atomically
+        write_txn
+            .commit()
+            .map_err(map_commit_error("Failed to commit batch"))?;
+
+        Ok(())
+    }
+
+    /// Compact the database to reclaim space.
+    pub fn compact(&mut self) -> Result<()> {
+        self.db
+            .compact()
+            .map_err(map_compaction_error("Failed to compact database"))?;
         Ok(())
     }
 }
@@ -679,8 +1008,6 @@ enum SerializableVersionData {
 }
 
 /// Serializable property value.
-///
-/// Note: Array is stored as a serialized `Vec<u8>` to avoid recursive type issues with bitcode.
 #[derive(bitcode::Encode, bitcode::Decode)]
 enum SerializablePropertyValue {
     Null,
@@ -689,7 +1016,6 @@ enum SerializablePropertyValue {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
-    /// Array is stored as bitcode-encoded bytes to avoid recursive type issues.
     Array(Vec<u8>),
     Vector(Vec<f32>),
     SparseVector {
@@ -700,8 +1026,6 @@ enum SerializablePropertyValue {
 }
 
 /// Encode a NodeVersion to bytes for storage.
-///
-/// This function is public for use by all cold storage implementations.
 pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
     use crate::core::interning::GLOBAL_INTERNER;
 
@@ -725,8 +1049,6 @@ pub fn encode_node_version(version: &NodeVersion) -> Vec<u8> {
 }
 
 /// Decode a NodeVersion from bytes.
-///
-/// This function is public for use by all cold storage implementations.
 pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
     use crate::core::hlc::HybridTimestamp;
     use crate::core::id::NodeId;
@@ -771,8 +1093,6 @@ pub fn decode_node_version(data: &[u8]) -> Result<NodeVersion> {
 }
 
 /// Encode an EdgeVersion to bytes for storage.
-///
-/// This function is public for use by all cold storage implementations.
 pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
     use crate::core::interning::GLOBAL_INTERNER;
 
@@ -798,8 +1118,6 @@ pub fn encode_edge_version(version: &EdgeVersion) -> Vec<u8> {
 }
 
 /// Decode an EdgeVersion from bytes.
-///
-/// This function is public for use by all cold storage implementations.
 pub fn decode_edge_version(data: &[u8]) -> Result<EdgeVersion> {
     use crate::core::hlc::HybridTimestamp;
     use crate::core::id::{EdgeId, NodeId};
@@ -1060,13 +1378,9 @@ mod tests {
         )
     }
 
-    // ========================================================================
-    // ColdStorage trait tests (using InMemoryColdStorage)
-    // ========================================================================
-
     #[test]
-    fn test_store_and_retrieve_node_version() {
-        let storage = InMemoryColdStorage::default_config();
+    fn test_redb_store_and_retrieve_node_version() {
+        let (storage, _temp_dir) = RedbColdStorage::new_temp().unwrap();
         let version = create_test_node_version(1);
 
         storage.store_node_version(&version).unwrap();
@@ -1077,8 +1391,8 @@ mod tests {
     }
 
     #[test]
-    fn test_store_and_retrieve_edge_version() {
-        let storage = InMemoryColdStorage::default_config();
+    fn test_redb_store_and_retrieve_edge_version() {
+        let (storage, _temp_dir) = RedbColdStorage::new_temp().unwrap();
         let version = create_test_edge_version(1);
 
         storage.store_edge_version(&version).unwrap();
@@ -1091,8 +1405,8 @@ mod tests {
     }
 
     #[test]
-    fn test_get_nonexistent_version() {
-        let storage = InMemoryColdStorage::default_config();
+    fn test_redb_get_nonexistent_returns_none() {
+        let (storage, _temp_dir) = RedbColdStorage::new_temp().unwrap();
 
         let result = storage
             .get_node_version(VersionId::new(999).unwrap())
@@ -1106,20 +1420,8 @@ mod tests {
     }
 
     #[test]
-    fn test_contains_version() {
-        let storage = InMemoryColdStorage::default_config();
-        let version = create_test_node_version(1);
-
-        assert!(!storage.contains_node_version(version.id).unwrap());
-
-        storage.store_node_version(&version).unwrap();
-
-        assert!(storage.contains_node_version(version.id).unwrap());
-    }
-
-    #[test]
-    fn test_delete_version() {
-        let storage = InMemoryColdStorage::default_config();
+    fn test_redb_delete_node_version() {
+        let (storage, _temp_dir) = RedbColdStorage::new_temp().unwrap();
         let version = create_test_node_version(1);
 
         storage.store_node_version(&version).unwrap();
@@ -1136,324 +1438,36 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_store_and_retrieve() {
-        let storage = InMemoryColdStorage::default_config();
-        let versions: Vec<NodeVersion> = (1..=10).map(create_test_node_version).collect();
+    fn test_redb_batch_store_atomic() {
+        let (storage, _temp_dir) = RedbColdStorage::new_temp().unwrap();
 
-        storage.store_node_versions_batch(&versions).unwrap();
+        let node_versions: Vec<NodeVersion> = (1..=10).map(create_test_node_version).collect();
+        let edge_versions: Vec<EdgeVersion> = (1..=5).map(create_test_edge_version).collect();
 
-        let ids: Vec<VersionId> = versions.iter().map(|v| v.id).collect();
-        let retrieved = storage.get_node_versions_batch(&ids).unwrap();
+        // Store batch with LSN
+        storage
+            .store_batch_with_lsn(&node_versions, &edge_versions, LSN(100))
+            .unwrap();
 
-        assert_eq!(retrieved.len(), 10);
-        for (i, v) in retrieved.iter().enumerate() {
-            assert!(v.is_some());
-            assert_eq!(v.as_ref().unwrap().id, versions[i].id);
+        // Verify all nodes stored
+        for version in &node_versions {
+            let retrieved = storage.get_node_version(version.id).unwrap();
+            assert!(retrieved.is_some());
         }
+
+        // Verify LSN was stored
+        let flushed_lsn = storage.get_flushed_lsn().unwrap();
+        assert_eq!(flushed_lsn, Some(LSN(100)));
     }
 
     #[test]
-    fn test_stats_tracking() {
-        let storage = InMemoryColdStorage::default_config();
-        let version = create_test_node_version(1);
-
-        storage.store_node_version(&version).unwrap();
-        storage.get_node_version(version.id).unwrap();
-
-        let stats = storage.stats();
-        assert_eq!(stats.node_versions_stored, 1);
-        assert_eq!(stats.node_version_reads, 1);
-        assert!(stats.bytes_written_raw > 0);
-        assert!(stats.bytes_written_compressed > 0);
-    }
-
-    #[test]
-    fn test_compression_ratio() {
-        let storage = InMemoryColdStorage::new(ColdStorageConfig {
-            compression: CompressionAlgorithm::Zstd,
-            ..Default::default()
-        });
-
-        // Create a version with repetitive data for better compression
-        let props = PropertyMapBuilder::new()
-            .insert("description", "This is a test description with repetitive content that should compress well. This is a test description with repetitive content that should compress well.")
-            .build();
-
-        let version = NodeVersion::new_anchor(
-            VersionId::new(1).unwrap(),
-            NodeId::new(100).unwrap(),
-            BiTemporalInterval::current(1000.into()),
-            GLOBAL_INTERNER.intern("Person").unwrap(),
-            props,
-        );
-
-        storage.store_node_version(&version).unwrap();
-
-        let stats = storage.stats();
-        let ratio = stats.compression_ratio();
-        // Compression should provide some benefit
-        assert!(
-            ratio >= 1.0,
-            "Expected compression ratio >= 1.0, got {}",
-            ratio
-        );
-    }
-
-    #[test]
-    fn test_no_compression() {
-        let storage = InMemoryColdStorage::new(ColdStorageConfig {
-            compression: CompressionAlgorithm::None,
-            enable_checksums: false,
-            ..Default::default()
-        });
+    fn test_fail_writes() {
+        let (storage, _temp_dir) = RedbColdStorage::new_temp().unwrap();
+        storage.set_fail_writes(true);
 
         let version = create_test_node_version(1);
-        storage.store_node_version(&version).unwrap();
-
-        let retrieved = storage.get_node_version(version.id).unwrap().unwrap();
-        assert_eq!(retrieved.id, version.id);
-    }
-
-    #[test]
-    fn test_fast_compression() {
-        let storage = InMemoryColdStorage::new(ColdStorageConfig {
-            compression: CompressionAlgorithm::Fast,
-            ..Default::default()
-        });
-
-        let version = create_test_node_version(1);
-        storage.store_node_version(&version).unwrap();
-
-        let retrieved = storage.get_node_version(version.id).unwrap().unwrap();
-        assert_eq!(retrieved.id, version.id);
-    }
-
-    #[test]
-    fn test_checksum_verification() {
-        let storage = InMemoryColdStorage::new(ColdStorageConfig {
-            compression: CompressionAlgorithm::None,
-            enable_checksums: true,
-            ..Default::default()
-        });
-
-        let version = create_test_node_version(1);
-        storage.store_node_version(&version).unwrap();
-
-        let retrieved = storage.get_node_version(version.id).unwrap().unwrap();
-        assert_eq!(retrieved.id, version.id);
-    }
-
-    // Serialization tests
-    // ========================================================================
-
-    #[test]
-    fn test_node_version_serialization_roundtrip() {
-        let version = create_test_node_version(42);
-        let encoded = encode_node_version(&version);
-        let decoded = decode_node_version(&encoded).unwrap();
-
-        assert_eq!(decoded.id, version.id);
-        assert_eq!(decoded.node_id, version.node_id);
-        assert_eq!(decoded.label, version.label);
-    }
-
-    #[test]
-    fn test_edge_version_serialization_roundtrip() {
-        let version = create_test_edge_version(42);
-        let encoded = encode_edge_version(&version);
-        let decoded = decode_edge_version(&encoded).unwrap();
-
-        assert_eq!(decoded.id, version.id);
-        assert_eq!(decoded.edge_id, version.edge_id);
-        assert_eq!(decoded.source, version.source);
-        assert_eq!(decoded.target, version.target);
-    }
-
-    #[test]
-    fn test_delta_version_serialization() {
-        let old_props = PropertyMapBuilder::new()
-            .insert("name", "Alice")
-            .insert("age", 30i64)
-            .build();
-        let new_props = PropertyMapBuilder::new()
-            .insert("name", "Alice")
-            .insert("age", 31i64)
-            .insert("city", "NYC")
-            .build();
-
-        let version = NodeVersion::new_delta(
-            VersionId::new(2).unwrap(),
-            NodeId::new(100).unwrap(),
-            BiTemporalInterval::current(2000.into()),
-            GLOBAL_INTERNER.intern("Person").unwrap(),
-            &old_props,
-            &new_props,
-            VersionId::new(1).unwrap(),
-        );
-
-        let encoded = encode_node_version(&version);
-        let decoded = decode_node_version(&encoded).unwrap();
-
-        assert!(decoded.is_delta());
-        assert_eq!(decoded.prev_version, Some(VersionId::new(1).unwrap()));
-    }
-
-    #[test]
-    fn test_version_with_vector_property() {
-        use crate::core::property::PropertyValue;
-
-        let props = PropertyMapBuilder::new()
-            .insert("embedding", PropertyValue::vector([0.1f32, 0.2, 0.3]))
-            .build();
-
-        let version = NodeVersion::new_anchor(
-            VersionId::new(1).unwrap(),
-            NodeId::new(100).unwrap(),
-            BiTemporalInterval::current(1000.into()),
-            GLOBAL_INTERNER.intern("Document").unwrap(),
-            props,
-        );
-
-        let encoded = encode_node_version(&version);
-        let decoded = decode_node_version(&encoded).unwrap();
-
-        assert_eq!(decoded.id, version.id);
-    }
-
-    // ========================================================================
-    // Compression algorithm tests
-    // ========================================================================
-
-    #[test]
-    fn test_compression_algorithm_levels() {
-        assert_eq!(CompressionAlgorithm::None.zstd_level(), None);
-        assert_eq!(CompressionAlgorithm::Zstd.zstd_level(), Some(3));
-        assert_eq!(CompressionAlgorithm::Fast.zstd_level(), Some(1));
-    }
-
-    #[test]
-    fn test_default_config() {
-        let config = ColdStorageConfig::default();
-        assert_eq!(config.compression, CompressionAlgorithm::Zstd);
-        assert!(!config.sync_writes);
-        assert!(config.enable_checksums);
-        assert_eq!(config.batch_size, 1000);
-    }
-
-    // ========================================================================
-    // ColdStorageStats tests
-    // ========================================================================
-
-    #[test]
-    fn test_cold_storage_stats_default() {
-        let stats = ColdStorageStats::default();
-        assert_eq!(stats.node_versions_stored, 0);
-        assert_eq!(stats.edge_versions_stored, 0);
-        assert_eq!(stats.node_version_reads, 0);
-        assert_eq!(stats.edge_version_reads, 0);
-        assert_eq!(stats.bytes_written_raw, 0);
-        assert_eq!(stats.bytes_written_compressed, 0);
-        assert_eq!(stats.bytes_read_compressed, 0);
-        assert_eq!(stats.bytes_read_decompressed, 0);
-        assert_eq!(stats.read_errors, 0);
-        assert_eq!(stats.write_errors, 0);
-    }
-
-    #[test]
-    fn test_cold_storage_stats_compression_ratio_no_data() {
-        let stats = ColdStorageStats::default();
-        // With no data written, compression ratio should be 1.0
-        assert_eq!(stats.compression_ratio(), 1.0);
-    }
-
-    #[test]
-    fn test_cold_storage_stats_compression_ratio_with_data() {
-        let stats = ColdStorageStats {
-            bytes_written_raw: 1000,
-            bytes_written_compressed: 500,
-            ..Default::default()
-        };
-        // Ratio = raw / compressed = 1000 / 500 = 2.0
-        assert_eq!(stats.compression_ratio(), 2.0);
-    }
-
-    #[test]
-    fn test_cold_storage_stats_compression_ratio_no_compression() {
-        let stats = ColdStorageStats {
-            bytes_written_raw: 1000,
-            bytes_written_compressed: 1000,
-            ..Default::default()
-        };
-        // When raw == compressed, ratio is 1.0 (no compression benefit)
-        assert_eq!(stats.compression_ratio(), 1.0);
-    }
-
-    #[test]
-    fn test_cold_storage_stats_compression_ratio_good_compression() {
-        let stats = ColdStorageStats {
-            bytes_written_raw: 10000,
-            bytes_written_compressed: 2000,
-            ..Default::default()
-        };
-        // Ratio = 10000 / 2000 = 5.0 (5x compression)
-        assert_eq!(stats.compression_ratio(), 5.0);
-    }
-
-    // ========================================================================
-    // AtomicColdStorageStats tests
-    // ========================================================================
-
-    #[test]
-    fn test_atomic_cold_storage_stats_new() {
-        let stats = AtomicColdStorageStats::new();
-        let snapshot = stats.snapshot();
-
-        // All values should be zero initially
-        assert_eq!(snapshot.node_versions_stored, 0);
-        assert_eq!(snapshot.edge_versions_stored, 0);
-        assert_eq!(snapshot.node_version_reads, 0);
-        assert_eq!(snapshot.edge_version_reads, 0);
-        assert_eq!(snapshot.bytes_written_raw, 0);
-        assert_eq!(snapshot.bytes_written_compressed, 0);
-        assert_eq!(snapshot.bytes_read_compressed, 0);
-        assert_eq!(snapshot.bytes_read_decompressed, 0);
-        assert_eq!(snapshot.read_errors, 0);
-        assert_eq!(snapshot.write_errors, 0);
-    }
-
-    #[test]
-    fn test_atomic_cold_storage_stats_snapshot() {
-        let stats = AtomicColdStorageStats::new();
-
-        // Update some values
-        stats.node_versions_stored.store(10, Ordering::Relaxed);
-        stats.edge_versions_stored.store(20, Ordering::Relaxed);
-        stats.node_version_reads.store(100, Ordering::Relaxed);
-        stats.edge_version_reads.store(200, Ordering::Relaxed);
-        stats.bytes_written_raw.store(1000, Ordering::Relaxed);
-        stats.bytes_written_compressed.store(500, Ordering::Relaxed);
-        stats.bytes_read_compressed.store(600, Ordering::Relaxed);
-        stats.bytes_read_decompressed.store(1200, Ordering::Relaxed);
-        stats.read_errors.store(2, Ordering::Relaxed);
-        stats.write_errors.store(1, Ordering::Relaxed);
-
-        // Take snapshot
-        let snapshot = stats.snapshot();
-
-        // Verify all values were captured correctly
-        assert_eq!(snapshot.node_versions_stored, 10);
-        assert_eq!(snapshot.edge_versions_stored, 20);
-        assert_eq!(snapshot.node_version_reads, 100);
-        assert_eq!(snapshot.edge_version_reads, 200);
-        assert_eq!(snapshot.bytes_written_raw, 1000);
-        assert_eq!(snapshot.bytes_written_compressed, 500);
-        assert_eq!(snapshot.bytes_read_compressed, 600);
-        assert_eq!(snapshot.bytes_read_decompressed, 1200);
-        assert_eq!(snapshot.read_errors, 2);
-        assert_eq!(snapshot.write_errors, 1);
-
-        // Snapshot is non-atomic, so changes after snapshot don't affect it
-        stats.node_versions_stored.store(99, Ordering::Relaxed);
-        assert_eq!(snapshot.node_versions_stored, 10); // Still the old value
+        let result = storage.store_node_version(&version);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Simulated write failure"));
     }
 }

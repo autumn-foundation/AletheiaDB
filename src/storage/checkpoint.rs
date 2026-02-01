@@ -45,7 +45,7 @@ use crate::core::GLOBAL_INTERNER;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
-use crate::storage::cold_storage::ColdStorage;
+use crate::storage::cold_storage::RedbColdStorage;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::{
@@ -481,7 +481,7 @@ impl CheckpointManager {
     pub fn recover_with_cold_storage(
         &mut self,
         wal: &ConcurrentWalSystem,
-        cold_storage: Option<&Arc<dyn ColdStorage>>,
+        cold_storage: Option<&Arc<RedbColdStorage>>,
     ) -> Result<RecoveryResult> {
         // Get flushed_lsn from cold storage if available
         let flushed_lsn = cold_storage.and_then(|cs| cs.get_flushed_lsn().ok().flatten());
@@ -3037,7 +3037,7 @@ mod tests {
 
     #[test]
     fn test_recovery_loads_cold_storage_first() -> Result<()> {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
 
         // Cold storage with flushed_lsn should be checked before WAL replay
         let temp_dir = TempDir::new().unwrap();
@@ -3051,7 +3051,7 @@ mod tests {
         // Create cold storage with a flushed_lsn
         let cold_storage = Arc::new(RedbColdStorage::new(
             cold_dir.join("cold.redb"),
-            RedbConfig::new(),
+            ColdStorageConfig::new(),
         )?);
 
         // Store some data with LSN tracking
@@ -3071,8 +3071,7 @@ mod tests {
         let mut manager = CheckpointManager::new(config)?;
 
         // Recovery should see the flushed_lsn
-        let cold: Arc<dyn ColdStorage> = cold_storage;
-        let result = manager.recover_with_cold_storage(&wal, Some(&cold))?;
+        let result = manager.recover_with_cold_storage(&wal, Some(&cold_storage))?;
 
         // Should have detected cold storage
         assert_eq!(result.flushed_lsn, Some(LSN(50)));
@@ -3083,7 +3082,7 @@ mod tests {
 
     #[test]
     fn test_recovery_replays_wal_from_flushed_lsn() -> Result<()> {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
 
         // When cold storage has higher flushed_lsn than checkpoint,
         // WAL replay should start from flushed_lsn + 1
@@ -3120,7 +3119,7 @@ mod tests {
         // Create cold storage with flushed_lsn at 100 (higher than checkpoint)
         let cold_storage = Arc::new(RedbColdStorage::new(
             cold_dir.join("cold.redb"),
-            RedbConfig::new(),
+            ColdStorageConfig::new(),
         )?);
 
         let node = crate::storage::version::NodeVersion::new_anchor(
@@ -3137,8 +3136,7 @@ mod tests {
             let config = CheckpointConfig::with_data_dir(&data_dir);
             let mut manager = CheckpointManager::new(config)?;
 
-            let cold: Arc<dyn ColdStorage> = cold_storage;
-            let result = manager.recover_with_cold_storage(&wal, Some(&cold))?;
+            let result = manager.recover_with_cold_storage(&wal, Some(&cold_storage))?;
 
             // Should use flushed_lsn as effective recovery point
             assert_eq!(result.checkpoint_lsn, Some(LSN(50)));
@@ -3155,7 +3153,7 @@ mod tests {
 
     #[test]
     fn test_recovery_with_no_wal_segments() -> Result<()> {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
 
         // Recovery with just cold storage data and no WAL
         let temp_dir = TempDir::new().unwrap();
@@ -3169,7 +3167,7 @@ mod tests {
         // Create cold storage with some data
         let cold_storage = Arc::new(RedbColdStorage::new(
             cold_dir.join("cold.redb"),
-            RedbConfig::new(),
+            ColdStorageConfig::new(),
         )?);
 
         let node = crate::storage::version::NodeVersion::new_anchor(
@@ -3184,8 +3182,7 @@ mod tests {
         let config = CheckpointConfig::with_data_dir(&data_dir);
         let mut manager = CheckpointManager::new(config)?;
 
-        let cold: Arc<dyn ColdStorage> = cold_storage;
-        let result = manager.recover_with_cold_storage(&wal, Some(&cold))?;
+        let result = manager.recover_with_cold_storage(&wal, Some(&cold_storage))?;
 
         // Should have no WAL entries replayed
         assert_eq!(result.wal_entries_replayed, 0);
@@ -3196,7 +3193,7 @@ mod tests {
 
     #[test]
     fn test_recovery_validates_lsn_consistency() -> Result<()> {
-        use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
+        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
 
         // flushed_lsn ahead of WAL should be detected as inconsistency
         let temp_dir = TempDir::new().unwrap();
@@ -3232,7 +3229,7 @@ mod tests {
         // Create cold storage with flushed_lsn = 1000 (way ahead of WAL)
         let cold_storage = Arc::new(RedbColdStorage::new(
             cold_dir.join("cold.redb"),
-            RedbConfig::new(),
+            ColdStorageConfig::new(),
         )?);
 
         let node = crate::storage::version::NodeVersion::new_anchor(
@@ -3247,8 +3244,7 @@ mod tests {
         let config = CheckpointConfig::with_data_dir(&data_dir);
         let mut manager = CheckpointManager::new(config)?;
 
-        let cold: Arc<dyn ColdStorage> = cold_storage;
-        let result = manager.recover_with_cold_storage(&wal, Some(&cold));
+        let result = manager.recover_with_cold_storage(&wal, Some(&cold_storage));
 
         // Should detect inconsistency
         assert!(result.is_err());

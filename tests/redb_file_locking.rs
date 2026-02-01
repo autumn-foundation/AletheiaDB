@@ -8,8 +8,8 @@
 use gallifreydb::GallifreyDB;
 use gallifreydb::PropertyMapBuilder;
 use gallifreydb::config::GallifreyDBConfig;
+use gallifreydb::storage::cold_storage::{ColdStorageConfig as RedbConfig, RedbColdStorage};
 use gallifreydb::storage::index_persistence::PersistenceConfig;
-use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
 use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -51,10 +51,8 @@ fn test_reopen_redb_after_shutdown_with_background_thread() {
 
         // Create Redb cold storage
         let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();
-        let tiered = Arc::new(TieredStorage::new(
-            TieredStorageConfig::default(),
-            Box::new(cold),
-        ));
+        // Removed Box::new wrapper for RedbColdStorage
+        let tiered = Arc::new(TieredStorage::new(TieredStorageConfig::default(), cold));
 
         // Wire up tiered storage to historical storage
         {

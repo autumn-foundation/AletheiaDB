@@ -19,7 +19,6 @@ pub mod historical;
 pub mod index_persistence;
 pub mod migration;
 pub mod persistence;
-pub mod redb_cold_storage;
 pub mod sharding;
 pub mod snapshot;
 pub mod tiered_storage;
@@ -32,8 +31,8 @@ pub use checkpoint::{
     CheckpointConfig as UnifiedCheckpointConfig, CheckpointManager, CheckpointStats,
 };
 pub use cold_storage::{
-    AtomicColdStorageStats, ColdStorage, ColdStorageConfig, ColdStorageStats, CompressionAlgorithm,
-    InMemoryColdStorage, decode_edge_version, decode_node_version, encode_edge_version,
+    AtomicColdStorageStats, ColdStorageConfig, ColdStorageStats, CompressionAlgorithm,
+    RedbColdStorage, RedbConfig, decode_edge_version, decode_node_version, encode_edge_version,
     encode_node_version,
 };
 pub use current::{CurrentStats, CurrentStorage, DEFAULT_MAX_VECTOR_PROPERTIES, VectorIndexInfo};
@@ -43,7 +42,6 @@ pub use migration::{
     MigrationStats,
 };
 pub use persistence::{Checkpoint, CheckpointConfig, PersistenceManager};
-pub use redb_cold_storage::{RedbColdStorage, RedbConfig};
 pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot, StorageSnapshot};
 pub use tiered_storage::{
     LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
