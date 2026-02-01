@@ -14,8 +14,9 @@ fn test_reproduce_config_gap() {
         .wal(WalConfigBuilder::new().wal_dir(wal_dir).build())
         .historical(
             HistoricalConfigBuilder::new()
-                .anchor_interval(5).unwrap() // Setting custom interval
-                .build()
+                .anchor_interval(5)
+                .unwrap() // Setting custom interval
+                .build(),
         )
         .persistence(PersistenceConfig {
             enabled: false,
@@ -32,13 +33,8 @@ fn test_reproduce_config_gap() {
 
     // Add 5 more versions (Total 6 versions)
     for i in 2..=6 {
-        db.write(|tx| {
-            tx.update_node(
-                node_id,
-                PropertyMapBuilder::new().insert("v", i).build(),
-            )
-        })
-        .unwrap();
+        db.write(|tx| tx.update_node(node_id, PropertyMapBuilder::new().insert("v", i).build()))
+            .unwrap();
     }
 
     // Verify stats
@@ -54,6 +50,9 @@ fn test_reproduce_config_gap() {
     // v6: Anchor (since anchor: 5 >= 5)
     // Total Anchors: 2
 
-    assert_eq!(stats.node_anchor_count, 2, "Should have 2 anchors with interval 5 (v1 and v6)");
+    assert_eq!(
+        stats.node_anchor_count, 2,
+        "Should have 2 anchors with interval 5 (v1 and v6)"
+    );
     assert_eq!(stats.node_delta_count, 4, "Should have 4 deltas");
 }
