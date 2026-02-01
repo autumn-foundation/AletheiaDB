@@ -1331,10 +1331,10 @@ impl HistoricalStorage {
     /// ```ignore
     /// use gallifreydb::storage::historical::HistoricalStorage;
     /// use gallifreydb::storage::tiered_storage::TieredStorage;
-    /// use gallifreydb::storage::cold_storage::FileColdStorage;
+    /// use gallifreydb::storage::redb_cold_storage::RedbColdStorage;
     ///
     /// let mut historical = HistoricalStorage::new();
-    /// let cold = FileColdStorage::with_default_config("data/cold")?;
+    /// let cold = RedbColdStorage::with_default_config("data/cold.redb")?;
     /// let tiered = TieredStorage::with_default_config(Box::new(cold));
     /// historical.set_tiered_storage(Arc::new(tiered));
     /// ```
