@@ -219,7 +219,10 @@ impl WriteTransaction {
         impl Drop for CommitTimer {
             fn drop(&mut self) {
                 let duration = self.0.elapsed().as_secs_f64();
-                crate::observe_histogram!("gallifreydb_transaction_commit_duration_seconds", duration);
+                crate::observe_histogram!(
+                    "gallifreydb_transaction_commit_duration_seconds",
+                    duration
+                );
             }
         }
 

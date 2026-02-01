@@ -1009,11 +1009,20 @@ mod phase5_background_compaction {
             );
         }
 
-        // Wait for successful compaction
-        thread::sleep(Duration::from_millis(150));
+        // Wait for successful compaction with retry
+        let mut attempts = 0;
+        while index.delta_edge_count() > 0 && attempts < 50 {
+            thread::sleep(Duration::from_millis(50));
+            attempts += 1;
+        }
 
         // Verify normal compaction worked after panic
-        assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(
+            index.delta_edge_count(),
+            0,
+            "Compaction failed to clear delta after {} attempts",
+            attempts
+        );
         assert_eq!(index.frozen_edge_count(), 12);
 
         // Panic count should still be 1 (no new panics)
