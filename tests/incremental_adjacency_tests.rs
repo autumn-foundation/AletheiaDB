@@ -852,8 +852,12 @@ mod phase5_background_compaction {
             );
         }
 
-        // Wait for background compaction
-        thread::sleep(Duration::from_millis(200));
+        // Wait for background compaction (poll)
+        let mut attempts = 0;
+        while index.delta_edge_count() > 0 && attempts < 50 {
+            thread::sleep(Duration::from_millis(50));
+            attempts += 1;
+        }
 
         // Delta should be cleared by background compaction
         assert_eq!(index.delta_edge_count(), 0);
@@ -902,7 +906,13 @@ mod phase5_background_compaction {
 
         // Resume
         scheduler.resume();
-        thread::sleep(Duration::from_millis(200));
+
+        // Wait for compaction (poll)
+        let mut attempts = 0;
+        while index.delta_edge_count() > 0 && attempts < 50 {
+            thread::sleep(Duration::from_millis(50));
+            attempts += 1;
+        }
 
         // Should now compact
         assert_eq!(index.delta_edge_count(), 0);
@@ -1009,8 +1019,12 @@ mod phase5_background_compaction {
             );
         }
 
-        // Wait for successful compaction
-        thread::sleep(Duration::from_millis(150));
+        // Wait for successful compaction (poll)
+        attempts = 0;
+        while index.delta_edge_count() > 0 && attempts < 50 {
+            thread::sleep(Duration::from_millis(50));
+            attempts += 1;
+        }
 
         // Verify normal compaction worked after panic
         assert_eq!(index.delta_edge_count(), 0);

@@ -3,6 +3,9 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Maximum recursion depth for JSON processing to prevent stack overflow.
+const MAX_JSON_RECURSION_DEPTH: usize = 100;
+
 pub fn interned_to_string(interned: crate::core::InternedString) -> String {
     GLOBAL_INTERNER
         .resolve(interned)
@@ -10,36 +13,58 @@ pub fn interned_to_string(interned: crate::core::InternedString) -> String {
         .unwrap_or_else(|| format!("<unknown:{}>", interned.as_u32()))
 }
 
-pub fn property_map_to_json(props: &PropertyMap) -> HashMap<String, serde_json::Value> {
+pub fn property_map_to_json(
+    props: &PropertyMap,
+) -> Result<HashMap<String, serde_json::Value>, String> {
     let mut result = HashMap::new();
     for (key, value) in props.iter() {
         let key_str = interned_to_string(*key);
-        result.insert(key_str, property_value_to_json(value));
+        result.insert(key_str, property_value_to_json(value)?);
     }
-    result
+    Ok(result)
 }
 
-pub fn property_value_to_json(value: &PropertyValue) -> serde_json::Value {
+pub fn property_value_to_json(value: &PropertyValue) -> Result<serde_json::Value, String> {
+    property_value_to_json_recursive(value, 0)
+}
+
+fn property_value_to_json_recursive(
+    value: &PropertyValue,
+    depth: usize,
+) -> Result<serde_json::Value, String> {
+    if depth >= MAX_JSON_RECURSION_DEPTH {
+        return Err(format!(
+            "Recursion limit exceeded (max {})",
+            MAX_JSON_RECURSION_DEPTH
+        ));
+    }
+
     match value {
-        PropertyValue::Null => serde_json::Value::Null,
-        PropertyValue::Bool(b) => serde_json::Value::Bool(*b),
-        PropertyValue::Int(i) => json!(*i),
-        PropertyValue::Float(f) => json!(*f),
-        PropertyValue::String(s) => serde_json::Value::String(s.to_string()),
+        PropertyValue::Null => Ok(serde_json::Value::Null),
+        PropertyValue::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+        PropertyValue::Int(i) => Ok(json!(*i)),
+        PropertyValue::Float(f) => Ok(json!(*f)),
+        PropertyValue::String(s) => Ok(serde_json::Value::String(s.to_string())),
         PropertyValue::Bytes(b) => {
             // Encode bytes as array of integers since base64 is not in http-server features
-            serde_json::Value::Array(b.iter().map(|byte| json!(*byte)).collect())
+            Ok(serde_json::Value::Array(
+                b.iter().map(|byte| json!(*byte)).collect(),
+            ))
         }
         PropertyValue::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(property_value_to_json).collect())
+            let items: Result<Vec<_>, String> = arr
+                .iter()
+                .map(|v| property_value_to_json_recursive(v, depth + 1))
+                .collect();
+            Ok(serde_json::Value::Array(items?))
         }
-        PropertyValue::Vector(v) => serde_json::Value::Array(v.iter().map(|f| json!(*f)).collect()),
-        PropertyValue::SparseVector(sv) => {
-            json!({
-                "indices": sv.indices(),
-                "values": sv.values()
-            })
-        }
+        PropertyValue::Vector(v) => Ok(serde_json::Value::Array(
+            v.iter().map(|f| json!(*f)).collect(),
+        )),
+        PropertyValue::SparseVector(sv) => Ok(json!({
+            "indices": sv.indices(),
+            "values": sv.values()
+        })),
     }
 }
 
@@ -55,6 +80,21 @@ pub fn json_to_property_map(
 }
 
 pub fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue, String> {
+    json_to_property_value_recursive(value, 0)
+}
+
+fn json_to_property_value_recursive(
+    value: &serde_json::Value,
+    depth: usize,
+) -> Result<PropertyValue, String> {
+    // Changed > to >= for strict limit adherence
+    if depth >= MAX_JSON_RECURSION_DEPTH {
+        return Err(format!(
+            "Recursion limit exceeded (max {})",
+            MAX_JSON_RECURSION_DEPTH
+        ));
+    }
+
     match value {
         serde_json::Value::Null => Ok(PropertyValue::Null),
         serde_json::Value::Bool(b) => Ok(PropertyValue::Bool(*b)),
@@ -83,12 +123,85 @@ pub fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue
                     return Ok(PropertyValue::Vector(Arc::from(floats)));
                 }
             }
-            let values: Result<Vec<PropertyValue>, String> =
-                arr.iter().map(json_to_property_value).collect();
+            let values: Result<Vec<PropertyValue>, String> = arr
+                .iter()
+                .map(|v| json_to_property_value_recursive(v, depth + 1))
+                .collect();
             Ok(PropertyValue::Array(Arc::new(values?)))
         }
         serde_json::Value::Object(_) => {
             Err("Nested objects are not supported as property values".to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_json_recursion_limit() {
+        // Create deeply nested JSON: [[[[...]]]]
+        let mut value = json!(1);
+        let depth = 200;
+        for _ in 0..depth {
+            value = json!([value]);
+        }
+
+        let result = json_to_property_value(&value);
+
+        match result {
+            Ok(_) => panic!("Recursion limit was not enforced!"),
+            Err(e) => assert!(
+                e.contains("Recursion limit exceeded"),
+                "Unexpected error: {}",
+                e
+            ),
+        }
+    }
+
+    #[test]
+    fn test_json_recursion_boundary() {
+        // Depth 99 should succeed (depth 0 is root, so 0..99 is 100 levels)
+        let mut value_99 = json!(1);
+
+        // Creating nesting level 99
+        for _ in 0..99 {
+            value_99 = json!([value_99]);
+        }
+        assert!(
+            json_to_property_value(&value_99).is_ok(),
+            "Depth 99 should pass"
+        );
+
+        // Creating nesting level 100
+        let mut value_100 = json!(1);
+        for _ in 0..100 {
+            value_100 = json!([value_100]);
+        }
+        let res = json_to_property_value(&value_100);
+        assert!(res.is_err(), "Depth 100 should fail");
+        assert!(res.unwrap_err().contains("Recursion limit exceeded"));
+    }
+
+    #[test]
+    fn test_property_value_to_json_recursion_limit() {
+        // Create deeply nested PropertyValue
+        let mut val = PropertyValue::Int(1);
+        let depth = 200;
+        for _ in 0..depth {
+            val = PropertyValue::Array(Arc::new(vec![val]));
+        }
+
+        let result = property_value_to_json(&val);
+        match result {
+            Ok(_) => panic!("Recursion limit was not enforced for serialization!"),
+            Err(e) => assert!(
+                e.contains("Recursion limit exceeded"),
+                "Unexpected error: {}",
+                e
+            ),
         }
     }
 }
