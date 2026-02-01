@@ -4,6 +4,7 @@
 
 use crate::core::graph::{Edge, Node};
 use crate::core::id::VersionId;
+use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
 use crate::utils::error::Result;
@@ -287,6 +288,8 @@ impl Iterator for QueryResults {
 pub struct QueryResult {
     /// Node IDs from the query results
     pub nodes: Vec<NodeId>,
+    /// Properties for the results (if full nodes were requested)
+    pub properties: Option<Vec<PropertyMap>>,
     /// Similarity scores for ranked results (e.g., vector search)
     pub scores: Option<Vec<f32>>,
     /// Paths for traversal results
@@ -301,6 +304,7 @@ impl QueryResult {
     pub fn new() -> Self {
         QueryResult {
             nodes: Vec::new(),
+            properties: None,
             scores: None,
             paths: None,
             versions: None,
@@ -312,10 +316,18 @@ impl QueryResult {
     pub fn with_nodes(nodes: Vec<NodeId>) -> Self {
         QueryResult {
             nodes,
+            properties: None,
             scores: None,
             paths: None,
             versions: None,
         }
+    }
+
+    /// Add properties to this result
+    #[must_use]
+    pub fn with_properties(mut self, properties: Vec<PropertyMap>) -> Self {
+        self.properties = Some(properties);
+        self
     }
 
     /// Add scores to this result
@@ -396,42 +408,106 @@ impl Default for QueryResult {
 
 impl std::fmt::Display for QueryResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "QueryResult {{")?;
-        writeln!(f, "  nodes: {} items", self.nodes.len())?;
+        if self.nodes.is_empty() {
+            return write!(f, "QueryResult {{ 0 items }}");
+        }
 
-        if let Some(scores) = &self.scores {
-            writeln!(f, "  scores: {} items", scores.len())?;
-            if !scores.is_empty() {
-                // Check if any value is not normal (NaN or Inf)
-                let has_abnormal = scores.iter().any(|s| !s.is_finite());
-                if !has_abnormal {
-                    let min = scores.iter().copied().fold(f32::INFINITY, f32::min);
-                    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    writeln!(f, "    range: [{:.3}, {:.3}]", min, max)?;
+        let mut table = comfy_table::Table::new();
+        table.load_preset(comfy_table::presets::UTF8_FULL);
+        table.apply_modifier(comfy_table::modifiers::UTF8_ROUND_CORNERS);
+
+        // Dynamic headers
+        let mut headers = vec!["Node ID"];
+        if self.scores.is_some() {
+            headers.push("Score");
+        }
+        if self.properties.is_some() {
+            headers.push("Properties");
+        }
+        if self.paths.is_some() {
+            headers.push("Path");
+        }
+        if self.versions.is_some() {
+            headers.push("Version");
+        }
+        table.set_header(headers);
+
+        // Data rows
+        for (i, node_id) in self.nodes.iter().enumerate() {
+            let mut row = comfy_table::Row::new();
+
+            // Node ID (Cyan)
+            row.add_cell(comfy_table::Cell::new(node_id).fg(comfy_table::Color::Cyan));
+
+            // Score
+            if let Some(scores) = &self.scores {
+                if let Some(score) = scores.get(i) {
+                    let mut cell = comfy_table::Cell::new(format!("{:.4}", score));
+                    if *score > 0.8 {
+                        cell = cell.fg(comfy_table::Color::Green);
+                    } else if *score < 0.5 {
+                        cell = cell.fg(comfy_table::Color::Yellow);
+                    }
+                    row.add_cell(cell);
+                } else {
+                    row.add_cell(comfy_table::Cell::new("-"));
                 }
             }
-        } else {
-            writeln!(f, "  scores: None")?;
-        }
 
-        if let Some(paths) = &self.paths {
-            writeln!(f, "  paths: {} items", paths.len())?;
-            if !paths.is_empty() {
-                let total_hops: usize = paths.iter().map(|p| p.len()).sum();
-                let avg_hops = total_hops as f32 / paths.len() as f32;
-                writeln!(f, "    avg path length: {:.1}", avg_hops)?;
+            // Properties
+            if let Some(props) = &self.properties {
+                if let Some(map) = props.get(i) {
+                    // Format map compactly
+                    let mut parts: Vec<String> = map
+                        .iter()
+                        .take(5) // Limit to 5 properties
+                        .map(|(k, v)| {
+                            // resolve key
+                            let k_str = crate::core::interning::GLOBAL_INTERNER
+                                .resolve(*k)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| format!("key:{}", k.as_u32()));
+                            format!("{}: {}", k_str, v)
+                        })
+                        .collect();
+
+                    if map.len() > 5 {
+                        parts.push(format!("... (+{})", map.len() - 5));
+                    }
+
+                    let content = if parts.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        format!("{{ {} }}", parts.join(", "))
+                    };
+                    row.add_cell(comfy_table::Cell::new(content));
+                } else {
+                    row.add_cell(comfy_table::Cell::new("{}"));
+                }
             }
-        } else {
-            writeln!(f, "  paths: None")?;
+
+            // Paths
+            if let Some(paths) = &self.paths {
+                if let Some(path) = paths.get(i) {
+                    row.add_cell(comfy_table::Cell::new(format!("len: {}", path.len())));
+                } else {
+                    row.add_cell(comfy_table::Cell::new("-"));
+                }
+            }
+
+            // Versions
+            if let Some(versions) = &self.versions {
+                if let Some(ver) = versions.get(i) {
+                    row.add_cell(comfy_table::Cell::new(format!("{:?}", ver)));
+                } else {
+                    row.add_cell(comfy_table::Cell::new("-"));
+                }
+            }
+
+            table.add_row(row);
         }
 
-        if let Some(versions) = &self.versions {
-            writeln!(f, "  versions: {} items", versions.len())?;
-        } else {
-            writeln!(f, "  versions: None")?;
-        }
-
-        write!(f, "}}")
+        write!(f, "{}", table)
     }
 }
 
@@ -467,9 +543,15 @@ impl QueryResults {
         let has_any_scores = rows.iter().any(|r| r.score.is_some());
         let has_any_paths = rows.iter().any(|r| r.path.is_some());
         let has_any_versions = rows.iter().any(|r| r.timestamp.is_some());
+        let has_any_nodes = rows.iter().any(|r| r.entity.as_node().is_some());
 
         // Second pass: extract data with padding
         let mut nodes = Vec::new();
+        let mut properties = if has_any_nodes {
+            Some(Vec::new())
+        } else {
+            None
+        };
         let mut scores = if has_any_scores {
             Some(Vec::new())
         } else {
@@ -490,6 +572,15 @@ impl QueryResults {
             // Extract node ID
             if let Some(node_id) = row.entity.node_id() {
                 nodes.push(node_id);
+                // Extract properties if we are collecting them
+                if let Some(ref mut props) = properties {
+                    let map = row
+                        .entity
+                        .as_node()
+                        .map(|n| n.properties.clone())
+                        .unwrap_or_default();
+                    props.push(map);
+                }
             }
 
             // Extract or pad scores
@@ -538,6 +629,7 @@ impl QueryResults {
 
         Ok(QueryResult {
             nodes,
+            properties,
             scores,
             paths,
             versions,
@@ -1049,10 +1141,13 @@ mod tests {
         let result = QueryResult::with_nodes(nodes).with_scores(scores);
 
         let display = format!("{}", result);
-        assert!(display.contains("QueryResult"));
-        assert!(display.contains("nodes: 2 items"));
-        assert!(display.contains("scores: 2 items"));
-        assert!(display.contains("range:"));
+        // Check for headers
+        assert!(display.contains("Node ID"));
+        assert!(display.contains("Score"));
+
+        // Check for data
+        assert!(display.contains("0.9000"));
+        assert!(display.contains("0.8000"));
     }
 
     #[test]
@@ -1061,10 +1156,7 @@ mod tests {
         let display = format!("{}", result);
 
         assert!(display.contains("QueryResult"));
-        assert!(display.contains("nodes: 0 items"));
-        assert!(display.contains("scores: None"));
-        assert!(display.contains("paths: None"));
-        assert!(display.contains("versions: None"));
+        assert!(display.contains("0 items"));
     }
 
     #[test]
@@ -1083,8 +1175,9 @@ mod tests {
         let result = QueryResult::with_nodes(nodes).with_paths(paths);
 
         let display = format!("{}", result);
-        assert!(display.contains("paths: 2 items"));
-        assert!(display.contains("avg path length:"));
+        assert!(display.contains("Path")); // Header
+        assert!(display.contains("len: 2")); // Path 1 length
+        assert!(display.contains("len: 3")); // Path 2 length
     }
 
     #[test]
@@ -1300,11 +1393,9 @@ mod tests {
         let result = QueryResult::with_nodes(nodes).with_scores(scores);
 
         let display = format!("{}", result);
-        assert!(display.contains("QueryResult"));
-        assert!(display.contains("nodes: 2 items"));
-        assert!(display.contains("scores: 2 items"));
-        // Should NOT contain "range:" because min/max are not finite
-        assert!(!display.contains("range:"));
+        assert!(display.contains("Score"));
+        assert!(display.contains("NaN"));
+        assert!(display.contains("0.8000"));
     }
 
     #[test]
@@ -1314,9 +1405,8 @@ mod tests {
         let result = QueryResult::with_nodes(nodes).with_scores(scores);
 
         let display = format!("{}", result);
-        assert!(display.contains("scores: 1 items"));
-        // Should NOT contain "range:" because max is infinite
-        assert!(!display.contains("range:"));
+        assert!(display.contains("Score"));
+        assert!(display.contains("inf"));
     }
 
     #[test]
