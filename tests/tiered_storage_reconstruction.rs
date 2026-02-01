@@ -35,7 +35,7 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
     // Create cold storage and tiered storage
     let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();
     let tiered_config = TieredStorageConfig::default();
-    let tiered = Arc::new(TieredStorage::new(tiered_config, Box::new(cold)));
+    let tiered = Arc::new(TieredStorage::new(tiered_config, Arc::new(cold)));
 
     // Create historical storage with tiered storage enabled
     let mut historical = HistoricalStorage::new();
@@ -215,7 +215,7 @@ fn test_reconstruct_properties_for_version_in_cold_storage() {
     let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();
     let tiered = Arc::new(TieredStorage::new(
         TieredStorageConfig::default(),
-        Box::new(cold),
+        Arc::new(cold),
     ));
 
     let mut historical = HistoricalStorage::new();

@@ -53,7 +53,7 @@ fn test_reopen_redb_after_shutdown_with_background_thread() {
         let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();
         let tiered = Arc::new(TieredStorage::new(
             TieredStorageConfig::default(),
-            Box::new(cold),
+            Arc::new(cold),
         ));
 
         // Wire up tiered storage to historical storage
