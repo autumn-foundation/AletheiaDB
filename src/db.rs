@@ -817,9 +817,49 @@ impl GallifreyDB {
         self.current.get_outgoing_edges(node_id)
     }
 
+    /// Get outgoing edges from a node as an iterator (zero-allocation).
+    ///
+    /// This avoids allocating a `Vec` for the edges.
+    pub fn get_outgoing_edges_iter(
+        &self,
+        node_id: NodeId,
+    ) -> crate::storage::current::OutgoingEdgesIter<'_> {
+        self.current.get_outgoing_edges_iter(node_id)
+    }
+
+    /// Get outgoing adjacency entries as an iterator (zero-allocation, zero-lookup).
+    ///
+    /// This iterator yields `AdjacencyEntry` structs which contain the neighbor node ID,
+    /// edge ID, and label. This avoids the need for subsequent `get_edge_target()` lookups.
+    pub fn get_outgoing_entries_iter(
+        &self,
+        node_id: NodeId,
+    ) -> crate::storage::current::OutgoingEntriesIter<'_> {
+        self.current.get_outgoing_entries_iter(node_id)
+    }
+
     /// Get incoming edges to a node (current state).
     pub fn get_incoming_edges(&self, node_id: NodeId) -> Vec<EdgeId> {
         self.current.get_incoming_edges(node_id)
+    }
+
+    /// Get incoming edges to a node as an iterator (zero-allocation).
+    pub fn get_incoming_edges_iter(
+        &self,
+        node_id: NodeId,
+    ) -> crate::storage::current::IncomingEdgesIter<'_> {
+        self.current.get_incoming_edges_iter(node_id)
+    }
+
+    /// Get incoming adjacency entries as an iterator (zero-allocation, zero-lookup).
+    ///
+    /// This iterator yields `AdjacencyEntry` structs. Note that for incoming edges,
+    /// the `target` field of `AdjacencyEntry` represents the **source** node (neighbor).
+    pub fn get_incoming_entries_iter(
+        &self,
+        node_id: NodeId,
+    ) -> crate::storage::current::IncomingEntriesIter<'_> {
+        self.current.get_incoming_entries_iter(node_id)
     }
 
     /// Get outgoing edges with a specific label (current state).

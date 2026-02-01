@@ -118,11 +118,10 @@ impl<'a> SemanticPathfinder<'a> {
             }
 
             // Get outgoing edges
-            let edges = self.db.get_outgoing_edges(node);
-
-            for edge_id in edges {
+            // Optimization: Use zero-allocation iterator and avoid DashMap lookup for target
+            for entry in self.db.get_outgoing_entries_iter(node) {
                 // For "current" pathfinding, we assume current edges are valid.
-                let target = self.db.get_edge_target(edge_id)?;
+                let target = entry.target;
 
                 // Calculate semantic cost of moving to target
                 let semantic_cost = self.calculate_semantic_cost(target, query_embedding)?;
@@ -191,9 +190,10 @@ impl<'a> SemanticPathfinder<'a> {
 
             // Get POTENTIAL outgoing edges from current storage
             // Note: This misses deleted edges!
-            let potential_edges = self.db.get_outgoing_edges(node);
+            // Optimization: Use zero-allocation iterator
+            for entry in self.db.get_outgoing_entries_iter(node) {
+                let edge_id = entry.edge_id;
 
-            for edge_id in potential_edges {
                 // Check if edge existed at time T
                 if let Ok(edge) = self.db.get_edge_at_time(edge_id, time, time) {
                     let target = edge.target;

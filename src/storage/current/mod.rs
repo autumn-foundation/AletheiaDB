@@ -447,7 +447,7 @@ impl CurrentStorage {
         let label_interned = GLOBAL_INTERNER.intern(label)?;
 
         let node = Node::new(node_id, label_interned, properties.clone(), version_id);
-        self.indexes.insert_node(node.clone());
+        self.indexes.insert_node(node);
 
         // Try to index vector property if enabled
         if let Err(e) = self.try_index_vector(node_id, &properties) {
@@ -886,6 +886,33 @@ impl CurrentStorage {
     #[inline]
     pub fn get_incoming_edges_iter(&self, target: NodeId) -> IncomingEdgesIter<'_> {
         IncomingEdgesIter::new(self.indexes.get_incoming(target))
+    }
+
+    /// Get outgoing adjacency entries as an iterator (zero-allocation, zero-lookup).
+    ///
+    /// This iterator yields `AdjacencyEntry` structs which contain the neighbor node ID,
+    /// edge ID, and label. This avoids the need for subsequent `get_edge_target()` lookups
+    /// when traversing the graph, saving one O(1) hash map lookup per edge.
+    ///
+    /// # Performance
+    ///
+    /// - **Zero-allocation**: No `Vec` or intermediate structures allocated
+    /// - **Zero-lookup**: Neighbor ID is available directly (no DashMap access)
+    /// - **Fastest traversal**: This is the most efficient way to traverse the graph
+    #[inline]
+    pub fn get_outgoing_entries_iter(&self, source: NodeId) -> OutgoingEntriesIter<'_> {
+        OutgoingEntriesIter::new(self.indexes.get_outgoing(source))
+    }
+
+    /// Get incoming adjacency entries as an iterator (zero-allocation, zero-lookup).
+    ///
+    /// This iterator yields `AdjacencyEntry` structs. Note that for incoming edges,
+    /// the `target` field of `AdjacencyEntry` represents the **source** node (neighbor).
+    ///
+    /// See [`Self::get_outgoing_entries_iter`] for performance details.
+    #[inline]
+    pub fn get_incoming_entries_iter(&self, target: NodeId) -> IncomingEntriesIter<'_> {
+        IncomingEntriesIter::new(self.indexes.get_incoming(target))
     }
 
     /// Get outgoing edges with a specific label as an iterator.

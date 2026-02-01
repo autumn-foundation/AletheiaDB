@@ -10,6 +10,57 @@ use gallifreydb::core::id::{EdgeId, NodeId, VersionId};
 use gallifreydb::core::interning::GLOBAL_INTERNER;
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::index::current::CurrentIndexes;
+use gallifreydb::storage::current::CurrentStorage;
+
+fn bench_outgoing_traversal(c: &mut Criterion) {
+    let storage = CurrentStorage::new();
+    let props = PropertyMapBuilder::new().build();
+
+    // Create source node
+    let source = storage.create_node("Source", props.clone()).unwrap();
+
+    // Create 1000 edges
+    for _ in 0..1000 {
+        let target = storage.create_node("Target", props.clone()).unwrap();
+        storage
+            .create_edge(source, target, "KNOWS", props.clone())
+            .unwrap();
+    }
+
+    storage.compact_adjacency(); // Ensure optimized structure
+
+    let mut group = c.benchmark_group("traversal");
+
+    group.bench_function("vec_allocation_lookup", |b| {
+        b.iter(|| {
+            let edges = storage.get_outgoing_edges(source);
+            let mut sum = 0;
+            for edge_id in edges {
+                // This simulates what SemanticPathfinder was doing:
+                // 1. Get Vec<EdgeId>
+                // 2. Lookup target for each edge (DashMap access)
+                let target = storage.get_edge_target(edge_id).unwrap();
+                sum += target.as_u64();
+            }
+            black_box(sum)
+        })
+    });
+
+    group.bench_function("zero_copy_iter", |b| {
+        b.iter(|| {
+            let mut sum = 0;
+            // This is the new optimized path:
+            // 1. Iterator (no Vec)
+            // 2. Direct access to target (no DashMap lookup)
+            for entry in storage.get_outgoing_entries_iter(source) {
+                sum += entry.target.as_u64();
+            }
+            black_box(sum)
+        })
+    });
+
+    group.finish();
+}
 
 fn bench_iter_edges(c: &mut Criterion) {
     let indexes = CurrentIndexes::new();
@@ -42,5 +93,5 @@ fn bench_iter_edges(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_iter_edges);
+criterion_group!(benches, bench_iter_edges, bench_outgoing_traversal);
 criterion_main!(benches);

@@ -510,12 +510,12 @@ impl FrozenAdjacencyView {
 /// excluding tombstones. The guard holds references to the frozen CSR and delta
 /// buffer, ensuring they remain valid during iteration.
 pub struct MergedAdjacencyGuard<'a> {
-    node: NodeId,
-    frozen: Guard<Arc<AdjacencyIndex>>,
-    delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
-    tombstones: &'a DashMap<EdgeId, Tombstone>,
+    pub(crate) node: NodeId,
+    pub(crate) frozen: Guard<Arc<AdjacencyIndex>>,
+    pub(crate) delta: Option<Ref<'a, NodeId, SmallVec<[AdjacencyEntry; 8]>>>,
+    pub(crate) tombstones: &'a DashMap<EdgeId, Tombstone>,
     /// Fast path flag: if true, skip per-edge tombstone checks (delta & tombstones are empty)
-    fast_path: bool,
+    pub(crate) fast_path: bool,
 }
 
 impl<'a> MergedAdjacencyGuard<'a> {
