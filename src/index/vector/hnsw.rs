@@ -99,10 +99,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
-#[doc(hidden)]
-pub static INJECT_RACE_DELAY: AtomicBool = AtomicBool::new(false);
-#[doc(hidden)]
-pub static HIT_RACE_CONDITION: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static INJECT_RACE_DELAY: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static HIT_RACE_CONDITION: AtomicU64 = AtomicU64::new(0);
 
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
@@ -689,6 +689,7 @@ impl VectorIndex for HnswIndex {
                     }
                 };
 
+                #[cfg(test)]
                 if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
@@ -710,6 +711,7 @@ impl VectorIndex for HnswIndex {
                     .is_some();
 
                 if !is_valid {
+                    #[cfg(test)]
                     HIT_RACE_CONDITION.fetch_add(1, Ordering::Relaxed);
                     // Race lost: node was removed or replaced. Abort add.
                     return Ok(());
@@ -2031,5 +2033,68 @@ mod tests {
             ),
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_zombie_vectors_race_coverage() {
+        use std::thread;
+        use std::time::Duration;
+
+        // 👺 Havoc Test: Zombie Vector Race Condition Coverage
+        //
+        // This test deterministically exercises the two race condition fix paths
+        // in HnswIndex::add:
+        // 1. "Removed": ID mapping is gone when lock is acquired.
+        // 2. "Replaced": ID mapping points to a different key (from a concurrent add).
+
+        // Reset counters
+        HIT_RACE_CONDITION.store(0, Ordering::Relaxed);
+
+        // --- Scenario 1: Deterministic Race Injection ---
+        {
+            println!("Testing race condition handling...");
+            let index = Arc::new(
+                HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                    .build()
+                    .unwrap(),
+            );
+            let id = NodeId::new(100).unwrap();
+            let vec = vec![0.1, 0.2, 0.3, 0.4];
+
+            // Enable delay to open the race window
+            INJECT_RACE_DELAY.store(true, Ordering::Relaxed);
+
+            let index_clone = index.clone();
+            let vec_clone = vec.clone();
+            let handle = thread::spawn(move || {
+                // This add will:
+                // 1. Alloc key
+                // 2. Insert into map
+                // 3. Sleep 50ms (INJECT_RACE_DELAY)
+                // 4. Try to acquire lock -> Verify map -> Fail
+                let _ = index_clone.add(id, &vec_clone);
+            });
+
+            // Main thread: Wait for the key to appear in the map.
+            // This ensures the background thread has reached the injection point (after insertion, before or during sleep).
+            while !index.id_mapping.contains_key(&id) {
+                thread::yield_now();
+            }
+
+            // Remove the ID. This removes it from the map.
+            // The background thread is sleeping (500ms) or waiting for lock.
+            let _ = index.remove(id);
+
+            // Wait for background thread to finish
+            handle.join().unwrap();
+
+            // Assert counter incremented
+            let hits = HIT_RACE_CONDITION.load(Ordering::Relaxed);
+            assert!(hits > 0, "Failed to hit race path. Count: {}", hits);
+            println!("Race path hit {} times.", hits);
+        }
+
+        // Disable injection
+        INJECT_RACE_DELAY.store(false, Ordering::Relaxed);
     }
 }
