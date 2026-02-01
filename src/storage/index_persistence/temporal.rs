@@ -452,6 +452,17 @@ pub fn save_temporal_index(data: &TemporalIndexData, path: &Path) -> Result<()> 
 
 /// Load temporal index data from disk and validate CRC32 checksum.
 pub fn load_temporal_index(path: &Path) -> Result<TemporalIndexData> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > super::MAX_TEMPORAL_INDEX_FILE_SIZE {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Temporal index file size {} exceeds limit {}",
+                metadata.len(),
+                super::MAX_TEMPORAL_INDEX_FILE_SIZE
+            ),
+        });
+    }
+
     let bytes = fs::read(path)?;
 
     // Check minimum size (must have at least 4 bytes for CRC)

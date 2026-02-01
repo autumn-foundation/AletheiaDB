@@ -90,6 +90,9 @@ pub mod vector;
 /// Background persistence worker thread.
 pub mod worker;
 
+#[cfg(test)]
+mod dos_tests;
+
 pub use api::{
     IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus,
 };
@@ -132,6 +135,62 @@ pub const MAX_STRING_LENGTH: usize = 1_048_576; // 1MB
 /// 100K dimensions aligns with the documented maximum.
 /// At 4 bytes per f32, this is 400KB per vector.
 pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
+
+/// Maximum size of a graph index file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading graph indexes.
+/// Default: 4GB in production, 10MB in tests.
+pub const MAX_GRAPH_INDEX_FILE_SIZE: u64 = if cfg!(test) {
+    10 * 1024 * 1024
+} else {
+    4 * 1024 * 1024 * 1024
+};
+
+/// Maximum size of a vector index metadata/mappings file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading vector index metadata.
+/// Default: 1GB in production, 5MB in tests.
+pub const MAX_VECTOR_INDEX_FILE_SIZE: u64 = if cfg!(test) {
+    5 * 1024 * 1024
+} else {
+    1024 * 1024 * 1024
+};
+
+/// Maximum size of a temporal index file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading temporal indexes.
+/// Default: 2GB in production, 10MB in tests.
+pub const MAX_TEMPORAL_INDEX_FILE_SIZE: u64 = if cfg!(test) {
+    10 * 1024 * 1024
+} else {
+    2 * 1024 * 1024 * 1024
+};
+
+/// Maximum size of a string interner file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading the string interner.
+/// Default: 256MB in production, 5MB in tests.
+pub const MAX_STRING_INTERNER_FILE_SIZE: u64 = if cfg!(test) {
+    5 * 1024 * 1024
+} else {
+    256 * 1024 * 1024
+};
+
+/// Maximum size of a manifest file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading the manifest.
+/// Default: 1MB in production, 100KB in tests.
+pub const MAX_MANIFEST_FILE_SIZE: u64 = if cfg!(test) { 100 * 1024 } else { 1024 * 1024 };
+
+/// Maximum allowed file size for memory-mapped files (Sanity Check).
+///
+/// Prevents attempting to map ridiculously large or sparse files that could cause issues.
+/// Default: 100GB in production, 100MB in tests.
+pub const MAX_MMAP_FILE_SIZE: u64 = if cfg!(test) {
+    100 * 1024 * 1024
+} else {
+    100 * 1024 * 1024 * 1024
+};
 
 /// Atomically write data to a file using write-temp-then-rename pattern.
 ///

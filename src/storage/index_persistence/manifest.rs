@@ -69,6 +69,17 @@ pub fn save_manifest(manifest: &IndexManifest, path: &Path) -> Result<()> {
 
 /// Load manifest from disk and validate CRC32 checksum.
 pub fn load_manifest(path: &Path) -> Result<IndexManifest> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > super::MAX_MANIFEST_FILE_SIZE {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "Manifest file size {} exceeds limit {}",
+                metadata.len(),
+                super::MAX_MANIFEST_FILE_SIZE
+            ),
+        });
+    }
+
     let bytes = fs::read(path)?;
 
     // Check minimum size (must have at least 4 bytes for CRC)
