@@ -13,3 +13,11 @@
 - `EntityHistory` and `VersionDiff` primitives made this trivial to implement.
 - This creates a bridge between raw bi-temporal data and LLM prompt generation (context injection).
 - Timestamp formatting and string interning were the main integration points.
+
+## Associative Retrieval (Fishing)
+**Concept:** A search algorithm that "casts" a vector query to find similar nodes, then "spreads a net" to their neighbors, scoring results by a combination of vector similarity, graph proximity, and temporal freshness.
+**Fate:** Merged (Experimental)
+**Lesson:**
+- Combining Vector + Graph + Time creates a rich "associative memory" feel.
+- `VersionMetadata` allows for easy "freshness" boosting.
+- Handling multiple vector indexes in a generic way requires some heuristics (currently picks the first enabled one).
