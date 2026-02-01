@@ -753,6 +753,44 @@ mod phase4_compaction {
             assert!(edges.contains(&EdgeId::new(1).unwrap()));
         }
     }
+
+    // Test compaction with concurrent inserts (data loss prevention)
+    #[test]
+    fn test_compact_concurrent_insert_no_data_loss() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let index = Arc::new(IncrementalAdjacencyIndex::new());
+        let knows = GLOBAL_INTERNER.intern("KNOWS").unwrap();
+
+        // Insert initial edges
+        for i in 0..1000 {
+            index.insert(
+                NodeId::new(0).unwrap(),
+                AdjacencyEntry::new(NodeId::new(i).unwrap(), EdgeId::new(i).unwrap(), knows),
+            );
+        }
+
+        // Spawn concurrent writer during compaction
+        let index_clone = Arc::clone(&index);
+        let handle = thread::spawn(move || {
+            for i in 1000..2000 {
+                index_clone.insert(
+                    NodeId::new(0).unwrap(),
+                    AdjacencyEntry::new(NodeId::new(i).unwrap(), EdgeId::new(i).unwrap(), knows),
+                );
+            }
+        });
+
+        // Run compaction while writer is running
+        index.compact();
+
+        handle.join().unwrap();
+
+        // Verify NO edges lost (either in frozen or delta)
+        let total = index.frozen_edge_count() + index.delta_edge_count();
+        assert_eq!(total, 2000);
+    }
 }
 
 // ============================================================================
