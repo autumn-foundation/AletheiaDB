@@ -329,7 +329,10 @@ mod tests {
 
         // Should error on overflow when wallclock doesn't advance
         let result = ts.send(1000);
-        assert!(matches!(result, Err(TemporalError::LogicalCounterOverflow { .. })));
+        assert!(matches!(
+            result,
+            Err(TemporalError::LogicalCounterOverflow { .. })
+        ));
 
         // Should NOT error if wallclock advances (logical resets)
         let result = ts.send(1001);
@@ -373,7 +376,10 @@ mod tests {
 
         // Overflow on local branch
         let result = local.receive(msg, 1000);
-        assert!(matches!(result, Err(TemporalError::LogicalCounterOverflow { .. })));
+        assert!(matches!(
+            result,
+            Err(TemporalError::LogicalCounterOverflow { .. })
+        ));
     }
 
     #[test]
