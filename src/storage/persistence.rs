@@ -1171,14 +1171,15 @@ mod tests {
 
     #[test]
     fn test_hnsw_config_serialization_roundtrip() -> Result<()> {
-        use crate::index::vector::{DistanceMetric, HnswConfig};
+        use crate::index::vector::{DistanceMetric, HnswConfig, Quantization};
         use std::io::Cursor;
 
         let config = HnswConfig::new(384, DistanceMetric::Cosine)
             .with_m(32)
             .with_ef_construction(200)
             .with_ef_search(100)
-            .with_capacity(5000);
+            .with_capacity(5000)
+            .with_quantization(Quantization::I8); // Set non-default quantization
 
         // Serialize
         let mut buffer = Vec::new();
@@ -1194,6 +1195,7 @@ mod tests {
         assert_eq!(loaded.ef_construction, 200);
         assert_eq!(loaded.ef_search, 100);
         assert_eq!(loaded.capacity, 5000);
+        assert_eq!(loaded.quantization, Quantization::I8, "Quantization should be preserved");
 
         Ok(())
     }

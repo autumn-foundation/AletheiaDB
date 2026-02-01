@@ -265,6 +265,8 @@ impl HnswConfig {
         writer.write_all(&(self.ef_construction as u64).to_le_bytes())?;
         writer.write_all(&(self.ef_search as u64).to_le_bytes())?;
         writer.write_all(&(self.capacity as u64).to_le_bytes())?;
+        // Append quantization (backward compatible: appended at end)
+        writer.write_all(&[self.quantization.to_u8()])?;
         Ok(())
     }
 
@@ -291,6 +293,16 @@ impl HnswConfig {
         reader.read_exact(&mut buf_u64)?;
         let capacity = u64::from_le_bytes(buf_u64) as usize;
 
+        // Try to read quantization byte.
+        // Use read() instead of read_exact() to handle legacy data (backward compatibility).
+        // If EOF, fallback to default (F32).
+        let quantization = match reader.read(&mut buf_u8) {
+            Ok(1) => Quantization::from_u8(buf_u8[0])?,
+            Ok(0) => Quantization::default(), // Legacy format (EOF)
+            Ok(_) => unreachable!("Buffer size is 1"),
+            Err(e) => return Err(e.into()),
+        };
+
         Ok(HnswConfig {
             dimensions,
             metric,
@@ -298,6 +310,7 @@ impl HnswConfig {
             ef_construction,
             ef_search,
             capacity,
+            quantization,
             ..Default::default()
         })
     }
@@ -1388,6 +1401,27 @@ mod tests {
     }
 
     #[test]
+    fn test_hnsw_config_serialization_quantization() -> Result<()> {
+        use std::io::Cursor;
+
+        // Create config with non-default quantization
+        let config = HnswConfig::new(384, DistanceMetric::Cosine)
+            .with_quantization(Quantization::I8);
+
+        // Serialize
+        let mut buffer = Vec::new();
+        config.serialize_into(&mut buffer)?;
+
+        // Deserialize
+        let mut cursor = Cursor::new(buffer);
+        let loaded = HnswConfig::deserialize_from(&mut cursor)?;
+
+        assert_eq!(loaded.quantization, Quantization::I8, "Quantization should be preserved");
+
+        Ok(())
+    }
+
+    #[test]
     fn test_hnsw_remove() -> Result<()> {
         let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
 
@@ -2001,6 +2035,32 @@ mod tests {
                 e
             ),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_hnsw_config_legacy_compatibility() -> Result<()> {
+        use std::io::Cursor;
+
+        // Construct legacy buffer (without quantization byte)
+        // Format: dimensions(8) + metric(1) + m(8) + ef_c(8) + ef_s(8) + capacity(8) = 41 bytes
+        let mut buffer = Vec::new();
+        buffer.write_all(&384u64.to_le_bytes())?; // dimensions
+        buffer.write_all(&[0])?; // metric (Cosine)
+        buffer.write_all(&16u64.to_le_bytes())?; // m
+        buffer.write_all(&128u64.to_le_bytes())?; // ef_construction
+        buffer.write_all(&64u64.to_le_bytes())?; // ef_search
+        buffer.write_all(&1000u64.to_le_bytes())?; // capacity
+        // NO quantization byte
+
+        let mut cursor = Cursor::new(buffer);
+        let loaded = HnswConfig::deserialize_from(&mut cursor)?;
+
+        // Should load successfully and default to F32
+        assert_eq!(loaded.dimensions, 384);
+        assert_eq!(loaded.metric, DistanceMetric::Cosine);
+        assert_eq!(loaded.quantization, Quantization::F32, "Legacy config should default to F32");
+
         Ok(())
     }
 }
