@@ -150,10 +150,8 @@ impl<'a> SemanticPathfinder<'a> {
     /// Find a path at a specific point in time.
     ///
     /// Similar to `find_path`, but only considers nodes and edges valid at `time`.
-    ///
-    /// # Limitations
-    /// Currently only considers edges that exist in the *current* storage but checks
-    /// their validity at `time`. Does not find edges that were deleted.
+    /// Uses the temporal adjacency index to find edges that existed at the specified
+    /// time, even if they have been deleted from current storage.
     pub fn find_path_at_time(
         &self,
         start: NodeId,
@@ -189,12 +187,12 @@ impl<'a> SemanticPathfinder<'a> {
                 }
             }
 
-            // Get POTENTIAL outgoing edges from current storage
-            // Note: This misses deleted edges!
-            let potential_edges = self.db.get_outgoing_edges(node);
+            // Get outgoing edges at the specified time using temporal adjacency index
+            // This includes edges that have been deleted from current storage
+            let temporal_edges = self.db.get_outgoing_edges_at_time(node, time, time);
 
-            for edge_id in potential_edges {
-                // Check if edge existed at time T
+            for edge_id in temporal_edges {
+                // Get edge details at the specified time
                 if let Ok(edge) = self.db.get_edge_at_time(edge_id, time, time) {
                     let target = edge.target;
 
@@ -415,14 +413,15 @@ mod tests {
             .unwrap();
         let _t1 = t_delete;
 
-        // Query at t0 AFTER deletion: Path should NOT exist due to limitation
+        // Query at t0 AFTER deletion: Path should NOT exist without temporal adjacency index
         // (Deleted edges are removed from current storage adjacency)
+        // NOTE: With temporal adjacency index enabled, this WOULD find the path
         let path_t0_after_delete = pathfinder
             .find_path_at_time(start, end, &query, t0)
             .unwrap();
         assert!(
             path_t0_after_delete.is_none(),
-            "Should be None due to current storage limitation"
+            "Should be None without temporal adjacency index (edges deleted from current storage)"
         );
 
         // Test "Future Path" scenario: Path exists now but didn't in past

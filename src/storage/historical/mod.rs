@@ -1413,6 +1413,64 @@ impl HistoricalStorage {
         self.temporal_adjacency_index = Some(index);
     }
 
+    /// Get outgoing edges from a node at a specific point in time.
+    ///
+    /// This method uses the temporal adjacency index to efficiently find all
+    /// edges that were valid at the specified time, including edges that have
+    /// been deleted in current storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The source node ID
+    /// * `valid_time` - The valid time to query
+    /// * `tx_time` - The transaction time to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of edge IDs that were valid at the specified time. Returns an
+    /// empty vector if no temporal adjacency index is configured.
+    pub fn get_outgoing_edges_at_time(
+        &self,
+        source: NodeId,
+        valid_time: Timestamp,
+        tx_time: Timestamp,
+    ) -> Vec<EdgeId> {
+        if let Some(ref index) = self.temporal_adjacency_index {
+            index.get_outgoing_at_time(source, valid_time, tx_time)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get incoming edges to a node at a specific point in time.
+    ///
+    /// This method uses the temporal adjacency index to efficiently find all
+    /// edges that were valid at the specified time, including edges that have
+    /// been deleted in current storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The target node ID
+    /// * `valid_time` - The valid time to query
+    /// * `tx_time` - The transaction time to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of edge IDs that were valid at the specified time. Returns an
+    /// empty vector if no temporal adjacency index is configured.
+    pub fn get_incoming_edges_at_time(
+        &self,
+        target: NodeId,
+        valid_time: Timestamp,
+        tx_time: Timestamp,
+    ) -> Vec<EdgeId> {
+        if let Some(ref index) = self.temporal_adjacency_index {
+            index.get_incoming_at_time(target, valid_time, tx_time)
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Get a node version from any tier (hot or cold).
     ///
     /// This method first checks hot storage, then falls back to cold storage
