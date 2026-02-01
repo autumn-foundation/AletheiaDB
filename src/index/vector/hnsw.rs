@@ -96,7 +96,15 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
+
+#[doc(hidden)]
+pub static INJECT_RACE_DELAY: AtomicBool = AtomicBool::new(false);
+#[doc(hidden)]
+pub static HIT_RACE_CONDITION_REPLACED: AtomicU64 = AtomicU64::new(0);
+#[doc(hidden)]
+pub static HIT_RACE_CONDITION_REMOVED: AtomicU64 = AtomicU64::new(0);
 
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
@@ -688,6 +696,10 @@ impl VectorIndex for HnswIndex {
                 // Occupied branch (which holds Map Write Lock -> waits for Index Lock).
                 let map_guard = self.id_mapping.get(&id);
 
+                if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
                 // Insert into usearch index (auto-expand capacity if needed)
                 let index = self.inner.write();
 
@@ -696,10 +708,12 @@ impl VectorIndex for HnswIndex {
                 // we should abort to avoid creating a zombie vector (one that exists in index but not in maps).
                 if let Some(current_key) = map_guard {
                     if *current_key != key {
+                        HIT_RACE_CONDITION_REPLACED.fetch_add(1, Ordering::Relaxed);
                         // Replaced by another thread (it won the race). Abort our stale add.
                         return Ok(());
                     }
                 } else {
+                    HIT_RACE_CONDITION_REMOVED.fetch_add(1, Ordering::Relaxed);
                     // Removed by another thread (it won the race). Abort our stale add.
                     return Ok(());
                 }

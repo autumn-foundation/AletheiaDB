@@ -1,8 +1,12 @@
+use gallifreydb::index::vector::hnsw::{
+    INJECT_RACE_DELAY, HIT_RACE_CONDITION_REMOVED, HIT_RACE_CONDITION_REPLACED
+};
 use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
 use gallifreydb::index::VectorIndex;
 use gallifreydb::core::id::NodeId;
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::sync::atomic::Ordering;
 
 #[test]
 fn test_zombie_vectors_race() {
@@ -13,9 +17,12 @@ fn test_zombie_vectors_race() {
 
     let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
 
+    // Enable race condition injection to ensure coverage
+    INJECT_RACE_DELAY.store(true, Ordering::Relaxed);
+
     // High contention to trigger the race
     let num_threads = 8;
-    let iterations = 500;
+    let iterations = 100; // Lower iterations since each has a 10ms delay
 
     println!("Spawning {} threads for {} iterations each...", num_threads, iterations);
 
@@ -46,6 +53,9 @@ fn test_zombie_vectors_race() {
         h.join().unwrap();
     }
 
+    // Disable race injection
+    INJECT_RACE_DELAY.store(false, Ordering::Relaxed);
+
     // Final cleanup to ensure map is definitively empty
     let _ = index.remove(target_id);
 
@@ -60,5 +70,12 @@ fn test_zombie_vectors_race() {
         println!("Boring. No zombies found.");
     }
 
+    let removed_hits = HIT_RACE_CONDITION_REMOVED.load(Ordering::Relaxed);
+    let replaced_hits = HIT_RACE_CONDITION_REPLACED.load(Ordering::Relaxed);
+    println!("Race condition hits: Removed={}, Replaced={}", removed_hits, replaced_hits);
+
     assert_eq!(zombie_count, 0, "Race condition detected: {} zombie vectors found in index (Memory Leak)", zombie_count);
+
+    // Verify that we actually exercised the fix logic
+    assert!(removed_hits > 0 || replaced_hits > 0, "Fix logic was not exercised by the test!");
 }
