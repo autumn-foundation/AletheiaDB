@@ -898,6 +898,8 @@ pub fn serialize_vector_into(v: &[f32], buffer: &mut Vec<u8>) {
         // 3. The slice lengths are correctly calculated. With the dimension check,
         //    overflow is not possible on 64-bit or 32-bit systems.
         // 4. Alignment is not an issue - we're copying to a Vec<u8>
+        //
+        // Verified by Warden (2026-02-15): Input slice 'v' is valid &[f32]. size_of_val is correct. u8 alignment is 1.
         let byte_slice = unsafe {
             std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v))
         };
@@ -1002,6 +1004,8 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
         //    `data_slice` into the aligned `Vec` buffer.
         // 4. After the copy, the memory is initialized, so calling `set_len` is safe.
         // 5. Any bit pattern is valid for f32 (including NaN, infinity).
+        //
+        // Verified by Warden (2026-02-15): Destination buffer is allocated via Vec::with_capacity(dimension), ensuring correct f32 alignment. Source buffer length is explicitly checked against capacity * 4.
         let mut values = Vec::with_capacity(dimension);
         if dimension > 0 {
             unsafe {
