@@ -1010,20 +1010,22 @@ mod phase5_background_compaction {
         }
 
         // Wait for successful compaction (poll instead of fixed sleep for CI reliability)
+        // Note: checking delta_edge_count() == 0 is not enough because delta is cleared *before*
+        // frozen is updated. We must wait until frozen edges appear to be sure compaction finished.
         let mut attempts = 0;
-        while index.delta_edge_count() > 0 && attempts < 100 {
+        while index.frozen_edge_count() != 12 && attempts < 100 {
             thread::sleep(Duration::from_millis(50));
             attempts += 1;
         }
 
         // Verify normal compaction worked after panic
         assert_eq!(
-            index.delta_edge_count(),
-            0,
-            "Compaction failed to run after {} attempts",
+            index.frozen_edge_count(),
+            12,
+            "Compaction failed to update frozen edges after {} attempts",
             attempts
         );
-        assert_eq!(index.frozen_edge_count(), 12);
+        assert_eq!(index.delta_edge_count(), 0);
 
         // Panic count should still be 1 (no new panics)
         assert_eq!(scheduler.panic_count(), 1);
