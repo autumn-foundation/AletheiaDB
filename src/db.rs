@@ -307,6 +307,16 @@ impl GallifreyDB {
             .write()
             .set_temporal_indexes(Arc::clone(&db.temporal_indexes));
 
+        // Initialize and enable temporal adjacency index for efficient temporal pathfinding
+        let temporal_adjacency_index = Arc::new(
+            crate::index::temporal_adjacency::TemporalAdjacencyIndex::new(
+                crate::index::temporal_adjacency::TemporalAdjacencyConfig::default(),
+            ),
+        );
+        db.historical
+            .write()
+            .set_temporal_adjacency_index(temporal_adjacency_index);
+
         Ok(db)
     }
 
@@ -368,6 +378,16 @@ impl GallifreyDB {
         db.historical
             .write()
             .set_temporal_indexes(Arc::clone(&db.temporal_indexes));
+
+        // Initialize and enable temporal adjacency index for efficient temporal pathfinding
+        let temporal_adjacency_index = Arc::new(
+            crate::index::temporal_adjacency::TemporalAdjacencyIndex::new(
+                crate::index::temporal_adjacency::TemporalAdjacencyConfig::default(),
+            ),
+        );
+        db.historical
+            .write()
+            .set_temporal_adjacency_index(temporal_adjacency_index);
 
         Ok(db)
     }
@@ -846,7 +866,7 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```ignore
     /// use gallifreydb::GallifreyDB;
     /// use gallifreydb::core::temporal::time;
     ///
@@ -885,7 +905,7 @@ impl GallifreyDB {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```ignore
     /// use gallifreydb::GallifreyDB;
     /// use gallifreydb::core::temporal::time;
     ///

@@ -413,16 +413,20 @@ mod tests {
             .unwrap();
         let _t1 = t_delete;
 
-        // Query at t0 AFTER deletion: Path should NOT exist without temporal adjacency index
-        // (Deleted edges are removed from current storage adjacency)
-        // NOTE: With temporal adjacency index enabled, this WOULD find the path
+        // Query at t0 AFTER deletion: With temporal adjacency index (enabled by default),
+        // the path SHOULD be found even though edges are deleted from current storage
         let path_t0_after_delete = pathfinder
             .find_path_at_time(start, end, &query, t0)
             .unwrap();
         assert!(
-            path_t0_after_delete.is_none(),
-            "Should be None without temporal adjacency index (edges deleted from current storage)"
+            path_t0_after_delete.is_some(),
+            "Temporal adjacency index (enabled by default) should find path through deleted edges"
         );
+        let path = path_t0_after_delete.unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0], start);
+        assert_eq!(path[1], middle);
+        assert_eq!(path[2], end);
 
         // Test "Future Path" scenario: Path exists now but didn't in past
 
@@ -451,19 +455,18 @@ mod tests {
             .unwrap();
         assert!(path_t2.is_some(), "Path should exist at t2");
 
-        // Path through NewMiddle did NOT exist at t0
-        // (And we know path through Middle is effectively invisible due to deletion)
-        // But specifically, NewMiddle edges shouldn't be valid at t0
-        // find_path_at_time iterates current edges (which include NewMiddle edges)
-        // but filters them by `is_visible_at(t0)`.
-        // NewMiddle edges are valid from t2. t0 < t2. So they should NOT be visible.
-
+        // Query at t0 again: Should find the ORIGINAL path through middle
+        // (not the new path through new_middle which was created at t2)
+        // With temporal adjacency index, deleted edges are still accessible
+        // when querying at times before they were deleted.
         let path_t0_check = pathfinder
             .find_path_at_time(start, end, &query, t0)
             .unwrap();
         assert!(
-            path_t0_check.is_none(),
-            "New path should not be visible at t0"
+            path_t0_check.is_some(),
+            "Should find original path at t0 (through middle, not new_middle)"
         );
+        // Verify it's the original middle node, not new_middle
+        assert_eq!(path_t0_check.as_ref().unwrap()[1], middle);
     }
 }
