@@ -408,8 +408,9 @@ impl PropertyDelta {
             }
         }
 
-        // Convert HashMap to PropertyMap using FromIterator
-        result.into_iter().collect()
+        // Optimization: Use internal constructor to reuse the HashMap
+        // This avoids creating a new HashMap via FromIterator
+        PropertyMap::from_inner_map(result)
     }
 
     /// Returns true if this delta has no changes.

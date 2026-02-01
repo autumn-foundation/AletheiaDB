@@ -1269,6 +1269,34 @@ impl PropertyMap {
         }
     }
 
+    /// Create a PropertyMap directly from a HashMap, avoiding reallocation.
+    ///
+    /// This is an internal helper for efficient construction when we already
+    /// have a HashMap (e.g., from PropertyDelta application).
+    ///
+    /// # Performance
+    ///
+    /// This avoids the overhead of `FromIterator` which would create a *new*
+    /// HashMap and re-insert all elements. Instead, we just iterate once
+    /// to calculate the serialized size (required for `cached_size` invariant).
+    pub(crate) fn from_inner_map(map: HashMap<PropertyKey, PropertyValue>) -> Self {
+        let mut size: usize = 4; // Count field
+        for (key, value) in &map {
+            // Need key size for serialization
+            // We use with_str to avoid Arc cloning overhead
+            let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
+            let key_size = 4 + key_len;
+            let val_size = value.serialized_size();
+
+            size = size.saturating_add(key_size).saturating_add(val_size);
+        }
+
+        PropertyMap {
+            inner: Arc::new(map),
+            cached_size: size,
+        }
+    }
+
     /// Get a property value by key.
     ///
     /// The key is automatically interned before lookup for efficient comparison.
