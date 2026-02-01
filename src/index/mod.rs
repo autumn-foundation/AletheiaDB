@@ -10,6 +10,7 @@ pub mod adjacency;
 pub mod current;
 pub mod incremental_adjacency;
 pub mod temporal;
+pub mod temporal_adjacency;
 pub mod vector;
 
 // Re-export commonly used types
@@ -20,5 +21,8 @@ pub use incremental_adjacency::{
     Tombstone,
 };
 pub use temporal::TemporalIndexes;
+pub use temporal_adjacency::{
+    TemporalAdjacencyConfig, TemporalAdjacencyEntry, TemporalAdjacencyIndex,
+};
 pub use vector::{DistanceMetric, VectorIndex};
 pub use vector::{HnswIndex, HnswIndexBuilder};

@@ -275,6 +275,11 @@ pub struct HistoricalStorage {
     /// The temporal indexes are maintained externally by the database and shared
     /// with HistoricalStorage for query optimization.
     temporal_indexes: Option<Arc<crate::index::temporal::TemporalIndexes>>,
+    /// Temporal adjacency index for fast temporal graph traversal.
+    ///
+    /// When available, pathfinding queries can efficiently find edges that existed
+    /// at specific points in time, including edges that have been deleted.
+    temporal_adjacency_index: Option<Arc<crate::index::temporal_adjacency::TemporalAdjacencyIndex>>,
 }
 
 impl HistoricalStorage {
@@ -385,6 +390,7 @@ impl HistoricalStorage {
             pre_edge_anchor_hook: None,
             tiered_storage: None,
             temporal_indexes: None,
+            temporal_adjacency_index: None,
         }
     }
 
@@ -833,6 +839,19 @@ impl HistoricalStorage {
                     );
                 }
             }
+
+            // Update temporal adjacency index to reflect closed valid time
+            if let Some(ref adj_index) = self.temporal_adjacency_index {
+                let new_temporal = *prev.temporal();
+                if old_temporal.valid_time().end() != new_temporal.valid_time().end() {
+                    adj_index.close_edge_valid_time(
+                        edge_id,
+                        source,
+                        target,
+                        new_temporal.valid_time().end(),
+                    );
+                }
+            }
         }
 
         // Check if anchor before storing (for notifications and caching)
@@ -880,6 +899,22 @@ impl HistoricalStorage {
                     edge_id,
                     timestamp,
                 },
+            );
+        }
+
+        // Update temporal adjacency index if configured
+        // Insert after all operations complete so temporal intervals are finalized
+        // Skip tombstones - they represent deletions and shouldn't appear in traversal queries
+        if !is_tombstone && let Some(ref adj_index) = self.temporal_adjacency_index {
+            let _ = adj_index.insert_edge(
+                edge_id,
+                source,
+                target,
+                label,
+                temporal.valid_time().start(),
+                temporal.valid_time().end(),
+                temporal.transaction_time().start(),
+                temporal.transaction_time().end(),
             );
         }
 
@@ -1362,6 +1397,20 @@ impl HistoricalStorage {
     /// temporal indexes between the database and historical storage.
     pub fn set_temporal_indexes(&mut self, indexes: Arc<crate::index::temporal::TemporalIndexes>) {
         self.temporal_indexes = Some(indexes);
+    }
+
+    /// Set the temporal adjacency index for this storage.
+    ///
+    /// When the temporal adjacency index is set, it will be automatically updated
+    /// when edges are added or modified, enabling efficient temporal pathfinding
+    /// queries that can find paths through deleted edges.
+    ///
+    /// This is typically called during database initialization.
+    pub fn set_temporal_adjacency_index(
+        &mut self,
+        index: Arc<crate::index::temporal_adjacency::TemporalAdjacencyIndex>,
+    ) {
+        self.temporal_adjacency_index = Some(index);
     }
 
     /// Get a node version from any tier (hot or cold).
