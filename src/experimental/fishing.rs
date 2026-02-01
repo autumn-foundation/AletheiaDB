@@ -14,8 +14,8 @@
 
 use crate::GallifreyDB;
 use crate::core::id::NodeId;
-use crate::utils::Result;
 use crate::core::temporal::time;
+use crate::utils::{Error, Result};
 use std::collections::HashMap;
 
 /// Configuration for a fishing trip.
@@ -32,6 +32,8 @@ pub struct FishingTrip {
     pub graph_weight: f32,
     /// Weight given to freshness/recency (0.0 to 1.0).
     pub freshness_weight: f32,
+    /// Optional edge labels to follow during graph expansion. If None, follows all edges.
+    pub edge_labels: Option<Vec<String>>,
 }
 
 impl Default for FishingTrip {
@@ -42,6 +44,7 @@ impl Default for FishingTrip {
             vector_weight: 1.0,
             graph_weight: 0.5,
             freshness_weight: 0.1,
+            edge_labels: None,
         }
     }
 }
@@ -50,9 +53,23 @@ impl Default for FishingTrip {
 #[derive(Debug, Clone)]
 pub enum Bait {
     /// Start with an existing node in the graph.
-    Node(NodeId),
+    /// Optionally specify which vector property to use for similarity search.
+    /// If None, it will attempt to use the first available vector index or rely on default behavior.
+    Node {
+        /// The Node ID to start fishing from.
+        id: NodeId,
+        /// Optional vector property to use for similarity search.
+        property: Option<String>,
+    },
     /// Start with a raw embedding vector.
-    Vector(Vec<f32>),
+    /// Optionally specify the target property name.
+    /// If None, it will use the first available vector index.
+    Vector {
+        /// The raw vector embedding to start fishing from.
+        vector: Vec<f32>,
+        /// Optional vector property to target.
+        property: Option<String>,
+    },
 }
 
 /// A result from the fishing algorithm.
@@ -79,30 +96,42 @@ impl<'a> FishingRod<'a> {
 
     /// Cast the line and retrieve related nodes.
     pub fn cast(&self, bait: Bait, config: FishingTrip) -> Result<Vec<Catch>> {
+        if config.depth > 1 {
+            return Err(Error::not_implemented(
+                "Multi-hop traversal (depth > 1)",
+                "Not yet implemented in FishingRod",
+            ));
+        }
+
         // Step 1: Cast the Line (Vector Search)
         let school = match bait {
-            Bait::Node(node_id) => {
-                // If the node exists and has a vector index enabled, search similar.
-                // For now, we assume if vector index is enabled, we search.
-                // We'll try to find *any* vector index.
-                // Since we don't know which property has the index, we might need to iterate.
-                // But `find_similar` works if there is a default or we can try.
-                // Actually `find_similar` in db.rs checks all vector indexes?
-                // No, `find_similar` uses `find_similar_in` internally or iterates?
-                // Looking at `db.rs`, `find_similar` seems to pick *a* property or fail?
-                // Let's rely on `find_similar`.
-                self.db.find_similar(node_id, config.limit)?
-            }
-            Bait::Vector(ref embedding) => {
-                // We need to know which property to search.
-                // Ideally `Bait` should specify property, but for "magic" we can try to guess or search all.
-                // For this MVP, let's look for the first enabled vector index.
-                let indexes = self.db.list_vector_indexes();
-                if let Some(idx_info) = indexes.first() {
-                    self.db.search_vectors_in(&idx_info.property_name, embedding, config.limit)?
+            Bait::Node { id, property } => {
+                if let Some(prop) = property {
+                    self.db.find_similar_in(&prop, id, config.limit)?
                 } else {
-                    return Ok(vec![]); // No vector indexes, no fish.
+                    // Fallback to finding similar across any index (default behavior)
+                    self.db.find_similar(id, config.limit)?
                 }
+            }
+            Bait::Vector { vector, property } => {
+                let property_name = if let Some(p) = property {
+                    p
+                } else {
+                    // Auto-detect index
+                    let indexes = self.db.list_vector_indexes();
+                    if let Some(idx_info) = indexes.first() {
+                        idx_info.property_name.clone()
+                    } else {
+                        return Err(crate::utils::error::Error::Vector(
+                            crate::utils::error::VectorError::IndexError(
+                                "No vector indexes configured. Call enable_vector_index() first."
+                                    .to_string(),
+                            ),
+                        ));
+                    }
+                };
+                self.db
+                    .search_vectors_in(&property_name, &vector, config.limit)?
             }
         };
 
@@ -117,12 +146,21 @@ impl<'a> FishingRod<'a> {
         }
 
         // Step 2: Spread the Net (Graph Traversal)
-        // If we want neighbors of the vector results
         if config.depth > 0 {
             let mut neighbors: Vec<(NodeId, NodeId)> = Vec::new(); // (neighbor, source)
 
             for (source_node, _) in school.iter() {
-                let edges = self.db.get_outgoing_edges(*source_node);
+                let edges = if let Some(ref labels) = config.edge_labels {
+                    let mut filtered_edges = Vec::new();
+                    for label in labels {
+                        filtered_edges
+                            .extend(self.db.get_outgoing_edges_with_label(*source_node, label));
+                    }
+                    filtered_edges
+                } else {
+                    self.db.get_outgoing_edges(*source_node)
+                };
+
                 for edge_id in edges {
                     if let Ok(target) = self.db.get_edge_target(edge_id) {
                         neighbors.push((target, *source_node));
@@ -136,7 +174,8 @@ impl<'a> FishingRod<'a> {
                 let new_score = current_score + config.graph_weight;
                 candidate_scores.insert(target, new_score);
 
-                provenance.entry(target)
+                provenance
+                    .entry(target)
                     .and_modify(|p| *p += &format!("\nLinked from Node {}", source))
                     .or_insert_with(|| format!("Linked from Node {}", source));
             }
@@ -151,6 +190,13 @@ impl<'a> FishingRod<'a> {
             let all_candidates: Vec<NodeId> = candidate_scores.keys().cloned().collect();
 
             for node_id in all_candidates {
+                // Not collapsing if to keep it simple and compatible with potentially older rust versions
+                // or just to be explicit. But clippy complained, so let's try to satisfy it without let_chains
+                // if they are experimental (as per memory), but `if let && let` is stable?
+                // Memory says: "The project targets stable Rust and does not support experimental features like let_chains (if let ... && ...). Use nested if statements or Option::is_some_and for complex conditionals."
+                // So I CANNOT collapse it using `if let ... && let ...`.
+                // I will suppress the lint.
+                #[allow(clippy::collapsible_if)]
                 if let Ok(node) = self.db.get_node(node_id) {
                     if let Some(ts) = node.metadata.commit_timestamp {
                         let age_micros = now_micros.saturating_sub(ts.wallclock());
@@ -168,7 +214,8 @@ impl<'a> FishingRod<'a> {
         }
 
         // Step 4: Format Results
-        let mut catches: Vec<Catch> = candidate_scores.into_iter()
+        let mut catches: Vec<Catch> = candidate_scores
+            .into_iter()
             .map(|(node_id, score)| Catch {
                 node_id,
                 score,
@@ -177,7 +224,12 @@ impl<'a> FishingRod<'a> {
             .collect();
 
         // Sort by score descending
-        catches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        // SAFETY: partial_cmp only returns None for NaN, which we handle with unwrap_or
+        catches.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Limit
         catches.truncate(config.limit);
@@ -189,8 +241,9 @@ impl<'a> FishingRod<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::property::PropertyMapBuilder;
-    use crate::index::vector::{HnswConfig, DistanceMetric};
+    use crate::HnswConfig;
+    use crate::PropertyMapBuilder;
+    use crate::index::vector::DistanceMetric;
 
     #[test]
     fn test_fishing_workflow() {
@@ -204,37 +257,40 @@ mod tests {
         // Node 1: "The Bait" (we'll use its vector)
         let props1 = PropertyMapBuilder::new()
             .insert("name", "Fish A")
-            .insert_vector("embedding", &vec![1.0, 0.0])
+            .insert_vector("embedding", &[1.0, 0.0])
             .build();
         let _n1 = db.create_node("Fish", props1).unwrap();
 
         // Node 2: "The Catch" (Similar vector)
         let props2 = PropertyMapBuilder::new()
             .insert("name", "Fish B")
-            .insert_vector("embedding", &vec![0.9, 0.1])
+            .insert_vector("embedding", &[0.9, 0.1])
             .build();
         let n2 = db.create_node("Fish", props2).unwrap();
 
         // Node 3: "The Neighbor" (Linked from Fish B)
-        let props3 = PropertyMapBuilder::new()
-            .insert("name", "Coral")
-            .build(); // No vector needed for graph traversal catch
+        let props3 = PropertyMapBuilder::new().insert("name", "Coral").build(); // No vector needed for graph traversal catch
         let n3 = db.create_node("Coral", props3).unwrap();
 
         // Link N2 -> N3
-        db.create_edge(n2, n3, "HIDES_IN", PropertyMapBuilder::new().build()).unwrap();
+        db.create_edge(n2, n3, "HIDES_IN", PropertyMapBuilder::new().build())
+            .unwrap();
 
         // Go fishing!
         let rod = FishingRod::new(&db);
 
         // Fish with a vector similar to N1/N2
-        let bait = Bait::Vector(vec![1.0, 0.0]);
+        let bait = Bait::Vector {
+            vector: vec![1.0, 0.0],
+            property: Some("embedding".to_string()),
+        };
         let trip = FishingTrip {
             limit: 5,
             depth: 1,
             vector_weight: 1.0,
             graph_weight: 0.5,
             freshness_weight: 0.0, // Ignore time for this deterministic test
+            edge_labels: None,
         };
 
         let catches = rod.cast(bait, trip).unwrap();
@@ -253,7 +309,138 @@ mod tests {
         assert!(n3_catch.is_some(), "Should catch Coral via graph link");
 
         if let Some(c) = n3_catch {
-             assert!(c.provenance.contains("Linked from Node"));
+            assert!(c.provenance.contains("Linked from Node"));
         }
+    }
+
+    #[test]
+    fn test_fishing_with_edge_label_filter() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Enable vector index
+        let config = HnswConfig::new(2, DistanceMetric::Cosine);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        // Node 1: "The Bait"
+        let props1 = PropertyMapBuilder::new()
+            .insert("name", "Bait")
+            .insert_vector("embedding", &[1.0, 0.0])
+            .build();
+        let n1 = db.create_node("Node", props1).unwrap();
+
+        // Node 2: "The School" (Similar to Bait)
+        let props2 = PropertyMapBuilder::new()
+            .insert("name", "Similar")
+            .insert_vector("embedding", &[0.99, 0.01])
+            .build();
+        let n2 = db.create_node("Node", props2).unwrap();
+
+        // Node 3: Connected to School via "KNOWS"
+        let n3 = db
+            .create_node("Node", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(n2, n3, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Node 4: Connected to School via "HATES"
+        let n4 = db
+            .create_node("Node", PropertyMapBuilder::new().build())
+            .unwrap();
+        db.create_edge(n2, n4, "HATES", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let rod = FishingRod::new(&db);
+
+        // Use Node 1 as bait.
+        // It will find Node 2 (similar).
+        // Then from Node 2, it will expand to neighbors.
+        let bait = Bait::Node {
+            id: n1,
+            property: None,
+        };
+
+        // Filter only for "KNOWS" edges
+        let trip = FishingTrip {
+            limit: 10,
+            depth: 1,
+            vector_weight: 1.0,
+            graph_weight: 1.0,
+            freshness_weight: 0.0,
+            edge_labels: Some(vec!["KNOWS".to_string()]),
+        };
+
+        let catches = rod.cast(bait, trip).unwrap();
+
+        // Expectation:
+        // - N2 is caught (Vector similarity)
+        // - N3 is caught (Graph neighbor via KNOWS)
+        // - N4 is NOT caught (Graph neighbor via HATES)
+        // - N1 is NOT caught (Self is excluded from find_similar)
+
+        assert!(
+            catches.iter().any(|c| c.node_id == n2),
+            "Should catch N2 (School)"
+        );
+        assert!(
+            catches.iter().any(|c| c.node_id == n3),
+            "Should catch N3 (KNOWS neighbor)"
+        );
+        assert!(
+            !catches.iter().any(|c| c.node_id == n4),
+            "Should NOT catch N4 (HATES neighbor)"
+        );
+    }
+
+    #[test]
+    fn test_fishing_no_vector_index_error() {
+        let db = GallifreyDB::new().unwrap();
+        // Do NOT enable vector index
+
+        let rod = FishingRod::new(&db);
+        let bait = Bait::Vector {
+            vector: vec![1.0, 0.0],
+            property: None,
+        };
+        let trip = FishingTrip::default();
+
+        let result = rod.cast(bait, trip);
+        assert!(result.is_err());
+
+        if let Err(crate::utils::error::Error::Vector(
+            crate::utils::error::VectorError::IndexError(msg),
+        )) = result
+        {
+            assert!(msg.contains("No vector indexes configured"));
+        } else {
+            panic!("Expected IndexError when no vector index exists");
+        }
+    }
+
+    #[test]
+    fn test_fishing_freshness_weight() {
+        // This test mostly verifies the code path runs without error.
+        // Deterministic testing of time decay is tricky without mocking time,
+        // but we can ensure it doesn't crash or behave illogically.
+        let db = GallifreyDB::new().unwrap();
+        let config = HnswConfig::new(2, DistanceMetric::Cosine);
+        db.enable_vector_index("embedding", config).unwrap();
+
+        let props = PropertyMapBuilder::new()
+            .insert_vector("embedding", &[1.0, 0.0])
+            .build();
+        let _n1 = db.create_node("Node", props).unwrap();
+
+        let rod = FishingRod::new(&db);
+        let bait = Bait::Vector {
+            vector: vec![1.0, 0.0],
+            property: None,
+        };
+        let trip = FishingTrip {
+            freshness_weight: 0.5,
+            ..Default::default()
+        };
+
+        let result = rod.cast(bait, trip);
+        assert!(result.is_ok());
     }
 }
