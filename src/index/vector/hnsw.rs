@@ -690,7 +690,7 @@ impl VectorIndex for HnswIndex {
                 };
 
                 if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
 
                 // Re-acquire map lock (read) to ensure lock ordering (Map -> Index) and verify state.

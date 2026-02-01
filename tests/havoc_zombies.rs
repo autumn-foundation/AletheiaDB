@@ -45,7 +45,7 @@ fn test_zombie_vectors_race_coverage() {
         });
 
         // Main thread: wait a bit to ensure background thread is in sleep
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(100));
 
         // Remove the ID. This removes it from the map.
         // The background thread is sleeping/waiting for lock.
