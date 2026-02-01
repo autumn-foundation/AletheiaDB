@@ -260,6 +260,7 @@ Use LMDB (Lightning Memory-Mapped Database).
 - Remove RocksDB dependency and feature flag
 - Update documentation
 - Migration guide for existing users
+- Removed `FileColdStorage` as it was redundant and inferior to `RedbColdStorage` (Completed 2026-01-24)
 
 ### Configuration
 
