@@ -1,12 +1,12 @@
-use gallifreydb::index::vector::hnsw::{
-    INJECT_RACE_DELAY, HIT_RACE_CONDITION_REMOVED, HIT_RACE_CONDITION_REPLACED
-};
-use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric};
-use gallifreydb::index::VectorIndex;
 use gallifreydb::core::id::NodeId;
+use gallifreydb::index::VectorIndex;
+use gallifreydb::index::vector::hnsw::{
+    HIT_RACE_CONDITION_REMOVED, HIT_RACE_CONDITION_REPLACED, INJECT_RACE_DELAY,
+};
+use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::sync::atomic::Ordering;
 
 #[test]
 fn test_zombie_vectors_race() {
@@ -15,7 +15,11 @@ fn test_zombie_vectors_race() {
     // This test reproduces a race condition between `add` and `remove` operations
     // that leads to "zombie" vectors leaking into the underlying HNSW index.
 
-    let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+    let index = Arc::new(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap(),
+    );
 
     // Enable race condition injection to ensure coverage
     INJECT_RACE_DELAY.store(true, Ordering::Relaxed);
@@ -24,7 +28,10 @@ fn test_zombie_vectors_race() {
     let num_threads = 8;
     let iterations = 100; // Lower iterations since each has a 10ms delay
 
-    println!("Spawning {} threads for {} iterations each...", num_threads, iterations);
+    println!(
+        "Spawning {} threads for {} iterations each...",
+        num_threads, iterations
+    );
 
     let barrier = Arc::new(Barrier::new(num_threads));
     let mut handles = vec![];
@@ -65,17 +72,30 @@ fn test_zombie_vectors_race() {
 
     let zombie_count = index.len();
     if zombie_count > 0 {
-        println!("👺 HAVOC DETECTED WEAKNESS: Found {} zombie vectors in index!", zombie_count);
+        println!(
+            "👺 HAVOC DETECTED WEAKNESS: Found {} zombie vectors in index!",
+            zombie_count
+        );
     } else {
         println!("Boring. No zombies found.");
     }
 
     let removed_hits = HIT_RACE_CONDITION_REMOVED.load(Ordering::Relaxed);
     let replaced_hits = HIT_RACE_CONDITION_REPLACED.load(Ordering::Relaxed);
-    println!("Race condition hits: Removed={}, Replaced={}", removed_hits, replaced_hits);
+    println!(
+        "Race condition hits: Removed={}, Replaced={}",
+        removed_hits, replaced_hits
+    );
 
-    assert_eq!(zombie_count, 0, "Race condition detected: {} zombie vectors found in index (Memory Leak)", zombie_count);
+    assert_eq!(
+        zombie_count, 0,
+        "Race condition detected: {} zombie vectors found in index (Memory Leak)",
+        zombie_count
+    );
 
     // Verify that we actually exercised the fix logic
-    assert!(removed_hits > 0 || replaced_hits > 0, "Fix logic was not exercised by the test!");
+    assert!(
+        removed_hits > 0 || replaced_hits > 0,
+        "Fix logic was not exercised by the test!"
+    );
 }

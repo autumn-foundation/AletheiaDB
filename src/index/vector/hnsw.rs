@@ -95,8 +95,8 @@ use parking_lot::RwLock;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 
 #[doc(hidden)]
@@ -691,14 +691,14 @@ impl VectorIndex for HnswIndex {
                     }
                 };
 
+                if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
                 // Re-acquire map lock (read) to ensure lock ordering (Map -> Index) and verify state.
                 // We must hold this lock BEFORE acquiring the index lock to avoid deadlock with the
                 // Occupied branch (which holds Map Write Lock -> waits for Index Lock).
                 let map_guard = self.id_mapping.get(&id);
-
-                if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
 
                 // Insert into usearch index (auto-expand capacity if needed)
                 let index = self.inner.write();
