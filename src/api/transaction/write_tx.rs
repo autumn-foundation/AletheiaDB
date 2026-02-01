@@ -241,160 +241,10 @@ impl WriteTransaction {
         self.detect_conflicts()?;
 
         // Acquire commit timestamp and perform mode-aware WAL flush.
-        //
-        // CRITICAL: We must hold the timestamp lock until WAL logging is complete
-        // to prevent a race condition where transactions commit out-of-order.
-        //
-        // Timestamp management for Bi-Temporal Database:
-        //
-        // For temporal queries to work correctly, we MUST use wallclock timestamps
-        // for transaction_time, not a logical clock. This allows querying historical
-        // state at specific points in time (e.g., "what was the state at 2PM yesterday?").
-        //
-        // Monotonicity: Wallclock time is monotonically increasing (assuming NTP is working),
-        // which satisfies the ordering requirements for Snapshot Isolation:
-        // - commit_ts > snapshot_ts for transactions that started before this commit
-        // - future snapshots will have timestamp >= this commit
-        //
-        // DURABILITY MODES (handled by ConcurrentWalSystem):
-        // - Synchronous: Appends drain and flush immediately with fsync
-        // - Async: Appends go to ring buffers, background thread syncs
-        // - GroupCommit: Appends go to ring buffers, wait for epoch completion
-        let commit_timestamp = {
+        let commit_timestamp = self.execute_commit_protocol(
             #[cfg(feature = "observability")]
-            let ts_lock_start = std::time::Instant::now();
-
-            let mut ts = self.current_timestamp.lock_or_err().map_err(|e| {
-                TransactionError::CommitFailed {
-                    reason: format!("timestamp lock poisoned: {}", e),
-                }
-            })?;
-
-            #[cfg(feature = "observability")]
-            let ts_lock_acquired = std::time::Instant::now();
-
-            // Phase 2: Use HLC for distributed temporal consistency
-            // Get current physical wallclock
-            let current_wallclock = crate::core::temporal::time::now();
-
-            // Check for pathological clock skew using wallclock components
-            let drift = current_wallclock.wallclock() - ts.wallclock();
-
-            // Backward drift check: prevent timestamps jumping far into future
-            if drift < -MAX_BACKWARD_DRIFT_US {
-                return Err(TransactionError::ClockSkew {
-                    wallclock: current_wallclock.wallclock(),
-                    previous: ts.wallclock(),
-                    drift_us: drift,
-                    max_allowed: -MAX_BACKWARD_DRIFT_US,
-                }
-                .into());
-            }
-
-            // Forward jump check: prevent timestamps in far future
-            if drift > MAX_FORWARD_JUMP_US {
-                return Err(TransactionError::ClockSkew {
-                    wallclock: current_wallclock.wallclock(),
-                    previous: ts.wallclock(),
-                    drift_us: drift,
-                    max_allowed: MAX_FORWARD_JUMP_US,
-                }
-                .into());
-            }
-
-            // Phase 2: Use HLC .send() method for monotonic timestamp generation
-            // This ensures: if wallclock advances, reset logical; otherwise increment logical
-            let commit = ts.send(current_wallclock.wallclock()).map_err(|e| {
-                TransactionError::CommitFailed {
-                    reason: format!("HLC timestamp generation failed: {}", e),
-                }
-            })?;
-
-            // Observability: Warn about clock skew issues
-            #[cfg(feature = "observability")]
-            {
-                // Clock went backwards: wallclock < previous wallclock
-                if current_wallclock.wallclock() < ts.wallclock() {
-                    tracing::warn!(
-                        wallclock_ts = %current_wallclock,
-                        prev_ts = %ts,
-                        skew_us = ts.wallclock() - current_wallclock.wallclock(),
-                        logical_counter = commit.logical(),
-                        "Clock skew detected: wallclock went backwards (NTP adjustment?)"
-                    );
-                } else if commit.wallclock() > ts.wallclock() + 60_000_000 {
-                    // Large forward jump (>60 seconds)
-                    tracing::warn!(
-                        wallclock_ts = %current_wallclock,
-                        prev_ts = %ts,
-                        jump_us = commit.wallclock() - ts.wallclock(),
-                        "Large clock jump detected: timestamps will be lumpy"
-                    );
-                }
-            }
-
-            // Update current_timestamp for next transaction's snapshot
-            *ts = commit;
-
-            #[cfg(feature = "observability")]
-            let wal_start = std::time::Instant::now();
-
-            // Log operations to WAL (lock-free striped append!)
-            // This must happen BEFORE applying changes for durability.
-            self.log_operations_to_wal(commit)?;
-
-            #[cfg(feature = "observability")]
-            let wal_logged = std::time::Instant::now();
-
-            // Commit with configured durability mode
-            // For Sync: drains and flushes immediately
-            // For Async: returns immediately
-            // For GroupCommit: registers and returns epoch
-            let wait_epoch = self.wal.commit()?;
-
-            #[cfg(feature = "observability")]
-            let wal_commit_completed = std::time::Instant::now();
-
-            // For GroupCommit mode, wait for the epoch to be flushed.
-            // AsyncBatched mode returns an epoch but does NOT wait.
-            if let Some(epoch) = wait_epoch
-                && let Some(gc) = self.wal.group_commit_coordinator()
-                && self.durability_mode.waits_for_durability()
-            {
-                gc.wait_for_flush(epoch)?;
-            }
-
-            #[cfg(feature = "observability")]
-            {
-                // Record detailed breakdown for Honeycomb
-                let ts_lock_wait_us =
-                    ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
-                let wal_log_us = wal_logged.duration_since(wal_start).as_micros() as u64;
-                let wal_commit_us =
-                    wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
-                let total_us = wal_commit_completed
-                    .duration_since(ts_lock_start)
-                    .as_micros() as u64;
-
-                // Calculate total commit duration for Honeycomb queries
-                let total_commit_us = commit_start.elapsed().as_micros() as u64;
-                let operations_count = self.buffer.operations().len();
-
-                tracing::info!(
-                    ts_lock_wait_us,
-                    wal_log_us,
-                    wal_commit_us,
-                    total_us,
-                    total_commit_us,
-                    operations_count,
-                    commit_ts = %commit,
-                    durability_mode = ?self.durability_mode,
-                    "Transaction commit breakdown (concurrent WAL)"
-                );
-            }
-
-            commit
-        };
+            commit_start,
+        )?;
 
         // Apply all changes atomically
         self.apply_changes(commit_timestamp)?;
@@ -423,6 +273,149 @@ impl WriteTransaction {
         }
 
         Ok(commit_timestamp)
+    }
+
+    /// Acquire commit timestamp and perform mode-aware WAL flush.
+    ///
+    /// CRITICAL: We must hold the timestamp lock until WAL logging is complete
+    /// to prevent a race condition where transactions commit out-of-order.
+    fn execute_commit_protocol(
+        &self,
+        #[cfg(feature = "observability")] commit_start: std::time::Instant,
+    ) -> Result<Timestamp> {
+        #[cfg(feature = "observability")]
+        let ts_lock_start = std::time::Instant::now();
+
+        let mut ts = self.current_timestamp.lock_or_err().map_err(|e| {
+            TransactionError::CommitFailed {
+                reason: format!("timestamp lock poisoned: {}", e),
+            }
+        })?;
+
+        #[cfg(feature = "observability")]
+        let ts_lock_acquired = std::time::Instant::now();
+
+        // Phase 2: Use HLC for distributed temporal consistency
+        // Get current physical wallclock
+        let current_wallclock = crate::core::temporal::time::now();
+
+        // Check for pathological clock skew using wallclock components
+        let drift = current_wallclock.wallclock() - ts.wallclock();
+
+        // Backward drift check: prevent timestamps jumping far into future
+        if drift < -MAX_BACKWARD_DRIFT_US {
+            return Err(TransactionError::ClockSkew {
+                wallclock: current_wallclock.wallclock(),
+                previous: ts.wallclock(),
+                drift_us: drift,
+                max_allowed: -MAX_BACKWARD_DRIFT_US,
+            }
+            .into());
+        }
+
+        // Forward jump check: prevent timestamps in far future
+        if drift > MAX_FORWARD_JUMP_US {
+            return Err(TransactionError::ClockSkew {
+                wallclock: current_wallclock.wallclock(),
+                previous: ts.wallclock(),
+                drift_us: drift,
+                max_allowed: MAX_FORWARD_JUMP_US,
+            }
+            .into());
+        }
+
+        // Phase 2: Use HLC .send() method for monotonic timestamp generation
+        // This ensures: if wallclock advances, reset logical; otherwise increment logical
+        let commit = ts.send(current_wallclock.wallclock()).map_err(|e| {
+            TransactionError::CommitFailed {
+                reason: format!("HLC timestamp generation failed: {}", e),
+            }
+        })?;
+
+        // Observability: Warn about clock skew issues
+        #[cfg(feature = "observability")]
+        {
+            // Clock went backwards: wallclock < previous wallclock
+            if current_wallclock.wallclock() < ts.wallclock() {
+                tracing::warn!(
+                    wallclock_ts = %current_wallclock,
+                    prev_ts = %ts,
+                    skew_us = ts.wallclock() - current_wallclock.wallclock(),
+                    logical_counter = commit.logical(),
+                    "Clock skew detected: wallclock went backwards (NTP adjustment?)"
+                );
+            } else if commit.wallclock() > ts.wallclock() + 60_000_000 {
+                // Large forward jump (>60 seconds)
+                tracing::warn!(
+                    wallclock_ts = %current_wallclock,
+                    prev_ts = %ts,
+                    jump_us = commit.wallclock() - ts.wallclock(),
+                    "Large clock jump detected: timestamps will be lumpy"
+                );
+            }
+        }
+
+        // Update current_timestamp for next transaction's snapshot
+        *ts = commit;
+
+        #[cfg(feature = "observability")]
+        let wal_start = std::time::Instant::now();
+
+        // Log operations to WAL (lock-free striped append!)
+        // This must happen BEFORE applying changes for durability.
+        self.log_operations_to_wal(commit)?;
+
+        #[cfg(feature = "observability")]
+        let wal_logged = std::time::Instant::now();
+
+        // Commit with configured durability mode
+        // For Sync: drains and flushes immediately
+        // For Async: returns immediately
+        // For GroupCommit: registers and returns epoch
+        let wait_epoch = self.wal.commit()?;
+
+        #[cfg(feature = "observability")]
+        let wal_commit_completed = std::time::Instant::now();
+
+        // For GroupCommit mode, wait for the epoch to be flushed.
+        // AsyncBatched mode returns an epoch but does NOT wait.
+        if let Some(epoch) = wait_epoch
+            && let Some(gc) = self.wal.group_commit_coordinator()
+            && self.durability_mode.waits_for_durability()
+        {
+            gc.wait_for_flush(epoch)?;
+        }
+
+        #[cfg(feature = "observability")]
+        {
+            // Record detailed breakdown for Honeycomb
+            let ts_lock_wait_us =
+                ts_lock_acquired.duration_since(ts_lock_start).as_micros() as u64;
+            let wal_log_us = wal_logged.duration_since(wal_start).as_micros() as u64;
+            let wal_commit_us =
+                wal_commit_completed.duration_since(wal_logged).as_micros() as u64;
+            let total_us = wal_commit_completed
+                .duration_since(ts_lock_start)
+                .as_micros() as u64;
+
+            // Calculate total commit duration for Honeycomb queries
+            let total_commit_us = commit_start.elapsed().as_micros() as u64;
+            let operations_count = self.buffer.operations().len();
+
+            tracing::info!(
+                ts_lock_wait_us,
+                wal_log_us,
+                wal_commit_us,
+                total_us,
+                total_commit_us,
+                operations_count,
+                commit_ts = %commit,
+                durability_mode = ?self.durability_mode,
+                "Transaction commit breakdown (concurrent WAL)"
+            );
+        }
+
+        Ok(commit)
     }
 
     /// Rollback the transaction.
@@ -1128,6 +1121,160 @@ impl WriteTransaction {
         Ok(())
     }
 
+    /// Generate batch of tombstone version IDs for delete operations.
+    fn generate_tombstone_ids(&self, num_deletes: usize) -> Result<std::vec::IntoIter<u64>> {
+        if num_deletes > 0 {
+            let ids: Result<Vec<u64>> = {
+                let id_gen = self.version_id_gen.lock_or_err()?;
+                (0..num_deletes)
+                    .map(|_| id_gen.next().map_err(Into::into))
+                    .collect()
+            };
+            Ok(ids?.into_iter())
+        } else {
+            Ok(Vec::new().into_iter())
+        }
+    }
+
+    fn apply_single_write(
+        &self,
+        write: &super::BufferedWrite,
+        commit_timestamp: Timestamp,
+        historical: &mut HistoricalStorage,
+        tombstone_ids: &mut std::vec::IntoIter<u64>,
+        num_deletes: usize,
+    ) -> Result<()> {
+        match write {
+            super::BufferedWrite::CreateNode {
+                node_id,
+                version_id,
+                label,
+                properties,
+                valid_from,
+            } => {
+                self.apply_node_write(
+                    true, // is_create
+                    *node_id,
+                    *version_id,
+                    *label,
+                    properties.clone(),
+                    *valid_from,
+                    commit_timestamp,
+                    historical,
+                )?;
+            }
+            super::BufferedWrite::CreateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties,
+                valid_from,
+            } => {
+                self.apply_edge_write(
+                    true, // is_create
+                    *edge_id,
+                    *version_id,
+                    *source,
+                    *target,
+                    *label,
+                    properties.clone(),
+                    *valid_from,
+                    commit_timestamp,
+                    historical,
+                )?;
+            }
+            super::BufferedWrite::UpdateNode {
+                node_id,
+                version_id,
+                label,
+                properties,
+                valid_from,
+            } => {
+                self.apply_node_write(
+                    false, // is_create
+                    *node_id,
+                    *version_id,
+                    *label,
+                    properties.clone(),
+                    *valid_from,
+                    commit_timestamp,
+                    historical,
+                )?;
+            }
+            super::BufferedWrite::UpdateEdge {
+                edge_id,
+                version_id,
+                source,
+                target,
+                label,
+                properties,
+                valid_from,
+            } => {
+                self.apply_edge_write(
+                    false, // is_create
+                    *edge_id,
+                    *version_id,
+                    *source,
+                    *target,
+                    *label,
+                    properties.clone(),
+                    *valid_from,
+                    commit_timestamp,
+                    historical,
+                )?;
+            }
+            super::BufferedWrite::DeleteNode {
+                node_id,
+                valid_from,
+            } => {
+                // Use pre-generated tombstone version ID (no lock needed)
+                // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
+                let tombstone_version_id = VersionId::new_unchecked(tombstone_ids.next().ok_or_else(|| {
+                    StorageError::InconsistentState {
+                        reason: format!(
+                            "Tombstone ID exhaustion for DeleteNode: expected {} deletes, iterator depleted at node_id {:?}",
+                            num_deletes, node_id
+                        ),
+                    }
+                })?);
+
+                self.apply_node_delete(
+                    *node_id,
+                    *valid_from,
+                    commit_timestamp,
+                    tombstone_version_id,
+                    historical,
+                )?;
+            }
+            super::BufferedWrite::DeleteEdge {
+                edge_id,
+                valid_from,
+            } => {
+                // Use pre-generated tombstone version ID (no lock needed)
+                // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
+                let tombstone_version_id = VersionId::new_unchecked(tombstone_ids.next().ok_or_else(|| {
+                    StorageError::InconsistentState {
+                        reason: format!(
+                            "Tombstone ID exhaustion for DeleteEdge: expected {} deletes, iterator depleted at edge_id {:?}",
+                            num_deletes, edge_id
+                        ),
+                    }
+                })?);
+
+                self.apply_edge_delete(
+                    *edge_id,
+                    *valid_from,
+                    commit_timestamp,
+                    tombstone_version_id,
+                    historical,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn apply_changes(&self, commit_timestamp: Timestamp) -> Result<()> {
         // Create temporal interval for all operations in this transaction.
         // All operations in a transaction share the same commit_timestamp, which is
@@ -1156,151 +1303,16 @@ impl WriteTransaction {
             })
             .count();
 
-        let mut tombstone_ids = if num_deletes > 0 {
-            let ids: Result<Vec<u64>> = {
-                let id_gen = self.version_id_gen.lock_or_err()?;
-                (0..num_deletes)
-                    .map(|_| id_gen.next().map_err(Into::into))
-                    .collect()
-            };
-            ids?.into_iter()
-        } else {
-            Vec::new().into_iter()
-        };
+        let mut tombstone_ids = self.generate_tombstone_ids(num_deletes)?;
 
         for write in self.buffer.operations() {
-            match write {
-                super::BufferedWrite::CreateNode {
-                    node_id,
-                    version_id,
-                    label,
-                    properties,
-                    valid_from,
-                } => {
-                    self.apply_node_write(
-                        true, // is_create
-                        *node_id,
-                        *version_id,
-                        *label,
-                        properties.clone(),
-                        *valid_from,
-                        commit_timestamp,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::CreateEdge {
-                    edge_id,
-                    version_id,
-                    source,
-                    target,
-                    label,
-                    properties,
-                    valid_from,
-                } => {
-                    self.apply_edge_write(
-                        true, // is_create
-                        *edge_id,
-                        *version_id,
-                        *source,
-                        *target,
-                        *label,
-                        properties.clone(),
-                        *valid_from,
-                        commit_timestamp,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::UpdateNode {
-                    node_id,
-                    version_id,
-                    label,
-                    properties,
-                    valid_from,
-                } => {
-                    self.apply_node_write(
-                        false, // is_create
-                        *node_id,
-                        *version_id,
-                        *label,
-                        properties.clone(),
-                        *valid_from,
-                        commit_timestamp,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::UpdateEdge {
-                    edge_id,
-                    version_id,
-                    source,
-                    target,
-                    label,
-                    properties,
-                    valid_from,
-                } => {
-                    self.apply_edge_write(
-                        false, // is_create
-                        *edge_id,
-                        *version_id,
-                        *source,
-                        *target,
-                        *label,
-                        properties.clone(),
-                        *valid_from,
-                        commit_timestamp,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::DeleteNode {
-                    node_id,
-                    valid_from,
-                } => {
-                    // Use pre-generated tombstone version ID (no lock needed)
-                    // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
-                    let tombstone_version_id = VersionId::new_unchecked(
-                        tombstone_ids.next().ok_or_else(|| {
-                            StorageError::InconsistentState {
-                                reason: format!(
-                                    "Tombstone ID exhaustion for DeleteNode: expected {} deletes, iterator depleted at node_id {:?}",
-                                    num_deletes, node_id
-                                ),
-                            }
-                        })?,
-                    );
-
-                    self.apply_node_delete(
-                        *node_id,
-                        *valid_from,
-                        commit_timestamp,
-                        tombstone_version_id,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::DeleteEdge {
-                    edge_id,
-                    valid_from,
-                } => {
-                    // Use pre-generated tombstone version ID (no lock needed)
-                    // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
-                    let tombstone_version_id = VersionId::new_unchecked(
-                        tombstone_ids.next().ok_or_else(|| {
-                            StorageError::InconsistentState {
-                                reason: format!(
-                                    "Tombstone ID exhaustion for DeleteEdge: expected {} deletes, iterator depleted at edge_id {:?}",
-                                    num_deletes, edge_id
-                                ),
-                            }
-                        })?,
-                    );
-
-                    self.apply_edge_delete(
-                        *edge_id,
-                        *valid_from,
-                        commit_timestamp,
-                        tombstone_version_id,
-                        &mut historical,
-                    )?;
-                }
-            }
+            self.apply_single_write(
+                write,
+                commit_timestamp,
+                &mut historical,
+                &mut tombstone_ids,
+                num_deletes,
+            )?;
         }
 
         // Safety check: verify all pre-generated tombstone IDs were consumed
