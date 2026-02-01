@@ -977,7 +977,7 @@ impl HnswIndex {
             })?;
 
         // Save mappings to companion file with integrity checks
-        // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
+        // Format: `[MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]`
         let mappings_path = path.with_extension("usearch.mappings");
         let mut mappings = Vec::with_capacity(self.id_mapping.len());
         for entry in self.id_mapping.iter() {
@@ -1095,7 +1095,7 @@ impl HnswIndex {
 
 /// Load and verify mappings from a companion file.
 /// Returns (id_mapping, reverse_mapping, max_key) or error if integrity check fails.
-/// Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
+/// Format: `[MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]`
 #[allow(clippy::type_complexity)]
 fn load_mappings_with_integrity(
     mappings_path: &Path,

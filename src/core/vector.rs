@@ -6,7 +6,7 @@
 //! # Overview
 //!
 //! GallifreyDB supports storing vectors as property values on nodes via
-//! [`PropertyValue::Vector`]. This module provides the utilities needed
+//! [`crate::core::property::PropertyValue::Vector`]. This module provides the utilities needed
 //! to work with those vectors effectively:
 //!
 //! - **Type definitions**: [`VectorDimension`] for expressing vector sizes
@@ -35,7 +35,7 @@
 //!
 //! # Design Notes
 //!
-//! Vectors in GallifreyDB are stored as `Arc<[f32]>` within [`PropertyValue::Vector`].
+//! Vectors in GallifreyDB are stored as `Arc<[f32]>` within [`crate::core::property::PropertyValue::Vector`].
 //! This design enables:
 //!
 //! - **Efficient cloning**: Multiple versions can share the same vector data
@@ -1760,7 +1760,7 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 /// Unlike two-vector functions like [`cosine_similarity`], normalization functions
 /// do not validate against `MAX_VECTOR_DIMENSIONS`. This is intentional because:
 /// - Single-vector operations don't have dimension mismatch issues
-/// - Dimension limits are enforced at storage time (see [`PropertyValue::vector`])
+/// - Dimension limits are enforced at storage time (see [`crate::core::property::PropertyValue::vector`])
 /// - Additional checks would add overhead without safety benefit
 #[inline]
 pub fn normalize(v: &[f32]) -> Vec<f32> {

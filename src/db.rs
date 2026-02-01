@@ -1661,7 +1661,7 @@ impl GallifreyDB {
 
     /// Find similar vectors at a specific point in time for a specific property.
     ///
-    /// This is the property-specific version of [`find_similar_as_of()`].
+    /// This is the property-specific version of [`Self::find_similar_as_of()`].
     /// It validates that the requested property matches the property for which
     /// the temporal vector index was enabled.
     ///

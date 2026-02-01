@@ -989,7 +989,7 @@ struct PersistedSparseVector {
 
 /// Root data structure for sparse index persistence.
 ///
-/// File format: [magic:4][version:2][bitcode_data:N][crc32:4]
+/// File format: `[magic:4][version:2][bitcode_data:N][crc32:4]`
 #[derive(Debug, Clone, Encode, Decode)]
 struct SparseIndexData {
     /// Magic bytes for validation (checked separately, not in bitcode)

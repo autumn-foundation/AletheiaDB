@@ -239,7 +239,7 @@ impl CurrentStorage {
     /// Returns `Some(property_name)` if a vector index is enabled,
     /// or `None` if no index is configured.
     ///
-    /// Note: For multi-property setups, use [`list_vector_indexes`] instead.
+    /// Note: For multi-property setups, use [`Self::list_vector_indexes`] instead.
     pub fn get_indexed_property_name(&self) -> Option<String> {
         self.get_default_vector_property_name()
     }
@@ -590,7 +590,7 @@ impl CurrentStorage {
     ///
     /// This method does NOT delete edges connected to the node. This may leave
     /// orphaned edges in the graph. For most use cases, prefer using
-    /// [`WriteTransaction::delete_node_cascade`] which automatically removes
+    /// [`crate::api::transaction::WriteOps::delete_node_cascade`] which automatically removes
     /// all connected edges to maintain referential integrity.
     ///
     /// Only use this method if you explicitly need to preserve edges for some
@@ -1697,7 +1697,7 @@ impl CurrentStorage {
 
     /// Find k most similar nodes at a specific point in time for a specific property.
     ///
-    /// This is the property-specific version of [`find_similar_as_of()`].
+    /// This is the property-specific version of [`Self::find_similar_as_of()`].
     /// It validates that the requested property matches the property for which
     /// the temporal vector index was enabled.
     ///

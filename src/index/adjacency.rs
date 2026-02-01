@@ -7,8 +7,8 @@
 //! # CSR Format
 //!
 //! The CSR format stores the graph as two arrays:
-//! - `offsets[i]`: Starting position in `edges` for node i's adjacency list
-//! - `edges`: Flat array of (target_node, edge_id, edge_label) tuples
+//! - `offsets[i]`: Starting position in `edges` for node `i`'s adjacency list
+//! - `edges`: Flat array of `(target_node, edge_id, edge_label)` tuples
 //!
 //! This layout is cache-friendly because traversing from a node requires
 //! sequential access to a contiguous region of memory.
@@ -51,9 +51,9 @@ pub struct AdjacencyIndex {
     /// Sorted list of node IDs that have outgoing edges.
     /// Used for binary search to map node_id -> index in offsets array.
     node_ids: Vec<NodeId>,
-    /// Offsets into the edges array for each node in node_ids.
-    /// offsets[i] = start index in edges array for node_ids[i]
-    /// offsets[i + 1] = end index (exclusive)
+    /// Offsets into the edges array for each node in `node_ids`.
+    /// `offsets[i]` = start index in edges array for `node_ids[i]`
+    /// `offsets[i + 1]` = end index (exclusive)
     offsets: Vec<usize>,
     /// Flat array of adjacency entries, sorted by source node.
     edges: Vec<AdjacencyEntry>,
