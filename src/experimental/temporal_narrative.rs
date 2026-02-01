@@ -2,6 +2,7 @@ use crate::GallifreyDB;
 use crate::core::GLOBAL_INTERNER;
 use crate::core::history::{VersionDiff, VersionInfo};
 use crate::core::id::NodeId;
+use crate::core::interning::InternedString;
 use crate::core::temporal::time;
 use crate::utils::error::Result;
 
@@ -29,10 +30,27 @@ impl<'a> NarrativeGenerator<'a> {
         Self { db }
     }
 
+    /// Helper to resolve interned keys to strings.
+    fn resolve_key(key_id: InternedString) -> String {
+        GLOBAL_INTERNER
+            .resolve(key_id)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
     /// Generate a narrative for a specific node.
     ///
     /// This reconstructs the history of the node and generates a sequence of
     /// human-readable events describing how it evolved over time.
+    ///
+    /// # Behavior for Empty History
+    /// If a node has no history (e.g. invalid ID or deleted), this returns an empty vector
+    /// or an error if the node ID is invalid, consistent with `get_node_history`.
+    ///
+    /// # Property Removal
+    /// Properties set to `null` are interpreted as "Removed property".
+    ///
+    /// Note: Edge narrative generation is planned for a future release.
     pub fn generate_node_narrative(&self, node_id: NodeId) -> Result<Vec<NarrativeEvent>> {
         let history = self.db.get_node_history(node_id)?;
         let mut events = Vec::new();
@@ -56,43 +74,40 @@ impl<'a> NarrativeGenerator<'a> {
 
                 description = format!("Version {} updated properties.", version_number);
 
+                // Pre-allocate vector to avoid frequent reallocations
+                changes.reserve(diff.added.len() + diff.removed.len() + diff.modified.len());
+
                 // Added properties
                 for (key_id, val) in diff.added.iter() {
-                    let key = GLOBAL_INTERNER
-                        .resolve(*key_id)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                    let key = Self::resolve_key(*key_id);
                     changes.push(format!("Added property '{}' with value '{}'", key, val));
                 }
 
-                // Removed properties
+                // Removed properties (explicitly missing keys)
                 for (key_id, val) in diff.removed.iter() {
-                    let key = GLOBAL_INTERNER
-                        .resolve(*key_id)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                    let key = Self::resolve_key(*key_id);
                     changes.push(format!("Removed property '{}' (was '{}')", key, val));
                 }
 
                 // Modified properties
                 for (key_id, old_val, new_val) in &diff.modified {
-                    let key = GLOBAL_INTERNER
-                        .resolve(*key_id)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    changes.push(format!(
-                        "Modified property '{}' from '{}' to '{}'",
-                        key, old_val, new_val
-                    ));
+                    let key = Self::resolve_key(*key_id);
+                    if new_val.is_null() {
+                        // Treat setting to null as removal
+                        changes.push(format!("Removed property '{}' (was '{}')", key, old_val));
+                    } else {
+                        changes.push(format!(
+                            "Modified property '{}' from '{}' to '{}'",
+                            key, old_val, new_val
+                        ));
+                    }
                 }
             } else {
                 // First version (Creation)
                 description = format!("Node created with label '{}'.", version.label);
+                changes.reserve(version.properties.len());
                 for (key_id, val) in version.properties.iter() {
-                    let key = GLOBAL_INTERNER
-                        .resolve(*key_id)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                    let key = Self::resolve_key(*key_id);
                     changes.push(format!("Initial property '{}': '{}'", key, val));
                 }
             }
@@ -115,7 +130,7 @@ impl<'a> NarrativeGenerator<'a> {
 mod tests {
     use super::*;
     use crate::api::transaction::WriteOps;
-    use crate::core::property::PropertyMapBuilder;
+    use crate::core::property::{PropertyMapBuilder, PropertyValue};
 
     #[test]
     fn test_node_narrative_generation() {
@@ -181,6 +196,50 @@ mod tests {
                 .changes
                 .iter()
                 .any(|s| s.contains("Added property 'city' with value '\"London\"'"))
+        );
+    }
+
+    #[test]
+    fn test_property_removal_narrative() {
+        let db = GallifreyDB::new().unwrap();
+
+        // 1. Create Node with properties
+        let props1 = PropertyMapBuilder::new()
+            .insert("name", "Bob")
+            .insert("temp_data", "delete_me")
+            .build();
+        let node_id = db.create_node("Person", props1).unwrap();
+
+        // 2. Remove property by setting to Null (Simulated removal)
+        db.write(|tx| {
+            let props2 = PropertyMapBuilder::new()
+                .insert("temp_data", PropertyValue::Null)
+                .build();
+            tx.update_node(node_id, props2)
+        })
+        .unwrap();
+
+        // 3. Generate Narrative
+        let generator = NarrativeGenerator::new(&db);
+        let narrative = generator.generate_node_narrative(node_id).unwrap();
+
+        assert_eq!(narrative.len(), 2);
+
+        let event2 = &narrative[1];
+        assert!(
+            event2
+                .changes
+                .iter()
+                .any(|s| s.contains("Removed property 'temp_data'")),
+            "Expected removal message for temp_data, found: {:?}",
+            event2.changes
+        );
+        assert!(
+            event2
+                .changes
+                .iter()
+                .any(|s| s.contains("was '\"delete_me\"'")),
+            "Expected original value in removal message"
         );
     }
 }
