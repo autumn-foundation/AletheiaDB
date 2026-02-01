@@ -555,9 +555,9 @@ impl GallifreyDB {
             let result = f(&mut tx)?;
 
             // Track mutations for persistence before committing
-        let has_node_writes = tx.has_node_writes();
-        let has_edge_writes = tx.has_edge_writes();
-        let has_vector_writes = tx.has_vector_writes();
+            let has_node_writes = tx.has_node_writes();
+            let has_edge_writes = tx.has_edge_writes();
+            let has_vector_writes = tx.has_vector_writes();
 
             tx.commit()?; // Ignore commit timestamp for simple write()
 
