@@ -33,8 +33,8 @@ pub use checkpoint::{
 };
 pub use cold_storage::{
     AtomicColdStorageStats, ColdStorage, ColdStorageConfig, ColdStorageStats, CompressionAlgorithm,
-    FileColdStorage, InMemoryColdStorage, decode_edge_version, decode_node_version,
-    encode_edge_version, encode_node_version,
+    InMemoryColdStorage, decode_edge_version, decode_node_version, encode_edge_version,
+    encode_node_version,
 };
 pub use current::{CurrentStats, CurrentStorage, DEFAULT_MAX_VECTOR_PROPERTIES, VectorIndexInfo};
 pub use historical::{CacheMetrics, HistoricalStats, HistoricalStorage};
