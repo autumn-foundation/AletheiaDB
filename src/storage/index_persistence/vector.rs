@@ -93,7 +93,7 @@ pub fn save_vector_meta(meta: &VectorIndexMeta, path: &Path) -> Result<()> {
 /// Load vector index metadata and validate CRC32 checksum.
 pub fn load_vector_meta(path: &Path) -> Result<VectorIndexMeta> {
     // Metadata should be small, but use standard limit for consistency
-    let data = load_with_crc(path, super::MAX_VECTOR_INDEX_SIZE)?;
+    let data = load_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE)?;
     let meta: VectorIndexMeta = bitcode::decode(&data)?;
 
     if meta.magic != VECTOR_META_MAGIC {
@@ -122,7 +122,7 @@ pub fn save_vector_mappings(mappings: &VectorMappingsData, path: &Path) -> Resul
 
 /// Load vector ID mappings and validate CRC32 checksum.
 pub fn load_vector_mappings(path: &Path) -> Result<VectorMappingsData> {
-    let data = load_with_crc(path, super::MAX_VECTOR_INDEX_SIZE)?;
+    let data = load_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE)?;
     let mappings: VectorMappingsData = bitcode::decode(&data)?;
     Ok(mappings)
 }
@@ -135,7 +135,7 @@ pub fn save_snapshot_meta(meta: &VectorSnapshotMeta, path: &Path) -> Result<()> 
 
 /// Load vector snapshot metadata and validate CRC32 checksum.
 pub fn load_snapshot_meta(path: &Path) -> Result<VectorSnapshotMeta> {
-    let data = load_with_crc(path, super::MAX_VECTOR_INDEX_SIZE)?;
+    let data = load_with_crc(path, super::MAX_VECTOR_INDEX_FILE_SIZE)?;
     let meta: VectorSnapshotMeta = bitcode::decode(&data)?;
     Ok(meta)
 }

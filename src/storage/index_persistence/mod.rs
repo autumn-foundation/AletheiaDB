@@ -141,28 +141,84 @@ pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 /// Limits the amount of memory allocated when loading graph indexes.
 /// Default: 4GB.
 #[cfg(not(test))]
-pub const MAX_GRAPH_INDEX_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4GB
+pub const MAX_GRAPH_INDEX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4GB
 
 /// Maximum size of a graph index file (DoS protection).
 ///
 /// Limits the amount of memory allocated when loading graph indexes.
 /// Default: 10MB (test mode).
 #[cfg(test)]
-pub const MAX_GRAPH_INDEX_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+pub const MAX_GRAPH_INDEX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
 /// Maximum size of a vector index metadata/mappings file (DoS protection).
 ///
 /// Limits the amount of memory allocated when loading vector index metadata.
 /// Default: 1GB.
 #[cfg(not(test))]
-pub const MAX_VECTOR_INDEX_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+pub const MAX_VECTOR_INDEX_FILE_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 
 /// Maximum size of a vector index metadata/mappings file (DoS protection).
 ///
 /// Limits the amount of memory allocated when loading vector index metadata.
 /// Default: 5MB (test mode).
 #[cfg(test)]
-pub const MAX_VECTOR_INDEX_SIZE: u64 = 5 * 1024 * 1024; // 5MB
+pub const MAX_VECTOR_INDEX_FILE_SIZE: u64 = 5 * 1024 * 1024; // 5MB
+
+/// Maximum size of a temporal index file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading temporal indexes.
+/// Default: 2GB.
+#[cfg(not(test))]
+pub const MAX_TEMPORAL_INDEX_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2GB
+
+/// Maximum size of a temporal index file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading temporal indexes.
+/// Default: 10MB (test mode).
+#[cfg(test)]
+pub const MAX_TEMPORAL_INDEX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+
+/// Maximum size of a string interner file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading the string interner.
+/// Default: 256MB.
+#[cfg(not(test))]
+pub const MAX_STRING_INTERNER_FILE_SIZE: u64 = 256 * 1024 * 1024; // 256MB
+
+/// Maximum size of a string interner file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading the string interner.
+/// Default: 5MB (test mode).
+#[cfg(test)]
+pub const MAX_STRING_INTERNER_FILE_SIZE: u64 = 5 * 1024 * 1024; // 5MB
+
+/// Maximum size of a manifest file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading the manifest.
+/// Default: 1MB.
+#[cfg(not(test))]
+pub const MAX_MANIFEST_FILE_SIZE: u64 = 1024 * 1024; // 1MB
+
+/// Maximum size of a manifest file (DoS protection).
+///
+/// Limits the amount of memory allocated when loading the manifest.
+/// Default: 100KB (test mode).
+#[cfg(test)]
+pub const MAX_MANIFEST_FILE_SIZE: u64 = 100 * 1024; // 100KB
+
+/// Maximum allowed file size for memory-mapped files (Sanity Check).
+///
+/// Prevents attempting to map ridiculously large or sparse files that could cause issues.
+/// Default: 100GB.
+#[cfg(not(test))]
+pub const MAX_MMAP_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024; // 100GB
+
+/// Maximum allowed file size for memory-mapped files (Sanity Check).
+///
+/// Prevents attempting to map ridiculously large or sparse files that could cause issues.
+/// Default: 100MB (test mode).
+#[cfg(test)]
+pub const MAX_MMAP_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100MB
 
 /// Atomically write data to a file using write-temp-then-rename pattern.
 ///
