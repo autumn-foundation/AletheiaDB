@@ -212,6 +212,20 @@ impl WriteTransaction {
     /// - **GroupCommit**: Waits for batch fsync (ACID + high throughput)
     /// - **AsyncBatched**: Returns after flush to OS cache, batched fsync in background (<100µs latency)
     pub fn commit_with_timestamp(mut self) -> Result<Timestamp> {
+        #[cfg(feature = "observability-prometheus")]
+        struct CommitTimer(std::time::Instant);
+
+        #[cfg(feature = "observability-prometheus")]
+        impl Drop for CommitTimer {
+            fn drop(&mut self) {
+                let duration = self.0.elapsed().as_secs_f64();
+                crate::observe_histogram!("gallifreydb_transaction_commit_duration_seconds", duration);
+            }
+        }
+
+        #[cfg(feature = "observability-prometheus")]
+        let _timer = CommitTimer(std::time::Instant::now());
+
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!(
             "transaction_commit",
@@ -694,6 +708,7 @@ impl WriteTransaction {
                     valid_from,
                     ..
                 } => {
+                    crate::increment_counter!("gallifreydb_transaction_operations_total", "type" => "node", "op" => "create");
                     // No allocation! Just copy the 4-byte InternedString ID
                     WalOperation::CreateNode {
                         node_id: *node_id,
@@ -711,6 +726,7 @@ impl WriteTransaction {
                     valid_from,
                     ..
                 } => {
+                    crate::increment_counter!("gallifreydb_transaction_operations_total", "type" => "edge", "op" => "create");
                     // No allocation! Just copy the 4-byte InternedString ID
                     WalOperation::CreateEdge {
                         edge_id: *edge_id,
@@ -729,6 +745,7 @@ impl WriteTransaction {
                     valid_from,
                     ..
                 } => {
+                    crate::increment_counter!("gallifreydb_transaction_operations_total", "type" => "node", "op" => "update");
                     // No allocation! Just copy the 4-byte InternedString ID
                     WalOperation::UpdateNode {
                         node_id: *node_id,
@@ -746,6 +763,7 @@ impl WriteTransaction {
                     valid_from,
                     ..
                 } => {
+                    crate::increment_counter!("gallifreydb_transaction_operations_total", "type" => "edge", "op" => "update");
                     // No allocation! Just copy the 4-byte InternedString ID
                     WalOperation::UpdateEdge {
                         edge_id: *edge_id,
@@ -758,17 +776,23 @@ impl WriteTransaction {
                 super::BufferedWrite::DeleteNode {
                     node_id,
                     valid_from,
-                } => WalOperation::DeleteNode {
-                    node_id: *node_id,
-                    valid_from: *valid_from,
-                },
+                } => {
+                    crate::increment_counter!("gallifreydb_transaction_operations_total", "type" => "node", "op" => "delete");
+                    WalOperation::DeleteNode {
+                        node_id: *node_id,
+                        valid_from: *valid_from,
+                    }
+                }
                 super::BufferedWrite::DeleteEdge {
                     edge_id,
                     valid_from,
-                } => WalOperation::DeleteEdge {
-                    edge_id: *edge_id,
-                    valid_from: *valid_from,
-                },
+                } => {
+                    crate::increment_counter!("gallifreydb_transaction_operations_total", "type" => "edge", "op" => "delete");
+                    WalOperation::DeleteEdge {
+                        edge_id: *edge_id,
+                        valid_from: *valid_from,
+                    }
+                }
             };
 
             // Append to WAL (lock-free!)

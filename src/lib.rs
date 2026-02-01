@@ -55,6 +55,9 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+#[macro_use]
+pub mod macros;
+
 pub mod api;
 pub mod config;
 pub mod core;

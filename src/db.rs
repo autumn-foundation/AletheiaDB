@@ -474,8 +474,10 @@ impl GallifreyDB {
     where
         F: FnOnce(&ReadTransaction) -> Result<T>,
     {
-        let tx = self.read_transaction()?;
-        f(&tx)
+        crate::timed_block!("gallifreydb_operation_duration_seconds", ["op" => "read_transaction"], {
+            let tx = self.read_transaction()?;
+            f(&tx)
+        })
     }
 
     /// Create a new write transaction.
@@ -548,30 +550,32 @@ impl GallifreyDB {
     where
         F: FnOnce(&mut WriteTransaction) -> Result<T>,
     {
-        let mut tx = self.write_transaction()?;
-        let result = f(&mut tx)?;
+        crate::timed_block!("gallifreydb_operation_duration_seconds", ["op" => "write_transaction"], {
+            let mut tx = self.write_transaction()?;
+            let result = f(&mut tx)?;
 
-        // Track mutations for persistence before committing
+            // Track mutations for persistence before committing
         let has_node_writes = tx.has_node_writes();
         let has_edge_writes = tx.has_edge_writes();
         let has_vector_writes = tx.has_vector_writes();
 
-        tx.commit()?; // Ignore commit timestamp for simple write()
+            tx.commit()?; // Ignore commit timestamp for simple write()
 
-        // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
-            if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
-                // String interner mutations happen with every node/edge (labels)
-                tracker.record_string_mutation();
+            // Record mutations after successful commit
+            if let Some(ref tracker) = self.persistence_tracker {
+                if has_node_writes || has_edge_writes {
+                    tracker.record_graph_mutation();
+                    tracker.record_temporal_mutation();
+                    // String interner mutations happen with every node/edge (labels)
+                    tracker.record_string_mutation();
+                }
+                if has_vector_writes {
+                    tracker.record_vector_mutation();
+                }
             }
-            if has_vector_writes {
-                tracker.record_vector_mutation();
-            }
-        }
 
-        Ok(result)
+            Ok(result)
+        })
     }
 
     /// Execute a write operation and return both the result and commit timestamp.
@@ -840,9 +844,11 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("get_node_at_time").entered();
 
-        self.historical
-            .read_or_err()?
-            .get_node_at_time(node_id, valid_time, transaction_time)
+        crate::timed_block!("gallifreydb_operation_duration_seconds", ["op" => "get_node_at_time"], {
+            self.historical
+                .read_or_err()?
+                .get_node_at_time(node_id, valid_time, transaction_time)
+        })
     }
 
     /// Get an edge as it existed at a specific point in bi-temporal space.
@@ -858,9 +864,11 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("get_edge_at_time").entered();
 
-        self.historical
-            .read_or_err()?
-            .get_edge_at_time(edge_id, valid_time, transaction_time)
+        crate::timed_block!("gallifreydb_operation_duration_seconds", ["op" => "get_edge_at_time"], {
+            self.historical
+                .read_or_err()?
+                .get_edge_at_time(edge_id, valid_time, transaction_time)
+        })
     }
 
     /// Get multiple nodes as they existed at a specific point in bi-temporal space.
@@ -1439,8 +1447,10 @@ impl GallifreyDB {
     ) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("find_similar_in").entered();
-        self.current
-            .find_similar_in(property_name, query_node_id, k)
+        crate::timed_block!("gallifreydb_operation_duration_seconds", ["op" => "find_similar_in"], {
+            self.current
+                .find_similar_in(property_name, query_node_id, k)
+        })
     }
 
     /// Search a specific property's vector index with a raw embedding.
@@ -1507,7 +1517,9 @@ impl GallifreyDB {
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("find_similar").entered();
-        self.current.find_similar(query_node_id, k)
+        crate::timed_block!("gallifreydb_operation_duration_seconds", ["op" => "find_similar"], {
+            self.current.find_similar(query_node_id, k)
+        })
     }
 
     /// Find k most similar nodes with a specific label.
@@ -1941,15 +1953,17 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("execute_query").entered();
 
-        // Use cached statistics for cost-based optimization
-        // Statistics are shared across all queries for this database instance
-        let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
-        let physical_plan = planner.plan(query)?;
+        crate::timed_block!("gallifreydb_operation_duration_seconds", ["op" => "execute_query"], {
+            // Use cached statistics for cost-based optimization
+            // Statistics are shared across all queries for this database instance
+            let planner = QueryPlanner::new(Arc::clone(&self.stats), Arc::clone(&self.current));
+            let physical_plan = planner.plan(query)?;
 
-        // Execute the plan
-        let executor = QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical));
+            // Execute the plan
+            let executor = QueryExecutor::new(Arc::clone(&self.current), Arc::clone(&self.historical));
 
-        executor.execute(physical_plan)
+            executor.execute(physical_plan)
+        })
     }
 
     /// Traverse from a node and rank results by similarity to an embedding.
@@ -1989,14 +2003,16 @@ impl GallifreyDB {
         #[cfg(feature = "observability")]
         let _span = tracing::info_span!("traverse_and_rank").entered();
 
-        let query = self
-            .query()
-            .start(source)
-            .traverse(edge_label)
-            .rank_by_similarity(embedding, k)
-            .build();
+        crate::timed_block!("gallifreydb_operation_duration_seconds", ["op" => "traverse_and_rank"], {
+            let query = self
+                .query()
+                .start(source)
+                .traverse(edge_label)
+                .rank_by_similarity(embedding, k)
+                .build();
 
-        self.execute_query(query)
+            self.execute_query(query)
+        })
     }
 
     /// Find similar nodes at a specific point in time.

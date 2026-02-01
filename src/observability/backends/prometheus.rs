@@ -52,6 +52,10 @@ impl PrometheusBackend {
 
         PrometheusBuilder::new()
             .with_http_listener(addr)
+            .set_buckets(&[
+                0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0,
+            ])
+            .map_err(|e| Error::other(format!("Failed to set buckets: {}", e)))?
             .install()
             .map_err(|e| Error::other(format!("Prometheus install failed: {}", e)))?;
 

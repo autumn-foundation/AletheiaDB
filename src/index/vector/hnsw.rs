@@ -738,6 +738,17 @@ impl VectorIndex for HnswIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<(NodeId, f32)>> {
+        #[cfg(feature = "observability-prometheus")]
+        struct SearchTimer(std::time::Instant);
+        #[cfg(feature = "observability-prometheus")]
+        impl Drop for SearchTimer {
+            fn drop(&mut self) {
+                crate::observe_histogram!("gallifreydb_vector_search_duration_seconds", self.0.elapsed().as_secs_f64(), "op" => "search");
+            }
+        }
+        #[cfg(feature = "observability-prometheus")]
+        let _timer = SearchTimer(std::time::Instant::now());
+
         // Validate query vector
         validate_vector(query)?;
 
@@ -808,6 +819,17 @@ impl VectorIndex for HnswIndex {
     where
         F: Fn(&NodeId) -> bool + Send + Sync,
     {
+        #[cfg(feature = "observability-prometheus")]
+        struct FilteredSearchTimer(std::time::Instant);
+        #[cfg(feature = "observability-prometheus")]
+        impl Drop for FilteredSearchTimer {
+            fn drop(&mut self) {
+                crate::observe_histogram!("gallifreydb_vector_search_duration_seconds", self.0.elapsed().as_secs_f64(), "op" => "search_with_filter");
+            }
+        }
+        #[cfg(feature = "observability-prometheus")]
+        let _timer = FilteredSearchTimer(std::time::Instant::now());
+
         // Validate query vector
         validate_vector(query)?;
 
