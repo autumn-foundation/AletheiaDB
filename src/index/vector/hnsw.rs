@@ -102,9 +102,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, ffi::Matches};
 #[doc(hidden)]
 pub static INJECT_RACE_DELAY: AtomicBool = AtomicBool::new(false);
 #[doc(hidden)]
-pub static HIT_RACE_CONDITION_REPLACED: AtomicU64 = AtomicU64::new(0);
-#[doc(hidden)]
-pub static HIT_RACE_CONDITION_REMOVED: AtomicU64 = AtomicU64::new(0);
+pub static HIT_RACE_CONDITION: AtomicU64 = AtomicU64::new(0);
 
 /// Magic bytes for mapping file identification
 const MAPPING_MAGIC: &[u8; 4] = b"GMAP";
@@ -705,16 +703,15 @@ impl VectorIndex for HnswIndex {
 
                 // FIX: Check if we are still the owner of this ID (race condition fix - see issue #567)
                 // If the mapping was removed or changed by another thread while we waited for the lock,
-                // we should abort to avoid creating a zombie vector (one that exists in index but not in maps).
-                if let Some(current_key) = map_guard {
-                    if *current_key != key {
-                        HIT_RACE_CONDITION_REPLACED.fetch_add(1, Ordering::Relaxed);
-                        // Replaced by another thread (it won the race). Abort our stale add.
-                        return Ok(());
-                    }
-                } else {
-                    HIT_RACE_CONDITION_REMOVED.fetch_add(1, Ordering::Relaxed);
-                    // Removed by another thread (it won the race). Abort our stale add.
+                // we should abort to avoid creating a zombie vector.
+                // We verify that the map still contains an entry for this ID, and that entry points to our key.
+                let is_valid = map_guard
+                    .filter(|current_key| *current_key.value() == key)
+                    .is_some();
+
+                if !is_valid {
+                    HIT_RACE_CONDITION.fetch_add(1, Ordering::Relaxed);
+                    // Race lost: node was removed or replaced. Abort add.
                     return Ok(());
                 }
 
