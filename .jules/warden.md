@@ -70,3 +70,19 @@ Internal SIMD helper functions in `src/core/vector.rs` used `debug_assert_eq!` t
 
 **Defense:** Runtime Assertion
 Replaced `debug_assert_eq!` with `assert_eq!` in `dot_and_magnitudes`, `squared_diff_sum`, and `dot_product_sum`. This ensures that even in optimized release builds, dimension mismatches trigger a safe panic rather than UB. Verified with a regression test `test_internal_safety_in_release`.
+
+## 2026-02-18 - HTTP & MCP Hardening
+**Threat:** Stack Overflow (DoS) in HTTP JSON Parsing
+Recursive JSON parsing in `src/http/converters.rs` and `src/mcp/server.rs` lacked depth checks. Deeply nested JSON payloads (e.g., arrays of arrays) could cause stack overflow crashes.
+
+**Defense:** Recursion Limit
+- Added `MAX_RECURSION_DEPTH` check to `json_to_property_value` in both HTTP and MCP layers.
+- Centralized resource constants in `src/core/constants.rs` (`MAX_RESULT_LIMIT`, `MAX_TRAVERSAL_DEPTH`, etc.).
+
+**Threat:** Resource Exhaustion in HTTP Endpoints
+The `FindNode` and `FindNeighbors` endpoints accepted unbounded `limit` parameters, and `FindNeighbors` lacked pagination entirely. This allowed attackers to request excessive data, causing memory exhaustion.
+
+**Defense:** Enforced Limits & Pagination
+- Capped `limit` to `MAX_RESULT_LIMIT` (10,000) in `src/http/handlers.rs`.
+- Added pagination (`limit`, `offset`) to `FindNeighbors` endpoint.
+- Refactored `src/mcp/server.rs` to use centralized constants.

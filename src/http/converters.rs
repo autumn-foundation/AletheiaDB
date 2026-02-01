@@ -55,6 +55,20 @@ pub fn json_to_property_map(
 }
 
 pub fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue, String> {
+    json_to_property_value_recursive(value, 0)
+}
+
+fn json_to_property_value_recursive(
+    value: &serde_json::Value,
+    depth: usize,
+) -> Result<PropertyValue, String> {
+    if depth > crate::core::property::MAX_RECURSION_DEPTH {
+        return Err(format!(
+            "Recursion limit exceeded (max {})",
+            crate::core::property::MAX_RECURSION_DEPTH
+        ));
+    }
+
     match value {
         serde_json::Value::Null => Ok(PropertyValue::Null),
         serde_json::Value::Bool(b) => Ok(PropertyValue::Bool(*b)),
@@ -83,12 +97,58 @@ pub fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue
                     return Ok(PropertyValue::Vector(Arc::from(floats)));
                 }
             }
-            let values: Result<Vec<PropertyValue>, String> =
-                arr.iter().map(json_to_property_value).collect();
+            let values: Result<Vec<PropertyValue>, String> = arr
+                .iter()
+                .map(|v| json_to_property_value_recursive(v, depth + 1))
+                .collect();
             Ok(PropertyValue::Array(Arc::new(values?)))
         }
         serde_json::Value::Object(_) => {
             Err("Nested objects are not supported as property values".to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::property::MAX_RECURSION_DEPTH;
+
+    #[test]
+    fn test_json_recursion_depth_limit() {
+        // Create a deeply nested JSON array: [[[[...]]]]
+        let depth = MAX_RECURSION_DEPTH + 5;
+        let mut value = json!(1);
+        for _ in 0..depth {
+            value = json!([value]);
+        }
+
+        // This should return an Err, not crash with stack overflow
+        let result = json_to_property_value(&value);
+
+        assert!(result.is_err(), "Deeply nested JSON should fail gracefully");
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Recursion limit exceeded"),
+            "Error message should indicate recursion limit"
+        );
+    }
+
+    #[test]
+    fn test_json_recursion_depth_limit_boundary() {
+        // Create a nested JSON array exactly at the limit
+        let depth = MAX_RECURSION_DEPTH;
+        let mut value = json!(1);
+        for _ in 0..depth {
+            value = json!([value]);
+        }
+
+        // This should succeed
+        let result = json_to_property_value(&value);
+        assert!(
+            result.is_ok(),
+            "Recursion at limit should succeed"
+        );
     }
 }

@@ -19,6 +19,9 @@ use rmcp::{
 use serde_json::json;
 
 use crate::api::transaction::WriteOps;
+use crate::core::constants::{
+    MAX_PAGINATION_OFFSET, MAX_RESULT_LIMIT, MAX_TRAVERSAL_DEPTH,
+};
 use crate::core::temporal::time;
 use crate::core::{
     EdgeId, GLOBAL_INTERNER, NodeId, PropertyMap, PropertyMapBuilder, PropertyValue, Timestamp,
@@ -33,18 +36,8 @@ use super::tools::*;
 // Resource Limits (to prevent DoS attacks)
 // ============================================================================
 
-/// Maximum traversal depth to prevent stack overflow and excessive computation.
-const MAX_TRAVERSAL_DEPTH: usize = 10;
-
-/// Maximum number of results to return in a single query.
-const MAX_RESULT_LIMIT: usize = 10_000;
-
 /// Default number of results to return.
 const DEFAULT_RESULT_LIMIT: usize = 100;
-
-/// Maximum pagination offset to prevent excessive memory usage.
-/// Since we fetch limit+offset rows and then skip, this limits total rows fetched.
-const MAX_PAGINATION_OFFSET: usize = 10_000;
 
 /// Maximum k for vector similarity search.
 const MAX_VECTOR_K: usize = 1000;
@@ -309,14 +302,23 @@ impl GallifreyMcpServer {
     fn json_to_property_map(&self, json: &HashMap<String, serde_json::Value>) -> PropertyMap {
         let mut builder = PropertyMapBuilder::new();
         for (key, value) in json {
-            if let Some(pv) = self.json_to_property_value(value) {
+            if let Some(pv) = self.json_to_property_value(value, 0) {
                 builder = builder.insert(key.as_str(), pv);
             }
         }
         builder.build()
     }
 
-    fn json_to_property_value(&self, value: &serde_json::Value) -> Option<PropertyValue> {
+    fn json_to_property_value(
+        &self,
+        value: &serde_json::Value,
+        depth: usize,
+    ) -> Option<PropertyValue> {
+        // Prevent stack overflow from deeply nested JSON
+        if depth > crate::core::property::MAX_RECURSION_DEPTH {
+            return None;
+        }
+
         match value {
             serde_json::Value::Null => Some(PropertyValue::Null),
             serde_json::Value::Bool(b) => Some(PropertyValue::Bool(*b)),
@@ -340,7 +342,7 @@ impl GallifreyMcpServer {
                 }
                 let values: Vec<PropertyValue> = arr
                     .iter()
-                    .filter_map(|v| self.json_to_property_value(v))
+                    .filter_map(|v| self.json_to_property_value(v, depth + 1))
                     .collect();
                 Some(PropertyValue::Array(Arc::new(values)))
             }
