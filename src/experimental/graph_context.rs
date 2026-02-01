@@ -1,7 +1,7 @@
 use crate::GallifreyDB;
 use crate::core::id::NodeId;
-use crate::core::temporal::{time, Timestamp};
 use crate::core::interning::GLOBAL_INTERNER;
+use crate::core::temporal::{Timestamp, time};
 use crate::utils::error::Result;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write;
@@ -62,7 +62,10 @@ impl<'a> GraphContextGenerator<'a> {
         while let Some((node_id, depth)) = queue.pop_front() {
             // Get node data
             let node = if let Some(valid_time) = config.time {
-                match self.db.get_node_at_time(node_id, valid_time, transaction_time) {
+                match self
+                    .db
+                    .get_node_at_time(node_id, valid_time, transaction_time)
+                {
                     Ok(n) => n,
                     Err(_) => {
                         let mut found = None;
@@ -72,7 +75,7 @@ impl<'a> GraphContextGenerator<'a> {
                             if let Some(commit_ts) = current_node.metadata.commit_timestamp {
                                 // Check if the current version was committed and valid by the requested time
                                 if commit_ts <= transaction_time && commit_ts <= valid_time {
-                                     found = Some(current_node);
+                                    found = Some(current_node);
                                 }
                             }
                         }
@@ -85,9 +88,13 @@ impl<'a> GraphContextGenerator<'a> {
                                     // Note: we check start() <= transaction_time because updates might close the transaction interval
                                     // but the fact remains historically true. By scanning reverse, we find the latest belief.
                                     if version.temporal.valid_time().contains(valid_time)
-                                        && version.temporal.transaction_time().start() <= transaction_time
+                                        && version.temporal.transaction_time().start()
+                                            <= transaction_time
                                     {
-                                        if let Ok(n) = self.db.get_node_at_version(node_id, version.version_number) {
+                                        if let Ok(n) = self
+                                            .db
+                                            .get_node_at_version(node_id, version.version_number)
+                                        {
                                             found = Some(n);
                                             break;
                                         }
@@ -111,17 +118,28 @@ impl<'a> GraphContextGenerator<'a> {
             };
 
             // Format Node
-            let label_str = GLOBAL_INTERNER.resolve(node.label).map(|s| s.to_string()).unwrap_or_else(|| "Unknown".to_string());
+            let label_str = GLOBAL_INTERNER
+                .resolve(node.label)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
 
             if depth == 0 {
-                writeln!(&mut output, "\n## Central Node: {} ({})", node_id, label_str).unwrap();
+                writeln!(
+                    &mut output,
+                    "\n## Central Node: {} ({})",
+                    node_id, label_str
+                )
+                .unwrap();
             } else {
                 writeln!(&mut output, "\n### Node: {} ({})", node_id, label_str).unwrap();
             }
 
             // Properties
             for (key, value) in node.properties.iter() {
-                 let key_str = GLOBAL_INTERNER.resolve(*key).map(|s| s.to_string()).unwrap_or_else(|| "Unknown".to_string());
+                let key_str = GLOBAL_INTERNER
+                    .resolve(*key)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
                 writeln!(&mut output, "- {}: {}", key_str, value).unwrap();
             }
 
@@ -142,38 +160,47 @@ impl<'a> GraphContextGenerator<'a> {
             for edge_id in edge_ids {
                 // Get edge data (possibly historical)
                 let edge = if let Some(valid_time) = config.time {
-                    match self.db.get_edge_at_time(edge_id, valid_time, transaction_time) {
+                    match self
+                        .db
+                        .get_edge_at_time(edge_id, valid_time, transaction_time)
+                    {
                         Ok(e) => e,
                         Err(_) => {
-                             let mut found = None;
+                            let mut found = None;
 
-                             // Fallback 1: Current
-                             if let Ok(current_edge) = self.db.get_edge(edge_id) {
+                            // Fallback 1: Current
+                            if let Ok(current_edge) = self.db.get_edge(edge_id) {
                                 if let Some(commit_ts) = current_edge.metadata.commit_timestamp {
                                     if commit_ts <= transaction_time && commit_ts <= valid_time {
                                         found = Some(current_edge);
                                     }
                                 }
-                             }
+                            }
 
-                             // Fallback 2: History
-                             if found.is_none() {
-                                 if let Ok(history) = self.db.get_edge_history(edge_id) {
+                            // Fallback 2: History
+                            if found.is_none() {
+                                if let Ok(history) = self.db.get_edge_history(edge_id) {
                                     for version in history.versions.iter().rev() {
                                         if version.temporal.valid_time().contains(valid_time)
-                                            && version.temporal.transaction_time().start() <= transaction_time
+                                            && version.temporal.transaction_time().start()
+                                                <= transaction_time
                                         {
                                             // Reconstruct edge from history
                                             // We assume topology (source/target) is invariant for the same EdgeId
-                                            if let (Ok(source), Ok(target)) = (self.db.get_edge_source(edge_id), self.db.get_edge_target(edge_id)) {
-                                                if let Ok(label) = GLOBAL_INTERNER.intern(&version.label) {
+                                            if let (Ok(source), Ok(target)) = (
+                                                self.db.get_edge_source(edge_id),
+                                                self.db.get_edge_target(edge_id),
+                                            ) {
+                                                if let Ok(label) =
+                                                    GLOBAL_INTERNER.intern(&version.label)
+                                                {
                                                     let e = crate::core::graph::Edge::new(
                                                         edge_id,
                                                         label,
                                                         source,
                                                         target,
                                                         version.properties.clone(),
-                                                        version.version_id
+                                                        version.version_id,
                                                     );
                                                     found = Some(e);
                                                     break;
@@ -181,14 +208,14 @@ impl<'a> GraphContextGenerator<'a> {
                                             }
                                         }
                                     }
-                                 }
-                             }
+                                }
+                            }
 
-                             if let Some(e) = found {
-                                 e
-                             } else {
-                                 continue;
-                             }
+                            if let Some(e) = found {
+                                e
+                            } else {
+                                continue;
+                            }
                         }
                     }
                 } else {
@@ -198,7 +225,10 @@ impl<'a> GraphContextGenerator<'a> {
                     }
                 };
 
-                let edge_label_str = GLOBAL_INTERNER.resolve(edge.label).map(|s| s.to_string()).unwrap_or_else(|| "Unknown".to_string());
+                let edge_label_str = GLOBAL_INTERNER
+                    .resolve(edge.label)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
 
                 // Filter by label if configured
                 if let Some(ref allowed) = config.edge_types {
@@ -210,15 +240,25 @@ impl<'a> GraphContextGenerator<'a> {
                 // Format Edge
                 let target_id = edge.target;
                 // Try to get target label for context (optimistic)
-                let target_label = self.db.get_node(target_id)
+                let target_label = self
+                    .db
+                    .get_node(target_id)
                     .ok()
                     .and_then(|n| GLOBAL_INTERNER.resolve(n.label).map(|s| s.to_string()))
                     .unwrap_or_else(|| "Unknown".to_string());
 
-                writeln!(&mut output, "- [{}] -> {} ({})", edge_label_str, target_id, target_label).unwrap();
+                writeln!(
+                    &mut output,
+                    "- [{}] -> {} ({})",
+                    edge_label_str, target_id, target_label
+                )
+                .unwrap();
 
                 for (key, value) in edge.properties.iter() {
-                    let key_str = GLOBAL_INTERNER.resolve(*key).map(|s| s.to_string()).unwrap_or_else(|| "Unknown".to_string());
+                    let key_str = GLOBAL_INTERNER
+                        .resolve(*key)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
                     writeln!(&mut output, "  - {}: {}", key_str, value).unwrap();
                 }
 
@@ -237,20 +277,50 @@ impl<'a> GraphContextGenerator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::property::PropertyMapBuilder;
     use crate::api::transaction::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
 
     #[test]
     fn test_graph_context_generation() {
         let db = GallifreyDB::new().unwrap();
 
         // Setup Graph
-        let alice = db.create_node("Person", PropertyMapBuilder::new().insert("name", "Alice").insert("age", 30i64).build()).unwrap();
-        let bob = db.create_node("Person", PropertyMapBuilder::new().insert("name", "Bob").build()).unwrap();
-        let acme = db.create_node("Company", PropertyMapBuilder::new().insert("name", "Acme").build()).unwrap();
+        let alice = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("name", "Alice")
+                    .insert("age", 30i64)
+                    .build(),
+            )
+            .unwrap();
+        let bob = db
+            .create_node(
+                "Person",
+                PropertyMapBuilder::new().insert("name", "Bob").build(),
+            )
+            .unwrap();
+        let acme = db
+            .create_node(
+                "Company",
+                PropertyMapBuilder::new().insert("name", "Acme").build(),
+            )
+            .unwrap();
 
-        db.create_edge(alice, bob, "KNOWS", PropertyMapBuilder::new().insert("since", 2020i64).build()).unwrap();
-        db.create_edge(alice, acme, "WORKS_AT", PropertyMapBuilder::new().insert("role", "Engineer").build()).unwrap();
+        db.create_edge(
+            alice,
+            bob,
+            "KNOWS",
+            PropertyMapBuilder::new().insert("since", 2020i64).build(),
+        )
+        .unwrap();
+        db.create_edge(
+            alice,
+            acme,
+            "WORKS_AT",
+            PropertyMapBuilder::new().insert("role", "Engineer").build(),
+        )
+        .unwrap();
 
         let generator = GraphContextGenerator::new(&db);
         let config = ContextConfig {
@@ -278,17 +348,29 @@ mod tests {
 
         // T1: Create Node
         // Use write_with_timestamp to ensure we capture the exact commit time
-        let (node_id, t1) = db.write_with_timestamp(|tx| {
-             tx.create_node("Test", PropertyMapBuilder::new().insert("status", "active").build())
-        }).unwrap();
+        let (node_id, t1) = db
+            .write_with_timestamp(|tx| {
+                tx.create_node(
+                    "Test",
+                    PropertyMapBuilder::new().insert("status", "active").build(),
+                )
+            })
+            .unwrap();
 
         // Wait to ensure distinct timestamps
         thread::sleep(Duration::from_millis(10));
 
         // T2: Update Node
-        let (_, t2) = db.write_with_timestamp(|tx| {
-            tx.update_node(node_id, PropertyMapBuilder::new().insert("status", "inactive").build())
-        }).unwrap();
+        let (_, t2) = db
+            .write_with_timestamp(|tx| {
+                tx.update_node(
+                    node_id,
+                    PropertyMapBuilder::new()
+                        .insert("status", "inactive")
+                        .build(),
+                )
+            })
+            .unwrap();
 
         let generator = GraphContextGenerator::new(&db);
 
@@ -301,7 +383,10 @@ mod tests {
         };
         let output_t1 = generator.generate(node_id, config_t1).unwrap();
         // Note: String properties are quoted in output
-        assert!(output_t1.contains("status: \"active\""), "Expected 'status: \"active\"' at t1");
+        assert!(
+            output_t1.contains("status: \"active\""),
+            "Expected 'status: \"active\"' at t1"
+        );
         assert!(!output_t1.contains("inactive"));
 
         // Context at T2 (should be inactive)
@@ -311,6 +396,9 @@ mod tests {
             ..Default::default()
         };
         let output_t2 = generator.generate(node_id, config_t2).unwrap();
-        assert!(output_t2.contains("status: \"inactive\""), "Expected 'status: \"inactive\"' at t2");
+        assert!(
+            output_t2.contains("status: \"inactive\""),
+            "Expected 'status: \"inactive\"' at t2"
+        );
     }
 }
