@@ -75,6 +75,7 @@
 //! - **Versioning**: All files include a version byte to support future schema evolution.
 
 pub mod api;
+pub mod controller;
 mod error;
 pub mod formats;
 pub mod graph;
@@ -96,6 +97,7 @@ mod dos_tests;
 pub use api::{
     IndexStatus, PersistenceConfig, PersistenceStats, PersistenceStatus, VectorIndexStatus,
 };
+pub use controller::PersistenceController;
 pub use error::{IndexPersistenceError, Result};
 pub use formats::*;
 pub use loader::IndexPersistenceManager;

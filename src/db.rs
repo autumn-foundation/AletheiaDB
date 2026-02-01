@@ -20,11 +20,7 @@ use crate::query::planner::Statistics;
 use crate::query::{Query, QueryBuilder, QueryExecutor, QueryPlanner, QueryResults};
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
-use crate::storage::index_persistence::operations::{
-    persist_temporal_index, persist_vector_indexes,
-};
-use crate::storage::index_persistence::tracker::PersistenceTracker;
-use crate::storage::index_persistence::worker::spawn_background_persistence_thread;
+use crate::storage::index_persistence::PersistenceController;
 use crate::storage::version::AnchorConfig;
 use crate::storage::wal::concurrent_system::{ConcurrentWalSystem, ConcurrentWalSystemConfig};
 use crate::storage::wal::{DurabilityMode, WriteOptions};
@@ -116,17 +112,8 @@ pub struct GallifreyDB {
     default_durability: DurabilityMode,
     /// Query optimization statistics - cached across queries for effective cost-based optimization
     stats: Arc<Statistics>,
-    /// Index persistence configuration (stored for potential future use)
-    #[allow(dead_code)]
-    persistence_config: crate::storage::index_persistence::PersistenceConfig,
-    /// Index persistence manager (if enabled)
-    persistence_manager: Option<Arc<crate::storage::index_persistence::IndexPersistenceManager>>,
-    /// Persistence mutation tracking
-    persistence_tracker: Option<Arc<PersistenceTracker>>,
-    /// Background persistence thread health flag - set to true if thread panics or stops
-    persistence_thread_stopped: Arc<std::sync::atomic::AtomicBool>,
-    /// Background persistence thread handle (if enabled) - used to join thread on shutdown
-    persistence_thread_handle: Option<std::thread::JoinHandle<()>>,
+    /// Persistence controller (if enabled)
+    persistence: Option<PersistenceController>,
 }
 
 impl GallifreyDB {
@@ -222,25 +209,14 @@ impl GallifreyDB {
         let wal = ConcurrentWalSystem::new(wal_system_config)?;
         let wal = Arc::new(wal);
 
-        // Create persistence manager if enabled
-        let persistence_manager = if config.persistence.enabled {
-            Some(Arc::new(
-                crate::storage::index_persistence::IndexPersistenceManager::new(
-                    &config.persistence.data_dir,
-                ),
-            ))
+        // Create persistence controller if enabled
+        let mut persistence_controller = if config.persistence.enabled {
+            Some(PersistenceController::new(config.persistence.clone()))
         } else {
             None
         };
 
-        // Create persistence tracker if persistence is enabled
-        let persistence_tracker = if config.persistence.enabled {
-            Some(Arc::new(PersistenceTracker::new()))
-        } else {
-            None
-        };
-
-        let mut db = GallifreyDB {
+        let db = GallifreyDB {
             current: Arc::new(CurrentStorage::new()),
             historical: Arc::new(RwLock::new(HistoricalStorage::from_unified_config(
                 config.historical,
@@ -255,48 +231,39 @@ impl GallifreyDB {
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             default_durability: durability_mode,
             stats: Arc::new(Statistics::new()),
-            persistence_config: config.persistence.clone(),
-            persistence_manager: persistence_manager.clone(),
-            persistence_tracker: persistence_tracker.clone(),
-            persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            persistence_thread_handle: None,
+            persistence: None, // Will be set after initialization
         };
 
-        // Load indexes on startup if enabled
-        if let Some(ref manager) = persistence_manager
-            && config.persistence.load_on_startup
-        {
-            crate::storage::index_persistence::operations::load_indexes_startup(
-                manager,
+        // Initialize persistence if enabled
+        if let Some(ref mut controller) = persistence_controller {
+            // Load indexes on startup
+            controller.load_indexes_startup(
                 &db.current,
                 &db.historical,
                 &db.node_id_gen,
                 &db.edge_id_gen,
                 &db.version_id_gen,
             );
-        }
 
-        // Start background persistence thread if enabled
-        if let Some(ref tracker) = persistence_tracker
-            && let Some(ref manager) = persistence_manager
-        {
-            let handle = spawn_background_persistence_thread(
+            // Start background persistence thread
+            controller.start_background_thread(
                 Arc::clone(&db.current),
                 Arc::clone(&db.historical),
                 Arc::clone(&db.temporal_indexes),
                 Arc::clone(&db.wal),
-                Arc::clone(manager),
-                Arc::clone(tracker),
-                config.persistence.policies.clone(),
-                Arc::clone(&db.persistence_thread_stopped),
             );
-            db.persistence_thread_handle = Some(handle);
         }
 
         // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
         db.historical
             .write()
             .set_temporal_indexes(Arc::clone(&db.temporal_indexes));
+
+        // Set persistence controller (using functional update since we can't mutate immutable binding if it wasn't mut)
+        // Actually db was immutable in previous block but we can make it mutable or reconstruct.
+        // Let's just reconstruct or shadow.
+        let mut db = db;
+        db.persistence = persistence_controller;
 
         Ok(db)
     }
@@ -348,11 +315,7 @@ impl GallifreyDB {
             version_id_gen: Arc::new(Mutex::new(IdGenerator::new())),
             default_durability: durability_mode,
             stats: Arc::new(Statistics::new()),
-            persistence_config: crate::storage::index_persistence::PersistenceConfig::default(),
-            persistence_manager: None,
-            persistence_tracker: None,
-            persistence_thread_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            persistence_thread_handle: None,
+            persistence: None,
         };
 
         // Wire temporal indexes to historical storage for O(log n) version lookups (Issue #209)
@@ -550,15 +513,15 @@ impl GallifreyDB {
         tx.commit()?; // Ignore commit timestamp for simple write()
 
         // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
+        if let Some(ref controller) = self.persistence {
             if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
+                controller.record_graph_mutation();
+                controller.record_temporal_mutation();
                 // String interner mutations happen with every node/edge (labels)
-                tracker.record_string_mutation();
+                controller.record_string_mutation();
             }
             if has_vector_writes {
-                tracker.record_vector_mutation();
+                controller.record_vector_mutation();
             }
         }
 
@@ -595,13 +558,13 @@ impl GallifreyDB {
         let commit_ts = tx.commit_with_timestamp()?;
 
         // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
+        if let Some(ref controller) = self.persistence {
             if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
+                controller.record_graph_mutation();
+                controller.record_temporal_mutation();
             }
             if has_vector_writes {
-                tracker.record_vector_mutation();
+                controller.record_vector_mutation();
             }
         }
 
@@ -647,15 +610,15 @@ impl GallifreyDB {
         tx.commit()?; // Ignore commit timestamp for simple write_with_options()
 
         // Record mutations after successful commit
-        if let Some(ref tracker) = self.persistence_tracker {
+        if let Some(ref controller) = self.persistence {
             if has_node_writes || has_edge_writes {
-                tracker.record_graph_mutation();
-                tracker.record_temporal_mutation();
+                controller.record_graph_mutation();
+                controller.record_temporal_mutation();
                 // String interner mutations happen with every node/edge (labels)
-                tracker.record_string_mutation();
+                controller.record_string_mutation();
             }
             if has_vector_writes {
-                tracker.record_vector_mutation();
+                controller.record_vector_mutation();
             }
         }
 
@@ -2135,57 +2098,20 @@ impl GallifreyDB {
     /// db.persist_indexes()?; // Save indexes to disk
     /// ```
     pub fn persist_indexes(&self) -> Result<()> {
-        use crate::storage::index_persistence::formats::IndexManifest;
-
-        // Warn if background persistence thread has stopped
-        if self
-            .persistence_thread_stopped
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            eprintln!(
-                "Warning: Background persistence thread has stopped. \
-                 Automatic persistence is disabled. Manual persist_indexes() calls will still work."
-            );
-        }
-
-        let manager =
-            self.persistence_manager
-                .as_ref()
-                .ok_or_else(|| StorageError::InconsistentState {
+        if let Some(ref controller) = self.persistence {
+            controller.persist_indexes(
+                &self.current,
+                &self.historical,
+                &self.temporal_indexes,
+                &self.wal,
+            )
+        } else {
+            Err(crate::utils::error::Error::Storage(
+                StorageError::InconsistentState {
                     reason: "Index persistence not enabled".to_string(),
-                })?;
-
-        // 1. Save string interner first (dependency for all others)
-        manager.save_string_interner().map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to save string interner: {}", e))
-        })?;
-
-        // 2. Save graph index
-        crate::storage::index_persistence::operations::persist_graph_index(
-            &self.current,
-            manager,
-            self.persistence_tracker.as_ref(),
-        )?;
-
-        // 3. Save vector indexes
-        if let Some(ref tracker) = self.persistence_tracker {
-            persist_vector_indexes(&self.current, manager, Some(tracker))?;
+                },
+            ))
         }
-
-        // 4. Save temporal index (version history)
-        if let Some(ref tracker) = self.persistence_tracker {
-            persist_temporal_index(&self.historical, &self.temporal_indexes, manager, tracker)?;
-        }
-
-        // 5. Save manifest last with current WAL LSN
-        // Note: This records the WAL position at persist time for future WAL replay coordination
-        let current_lsn = self.wal.current_lsn().0;
-        let manifest = IndexManifest::new(current_lsn);
-        manager.save_manifest(&manifest).map_err(|e| {
-            StorageError::PersistenceError(format!("Failed to save manifest: {}", e))
-        })?;
-
-        Ok(())
     }
 
     /// Get a reference to the current storage (test-only helper).
@@ -2511,17 +2437,7 @@ impl GallifreyDB {
 
 impl Drop for GallifreyDB {
     fn drop(&mut self) {
-        // Signal shutdown to background persistence thread
-        if let Some(ref tracker) = self.persistence_tracker {
-            tracker.signal_shutdown();
-
-            // Wait for the background thread to fully exit and release all resources
-            // This ensures the thread drops its Arc references to TieredStorage/RedbColdStorage
-            // before Drop returns, preventing file locking issues when reopening Redb.
-            if let Some(handle) = self.persistence_thread_handle.take() {
-                let _ = handle.join();
-            }
-        }
+        // PersistenceController handles its own shutdown in its Drop implementation
     }
 }
 
