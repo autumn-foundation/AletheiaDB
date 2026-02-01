@@ -82,6 +82,7 @@ GallifreyDB is under active development. Be aware of these limitations:
 - **Dependency Scanning**: Automated with Dependabot and cargo-audit
 - **Memory Safety**: Rust's memory safety guarantees
 - **Input Validation**: Comprehensive validation of all inputs
+- **Recursion Limits**: Parsers enforce depth limits to prevent stack overflow DoS
 - **Error Handling**: No panic-based DoS vulnerabilities
 - **CI Security Checks**: Automated security audits on every PR
 

@@ -1862,4 +1862,35 @@ mod tests {
         let result = Parser::parse(&query);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_parse_recursion_limit_mixed() {
+        // Depth 101: Mixed NOT and parens
+        // 0: (
+        // 1: NOT
+        // 2: (
+        // 3: NOT
+        // ...
+        let mut query = "MATCH (n) WHERE ".to_string();
+        let mut closing_parens = 0;
+
+        for i in 0..=MAX_RECURSION_DEPTH {
+            if i % 2 == 0 {
+                query.push('(');
+                closing_parens += 1;
+            } else {
+                query.push_str("NOT ");
+            }
+        }
+        query.push_str("n.active = true");
+        for _ in 0..closing_parens {
+            query.push(')');
+        }
+        query.push_str(" RETURN n");
+
+        let result = Parser::parse(&query);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Recursion limit exceeded"));
+    }
 }
