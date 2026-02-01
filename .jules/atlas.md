@@ -28,3 +28,7 @@
 ## 2026-02-01 - Splitting CurrentStorage
 **Tangle:** `src/storage/current.rs` was a "Blob" module containing storage implementation, iterators, statistics, vector index helpers, and extensive tests, making it difficult to maintain.
 **Blueprint:** Refactored into `src/storage/current/` directory. Extracted `iterators.rs`, `stats.rs`, and `vector.rs` to separate concerns. Moved tests to `tests.rs`, leaving `mod.rs` as a clean facade and core implementation.
+
+## 2026-02-02 - Extracting Vector Logic from CurrentStorage
+**Tangle:** `CurrentStorage` was acting as a "God Struct", handling core graph operations, ID generation, AND complex vector indexing logic (multi-property, temporal, adaptive stats), leading to high coupling and reduced cohesion.
+**Blueprint:** Extracted `VectorIndexManager` to `src/storage/current/vector.rs`. `CurrentStorage` now owns `VectorIndexManager` and delegates vector operations to it. This encapsulates vector lifecycle and logic, leaving `CurrentStorage` to focus on core graph storage and coordination.
