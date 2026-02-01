@@ -246,9 +246,13 @@ impl IncrementalAdjacencyIndex {
     /// The edge is added to the mutable delta layer and will be merged into
     /// the frozen CSR during the next compaction.
     pub fn insert(&self, source: NodeId, entry: AdjacencyEntry) {
-        self.delta.entry(source).or_default().push(entry);
-
+        // Increment stats BEFORE inserting into map to prevent underflow race condition
+        // during concurrent compaction. If compaction runs between stats increment and
+        // map insertion, it will see stats=1 but map empty, subtracting 0.
+        // If we did map insert first, compaction could drain map (1 item) then subtract
+        // from stats (0) causing underflow to usize::MAX.
         self.stats.delta_edge_count.fetch_add(1, Ordering::Relaxed);
+        self.delta.entry(source).or_default().push(entry);
     }
 
     /// Mark an edge as deleted. O(1).
@@ -263,8 +267,9 @@ impl IncrementalAdjacencyIndex {
             transaction_time: Utc::now(),
         };
 
-        self.tombstones.insert(edge_id, tombstone);
+        // Increment stats BEFORE inserting to prevent underflow race condition
         self.stats.tombstone_count.fetch_add(1, Ordering::Relaxed);
+        self.tombstones.insert(edge_id, tombstone);
     }
 
     /// Get tombstone metadata for a deleted edge.
