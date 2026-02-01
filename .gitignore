@@ -69,3 +69,7 @@ run-benchmarks.bat
 # Cleanup scripts
 final_cleanup.sh
 *_cleanup.sh
+
+# Debug output files
+*_output.txt
+test_output_*.txt
