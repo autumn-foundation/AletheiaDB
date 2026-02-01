@@ -1,8 +1,8 @@
 use crate::GallifreyDB;
-use crate::core::id::NodeId;
-use crate::core::temporal::time;
 use crate::core::GLOBAL_INTERNER;
 use crate::core::history::{VersionDiff, VersionInfo};
+use crate::core::id::NodeId;
+use crate::core::temporal::time;
 use crate::utils::error::Result;
 
 /// A single event in the narrative history of an entity.
@@ -58,27 +58,41 @@ impl<'a> NarrativeGenerator<'a> {
 
                 // Added properties
                 for (key_id, val) in diff.added.iter() {
-                    let key = GLOBAL_INTERNER.resolve(*key_id).map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string());
+                    let key = GLOBAL_INTERNER
+                        .resolve(*key_id)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
                     changes.push(format!("Added property '{}' with value '{}'", key, val));
                 }
 
                 // Removed properties
                 for (key_id, val) in diff.removed.iter() {
-                    let key = GLOBAL_INTERNER.resolve(*key_id).map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string());
+                    let key = GLOBAL_INTERNER
+                        .resolve(*key_id)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
                     changes.push(format!("Removed property '{}' (was '{}')", key, val));
                 }
 
                 // Modified properties
                 for (key_id, old_val, new_val) in &diff.modified {
-                    let key = GLOBAL_INTERNER.resolve(*key_id).map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string());
-                    changes.push(format!("Modified property '{}' from '{}' to '{}'", key, old_val, new_val));
+                    let key = GLOBAL_INTERNER
+                        .resolve(*key_id)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    changes.push(format!(
+                        "Modified property '{}' from '{}' to '{}'",
+                        key, old_val, new_val
+                    ));
                 }
-
             } else {
                 // First version (Creation)
                 description = format!("Node created with label '{}'.", version.label);
                 for (key_id, val) in version.properties.iter() {
-                    let key = GLOBAL_INTERNER.resolve(*key_id).map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string());
+                    let key = GLOBAL_INTERNER
+                        .resolve(*key_id)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
                     changes.push(format!("Initial property '{}': '{}'", key, val));
                 }
             }
@@ -100,8 +114,8 @@ impl<'a> NarrativeGenerator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::property::PropertyMapBuilder;
     use crate::api::transaction::WriteOps;
+    use crate::core::property::PropertyMapBuilder;
 
     #[test]
     fn test_node_narrative_generation() {
@@ -122,7 +136,8 @@ mod tests {
                 .insert("city", "London")
                 .build();
             tx.update_node(node_id, props2)
-        }).unwrap();
+        })
+        .unwrap();
 
         // 3. Generate Narrative
         let generator = NarrativeGenerator::new(&db);
@@ -135,8 +150,18 @@ mod tests {
         assert_eq!(event1.version_number, 1);
         assert!(event1.description.contains("Node created"));
         // PropertyValue::String display format is "Alice" (quoted)
-        assert!(event1.changes.iter().any(|s| s.contains("Initial property 'name': '\"Alice\"'")));
-        assert!(event1.changes.iter().any(|s| s.contains("Initial property 'age': '30'")));
+        assert!(
+            event1
+                .changes
+                .iter()
+                .any(|s| s.contains("Initial property 'name': '\"Alice\"'"))
+        );
+        assert!(
+            event1
+                .changes
+                .iter()
+                .any(|s| s.contains("Initial property 'age': '30'"))
+        );
 
         // Verify Second Event (Update)
         let event2 = &narrative[1];
@@ -144,8 +169,18 @@ mod tests {
         assert!(event2.description.contains("updated properties"));
 
         // age changed
-        assert!(event2.changes.iter().any(|s| s.contains("Modified property 'age' from '30' to '31'")));
+        assert!(
+            event2
+                .changes
+                .iter()
+                .any(|s| s.contains("Modified property 'age' from '30' to '31'"))
+        );
         // city added
-        assert!(event2.changes.iter().any(|s| s.contains("Added property 'city' with value '\"London\"'")));
+        assert!(
+            event2
+                .changes
+                .iter()
+                .any(|s| s.contains("Added property 'city' with value '\"London\"'"))
+        );
     }
 }
