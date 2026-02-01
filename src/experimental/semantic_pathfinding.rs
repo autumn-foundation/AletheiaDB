@@ -105,6 +105,7 @@ impl<'a> SemanticPathfinder<'a> {
             }
 
             // Optimization: Skip if we found a better path already
+            #[allow(clippy::collapsible_if)]
             if let Some(&d) = dist.get(&node) {
                 if cost > d {
                     continue;
@@ -181,6 +182,7 @@ impl<'a> SemanticPathfinder<'a> {
                 return Ok(Some(self.reconstruct_path(came_from, end)));
             }
 
+            #[allow(clippy::collapsible_if)]
             if let Some(&d) = dist.get(&node) {
                 if cost > d {
                     continue;
@@ -234,6 +236,7 @@ impl<'a> SemanticPathfinder<'a> {
     fn calculate_semantic_cost(&self, node_id: NodeId, query: &[f32]) -> Result<f32> {
         let node = self.db.get_node(node_id)?;
 
+        #[allow(clippy::collapsible_if)]
         if let Some(prop) = node.properties.get(&self.vector_property) {
             if let Some(vec) = prop.as_vector() {
                 let sim = cosine_similarity(vec, query)?;
