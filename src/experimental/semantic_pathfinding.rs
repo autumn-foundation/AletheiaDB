@@ -105,10 +105,8 @@ impl<'a> SemanticPathfinder<'a> {
             }
 
             // Optimization: Skip if we found a better path already
-            if let Some(&d) = dist.get(&node) {
-                if cost > d {
-                    continue;
-                }
+            if dist.get(&node).is_some_and(|&d| cost > d) {
+                continue;
             }
 
             // Check depth limit
@@ -181,10 +179,8 @@ impl<'a> SemanticPathfinder<'a> {
                 return Ok(Some(self.reconstruct_path(came_from, end)));
             }
 
-            if let Some(&d) = dist.get(&node) {
-                if cost > d {
-                    continue;
-                }
+            if dist.get(&node).is_some_and(|&d| cost > d) {
+                continue;
             }
 
             // Get POTENTIAL outgoing edges from current storage
@@ -231,6 +227,7 @@ impl<'a> SemanticPathfinder<'a> {
 
     /// Calculate cost based on semantic similarity (1.0 - similarity).
     /// Returns 1.0 (max cost) if node has no embedding.
+    #[allow(clippy::collapsible_if)]
     fn calculate_semantic_cost(&self, node_id: NodeId, query: &[f32]) -> Result<f32> {
         let node = self.db.get_node(node_id)?;
 

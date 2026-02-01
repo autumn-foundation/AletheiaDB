@@ -1289,10 +1289,10 @@ mod coverage_tests {
             query_embedding: Some(vec![0.1, 0.2, 0.3]), // Wrong: 3 dimensions
             vector_property: Some("embedding".to_string()),
             top_k: Some(5),
-            filter_label: None,
-            limit: None,
             valid_time: None,
             transaction_time: None,
+            filter_label: None,
+            limit: None,
         });
 
         // Should get dimension mismatch error
@@ -2556,5 +2556,61 @@ mod list_nodes_extended_tests {
             value.get("nodes").is_some(),
             "Large limit should be capped, not error"
         );
+    }
+}
+
+// ============================================================================
+// Coverage Fix Tests
+// ============================================================================
+
+mod coverage_fix_tests {
+    use super::*;
+
+    #[test]
+    fn test_create_node_with_nested_object_property_ignored() {
+        let server = create_test_server();
+
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), serde_json::json!("NestedObjectTest"));
+        // Nested objects are not supported as PropertyValue, so this should be ignored/filtered out
+        props.insert("nested".to_string(), serde_json::json!({"foo": "bar"}));
+
+        let req = CreateNodeRequest {
+            label: "Test".to_string(),
+            properties: Some(props),
+        };
+
+        let response = server.create_node(req);
+        let node: NodeResponse = parse_response(&response).expect("Failed to create node");
+
+        // Verify "name" is present
+        assert_eq!(
+            node.properties.get("name"),
+            Some(&serde_json::json!("NestedObjectTest"))
+        );
+        // Verify "nested" is absent (it was ignored because it's an Object)
+        assert!(
+            !node.properties.contains_key("nested"),
+            "Nested object property should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_parse_timestamp_invalid_format() {
+        // This test ensures that the error path in parse_timestamp is executed and returns the expected error message.
+        let server = create_test_server();
+
+        // We use get_node_at_time to trigger parse_timestamp
+        let response = server.get_node_at_time(GetNodeAtTimeRequest {
+            node_id: 123, // ID doesn't matter for this test
+            valid_time: "not-a-timestamp".to_string(),
+            transaction_time: None,
+        });
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let error = value.get("error").expect("Should return error").as_str().unwrap();
+
+        assert!(error.contains("Invalid timestamp format"));
+        assert!(error.contains("not-a-timestamp"));
     }
 }

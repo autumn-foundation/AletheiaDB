@@ -13,7 +13,6 @@
 //! - **[`interning`]**: String interning for memory-efficient storage of labels and keys.
 //! - **[`hlc`]**: Hybrid Logical Clock implementation for distributed timekeeping.
 
-pub mod constants;
 pub mod graph;
 pub mod history;
 pub mod hlc;

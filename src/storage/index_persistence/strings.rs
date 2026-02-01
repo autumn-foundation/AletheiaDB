@@ -43,6 +43,17 @@ pub fn save_string_interner(path: &Path) -> Result<()> {
 
 /// Load the string interner from disk and validate CRC32 checksum.
 pub fn load_string_interner(path: &Path) -> Result<StringInternerData> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > super::MAX_STRING_INTERNER_FILE_SIZE {
+        return Err(IndexPersistenceError::SizeLimitExceeded {
+            message: format!(
+                "String interner file size {} exceeds limit {}",
+                metadata.len(),
+                super::MAX_STRING_INTERNER_FILE_SIZE
+            ),
+        });
+    }
+
     let bytes = fs::read(path)?;
 
     // Check minimum size (must have at least 4 bytes for CRC)

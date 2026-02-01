@@ -429,14 +429,14 @@ impl PropertyValue {
     ///
     /// | Type   | Format                                      |
     /// |--------|---------------------------------------------|
-    /// | Null   | [tag:1]                                     |
-    /// | Bool   | [tag:1][value:1]                           |
-    /// | Int    | [tag:1][i64:8]                             |
-    /// | Float  | [tag:1][f64:8]                             |
-    /// | String | [tag:1][len:4][utf8_bytes:len]             |
-    /// | Bytes  | [tag:1][len:4][bytes:len]                  |
-    /// | Array  | [tag:1][count:4][elements...]              |
-    /// | Vector | [tag:1][dim:4][f32_values:dim*4]           |
+    /// | Null   | `[tag:1]`                                   |
+    /// | Bool   | `[tag:1][value:1]`                          |
+    /// | Int    | `[tag:1][i64:8]`                            |
+    /// | Float  | `[tag:1][f64:8]`                            |
+    /// | String | `[tag:1][len:4][utf8_bytes:len]`            |
+    /// | Bytes  | `[tag:1][len:4][bytes:len]`                 |
+    /// | Array  | `[tag:1][count:4][elements...]`             |
+    /// | Vector | `[tag:1][dim:4][f32_values:dim*4]`          |
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::with_capacity(self.serialized_size());
         self.serialize_into(&mut buffer);
@@ -760,7 +760,7 @@ impl PropertyValue {
 /// [tag:1][dimension:4][f32_0:4][f32_1:4]...[f32_n:4]
 /// ```
 ///
-/// - Tag: TAG_VECTOR (7)
+/// - Tag: `TAG_VECTOR` (7)
 /// - Dimension: u32 little-endian, number of elements
 /// - Values: f32 little-endian, the vector elements
 ///
@@ -975,7 +975,7 @@ pub fn deserialize_vector(bytes: &[u8]) -> Result<(Arc<[f32]>, usize)> {
 /// [tag:1][dimension:4][nnz:4][index_0:4]...[index_n:4][value_0:4]...[value_n:4]
 /// ```
 ///
-/// - Tag: TAG_SPARSE_VECTOR (8)
+/// - Tag: `TAG_SPARSE_VECTOR` (8)
 /// - Dimension: u32 little-endian, total vector dimension
 /// - NNZ: u32 little-endian, number of non-zero elements
 /// - Indices: u32 little-endian array of non-zero positions
@@ -1370,7 +1370,7 @@ impl PropertyMap {
     /// [count:4][key1_len:4][key1_bytes:key1_len][value1_bytes:...]...
     /// ```
     ///
-    /// - Count: u32 little-endian, number of key-value pairs
+    /// - Count: `u32` little-endian, number of key-value pairs
     /// - For each key-value pair:
     ///   - Key length: u32 little-endian
     ///   - Key bytes: UTF-8 encoded string

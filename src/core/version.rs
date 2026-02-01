@@ -10,6 +10,10 @@ use crate::core::temporal::Timestamp;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VersionMetadata {
     /// Transaction that created this version
+    ///
+    /// Note: For historical versions reconstructed from storage (not currently in memory),
+    /// this may be `TxId(0)` if the creating transaction ID was not preserved in the
+    /// historical storage format.
     pub created_by_tx: TxId,
 
     /// When this version was committed (None if uncommitted)

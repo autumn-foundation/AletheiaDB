@@ -180,6 +180,12 @@ impl TemporalVectorConfig {
     }
 }
 
+impl Default for TemporalVectorConfig {
+    fn default() -> Self {
+        Self::default_temporal_only()
+    }
+}
+
 /// Snapshot creation strategies.
 ///
 /// Determines when temporal vector index snapshots are created.
@@ -284,4 +290,27 @@ pub enum DriftMetric {
     /// Returns the geometric angle between vectors in radians.
     /// Range: [0, Ï€] where 0 = identical, Ï€/2 = orthogonal, Ï€ = opposite.
     Angular,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_temporal_vector_config_default() {
+        // This test ensures the Default implementation is covered
+        let config = TemporalVectorConfig::default();
+        let expected = TemporalVectorConfig::default_temporal_only();
+        assert_eq!(config, expected);
+
+        // Verify defaults
+        assert_eq!(
+            config.snapshot_strategy,
+            SnapshotStrategy::TransactionInterval(10)
+        );
+        assert_eq!(config.retention_policy, RetentionPolicy::KeepN(100));
+        assert_eq!(config.max_snapshots, 100);
+        assert_eq!(config.full_snapshot_interval, 10);
+        assert!(config.hnsw_config.is_none());
+    }
 }

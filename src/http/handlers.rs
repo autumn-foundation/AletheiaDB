@@ -1,7 +1,6 @@
 //! HTTP request handlers.
 
 use crate::core::NodeId;
-use crate::core::constants::{MAX_PAGINATION_OFFSET, MAX_RESULT_LIMIT};
 use crate::http::converters::{interned_to_string, json_to_property_map, property_map_to_json};
 use crate::http::state::AppState;
 use crate::query::QueryBuilder;
@@ -54,9 +53,7 @@ pub enum QueryRequest {
     },
     FindNeighbors {
         node_id: u64,
-        #[serde(default)]
         limit: Option<usize>,
-        #[serde(default)]
         offset: Option<usize>,
     },
 }
@@ -179,14 +176,12 @@ pub async fn handle_query(
                 }
             }
 
-            // Issue 4: Pagination with limits
+            // Issue 4: Pagination
             if let Some(skip) = offset {
-                let skip_val = skip.min(MAX_PAGINATION_OFFSET);
-                builder = builder.skip(skip_val);
+                builder = builder.skip(skip);
             }
 
-            // Cap the limit to prevent DoS
-            let limit_val = limit.unwrap_or(100).min(MAX_RESULT_LIMIT);
+            let limit_val = limit.unwrap_or(100);
             match builder.limit(limit_val).execute(db) {
                 Ok(results) => {
                     let mut nodes = Vec::new();
@@ -218,20 +213,52 @@ pub async fn handle_query(
                     let mut seen_ids = HashSet::new();
                     let mut neighbors = Vec::new();
 
-                    // Apply limits
-                    let limit_val = limit.unwrap_or(100).min(MAX_RESULT_LIMIT);
-                    let offset_val = offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
+                    let max_limit = 10_000;
+                    let limit_val = limit.unwrap_or(100).min(max_limit);
+                    let offset_val = offset.unwrap_or(0);
+
+                    // Combined iterator for outgoing and incoming
+                    let outgoing = db.get_outgoing_edges(nid);
+                    let incoming = db.get_incoming_edges(nid);
+
+                    let mut count = 0;
                     let mut skipped = 0;
 
-                    // Outgoing
-                    let outgoing = db.get_outgoing_edges(nid);
+                    // Process outgoing
                     for edge_id in outgoing {
-                        if neighbors.len() >= limit_val {
+                        if count >= limit_val {
                             break;
                         }
+                        if let Ok(node) = db
+                            .get_edge_target(edge_id)
+                            .and_then(|target| db.get_node(target))
+                        {
+                            let id = node.id.as_u64();
+                            if seen_ids.insert(id) {
+                                if skipped < offset_val {
+                                    skipped += 1;
+                                    continue;
+                                }
+                                neighbors.push(json!({
+                                    "id": id,
+                                    "label": interned_to_string(node.label),
+                                    "properties": property_map_to_json(&node.properties)
+                                }));
+                                count += 1;
+                            }
+                        }
+                    }
 
-                        if let Ok(target) = db.get_edge_target(edge_id) {
-                            if let Ok(node) = db.get_node(target) {
+                    // Process incoming (only if we haven't reached limit)
+                    if count < limit_val {
+                        for edge_id in incoming {
+                            if count >= limit_val {
+                                break;
+                            }
+                            if let Ok(node) = db
+                                .get_edge_source(edge_id)
+                                .and_then(|source| db.get_node(source))
+                            {
                                 let id = node.id.as_u64();
                                 if seen_ids.insert(id) {
                                     if skipped < offset_val {
@@ -243,33 +270,7 @@ pub async fn handle_query(
                                         "label": interned_to_string(node.label),
                                         "properties": property_map_to_json(&node.properties)
                                     }));
-                                }
-                            }
-                        }
-                    }
-
-                    // Incoming (only if we haven't hit limit)
-                    if neighbors.len() < limit_val {
-                        let incoming = db.get_incoming_edges(nid);
-                        for edge_id in incoming {
-                            if neighbors.len() >= limit_val {
-                                break;
-                            }
-
-                            if let Ok(source) = db.get_edge_source(edge_id) {
-                                if let Ok(node) = db.get_node(source) {
-                                    let id = node.id.as_u64();
-                                    if seen_ids.insert(id) {
-                                        if skipped < offset_val {
-                                            skipped += 1;
-                                            continue;
-                                        }
-                                        neighbors.push(json!({
-                                            "id": id,
-                                            "label": interned_to_string(node.label),
-                                            "properties": property_map_to_json(&node.properties)
-                                        }));
-                                    }
+                                    count += 1;
                                 }
                             }
                         }

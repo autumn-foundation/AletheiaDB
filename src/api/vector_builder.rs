@@ -11,8 +11,13 @@ use crate::utils::error::Result;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust,no_run
+/// use gallifreydb::GallifreyDB;
 /// use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+/// use gallifreydb::index::vector::temporal::TemporalVectorConfig;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let db = GallifreyDB::new()?;
 ///
 /// // Create a basic vector index
 /// db.vector_index("embedding")
@@ -20,10 +25,13 @@ use crate::utils::error::Result;
 ///     .enable()?;
 ///
 /// // Create a vector index with temporal support
-/// db.vector_index("embedding")
+/// // Note: Using a different property since "embedding" is already used
+/// db.vector_index("content_embedding")
 ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
 ///     .temporal(TemporalVectorConfig::default())
 ///     .enable()?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct VectorIndexBuilder<'a> {
     db: &'a GallifreyDB,
@@ -54,10 +62,16 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine).with_capacity(10000))
     ///     .enable()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn hnsw(mut self, config: HnswConfig) -> Self {
         self.hnsw_config = Some(config);
@@ -76,9 +90,13 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
     /// use gallifreydb::index::vector::temporal::{TemporalVectorConfig, SnapshotStrategy};
     ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     ///     .temporal(TemporalVectorConfig {
@@ -86,6 +104,8 @@ impl<'a> VectorIndexBuilder<'a> {
     ///         ..Default::default()
     ///     })
     ///     .enable()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn temporal(mut self, config: TemporalVectorConfig) -> Self {
         self.temporal_config = Some(config);
@@ -107,7 +127,11 @@ impl<'a> VectorIndexBuilder<'a> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::GallifreyDB;
+    /// # use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
     /// // This will fail - no HNSW config
     /// let result = db.vector_index("embedding").enable();
     /// assert!(result.is_err());
@@ -116,6 +140,8 @@ impl<'a> VectorIndexBuilder<'a> {
     /// db.vector_index("embedding")
     ///     .hnsw(HnswConfig::new(384, DistanceMetric::Cosine))
     ///     .enable()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn enable(self) -> Result<()> {
         let hnsw_config = self.hnsw_config.ok_or_else(|| {
