@@ -1088,18 +1088,76 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
     // Deserialize indices
     let indices_end = data_start + indices_len;
     let indices_slice = &bytes[data_start..indices_end];
-    let mut indices = Vec::with_capacity(nnz);
-    for chunk in indices_slice.chunks_exact(4) {
-        indices.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-    }
+
+    #[cfg(target_endian = "little")]
+    let indices = {
+        // SAFETY: On little-endian platforms, we can directly copy the bytes
+        // into a u32 vector using a single bulk memory operation.
+        //
+        // Safety argument:
+        // 1. We validated that bytes.len() >= total_len, where total_len includes
+        //    indices_len = nnz * 4. Thus indices_slice.len() == nnz * 4 exactly.
+        // 2. We allocated Vec<u32> with capacity nnz. Its byte capacity is nnz * 4.
+        // 3. src_ptr (from slice) and dst_ptr (from Vec) are valid for reads/writes of
+        //    indices_slice.len() bytes.
+        // 4. Alignment is handled because we copy to *mut u8, and the Vec's buffer
+        //    is aligned for u32.
+        // 5. u32 has no invalid bit patterns, so any byte sequence is valid.
+        let mut indices = Vec::with_capacity(nnz);
+        if nnz > 0 {
+            unsafe {
+                let src_ptr = indices_slice.as_ptr();
+                let dst_ptr = indices.as_mut_ptr() as *mut u8;
+                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, indices_slice.len());
+                indices.set_len(nnz);
+            }
+        }
+        indices
+    };
+
+    #[cfg(not(target_endian = "little"))]
+    let indices = {
+        let mut indices = Vec::with_capacity(nnz);
+        for chunk in indices_slice.chunks_exact(4) {
+            indices.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+        }
+        indices
+    };
 
     // Deserialize values
     let values_end = indices_end + values_len;
     let values_slice = &bytes[indices_end..values_end];
-    let mut values = Vec::with_capacity(nnz);
-    for chunk in values_slice.chunks_exact(4) {
-        values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
-    }
+
+    #[cfg(target_endian = "little")]
+    let values = {
+        // SAFETY: On little-endian platforms, we can directly copy the bytes
+        // into an f32 vector using a single bulk memory operation.
+        //
+        // Safety argument:
+        // 1. validated that values_len = nnz * 4, and buffer has sufficient bytes.
+        // 2. Vec<f32> capacity is nnz, so byte capacity is nnz * 4.
+        // 3. Pointers are valid for the copy length.
+        // 4. f32 has no invalid bit patterns (NaNs are allowed).
+        let mut values = Vec::with_capacity(nnz);
+        if nnz > 0 {
+            unsafe {
+                let src_ptr = values_slice.as_ptr();
+                let dst_ptr = values.as_mut_ptr() as *mut u8;
+                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, values_slice.len());
+                values.set_len(nnz);
+            }
+        }
+        values
+    };
+
+    #[cfg(not(target_endian = "little"))]
+    let values = {
+        let mut values = Vec::with_capacity(nnz);
+        for chunk in values_slice.chunks_exact(4) {
+            values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+        }
+        values
+    };
 
     // Construct SparseVec (this will validate the data)
     let sparse_vec = SparseVec::new(indices, values, dimension)?;
