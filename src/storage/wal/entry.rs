@@ -101,16 +101,36 @@ pub enum WalOperation {
     },
 }
 
-/// A single WAL entry
+/// A single WAL entry.
+///
+/// # Binary Format
+///
+/// WAL entries are serialized to disk with the following layout (little-endian):
+///
+/// ```text
+/// ┌──────────┬───────────┬───────────────┬───────────────┬──────────────────┐
+/// │ LSN (8b) │ Time (12b)│ Checksum (4b) │ Op Type (1b)  │ Operation Data...│
+/// └──────────┴───────────┴───────────────┴───────────────┴──────────────────┘
+/// ```
+///
+/// - **LSN** (8 bytes): Log Sequence Number for ordering.
+/// - **Time** (12 bytes): [`Timestamp`] (HybridTimestamp) - 8 bytes wallclock, 4 bytes logical.
+/// - **Checksum** (4 bytes): CRC32 of the entry (excluding the checksum field itself).
+/// - **Op Type** (1 byte): Tag identifying the [`WalOperation`] variant.
+/// - **Operation Data**: Variable-length data specific to the operation type.
+///
+/// See `src/storage/wal/serialization.rs` for detailed serialization logic.
 #[derive(Debug, Clone)]
 pub struct WalEntry {
-    /// Log sequence number
+    /// Log sequence number - unique, monotonically increasing identifier.
     pub lsn: LSN,
-    /// Timestamp when logged
+    /// Timestamp when the entry was logged (Hybrid Logical Clock).
     pub timestamp: Timestamp,
-    /// The operation to log
+    /// The actual database operation (CreateNode, UpdateEdge, etc.).
     pub operation: WalOperation,
-    /// CRC32 checksum for corruption detection
+    /// CRC32 checksum for data integrity verification.
+    ///
+    /// The checksum is computed over the entire serialized entry, excluding the checksum field itself.
     pub checksum: u32,
 }
 
