@@ -105,7 +105,9 @@ impl<'a> SemanticPathfinder<'a> {
             }
 
             // Optimization: Skip if we found a better path already
-            if let Some(&d) = dist.get(&node) && cost > d {
+            if let Some(&d) = dist.get(&node)
+                && cost > d
+            {
                 continue;
             }
 
@@ -179,7 +181,9 @@ impl<'a> SemanticPathfinder<'a> {
                 return Ok(Some(self.reconstruct_path(came_from, end)));
             }
 
-            if let Some(&d) = dist.get(&node) && cost > d {
+            if let Some(&d) = dist.get(&node)
+                && cost > d
+            {
                 continue;
             }
 

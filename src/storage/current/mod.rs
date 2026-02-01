@@ -10,9 +10,9 @@ use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::Timestamp;
 use crate::index::current::CurrentIndexes;
+use crate::index::vector::TemporalSearchResults;
 use crate::index::vector::hnsw::HnswConfig;
 use crate::index::vector::temporal::{TemporalVectorConfig, TemporalVectorIndex};
-use crate::index::vector::TemporalSearchResults;
 use crate::utils::error::{Result, StorageError};
 use std::sync::Arc;
 
@@ -22,8 +22,8 @@ mod vector;
 
 pub use iterators::*;
 pub use stats::CurrentStats;
-pub use vector::VectorIndexInfo;
 pub use vector::DEFAULT_MAX_VECTOR_PROPERTIES;
+pub use vector::VectorIndexInfo;
 use vector::VectorIndexManager;
 
 /// Current-state storage engine.
@@ -80,7 +80,8 @@ impl CurrentStorage {
 
     /// Enable vector indexing for a specific property.
     pub fn enable_vector_index(&self, property_name: &str, config: HnswConfig) -> Result<()> {
-        self.vector_manager.enable_vector_index(property_name, config)
+        self.vector_manager
+            .enable_vector_index(property_name, config)
     }
 
     /// Check if any vector indexing is enabled.
@@ -159,10 +160,7 @@ impl CurrentStorage {
         self.indexes.insert_node(node.clone());
 
         // Try to index vector property if enabled
-        if let Err(e) = self
-            .vector_manager
-            .try_index_vector(node_id, &properties)
-        {
+        if let Err(e) = self.vector_manager.try_index_vector(node_id, &properties) {
             // Rollback: remove node from indexes
             self.indexes.remove_node(node_id);
             return Err(e);
@@ -318,11 +316,9 @@ impl CurrentStorage {
 
         // Update vector index
         if let Some(ref old) = old_node
-            && let Err(e) = self.vector_manager.update_vector_index(
-                node.id,
-                &node.properties,
-                &old.properties,
-            )
+            && let Err(e) =
+                self.vector_manager
+                    .update_vector_index(node.id, &node.properties, &old.properties)
         {
             // Rollback: restore the original node
             self.indexes.insert_node(old.clone());
@@ -349,7 +345,9 @@ impl CurrentStorage {
             .ok_or(StorageError::NodeNotFound(id))?;
 
         let _ = self.vector_manager.try_remove_from_index(id);
-        let _ = self.vector_manager.try_remove_temporal_vector(id, timestamp);
+        let _ = self
+            .vector_manager
+            .try_remove_temporal_vector(id, timestamp);
 
         Ok(())
     }
@@ -569,8 +567,7 @@ impl CurrentStorage {
         embedding: &[f32],
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        self.vector_manager
-            .find_similar_by_embedding(embedding, k)
+        self.vector_manager.find_similar_by_embedding(embedding, k)
     }
 
     /// Find k most similar nodes with a specific label to a raw embedding vector.
@@ -580,12 +577,8 @@ impl CurrentStorage {
         label: &str,
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        self.vector_manager.find_similar_by_embedding_with_label(
-            &self.indexes,
-            embedding,
-            label,
-            k,
-        )
+        self.vector_manager
+            .find_similar_by_embedding_with_label(&self.indexes, embedding, label, k)
     }
 
     /// Find k most similar nodes to a raw embedding in a specific property's index.
@@ -664,6 +657,14 @@ impl CurrentStorage {
         self.vector_manager.list_temporal_vector_indexes()
     }
 
+    pub(crate) fn get_temporal_vector_index_for(
+        &self,
+        property_name: &str,
+    ) -> Option<Arc<TemporalVectorIndex>> {
+        self.vector_manager
+            .get_temporal_vector_index_for(property_name)
+    }
+
     pub(crate) fn get_temporal_vector_index(&self) -> Option<Arc<TemporalVectorIndex>> {
         self.vector_manager.get_temporal_vector_index()
     }
@@ -699,12 +700,8 @@ impl CurrentStorage {
         reference_embedding: &[f32],
         time_range: crate::core::temporal::TimeRange,
     ) -> Result<Vec<(crate::core::temporal::Timestamp, f32)>> {
-        self.vector_manager.track_drift_in(
-            property_name,
-            node_id,
-            reference_embedding,
-            time_range,
-        )
+        self.vector_manager
+            .track_drift_in(property_name, node_id, reference_embedding, time_range)
     }
 
     /// Get the semantic evolution of a node's embedding over time in a specific property.
@@ -904,3 +901,5 @@ impl Default for CurrentStorage {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vector_coverage_tests;

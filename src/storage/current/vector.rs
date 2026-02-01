@@ -903,9 +903,8 @@ impl VectorIndexManager {
 
     /// Notify the temporal vector index of a transaction.
     pub fn on_temporal_vector_transaction(&self) -> Result<()> {
-        let state = self.temporal_vector_index_state.read();
-        if let Some(index) = &state.index {
-            index.on_transaction()?;
+        for entry in self.temporal_vector_indexes.iter() {
+            entry.value().index.on_transaction()?;
         }
         Ok(())
     }
@@ -928,7 +927,11 @@ impl VectorIndexManager {
     }
 
     /// Helper to remove a vector from the temporal index.
-    pub(crate) fn try_remove_temporal_vector(&self, node_id: NodeId, timestamp: Timestamp) -> Result<()> {
+    pub(crate) fn try_remove_temporal_vector(
+        &self,
+        node_id: NodeId,
+        timestamp: Timestamp,
+    ) -> Result<()> {
         let state = self.temporal_vector_index_state.read();
         if let Some(index) = &state.index {
             index.remove(node_id, timestamp)?;
