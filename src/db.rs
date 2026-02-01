@@ -3351,4 +3351,33 @@ mod tests {
             "Version 2 should have name='Alice Smith'"
         );
     }
+
+    #[test]
+    fn test_sample_nodes() {
+        let db = GallifreyDB::new().unwrap();
+
+        // Create a few nodes
+        for i in 0..10 {
+            db.create_node(
+                "Person",
+                PropertyMapBuilder::new()
+                    .insert("id", i as i64)
+                    .build(),
+            )
+            .unwrap();
+        }
+
+        // Sample 5 nodes
+        let sample = db.sample_nodes(5).unwrap();
+        assert_eq!(sample.len(), 5);
+
+        // Verify all sampled nodes exist
+        for node_id in sample {
+            assert!(db.get_node(node_id).is_ok());
+        }
+
+        // Sample more than exist (should return all)
+        let sample_all = db.sample_nodes(100).unwrap();
+        assert_eq!(sample_all.len(), 10);
+    }
 }
