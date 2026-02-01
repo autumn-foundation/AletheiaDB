@@ -442,7 +442,9 @@ impl PropertyValue {
     /// Returns `StorageError::CorruptedData` if recursion depth exceeds limits.
     pub fn serialize(&self) -> Result<Vec<u8>> {
         let mut buffer = Vec::with_capacity(self.serialized_size().map_err(|_| {
-            StorageError::CorruptedData("Recursion depth limit exceeded in serialized_size".to_string())
+            StorageError::CorruptedData(
+                "Recursion depth limit exceeded in serialized_size".to_string(),
+            )
         })?);
         self.serialize_into(&mut buffer)?;
         Ok(buffer)
@@ -756,8 +758,10 @@ impl PropertyValue {
             PropertyValue::Vector(v) => Ok(v.len() * std::mem::size_of::<f32>()),
             PropertyValue::SparseVector(sv) => {
                 // Indices + values + SparseVec struct overhead
-                Ok(sv.nnz() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
-                    + std::mem::size_of::<usize>()) // dimension field
+                Ok(
+                    sv.nnz() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
+                        + std::mem::size_of::<usize>(),
+                ) // dimension field
             }
         }
     }
@@ -1686,16 +1690,20 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
             // Need key size for serialization
             let key_len = GLOBAL_INTERNER.with_str(key, |s| s.len()).unwrap_or(256);
             let key_size = 4 + key_len;
-            let val_size = value.serialized_size().expect("Recursion depth limit exceeded in FromIterator");
+            let val_size = value
+                .serialized_size()
+                .expect("Recursion depth limit exceeded in FromIterator");
 
             size = size.saturating_add(key_size).saturating_add(val_size);
 
             if let Some(old_val) = map.insert(key, value) {
                 // If replaced, subtract the size of the old entry (key + value)
                 // Key size is the same since it's the same key ID
-                size = size
-                    .saturating_sub(key_size)
-                    .saturating_sub(old_val.serialized_size().expect("Recursion depth limit exceeded in FromIterator"));
+                size = size.saturating_sub(key_size).saturating_sub(
+                    old_val
+                        .serialized_size()
+                        .expect("Recursion depth limit exceeded in FromIterator"),
+                );
             }
         }
 
@@ -1738,7 +1746,8 @@ impl PropertyMapBuilder {
     ///
     /// Panics if recursion depth limit is exceeded.
     pub fn insert<V: Into<PropertyValue>>(self, key: &str, value: V) -> Self {
-        self.try_insert(key, value).expect("Property insertion failed (recursion depth limit exceeded)")
+        self.try_insert(key, value)
+            .expect("Property insertion failed (recursion depth limit exceeded)")
     }
 
     /// Insert a property (fallible).
@@ -1771,7 +1780,8 @@ impl PropertyMapBuilder {
     ///
     /// Panics if recursion depth limit is exceeded.
     pub fn insert_by_key(self, key: PropertyKey, value: PropertyValue) -> Self {
-        self.try_insert_by_key(key, value).expect("Property insertion failed (recursion depth limit exceeded)")
+        self.try_insert_by_key(key, value)
+            .expect("Property insertion failed (recursion depth limit exceeded)")
     }
 
     /// Insert a property with an already-interned key (fallible).
@@ -1859,7 +1869,8 @@ impl PropertyMapBuilder {
     ///
     /// Panics if serialization size calculation fails.
     pub fn remove_by_key(self, key: &PropertyKey) -> Self {
-        self.try_remove_by_key(key).expect("Property removal failed")
+        self.try_remove_by_key(key)
+            .expect("Property removal failed")
     }
 
     /// Remove a property by an already-interned key (fallible).

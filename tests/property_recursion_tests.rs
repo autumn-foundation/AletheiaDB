@@ -1,4 +1,4 @@
-use gallifreydb::core::property::{PropertyValue, MAX_RECURSION_DEPTH};
+use gallifreydb::core::property::{MAX_RECURSION_DEPTH, PropertyValue};
 
 #[test]
 fn test_deeply_nested_serialization_recursion_limit() {
@@ -13,13 +13,18 @@ fn test_deeply_nested_serialization_recursion_limit() {
     // Attempt to serialize - should return an error due to recursion limit
     let result = value.serialize();
 
-    assert!(result.is_err(), "Serialization should fail due to recursion limit");
+    assert!(
+        result.is_err(),
+        "Serialization should fail due to recursion limit"
+    );
 
     // Verify the error message
     let err = result.unwrap_err();
     let err_str = format!("{}", err);
     assert!(
-        err_str.to_lowercase().contains("recursion depth limit exceeded"),
+        err_str
+            .to_lowercase()
+            .contains("recursion depth limit exceeded"),
         "Error should mention recursion depth. Got: {}",
         err_str
     );
