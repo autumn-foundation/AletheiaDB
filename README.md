@@ -154,6 +154,16 @@ gallifreydb = { version = "0.1", features = ["sharding-rpc"] }
 |---------|-------------|--------------|
 | `sharding-rpc` | RPC client for sharding coordination | `reqwest`, `serde` |
 
+### Experimental Features
+```toml
+[dependencies]
+gallifreydb = { version = "0.1", features = ["nova"] }
+```
+
+| Feature | Description |
+|---------|-------------|
+| `nova` | Experimental features (Narrative Generator, Fishing, Semantic Pathfinding) |
+
 Note: Tiered storage with Redb cold storage backend is included by default (no feature flag needed).
 
 ## Performance & Benchmarks
@@ -758,6 +768,7 @@ See `docs/adr/` for all architectural decisions.
 **Other Examples:**
 - `examples/observability_demo.rs` - Production observability features
 - `examples/doctor_who_demo.rs` - Temporal graph modeling example
+- `examples/story_demo.rs` - Narrative generation example (requires `nova` feature)
 
 ## Use Cases
 
