@@ -443,6 +443,15 @@ impl HnswIndexBuilder {
         self
     }
 
+    /// Sets a custom distance metric function.
+    pub fn with_custom_metric<F>(mut self, name: &str, f: F) -> Self
+    where
+        F: Fn(&[f32], &[f32]) -> f32 + Send + Sync + 'static,
+    {
+        self.config = self.config.with_custom_metric(name, f);
+        self
+    }
+
     /// Builds the HNSW index with the configured parameters.
     pub fn build(self) -> Result<HnswIndex> {
         // Validate dimensions
@@ -456,6 +465,22 @@ impl HnswIndexBuilder {
         if self.config.m == 0 || self.config.m > 64 {
             return Err(Error::Vector(VectorError::InvalidVector {
                 reason: format!("M must be in range [1, 64], got {}", self.config.m),
+            }));
+        }
+
+        // Security Check: Custom metrics require F32 quantization
+        // This is critical because usearch passes raw pointers to the metric function.
+        // If quantization is not F32 (e.g., I8 or F16), the pointers will point to
+        // compressed data, but our metric wrapper casts them to `*const f32`.
+        // This would cause a buffer over-read (reading 4x or 2x memory), leading to
+        // potential crashes (DoS) or information leakage.
+        if self.config.custom_metric.is_some() && self.config.quantization != Quantization::F32 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "Custom metrics are only supported with F32 quantization (requested {:?}). \
+                     Using other quantization levels with custom metrics causes memory safety issues.",
+                    self.config.quantization
+                ),
             }));
         }
 
@@ -1246,6 +1271,17 @@ impl HnswIndex {
 
     /// Loads an index from a file path.
     pub fn load(path: &Path, config: HnswConfig) -> Result<Self> {
+        // Security Check: Custom metrics require F32 quantization
+        if config.custom_metric.is_some() && config.quantization != Quantization::F32 {
+            return Err(Error::Vector(VectorError::InvalidVector {
+                reason: format!(
+                    "Custom metrics are only supported with F32 quantization (requested {:?}). \
+                     Using other quantization levels with custom metrics causes memory safety issues.",
+                    config.quantization
+                ),
+            }));
+        }
+
         let options = IndexOptions {
             dimensions: config.dimensions,
             metric: to_usearch_metric(config.metric),
