@@ -53,33 +53,44 @@ macro_rules! increment_counter {
 macro_rules! timed_block {
     ($name:expr, [ $($labels:tt)* ], $block:expr) => {{
         #[cfg(feature = "observability-prometheus")]
+        let _start = std::time::Instant::now();
+
+        let result = $block;
+
+        #[cfg(feature = "observability-prometheus")]
         {
-            struct TimedBlockGuard<F: FnMut(f64)> {
-                start: std::time::Instant,
-                callback: F,
-            }
-
-            impl<F: FnMut(f64)> Drop for TimedBlockGuard<F> {
-                fn drop(&mut self) {
-                    let duration = self.start.elapsed().as_secs_f64();
-                    (self.callback)(duration);
-                }
-            }
-
-            let _guard = TimedBlockGuard {
-                start: std::time::Instant::now(),
-                callback: |duration| {
-                    metrics::histogram!($name, $($labels)*).record(duration);
-                },
-            };
-
-            let result = $block;
-            result
+            let duration = _start.elapsed().as_secs_f64();
+            metrics::histogram!($name, $($labels)*).record(duration);
         }
 
-        #[cfg(not(feature = "observability-prometheus"))]
-        {
-            $block
-        }
+        result
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_timed_block_preserves_return_value() {
+        let result = timed_block!("test_metric", [], {
+            40 + 2
+        });
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_timed_block_executes_side_effects() {
+        let mut x = 0;
+        timed_block!("test_metric", [], {
+            x += 1;
+        });
+        assert_eq!(x, 1);
+    }
+
+    #[test]
+    fn test_timed_block_with_labels() {
+        let result = timed_block!("test_metric", ["key" => "val"], {
+            "success"
+        });
+        assert_eq!(result, "success");
+    }
 }
