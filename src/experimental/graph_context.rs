@@ -54,7 +54,13 @@ impl<'a> GraphContextBuilder<'a> {
         let label = Self::resolve(node.label);
 
         // 1. Header
-        writeln!(&mut output, "# Node Context: {} ({})", self.center_node.as_u64(), label).unwrap();
+        writeln!(
+            &mut output,
+            "# Node Context: {} ({})",
+            self.center_node.as_u64(),
+            label
+        )
+        .unwrap();
 
         // 2. Properties
         writeln!(&mut output, "\n## Properties").unwrap();
@@ -80,18 +86,28 @@ impl<'a> GraphContextBuilder<'a> {
                     writeln!(&mut output, "- No history available.").unwrap();
                 } else {
                     for event in events.iter().rev().take(self.history_limit) {
-                         writeln!(&mut output, "- {} (v{}): {}", event.timestamp, event.version_number, event.description).unwrap();
-                         for change in &event.changes {
-                             writeln!(&mut output, "  - {}", change).unwrap();
-                         }
+                        writeln!(
+                            &mut output,
+                            "- {} (v{}): {}",
+                            event.timestamp, event.version_number, event.description
+                        )
+                        .unwrap();
+                        for change in &event.changes {
+                            writeln!(&mut output, "  - {}", change).unwrap();
+                        }
                     }
                     if events.len() > self.history_limit {
-                        writeln!(&mut output, "- ... ({} more versions)", events.len() - self.history_limit).unwrap();
+                        writeln!(
+                            &mut output,
+                            "- ... ({} more versions)",
+                            events.len() - self.history_limit
+                        )
+                        .unwrap();
                     }
                 }
             }
             Err(e) => {
-                 writeln!(&mut output, "- Error retrieving history: {}", e).unwrap();
+                writeln!(&mut output, "- Error retrieving history: {}", e).unwrap();
             }
         }
 
@@ -99,15 +115,25 @@ impl<'a> GraphContextBuilder<'a> {
         writeln!(&mut output, "\n## Neighborhood").unwrap();
         let edges = self.db.get_outgoing_edges(self.center_node);
         if edges.is_empty() {
-             writeln!(&mut output, "- (No outgoing edges)").unwrap();
+            writeln!(&mut output, "- (No outgoing edges)").unwrap();
         } else {
-            writeln!(&mut output, "{} outgoing edges (showing max {}):", edges.len(), self.neighbor_limit).unwrap();
+            writeln!(
+                &mut output,
+                "{} outgoing edges (showing max {}):",
+                edges.len(),
+                self.neighbor_limit
+            )
+            .unwrap();
             for edge_id in edges.iter().take(self.neighbor_limit) {
                 if let Ok(edge) = self.db.get_edge(*edge_id) {
                     let edge_label = Self::resolve(edge.label);
                     // Try to get target node label if possible, otherwise just ID
                     let target_desc = if let Ok(target_node) = self.db.get_node(edge.target) {
-                        format!("{} ({})", Self::resolve(target_node.label), edge.target.as_u64())
+                        format!(
+                            "{} ({})",
+                            Self::resolve(target_node.label),
+                            edge.target.as_u64()
+                        )
                     } else {
                         format!("Node {}", edge.target.as_u64())
                     };
@@ -116,12 +142,19 @@ impl<'a> GraphContextBuilder<'a> {
 
                     // Edge properties (compact)
                     if !edge.properties.is_empty() {
-                         let mut props_str: Vec<String> = edge.properties.iter()
-                             .map(|(k, v)| format!("{}: {}", Self::resolve(*k), v))
-                             .collect();
-                         // Sort for deterministic output
-                         props_str.sort();
-                         writeln!(&mut output, "  - Properties: {{ {} }}", props_str.join(", ")).unwrap();
+                        let mut props_str: Vec<String> = edge
+                            .properties
+                            .iter()
+                            .map(|(k, v)| format!("{}: {}", Self::resolve(*k), v))
+                            .collect();
+                        // Sort for deterministic output
+                        props_str.sort();
+                        writeln!(
+                            &mut output,
+                            "  - Properties: {{ {} }}",
+                            props_str.join(", ")
+                        )
+                        .unwrap();
                     }
                 }
             }
@@ -165,10 +198,9 @@ mod tests {
         let node_b = db.create_node("Company", props_b).unwrap();
 
         // 4. Create Edge A -> B
-        let props_edge = PropertyMapBuilder::new()
-            .insert("since", 2020i64)
-            .build();
-        db.create_edge(node_a, node_b, "WORKS_AT", props_edge).unwrap();
+        let props_edge = PropertyMapBuilder::new().insert("since", 2020i64).build();
+        db.create_edge(node_a, node_b, "WORKS_AT", props_edge)
+            .unwrap();
 
         // 5. Build Context
         let context = GraphContextBuilder::new(&db, node_a)
@@ -189,7 +221,10 @@ mod tests {
         // Check Evolution
         assert!(context.contains("## Evolution"));
         assert!(context.contains("updated properties")); // Description
-        assert!(context.contains("Modified property 'role' from '\"Engineer\"' to '\"Senior Engineer\"'"));
+        assert!(
+            context
+                .contains("Modified property 'role' from '\"Engineer\"' to '\"Senior Engineer\"'")
+        );
 
         // Check Neighborhood
         assert!(context.contains("## Neighborhood"));
