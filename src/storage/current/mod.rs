@@ -1949,6 +1949,15 @@ impl CurrentStorage {
         self.indexes.iter_node_ids().collect()
     }
 
+    /// Sample k random nodes from the storage.
+    ///
+    /// This is useful for random walks, exploration, or approximate analytics.
+    pub fn sample_nodes(&self, k: usize) -> Vec<NodeId> {
+        use rand::seq::IteratorRandom;
+        let mut rng = rand::thread_rng();
+        self.indexes.iter_node_ids().choose_multiple(&mut rng, k)
+    }
+
     /// Get all edge IDs in the current storage.
     ///
     /// This is used by recovery tests and query executor for full edge scans.

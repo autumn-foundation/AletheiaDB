@@ -2097,6 +2097,14 @@ impl GallifreyDB {
         self.current.node_count()
     }
 
+    /// Sample k random nodes from the database.
+    ///
+    /// This provides a random sample of node IDs from the current state.
+    /// Useful for exploration, approximate analytics, or visualization.
+    pub fn sample_nodes(&self, k: usize) -> Result<Vec<NodeId>> {
+        Ok(self.current.sample_nodes(k))
+    }
+
     /// Get the number of edges in the current state.
     #[inline]
     pub fn edge_count(&self) -> usize {
