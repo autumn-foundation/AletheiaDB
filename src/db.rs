@@ -3346,8 +3346,8 @@ mod tests {
 
     #[test]
     fn test_find_similar_as_of_in() {
-        use crate::index::vector::{DistanceMetric, HnswConfig};
         use crate::index::vector::temporal::{SnapshotStrategy, TemporalVectorConfig};
+        use crate::index::vector::{DistanceMetric, HnswConfig};
 
         let db = GallifreyDB::new().unwrap();
 
