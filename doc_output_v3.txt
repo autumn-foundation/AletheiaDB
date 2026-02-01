@@ -1,0 +1,3 @@
+ Documenting gallifreydb v0.1.0 (/app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.52s
+   Generated /app/target/doc/gallifreydb/index.html

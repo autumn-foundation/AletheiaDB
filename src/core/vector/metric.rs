@@ -42,7 +42,7 @@ use std::fmt;
 /// All metrics use SIMD acceleration (AVX2/SSE2) when available. For maximum
 /// performance with large-scale similarity search:
 ///
-/// 1. Pre-normalize vectors with [`normalize`] or [`normalize_in_place`]
+/// 1. Pre-normalize vectors with [`crate::core::vector::normalize`] or [`crate::core::vector::normalize_in_place`]
 /// 2. Use [`DotProduct`](DistanceMetric::DotProduct) metric (single SIMD operation)
 /// 3. Store normalized vectors to avoid repeated normalization
 ///

@@ -208,9 +208,9 @@ impl Pattern {
 /// An element in a pattern (either a node or relationship).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternElement {
-    /// A node pattern: (n:Label {props})
+    /// A node pattern: `(n:Label {props})`
     Node(NodePattern),
-    /// A relationship pattern: -[:REL]->
+    /// A relationship pattern: `-[:REL]->`
     Relationship(RelationshipPattern),
 }
 
@@ -275,7 +275,7 @@ pub struct RelationshipPattern {
 }
 
 impl RelationshipPattern {
-    /// Create an outgoing relationship: -[]->(
+    /// Create an outgoing relationship: `-[]->(`
     pub fn outgoing() -> Self {
         RelationshipPattern {
             variable: None,
@@ -285,7 +285,7 @@ impl RelationshipPattern {
         }
     }
 
-    /// Create an incoming relationship: <-[]-
+    /// Create an incoming relationship: `<-[]-`
     pub fn incoming() -> Self {
         RelationshipPattern {
             variable: None,
@@ -295,7 +295,7 @@ impl RelationshipPattern {
         }
     }
 
-    /// Create a bidirectional relationship: -[]-
+    /// Create a bidirectional relationship: `-[]-`
     pub fn both() -> Self {
         RelationshipPattern {
             variable: None,
@@ -305,21 +305,21 @@ impl RelationshipPattern {
         }
     }
 
-    /// Add a relationship type: -[:KNOWS]->
+    /// Add a relationship type: `-[:KNOWS]->`
     #[must_use]
     pub fn with_type(mut self, rel_type: impl Into<String>) -> Self {
         self.rel_type = Some(rel_type.into());
         self
     }
 
-    /// Add a variable binding: -[r:KNOWS]->
+    /// Add a variable binding: `-[r:KNOWS]->`
     #[must_use]
     pub fn with_variable(mut self, var: impl Into<String>) -> Self {
         self.variable = Some(var.into());
         self
     }
 
-    /// Add a depth specification: -[:KNOWS*1..3]->
+    /// Add a depth specification: `-[:KNOWS*1..3]->`
     #[must_use]
     pub fn with_depth(mut self, depth: DepthSpec) -> Self {
         self.depth = Some(depth);
