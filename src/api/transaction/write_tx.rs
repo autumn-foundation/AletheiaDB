@@ -1308,138 +1308,13 @@ impl WriteTransaction {
         };
 
         for write in self.buffer.operations() {
-            match write {
-                super::BufferedWrite::CreateNode {
-                    node_id,
-                    version_id,
-                    label,
-                    properties,
-                    valid_from,
-                } => {
-                    self.apply_node_write(
-                        true, // is_create
-                        *node_id,
-                        *version_id,
-                        *label,
-                        properties.clone(),
-                        *valid_from,
-                        commit_timestamp,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::CreateEdge {
-                    edge_id,
-                    version_id,
-                    source,
-                    target,
-                    label,
-                    properties,
-                    valid_from,
-                } => {
-                    self.apply_edge_write(
-                        true, // is_create
-                        *edge_id,
-                        *version_id,
-                        *source,
-                        *target,
-                        *label,
-                        properties.clone(),
-                        *valid_from,
-                        commit_timestamp,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::UpdateNode {
-                    node_id,
-                    version_id,
-                    label,
-                    properties,
-                    valid_from,
-                } => {
-                    self.apply_node_write(
-                        false, // is_create
-                        *node_id,
-                        *version_id,
-                        *label,
-                        properties.clone(),
-                        *valid_from,
-                        commit_timestamp,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::UpdateEdge {
-                    edge_id,
-                    version_id,
-                    source,
-                    target,
-                    label,
-                    properties,
-                    valid_from,
-                } => {
-                    self.apply_edge_write(
-                        false, // is_create
-                        *edge_id,
-                        *version_id,
-                        *source,
-                        *target,
-                        *label,
-                        properties.clone(),
-                        *valid_from,
-                        commit_timestamp,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::DeleteNode {
-                    node_id,
-                    valid_from,
-                } => {
-                    // Use pre-generated tombstone version ID (no lock needed)
-                    // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
-                    let tombstone_version_id = VersionId::new_unchecked(
-                        tombstone_ids.next().ok_or_else(|| {
-                            StorageError::InconsistentState {
-                                reason: format!(
-                                    "Tombstone ID exhaustion for DeleteNode: expected {} deletes, iterator depleted at node_id {:?}",
-                                    num_deletes, node_id
-                                ),
-                            }
-                        })?,
-                    );
-
-                    self.apply_node_delete(
-                        *node_id,
-                        *valid_from,
-                        commit_timestamp,
-                        tombstone_version_id,
-                        &mut historical,
-                    )?;
-                }
-                super::BufferedWrite::DeleteEdge {
-                    edge_id,
-                    valid_from,
-                } => {
-                    // Use pre-generated tombstone version ID (no lock needed)
-                    // CRITICAL: Use proper error handling instead of .expect() to avoid lock poisoning
-                    let tombstone_version_id = VersionId::new_unchecked(
-                        tombstone_ids.next().ok_or_else(|| {
-                            StorageError::InconsistentState {
-                                reason: format!(
-                                    "Tombstone ID exhaustion for DeleteEdge: expected {} deletes, iterator depleted at edge_id {:?}",
-                                    num_deletes, edge_id
-                                ),
-                            }
-                        })?,
-                    );
-
-                    self.apply_edge_delete(
-                        *edge_id,
-                        *valid_from,
-                        commit_timestamp,
-                        tombstone_version_id,
-                        &mut historical,
-                    )?;
-                }
-            }
+            self.apply_single_write(
+                write,
+                commit_timestamp,
+                &mut historical,
+                &mut tombstone_ids,
+                num_deletes,
+            )?;
         }
 
         // Safety check: verify all pre-generated tombstone IDs were consumed
@@ -4543,7 +4418,10 @@ mod clock_skew_tests {
 
         // Verify it is a ClockSkew error
         match result.unwrap_err() {
-            crate::utils::error::Error::Transaction(TransactionError::ClockSkew { drift_us, .. }) => {
+            crate::utils::error::Error::Transaction(TransactionError::ClockSkew {
+                drift_us,
+                ..
+            }) => {
                 // Drift should be negative and large magnitude
                 assert!(drift_us < -super::MAX_BACKWARD_DRIFT_US);
             }
@@ -4571,7 +4449,10 @@ mod clock_skew_tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            crate::utils::error::Error::Transaction(TransactionError::ClockSkew { drift_us, .. }) => {
+            crate::utils::error::Error::Transaction(TransactionError::ClockSkew {
+                drift_us,
+                ..
+            }) => {
                 // Drift should be positive and large
                 assert!(drift_us > super::MAX_FORWARD_JUMP_US);
             }
