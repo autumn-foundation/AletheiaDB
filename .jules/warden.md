@@ -88,3 +88,22 @@ Enforced a strict validation rule in `HnswIndexBuilder::build` and `HnswIndex::l
 
 **Verification:** Regression Test
 Added `tests/security_custom_metric.rs` which attempts to build and load an index with this dangerous combination. Verified that the operation fails safely with the expected error message, whereas previously it would read out-of-bounds memory.
+
+## 2026-02-15 - Race Condition & Unsafe Audit
+
+**Threat:** Race Condition / UB in Environment Variable Tests
+Tests in `src/embeddings/providers` were using `unsafe { std::env::set_var(...) }` to mock configuration. Since `set_var` is not thread-safe and tests run in parallel by default, this could lead to data races (Undefined Behavior) and flaky tests across the entire suite.
+
+**Defense:** Dependency Injection for Config
+Refactored `OpenAIConfig::from_env` and `HuggingFaceConfig::from_env` to use an internal helper `from_env_with_provider` that accepts a closure for environment lookup.
+- Removed all `unsafe` blocks and `std::env::set_var` calls from tests.
+- Removed the `Mutex` serialization hack.
+- Tests now use a mock closure to simulate environment variables safely.
+
+**Threat:** Potential Buffer Over-read in Vector Deserialization
+`src/core/property.rs` contains `unsafe` blocks for optimizing vector serialization/deserialization by casting byte slices to f32 slices. While theoretically sound on little-endian systems, incorrect length checks could lead to buffer over-reads.
+
+**Verification:** Audit & Fuzz Test
+- **Audited:** Verified that `serialize_vector_into` and `deserialize_vector` perform strict bounds checking (`data_slice.len() == dimension * 4`) and handle alignment correctly via `Vec::with_capacity`.
+- **Documented:** Added "Verified by Warden" comments explaining the safety proofs (validity of f32 bit patterns, alignment guarantees).
+- **Verified:** Added `tests/warden_property_safety.rs` to fuzz truncated and malformed inputs, confirming that safe guards trigger before `unsafe` blocks are reached.

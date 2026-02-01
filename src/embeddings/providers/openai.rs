@@ -99,7 +99,18 @@ impl OpenAIConfig {
     /// let config = OpenAIConfig::from_env(OpenAIModel::TextEmbedding3Small)?;
     /// ```
     pub fn from_env(model: OpenAIModel) -> Result<Self, EmbeddingError> {
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+        Self::from_env_with_provider(model, |k| std::env::var(k))
+    }
+
+    /// Internal helper to allow mocking environment variables in tests
+    pub(crate) fn from_env_with_provider<F>(
+        model: OpenAIModel,
+        env_provider: F,
+    ) -> Result<Self, EmbeddingError>
+    where
+        F: Fn(&str) -> Result<String, std::env::VarError>,
+    {
+        let api_key = env_provider("OPENAI_API_KEY").map_err(|_| {
             EmbeddingError::ConfigError("OPENAI_API_KEY environment variable not set".to_string())
         })?;
 
@@ -335,11 +346,6 @@ impl EmbeddingProvider for OpenAIProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    lazy_static::lazy_static! {
-        static ref ENV_MUTEX: Mutex<()> = Mutex::new(());
-    }
 
     #[test]
     fn test_model_dimensions() {
@@ -363,15 +369,11 @@ mod tests {
 
     #[test]
     fn test_config_from_missing_env() {
-        let _guard = ENV_MUTEX.lock().unwrap(); // Lock before manipulating env
-        let original_var = std::env::var("OPENAI_API_KEY").ok();
+        // Simulate missing environment variable using the provider pattern
+        let result = OpenAIConfig::from_env_with_provider(OpenAIModel::Ada002, |_| {
+            Err(std::env::VarError::NotPresent)
+        });
 
-        // SAFETY: Only used in single-threaded test context protected by mutex
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
-
-        let result = OpenAIConfig::from_env(OpenAIModel::Ada002);
         assert!(result.is_err());
         match result {
             Err(EmbeddingError::ConfigError(msg)) => {
@@ -379,15 +381,7 @@ mod tests {
             }
             _ => panic!("Expected ConfigError"),
         }
-
-        // Restore original value
-        if let Some(val) = original_var {
-            // SAFETY: Only used in single-threaded test context protected by mutex
-            unsafe {
-                std::env::set_var("OPENAI_API_KEY", val);
-            }
-        }
-    } // Mutex is unlocked when _guard goes out of scope
+    }
 
     #[test]
     fn test_config_builder() {
