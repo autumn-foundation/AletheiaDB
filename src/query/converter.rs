@@ -382,7 +382,9 @@ impl AstConverter {
     /// }
     /// ```
     pub fn convert(&self, ast: &QueryAst) -> Result<Query> {
-        let mut ops = Vec::new();
+        // OPTIMIZATION: Pre-allocate vector to avoid reallocations.
+        // Most queries produce at least a few operations (Scan, Return, etc.), so 8 is a conservative start.
+        let mut ops = Vec::with_capacity(8);
         let hints = QueryHints::default();
 
         // 1. Convert temporal clause to context
@@ -759,7 +761,8 @@ impl AstConverter {
 
     /// Convert RETURN clause to projection list.
     fn convert_return(&self, return_clause: &ReturnClause) -> Result<Vec<String>> {
-        let mut projections = Vec::new();
+        // OPTIMIZATION: Pre-allocate vector with exact size to avoid reallocations.
+        let mut projections = Vec::with_capacity(return_clause.items.len());
         for item in &return_clause.items {
             match &item.expression {
                 Expression::Property(prop) => {
