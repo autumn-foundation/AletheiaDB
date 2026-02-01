@@ -57,11 +57,18 @@ const MAX_VALID_TIME_FUTURE_OFFSET_US: i64 = 365 * 24 * 60 * 60 * 1_000_000; // 
 ///
 /// # Example
 ///
-/// ```ignore
-/// let mut tx = db.write_transaction();
-/// let node_id = tx.create_node("Person", props)?;
-/// tx.create_edge(node_id, other, "KNOWS", edge_props)?;
+/// ```rust,no_run
+/// # use gallifreydb::{GallifreyDB, properties};
+/// # use gallifreydb::api::transaction::WriteOps;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let db = GallifreyDB::new()?;
+/// # let other = db.write(|tx| tx.create_node("Person", properties!()))?;
+/// let mut tx = db.write_transaction()?;
+/// let node_id = tx.create_node("Person", properties! { "name" => "Alice" })?;
+/// tx.create_edge(node_id, other, "KNOWS", properties!())?;
 /// tx.commit()?;  // or tx.rollback()
+/// # Ok(())
+/// # }
 /// ```
 pub struct WriteTransaction {
     tx_id: TxId,
@@ -196,13 +203,20 @@ impl WriteTransaction {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # use gallifreydb::{GallifreyDB, properties};
+    /// # use gallifreydb::api::transaction::WriteOps;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let db = GallifreyDB::new()?;
     /// let mut tx = db.write_transaction()?;
-    /// let node_id = tx.create_node("Person", properties)?;
+    /// let node_id = tx.create_node("Person", properties! { "name" => "Alice" })?;
     /// let commit_ts = tx.commit_with_timestamp()?;
     ///
     /// // Query at exact commit timestamp
+    /// // Note: This uses the transaction time path
     /// let node = db.get_node_at_time(node_id, commit_ts, commit_ts)?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Durability Modes
