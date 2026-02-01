@@ -5,3 +5,6 @@
 
 #[cfg(feature = "nova")]
 pub mod semantic_pathfinding;
+
+#[cfg(feature = "nova")]
+pub mod graph_context;
