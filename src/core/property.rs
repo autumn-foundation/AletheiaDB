@@ -1279,6 +1279,13 @@ impl PropertyMap {
     /// This avoids the overhead of `FromIterator` which would create a *new*
     /// HashMap and re-insert all elements. Instead, we just iterate once
     /// to calculate the serialized size (required for `cached_size` invariant).
+    ///
+    /// # Safety
+    ///
+    /// This assumes the provided `HashMap` is the definitive source of truth.
+    /// Unlike `FromIterator` which must handle duplicate keys in the input stream
+    /// by adjusting the size, `HashMap` by definition has unique keys. Therefore,
+    /// a simple summation of sizes is correct and consistent with `serialized_size()`.
     pub(crate) fn from_inner_map(map: HashMap<PropertyKey, PropertyValue>) -> Self {
         let mut size: usize = 4; // Count field
         for (key, value) in &map {
@@ -3677,5 +3684,24 @@ mod tests {
         let expected_min = 10 * min_vec_size + 4; // "data".len() = 4
 
         assert!(size >= expected_min);
+    }
+
+    #[test]
+    fn test_from_inner_map_cached_size() {
+        let mut map = HashMap::new();
+        map.insert(
+            GLOBAL_INTERNER.intern("name").unwrap(),
+            PropertyValue::string("Alice"),
+        );
+        map.insert(
+            GLOBAL_INTERNER.intern("age").unwrap(),
+            PropertyValue::Int(30),
+        );
+
+        let pm1 = PropertyMap::from_inner_map(map.clone());
+        let pm2: PropertyMap = map.into_iter().collect(); // FromIterator path
+
+        assert_eq!(pm1.cached_size, pm2.cached_size);
+        assert_eq!(pm1.inner, pm2.inner);
     }
 }
