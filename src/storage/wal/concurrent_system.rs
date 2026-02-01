@@ -202,9 +202,9 @@ impl BackgroundFlusher {
         // here - continuing would leave waiting transactions hanging indefinitely.
         let should_mark_flushed = !entries.is_empty()
             || self.group_commit.as_ref().is_some_and(|gc| {
-                gc.current_batch_size().expect(
-                    "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                ) > 0
+                gc.current_batch_size()
+                    .expect("GroupCommitCoordinator lock poisoned - flush thread cannot continue")
+                    > 0
             });
 
         if !entries.is_empty() {
