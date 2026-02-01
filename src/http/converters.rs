@@ -58,9 +58,9 @@ fn property_value_to_json_recursive(
                 .collect();
             Ok(serde_json::Value::Array(items?))
         }
-        PropertyValue::Vector(v) => {
-            Ok(serde_json::Value::Array(v.iter().map(|f| json!(*f)).collect()))
-        }
+        PropertyValue::Vector(v) => Ok(serde_json::Value::Array(
+            v.iter().map(|f| json!(*f)).collect(),
+        )),
         PropertyValue::SparseVector(sv) => Ok(json!({
             "indices": sv.indices(),
             "values": sv.values()
@@ -164,23 +164,16 @@ mod tests {
     #[test]
     fn test_json_recursion_boundary() {
         // Depth 99 should succeed (depth 0 is root, so 0..99 is 100 levels)
-        let mut value = json!(1);
-        // Note: The loop count + 1 (for initial value) is roughly the depth
-        // Let's be precise.
-        // value = 1 (depth 0, implicit but handled as primitive)
-        // value = [1] (depth 1)
-        // Loop runs 99 times -> final value is nested 99 times.
-        // Recursive function calls: call(depth 0) -> ... -> call(depth 99)
-        // depth 100 is the limit where we check >= 100.
-        // So nesting level 99 should be fine (calls with depth 0..99).
-        // Nesting level 100 calls with depth 0..100, checking >= 100 fails at 100.
+        let mut value_99 = json!(1);
 
         // Creating nesting level 99
-        let mut value_99 = json!(1);
         for _ in 0..99 {
             value_99 = json!([value_99]);
         }
-        assert!(json_to_property_value(&value_99).is_ok(), "Depth 99 should pass");
+        assert!(
+            json_to_property_value(&value_99).is_ok(),
+            "Depth 99 should pass"
+        );
 
         // Creating nesting level 100
         let mut value_100 = json!(1);

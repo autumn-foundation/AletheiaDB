@@ -55,9 +55,6 @@ const DEFAULT_VECTOR_K: usize = 10;
 /// Default transaction time placeholder string.
 const TRANSACTION_TIME_NOW: &str = "now";
 
-/// Maximum recursion depth for JSON processing to prevent stack overflow.
-const MAX_JSON_RECURSION_DEPTH: usize = 100;
-
 /// GallifreyDB MCP Server.
 ///
 /// Exposes GallifreyDB's graph, vector, and temporal capabilities through MCP.
@@ -257,75 +254,55 @@ impl GallifreyMcpServer {
             .unwrap_or_else(|| format!("<unknown:{}>", interned.as_u32()))
     }
 
-    fn node_to_response(&self, node: &crate::core::Node) -> Result<NodeResponse, String> {
-        Ok(NodeResponse {
+    fn node_to_response(&self, node: &crate::core::Node) -> NodeResponse {
+        NodeResponse {
             id: node.id.as_u64(),
             label: self.interned_to_string(node.label),
-            properties: self.property_map_to_json(&node.properties)?,
-        })
+            properties: self.property_map_to_json(&node.properties),
+        }
     }
 
-    fn edge_to_response(&self, edge: &crate::core::Edge) -> Result<EdgeResponse, String> {
-        Ok(EdgeResponse {
+    fn edge_to_response(&self, edge: &crate::core::Edge) -> EdgeResponse {
+        EdgeResponse {
             id: edge.id.as_u64(),
             source_id: edge.source.as_u64(),
             target_id: edge.target.as_u64(),
             label: self.interned_to_string(edge.label),
-            properties: self.property_map_to_json(&edge.properties)?,
-        })
+            properties: self.property_map_to_json(&edge.properties),
+        }
     }
 
-    fn property_map_to_json(
-        &self,
-        props: &PropertyMap,
-    ) -> Result<HashMap<String, serde_json::Value>, String> {
+    fn property_map_to_json(&self, props: &PropertyMap) -> HashMap<String, serde_json::Value> {
         let mut result = HashMap::new();
         for (key, value) in props.iter() {
             let key_str = self.interned_to_string(*key);
-            result.insert(key_str, self.property_value_to_json(value)?);
+            result.insert(key_str, self.property_value_to_json(value));
         }
-        Ok(result)
+        result
     }
 
-    fn property_value_to_json(&self, value: &PropertyValue) -> Result<serde_json::Value, String> {
-        self.property_value_to_json_recursive(value, 0)
-    }
-
-    fn property_value_to_json_recursive(
-        &self,
-        value: &PropertyValue,
-        depth: usize,
-    ) -> Result<serde_json::Value, String> {
-        if depth >= MAX_JSON_RECURSION_DEPTH {
-            return Err(format!(
-                "Recursion limit exceeded (max {})",
-                MAX_JSON_RECURSION_DEPTH
-            ));
-        }
-
+    fn property_value_to_json(&self, value: &PropertyValue) -> serde_json::Value {
         match value {
-            PropertyValue::Null => Ok(serde_json::Value::Null),
-            PropertyValue::Bool(b) => Ok(serde_json::Value::Bool(*b)),
-            PropertyValue::Int(i) => Ok(json!(*i)),
-            PropertyValue::Float(f) => Ok(json!(*f)),
-            PropertyValue::String(s) => Ok(serde_json::Value::String(s.to_string())),
-            PropertyValue::Bytes(b) => Ok(serde_json::Value::String(
-                base64::engine::general_purpose::STANDARD.encode(b),
-            )),
-            PropertyValue::Array(arr) => {
-                let items: Result<Vec<_>, String> = arr
-                    .iter()
-                    .map(|v| self.property_value_to_json_recursive(v, depth + 1))
-                    .collect();
-                Ok(serde_json::Value::Array(items?))
+            PropertyValue::Null => serde_json::Value::Null,
+            PropertyValue::Bool(b) => serde_json::Value::Bool(*b),
+            PropertyValue::Int(i) => json!(*i),
+            PropertyValue::Float(f) => json!(*f),
+            PropertyValue::String(s) => serde_json::Value::String(s.to_string()),
+            PropertyValue::Bytes(b) => {
+                serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
+            PropertyValue::Array(arr) => serde_json::Value::Array(
+                arr.iter().map(|v| self.property_value_to_json(v)).collect(),
+            ),
             PropertyValue::Vector(v) => {
-                Ok(serde_json::Value::Array(v.iter().map(|f| json!(*f)).collect()))
+                serde_json::Value::Array(v.iter().map(|f| json!(*f)).collect())
             }
-            PropertyValue::SparseVector(sv) => Ok(json!({
-                "indices": sv.indices(),
-                "values": sv.values()
-            })),
+            PropertyValue::SparseVector(sv) => {
+                json!({
+                    "indices": sv.indices(),
+                    "values": sv.values()
+                })
+            }
         }
     }
 
@@ -340,18 +317,6 @@ impl GallifreyMcpServer {
     }
 
     fn json_to_property_value(&self, value: &serde_json::Value) -> Option<PropertyValue> {
-        self.json_to_property_value_recursive(value, 0)
-    }
-
-    fn json_to_property_value_recursive(
-        &self,
-        value: &serde_json::Value,
-        depth: usize,
-    ) -> Option<PropertyValue> {
-        if depth >= MAX_JSON_RECURSION_DEPTH {
-            return None;
-        }
-
         match value {
             serde_json::Value::Null => Some(PropertyValue::Null),
             serde_json::Value::Bool(b) => Some(PropertyValue::Bool(*b)),
@@ -375,7 +340,7 @@ impl GallifreyMcpServer {
                 }
                 let values: Vec<PropertyValue> = arr
                     .iter()
-                    .filter_map(|v| self.json_to_property_value_recursive(v, depth + 1))
+                    .filter_map(|v| self.json_to_property_value(v))
                     .collect();
                 Some(PropertyValue::Array(Arc::new(values)))
             }
@@ -481,13 +446,13 @@ impl GallifreyMcpServer {
         };
 
         match self.db.get_node(node_id) {
-            Ok(node) => match self.node_to_response(&node) {
-                Ok(response) => self.success_json(
+            Ok(node) => {
+                let response = self.node_to_response(&node);
+                self.success_json(
                     serde_json::to_value(&response)
                         .expect("response serialization should not fail"),
-                ),
-                Err(e) => self.error_json(&e),
-            },
+                )
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
@@ -505,13 +470,13 @@ impl GallifreyMcpServer {
 
         match self.db.create_node(&req.label, properties) {
             Ok(node_id) => match self.db.get_node(node_id) {
-                Ok(node) => match self.node_to_response(&node) {
-                    Ok(response) => self.success_json(
+                Ok(node) => {
+                    let response = self.node_to_response(&node);
+                    self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
-                    ),
-                    Err(e) => self.error_json(&e),
-                },
+                    )
+                }
                 Err(e) => self.error_json(&e.to_string()),
             },
             Err(e) => self.error_json(&e.to_string()),
@@ -533,13 +498,13 @@ impl GallifreyMcpServer {
 
         match self.db.write(|tx| tx.update_node(node_id, properties)) {
             Ok(()) => match self.db.get_node(node_id) {
-                Ok(node) => match self.node_to_response(&node) {
-                    Ok(response) => self.success_json(
+                Ok(node) => {
+                    let response = self.node_to_response(&node);
+                    self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
-                    ),
-                    Err(e) => self.error_json(&e),
-                },
+                    )
+                }
                 Err(e) => self.error_json(&e.to_string()),
             },
             Err(e) => self.error_json(&e.to_string()),
@@ -620,10 +585,7 @@ impl GallifreyMcpServer {
                                     continue;
                                 }
                                 if let EntityResult::Node(node) = row.entity {
-                                    match self.node_to_response(&node) {
-                                        Ok(resp) => nodes.push(resp),
-                                        Err(e) => return self.error_json(&e),
-                                    }
+                                    nodes.push(self.node_to_response(&node));
                                     if nodes.len() >= limit {
                                         break;
                                     }
@@ -698,13 +660,13 @@ impl GallifreyMcpServer {
         };
 
         match self.db.get_edge(edge_id) {
-            Ok(edge) => match self.edge_to_response(&edge) {
-                Ok(response) => self.success_json(
+            Ok(edge) => {
+                let response = self.edge_to_response(&edge);
+                self.success_json(
                     serde_json::to_value(&response)
                         .expect("response serialization should not fail"),
-                ),
-                Err(e) => self.error_json(&e),
-            },
+                )
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
@@ -735,13 +697,13 @@ impl GallifreyMcpServer {
             .create_edge(source_id, target_id, &req.label, properties)
         {
             Ok(edge_id) => match self.db.get_edge(edge_id) {
-                Ok(edge) => match self.edge_to_response(&edge) {
-                    Ok(response) => self.success_json(
+                Ok(edge) => {
+                    let response = self.edge_to_response(&edge);
+                    self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
-                    ),
-                    Err(e) => self.error_json(&e),
-                },
+                    )
+                }
                 Err(e) => self.error_json(&e.to_string()),
             },
             Err(e) => self.error_json(&e.to_string()),
@@ -763,13 +725,13 @@ impl GallifreyMcpServer {
 
         match self.db.write(|tx| tx.update_edge(edge_id, properties)) {
             Ok(()) => match self.db.get_edge(edge_id) {
-                Ok(edge) => match self.edge_to_response(&edge) {
-                    Ok(response) => self.success_json(
+                Ok(edge) => {
+                    let response = self.edge_to_response(&edge);
+                    self.success_json(
                         serde_json::to_value(&response)
                             .expect("response serialization should not fail"),
-                    ),
-                    Err(e) => self.error_json(&e),
-                },
+                    )
+                }
                 Err(e) => self.error_json(&e.to_string()),
             },
             Err(e) => self.error_json(&e.to_string()),
@@ -858,15 +820,11 @@ impl GallifreyMcpServer {
             self.db.get_outgoing_edges(node_id)
         };
 
-        let mut edges = Vec::new();
-        for eid in edge_ids {
-            if let Ok(e) = self.db.get_edge(eid) {
-                match self.edge_to_response(&e) {
-                    Ok(resp) => edges.push(resp),
-                    Err(err) => return self.error_json(&err),
-                }
-            }
-        }
+        let edges: Vec<EdgeResponse> = edge_ids
+            .into_iter()
+            .filter_map(|eid| self.db.get_edge(eid).ok())
+            .map(|e| self.edge_to_response(&e))
+            .collect();
 
         self.success_json(json!({
             "edges": edges,
@@ -887,22 +845,18 @@ impl GallifreyMcpServer {
 
         let edge_ids = self.db.get_incoming_edges(node_id);
 
-        let mut edges = Vec::new();
-        for eid in edge_ids {
-            if let Ok(e) = self.db.get_edge(eid) {
-                if req
-                    .label
+        // Filter by label if provided
+        let edges: Vec<EdgeResponse> = edge_ids
+            .into_iter()
+            .filter_map(|eid| self.db.get_edge(eid).ok())
+            .filter(|e| {
+                req.label
                     .as_ref()
                     .map(|l| self.matches_label(e.label, l))
                     .unwrap_or(true)
-                {
-                    match self.edge_to_response(&e) {
-                        Ok(resp) => edges.push(resp),
-                        Err(err) => return self.error_json(&err),
-                    }
-                }
-            }
-        }
+            })
+            .map(|e| self.edge_to_response(&e))
+            .collect();
 
         self.success_json(json!({
             "edges": edges,
@@ -942,18 +896,13 @@ impl GallifreyMcpServer {
             if current_depth > 0 && !visited.contains(&current_id.as_u64()) {
                 visited.insert(current_id.as_u64());
                 if let Ok(node) = self.db.get_node(current_id) {
-                    match self.node_to_response(&node) {
-                        Ok(resp) => {
-                            results.push(TraversalResult {
-                                node: resp,
-                                path: path.clone(),
-                                depth: current_depth,
-                            });
-                            if results.len() >= limit {
-                                break;
-                            }
-                        }
-                        Err(e) => return self.error_json(&e),
+                    results.push(TraversalResult {
+                        node: self.node_to_response(&node),
+                        path: path.clone(),
+                        depth: current_depth,
+                    });
+                    if results.len() >= limit {
+                        break;
                     }
                 }
             }
@@ -1041,18 +990,15 @@ impl GallifreyMcpServer {
 
         match self.db.find_similar_by_embedding(&req.embedding, k) {
             Ok(results) => {
-                let mut similarity_results = Vec::new();
-                for (node_id, score) in results {
-                    if let Ok(node) = self.db.get_node(node_id) {
-                        match self.node_to_response(&node) {
-                            Ok(resp) => similarity_results.push(SimilarityResult {
-                                node: resp,
-                                score,
-                            }),
-                            Err(e) => return self.error_json(&e),
-                        }
-                    }
-                }
+                let similarity_results: Vec<SimilarityResult> = results
+                    .into_iter()
+                    .filter_map(|(node_id, score)| {
+                        self.db.get_node(node_id).ok().map(|node| SimilarityResult {
+                            node: self.node_to_response(&node),
+                            score,
+                        })
+                    })
+                    .collect();
 
                 self.success_json(json!({
                     "results": similarity_results,
@@ -1128,14 +1074,14 @@ impl GallifreyMcpServer {
         };
 
         match self.db.get_node_at_time(node_id, valid_time, tx_time) {
-            Ok(node) => match self.node_to_response(&node) {
-                Ok(response) => self.success_json(json!({
+            Ok(node) => {
+                let response = self.node_to_response(&node);
+                self.success_json(json!({
                     "node": response,
                     "valid_time": req.valid_time,
                     "transaction_time": Self::format_tx_time_response(req.transaction_time)
-                })),
-                Err(e) => self.error_json(&e),
-            },
+                }))
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
@@ -1162,14 +1108,14 @@ impl GallifreyMcpServer {
         };
 
         match self.db.get_edge_at_time(edge_id, valid_time, tx_time) {
-            Ok(edge) => match self.edge_to_response(&edge) {
-                Ok(response) => self.success_json(json!({
+            Ok(edge) => {
+                let response = self.edge_to_response(&edge);
+                self.success_json(json!({
                     "edge": response,
                     "valid_time": req.valid_time,
                     "transaction_time": Self::format_tx_time_response(req.transaction_time)
-                })),
-                Err(e) => self.error_json(&e),
-            },
+                }))
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
@@ -1195,13 +1141,13 @@ impl GallifreyMcpServer {
         };
 
         match self.db.get_node_at_valid_time(node_id, valid_time) {
-            Ok(node) => match self.node_to_response(&node) {
-                Ok(response) => self.success_json(json!({
+            Ok(node) => {
+                let response = self.node_to_response(&node);
+                self.success_json(json!({
                     "node": response,
                     "valid_time": req.valid_time
-                })),
-                Err(e) => self.error_json(&e),
-            },
+                }))
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
@@ -1223,13 +1169,13 @@ impl GallifreyMcpServer {
         };
 
         match self.db.get_node_at_transaction_time(node_id, tx_time) {
-            Ok(node) => match self.node_to_response(&node) {
-                Ok(response) => self.success_json(json!({
+            Ok(node) => {
+                let response = self.node_to_response(&node);
+                self.success_json(json!({
                     "node": response,
                     "transaction_time": req.transaction_time
-                })),
-                Err(e) => self.error_json(&e),
-            },
+                }))
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
@@ -1247,13 +1193,11 @@ impl GallifreyMcpServer {
 
         match self.db.get_node_history(node_id) {
             Ok(history) => {
-                let mut versions = Vec::new();
-                for v in &history.versions {
-                    match self.version_info_to_response(v) {
-                        Ok(resp) => versions.push(resp),
-                        Err(e) => return self.error_json(&e),
-                    }
-                }
+                let versions: Vec<_> = history
+                    .versions
+                    .iter()
+                    .map(|v| self.version_info_to_response(v))
+                    .collect();
 
                 self.success_json(json!({
                     "node_id": req.node_id,
@@ -1290,10 +1234,10 @@ impl GallifreyMcpServer {
             .db
             .diff_node_versions(node_id, from_version, to_version)
         {
-            Ok(diff) => match self.version_diff_to_response(&diff) {
-                Ok(response) => self.success_json(json!(response)),
-                Err(e) => self.error_json(&e),
-            },
+            Ok(diff) => {
+                let response = self.version_diff_to_response(&diff);
+                self.success_json(json!(response))
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
@@ -1315,13 +1259,13 @@ impl GallifreyMcpServer {
         };
 
         match self.db.get_edge_at_valid_time(edge_id, valid_time) {
-            Ok(edge) => match self.edge_to_response(&edge) {
-                Ok(response) => self.success_json(json!({
+            Ok(edge) => {
+                let response = self.edge_to_response(&edge);
+                self.success_json(json!({
                     "edge": response,
                     "valid_time": req.valid_time
-                })),
-                Err(e) => self.error_json(&e),
-            },
+                }))
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
@@ -1343,13 +1287,13 @@ impl GallifreyMcpServer {
         };
 
         match self.db.get_edge_at_transaction_time(edge_id, tx_time) {
-            Ok(edge) => match self.edge_to_response(&edge) {
-                Ok(response) => self.success_json(json!({
+            Ok(edge) => {
+                let response = self.edge_to_response(&edge);
+                self.success_json(json!({
                     "edge": response,
                     "transaction_time": req.transaction_time
-                })),
-                Err(e) => self.error_json(&e),
-            },
+                }))
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
@@ -1367,13 +1311,11 @@ impl GallifreyMcpServer {
 
         match self.db.get_edge_history(edge_id) {
             Ok(history) => {
-                let mut versions = Vec::new();
-                for v in &history.versions {
-                    match self.version_info_to_response(v) {
-                        Ok(resp) => versions.push(resp),
-                        Err(e) => return self.error_json(&e),
-                    }
-                }
+                let versions: Vec<_> = history
+                    .versions
+                    .iter()
+                    .map(|v| self.version_info_to_response(v))
+                    .collect();
 
                 self.success_json(json!({
                     "edge_id": req.edge_id,
@@ -1410,23 +1352,20 @@ impl GallifreyMcpServer {
             .db
             .diff_edge_versions(edge_id, from_version, to_version)
         {
-            Ok(diff) => match self.version_diff_to_response(&diff) {
-                Ok(response) => self.success_json(json!(response)),
-                Err(e) => self.error_json(&e),
-            },
+            Ok(diff) => {
+                let response = self.version_diff_to_response(&diff);
+                self.success_json(json!(response))
+            }
             Err(e) => self.error_json(&e.to_string()),
         }
     }
 
     // Helper methods for converting internal types to response types
 
-    fn version_info_to_response(
-        &self,
-        info: &crate::query::VersionInfo,
-    ) -> Result<serde_json::Value, String> {
+    fn version_info_to_response(&self, info: &crate::query::VersionInfo) -> serde_json::Value {
         use crate::core::temporal::TIMESTAMP_MAX;
 
-        let properties = self.property_map_to_json(&info.properties)?;
+        let properties = self.property_map_to_json(&info.properties);
 
         let valid_to = {
             let end = info.temporal.valid_time().end();
@@ -1446,7 +1385,7 @@ impl GallifreyMcpServer {
             }
         };
 
-        Ok(json!({
+        json!({
             "version_number": info.version_number,
             "version_id": info.version_id.as_u64(),
             "valid_from": info.temporal.valid_time().start().wallclock().to_string(),
@@ -1455,31 +1394,31 @@ impl GallifreyMcpServer {
             "transaction_to": transaction_to,
             "properties": properties,
             "label": info.label
-        }))
+        })
     }
 
-    fn version_diff_to_response(
-        &self,
-        diff: &crate::query::VersionDiff,
-    ) -> Result<serde_json::Value, String> {
-        let added = self.property_map_to_json(&diff.added)?;
-        let removed = self.property_map_to_json(&diff.removed)?;
+    fn version_diff_to_response(&self, diff: &crate::query::VersionDiff) -> serde_json::Value {
+        let added = self.property_map_to_json(&diff.added);
+        let removed = self.property_map_to_json(&diff.removed);
 
-        let mut modified = Vec::new();
-        for (key, old_val, new_val) in &diff.modified {
-            let key_str = GLOBAL_INTERNER
-                .resolve(*key)
-                .map(|s| s.as_ref().to_string())
-                .unwrap_or_else(|| format!("{:?}", key));
+        let modified: Vec<_> = diff
+            .modified
+            .iter()
+            .map(|(key, old_val, new_val)| {
+                let key_str = GLOBAL_INTERNER
+                    .resolve(*key)
+                    .map(|s| s.as_ref().to_string())
+                    .unwrap_or_else(|| format!("{:?}", key));
 
-            modified.push(json!({
-                "key": key_str,
-                "old_value": self.property_value_to_json(old_val)?,
-                "new_value": self.property_value_to_json(new_val)?
-            }));
-        }
+                json!({
+                    "key": key_str,
+                    "old_value": self.property_value_to_json(old_val),
+                    "new_value": self.property_value_to_json(new_val)
+                })
+            })
+            .collect();
 
-        Ok(json!({
+        json!({
             "from_version": diff.from_version.as_u64(),
             "to_version": diff.to_version.as_u64(),
             "added": added,
@@ -1487,7 +1426,7 @@ impl GallifreyMcpServer {
             "modified": modified,
             "has_changes": diff.has_changes(),
             "change_count": diff.change_count()
-        }))
+        })
     }
 
     fn handle_hybrid_query(&self, args: serde_json::Value) -> CallToolResult {
@@ -1524,9 +1463,30 @@ impl GallifreyMcpServer {
         };
 
         // Helper to convert rows to hybrid results with temporal info
-        // Need to change to return Result because node_to_response returns Result now
-        // This makes this closure a bit tricky with filter_map.
-        // Let's refactor the logic below to handle Result properly.
+        let rows_to_results =
+            |rows: Vec<crate::query::executor::QueryRow>| -> Vec<HybridQueryResult> {
+                rows.into_iter()
+                    .filter_map(|row| {
+                        if let EntityResult::Node(node) = row.entity {
+                            Some(HybridQueryResult {
+                                node: self.node_to_response(&node),
+                                similarity_score: row.score,
+                                traversal_path: row.path.map(|p| {
+                                    p.iter()
+                                        .map(|e| match e {
+                                            ResultEntityId::Node(id) => id.as_u64(),
+                                            ResultEntityId::Edge(id) => id.as_u64(),
+                                        })
+                                        .collect()
+                                }),
+                                timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
 
         // Use QueryBuilder for hybrid queries
         if let Some(start_id) = req.start_node_id {
@@ -1539,10 +1499,11 @@ impl GallifreyMcpServer {
             if let (Some(vt), Some(tt)) = (valid_time, tx_time) {
                 // Temporal query for a single node
                 return match self.db.get_node_at_time(node_id, vt, tt) {
-                    Ok(node) => match self.node_to_response(&node) {
-                        Ok(resp) => self.success_json(json!({
+                    Ok(node) => {
+                        let response = self.node_to_response(&node);
+                        self.success_json(json!({
                             "results": [HybridQueryResult {
-                                node: resp,
+                                node: response,
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: Some(vt.wallclock().to_string()),
@@ -1552,9 +1513,8 @@ impl GallifreyMcpServer {
                                 "valid_time": req.valid_time,
                                 "transaction_time": req.transaction_time
                             }
-                        })),
-                        Err(e) => self.error_json(&e),
-                    },
+                        }))
+                    }
                     Err(e) => self.error_json(&e.to_string()),
                 };
             }
@@ -1571,18 +1531,18 @@ impl GallifreyMcpServer {
             } else {
                 // Just return the start node
                 return match self.db.get_node(node_id) {
-                    Ok(node) => match self.node_to_response(&node) {
-                        Ok(resp) => self.success_json(json!({
+                    Ok(node) => {
+                        let response = self.node_to_response(&node);
+                        self.success_json(json!({
                             "results": [HybridQueryResult {
-                                node: resp,
+                                node: response,
                                 similarity_score: None,
                                 traversal_path: Some(vec![node_id.as_u64()]),
                                 timestamp: None,
                             }],
                             "count": 1
-                        })),
-                        Err(e) => self.error_json(&e),
-                    },
+                        }))
+                    }
                     Err(e) => self.error_json(&e.to_string()),
                 };
             };
@@ -1591,27 +1551,7 @@ impl GallifreyMcpServer {
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let mut hybrid_results = Vec::new();
-                        for row in rows {
-                            if let EntityResult::Node(node) = row.entity {
-                                match self.node_to_response(&node) {
-                                    Ok(resp) => hybrid_results.push(HybridQueryResult {
-                                        node: resp,
-                                        similarity_score: row.score,
-                                        traversal_path: row.path.map(|p| {
-                                            p.iter()
-                                                .map(|e| match e {
-                                                    ResultEntityId::Node(id) => id.as_u64(),
-                                                    ResultEntityId::Edge(id) => id.as_u64(),
-                                                })
-                                                .collect()
-                                        }),
-                                        timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
-                                    }),
-                                    Err(e) => return self.error_json(&e),
-                                }
-                            }
-                        }
+                        let hybrid_results = rows_to_results(rows);
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
@@ -1644,27 +1584,7 @@ impl GallifreyMcpServer {
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let mut hybrid_results = Vec::new();
-                        for row in rows {
-                            if let EntityResult::Node(node) = row.entity {
-                                match self.node_to_response(&node) {
-                                    Ok(resp) => hybrid_results.push(HybridQueryResult {
-                                        node: resp,
-                                        similarity_score: row.score,
-                                        traversal_path: row.path.map(|p| {
-                                            p.iter()
-                                                .map(|e| match e {
-                                                    ResultEntityId::Node(id) => id.as_u64(),
-                                                    ResultEntityId::Edge(id) => id.as_u64(),
-                                                })
-                                                .collect()
-                                        }),
-                                        timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
-                                    }),
-                                    Err(e) => return self.error_json(&e),
-                                }
-                            }
-                        }
+                        let hybrid_results = rows_to_results(rows);
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len(),
@@ -1682,27 +1602,7 @@ impl GallifreyMcpServer {
             match builder.limit(limit).execute(&self.db) {
                 Ok(results) => match results.collect_all() {
                     Ok(rows) => {
-                        let mut hybrid_results = Vec::new();
-                        for row in rows {
-                            if let EntityResult::Node(node) = row.entity {
-                                match self.node_to_response(&node) {
-                                    Ok(resp) => hybrid_results.push(HybridQueryResult {
-                                        node: resp,
-                                        similarity_score: row.score,
-                                        traversal_path: row.path.map(|p| {
-                                            p.iter()
-                                                .map(|e| match e {
-                                                    ResultEntityId::Node(id) => id.as_u64(),
-                                                    ResultEntityId::Edge(id) => id.as_u64(),
-                                                })
-                                                .collect()
-                                        }),
-                                        timestamp: row.timestamp.map(|t| t.wallclock().to_string()),
-                                    }),
-                                    Err(e) => return self.error_json(&e),
-                                }
-                            }
-                        }
+                        let hybrid_results = rows_to_results(rows);
                         self.success_json(json!({
                             "results": hybrid_results,
                             "count": hybrid_results.len()
