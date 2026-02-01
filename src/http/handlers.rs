@@ -121,10 +121,17 @@ pub async fn handle_query(
                 Ok(node_id) => {
                     match db.get_node(node_id) {
                         Ok(node) => {
+                            let props_json = match property_map_to_json(&node.properties) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    return HttpResponse::InternalServerError()
+                                        .json(ApiResponse::error(e));
+                                }
+                            };
                             let node_json = json!({
                                 "id": node.id.as_u64(),
                                 "label": interned_to_string(node.label),
-                                "properties": property_map_to_json(&node.properties)
+                                "properties": props_json
                             });
                             // Issue 5: Return single object, not array
                             HttpResponse::Ok().json(ApiResponse::success(node_json))
@@ -140,10 +147,17 @@ pub async fn handle_query(
             match NodeId::new(node_id) {
                 Ok(nid) => match db.get_node(nid) {
                     Ok(node) => {
+                        let props_json = match property_map_to_json(&node.properties) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                return HttpResponse::InternalServerError()
+                                    .json(ApiResponse::error(e));
+                            }
+                        };
                         let node_json = json!({
                             "id": node.id.as_u64(),
                             "label": interned_to_string(node.label),
-                            "properties": property_map_to_json(&node.properties)
+                            "properties": props_json
                         });
                         HttpResponse::Ok().json(ApiResponse::success(node_json))
                     }
@@ -185,10 +199,17 @@ pub async fn handle_query(
                     let mut nodes = Vec::new();
                     for row in results.flatten() {
                         if let crate::query::executor::EntityResult::Node(node) = row.entity {
+                            let props_json = match property_map_to_json(&node.properties) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    return HttpResponse::InternalServerError()
+                                        .json(ApiResponse::error(e));
+                                }
+                            };
                             nodes.push(json!({
                                 "id": node.id.as_u64(),
                                 "label": interned_to_string(node.label),
-                                "properties": property_map_to_json(&node.properties)
+                                "properties": props_json
                             }));
                         }
                     }
@@ -216,10 +237,17 @@ pub async fn handle_query(
                         {
                             let id = node.id.as_u64();
                             if seen_ids.insert(id) {
+                                let props_json = match property_map_to_json(&node.properties) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        return HttpResponse::InternalServerError()
+                                            .json(ApiResponse::error(e));
+                                    }
+                                };
                                 neighbors.push(json!({
                                     "id": id,
                                     "label": interned_to_string(node.label),
-                                    "properties": property_map_to_json(&node.properties)
+                                    "properties": props_json
                                 }));
                             }
                         }
@@ -234,10 +262,17 @@ pub async fn handle_query(
                         {
                             let id = node.id.as_u64();
                             if seen_ids.insert(id) {
+                                let props_json = match property_map_to_json(&node.properties) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        return HttpResponse::InternalServerError()
+                                            .json(ApiResponse::error(e));
+                                    }
+                                };
                                 neighbors.push(json!({
                                     "id": id,
                                     "label": interned_to_string(node.label),
-                                    "properties": property_map_to_json(&node.properties)
+                                    "properties": props_json
                                 }));
                             }
                         }
