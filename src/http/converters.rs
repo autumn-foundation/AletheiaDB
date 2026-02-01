@@ -3,6 +3,9 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Maximum recursion depth for JSON processing to prevent stack overflow.
+const MAX_JSON_RECURSION_DEPTH: usize = 100;
+
 pub fn interned_to_string(interned: crate::core::InternedString) -> String {
     GLOBAL_INTERNER
         .resolve(interned)
@@ -55,6 +58,20 @@ pub fn json_to_property_map(
 }
 
 pub fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue, String> {
+    json_to_property_value_recursive(value, 0)
+}
+
+fn json_to_property_value_recursive(
+    value: &serde_json::Value,
+    depth: usize,
+) -> Result<PropertyValue, String> {
+    if depth > MAX_JSON_RECURSION_DEPTH {
+        return Err(format!(
+            "Recursion limit exceeded (max {})",
+            MAX_JSON_RECURSION_DEPTH
+        ));
+    }
+
     match value {
         serde_json::Value::Null => Ok(PropertyValue::Null),
         serde_json::Value::Bool(b) => Ok(PropertyValue::Bool(*b)),
@@ -83,12 +100,37 @@ pub fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue
                     return Ok(PropertyValue::Vector(Arc::from(floats)));
                 }
             }
-            let values: Result<Vec<PropertyValue>, String> =
-                arr.iter().map(json_to_property_value).collect();
+            let values: Result<Vec<PropertyValue>, String> = arr
+                .iter()
+                .map(|v| json_to_property_value_recursive(v, depth + 1))
+                .collect();
             Ok(PropertyValue::Array(Arc::new(values?)))
         }
         serde_json::Value::Object(_) => {
             Err("Nested objects are not supported as property values".to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_json_recursion_limit() {
+        // Create deeply nested JSON: [[[[...]]]]
+        let mut value = json!(1);
+        let depth = 200;
+        for _ in 0..depth {
+            value = json!([value]);
+        }
+
+        let result = json_to_property_value(&value);
+
+        match result {
+            Ok(_) => panic!("Recursion limit was not enforced!"),
+            Err(e) => assert!(e.contains("Recursion limit exceeded"), "Unexpected error: {}", e),
         }
     }
 }

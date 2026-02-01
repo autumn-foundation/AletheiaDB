@@ -70,3 +70,10 @@ Internal SIMD helper functions in `src/core/vector.rs` used `debug_assert_eq!` t
 
 **Defense:** Runtime Assertion
 Replaced `debug_assert_eq!` with `assert_eq!` in `dot_and_magnitudes`, `squared_diff_sum`, and `dot_product_sum`. This ensures that even in optimized release builds, dimension mismatches trigger a safe panic rather than UB. Verified with a regression test `test_internal_safety_in_release`.
+
+## 2026-02-18 - JSON Recursion DoS Hardening
+**Threat:** Stack Overflow (DoS) in JSON Parsing
+The JSON converter `json_to_property_value` in `src/http/converters.rs` processed nested arrays recursively without a depth limit. A malicious payload with deeply nested arrays (e.g., `[[[[...]]]]`) could cause a stack overflow, crashing the server.
+
+**Defense:** Recursion Depth Limit
+Refactored `json_to_property_value` to use a recursive helper function `json_to_property_value_recursive` that tracks depth. Enforced `MAX_JSON_RECURSION_DEPTH = 100`. Verified with a new unit test `test_json_recursion_limit` in `src/http/converters.rs`.
