@@ -3383,4 +3383,46 @@ mod tests {
             "Version 2 should have name='Alice Smith'"
         );
     }
+
+    #[test]
+    fn test_iterator_wrappers() {
+        let db = GallifreyDB::new().unwrap();
+
+        let n0 = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+        let n1 = db
+            .create_node("Person", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        let e1 = db
+            .create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build())
+            .unwrap();
+
+        // Test get_outgoing_edges_iter
+        let iter = db.get_outgoing_edges_iter(n0);
+        assert_eq!(iter.count(), 1);
+        let edge_id = db.get_outgoing_edges_iter(n0).next().unwrap();
+        assert_eq!(edge_id, e1);
+
+        // Test get_outgoing_entries_iter
+        let entry_iter = db.get_outgoing_entries_iter(n0);
+        assert_eq!(entry_iter.count(), 1);
+        let entry = db.get_outgoing_entries_iter(n0).next().unwrap();
+        assert_eq!(entry.edge_id, e1);
+        assert_eq!(entry.target, n1);
+
+        // Test get_incoming_edges_iter
+        let in_iter = db.get_incoming_edges_iter(n1);
+        assert_eq!(in_iter.count(), 1);
+        let in_edge_id = db.get_incoming_edges_iter(n1).next().unwrap();
+        assert_eq!(in_edge_id, e1);
+
+        // Test get_incoming_entries_iter
+        let in_entry_iter = db.get_incoming_entries_iter(n1);
+        assert_eq!(in_entry_iter.count(), 1);
+        let in_entry = db.get_incoming_entries_iter(n1).next().unwrap();
+        assert_eq!(in_entry.edge_id, e1);
+        assert_eq!(in_entry.target, n0); // source node
+    }
 }

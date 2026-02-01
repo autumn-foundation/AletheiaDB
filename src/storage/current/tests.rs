@@ -1629,3 +1629,124 @@ fn test_legacy_vector_count() {
     // Count should be 1
     assert_eq!(storage.vector_count(), 1);
 }
+
+// Tests for zero-allocation entries iterators (Issue #405)
+
+#[test]
+fn test_get_outgoing_entries_iter_basic() {
+    let storage = CurrentStorage::new();
+    let n0 = storage.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+    let n1 = storage.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+    let e1 = storage.create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+
+    let entries: Vec<_> = storage.get_outgoing_entries_iter(n0).collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].edge_id, e1);
+    assert_eq!(entries[0].target, n1);
+}
+
+#[test]
+fn test_get_incoming_entries_iter_basic() {
+    let storage = CurrentStorage::new();
+    let n0 = storage.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+    let n1 = storage.create_node("Person", PropertyMapBuilder::new().build()).unwrap();
+    let e1 = storage.create_edge(n0, n1, "KNOWS", PropertyMapBuilder::new().build()).unwrap();
+
+    let entries: Vec<_> = storage.get_incoming_entries_iter(n1).collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].edge_id, e1);
+    assert_eq!(entries[0].target, n0); // Source node
+}
+
+#[test]
+fn test_entries_iter_len() {
+    let storage = CurrentStorage::new();
+    let n0 = storage.create_node("Source", PropertyMapBuilder::new().build()).unwrap();
+
+    // Create 5 outgoing edges
+    for _ in 0..5 {
+        let target = storage.create_node("Target", PropertyMapBuilder::new().build()).unwrap();
+        storage.create_edge(n0, target, "LINK", PropertyMapBuilder::new().build()).unwrap();
+    }
+
+    let iter = storage.get_outgoing_entries_iter(n0);
+    assert_eq!(iter.len(), 5);
+
+    // Verify ExactSizeIterator contract
+    let count = iter.count();
+    assert_eq!(count, 5);
+}
+
+#[test]
+fn test_entries_iter_size_hint() {
+    let storage = CurrentStorage::new();
+    let n0 = storage.create_node("Source", PropertyMapBuilder::new().build()).unwrap();
+
+    let iter = storage.get_outgoing_entries_iter(n0);
+    let (lower, upper) = iter.size_hint();
+    assert_eq!(lower, 0);
+    assert!(upper.is_none());
+}
+
+#[test]
+fn test_entries_iter_slow_path_uncompacted() {
+    let storage = CurrentStorage::new();
+    let n0 = storage.create_node("Source", PropertyMapBuilder::new().build()).unwrap();
+    let target = storage.create_node("Target", PropertyMapBuilder::new().build()).unwrap();
+
+    // Add edges to delta (no compaction)
+    storage.create_edge(n0, target, "LINK", PropertyMapBuilder::new().build()).unwrap();
+
+    // Verify iterators work correctly on uncompacted data
+    let iter = storage.get_outgoing_entries_iter(n0);
+    assert_eq!(iter.len(), 1);
+    assert_eq!(iter.count(), 1);
+}
+
+#[test]
+fn test_entries_iter_slow_path_tombstones() {
+    let storage = CurrentStorage::new();
+    let n0 = storage.create_node("Source", PropertyMapBuilder::new().build()).unwrap();
+    let t1 = storage.create_node("Target1", PropertyMapBuilder::new().build()).unwrap();
+    let t2 = storage.create_node("Target2", PropertyMapBuilder::new().build()).unwrap();
+
+    let e1 = storage.create_edge(n0, t1, "LINK", PropertyMapBuilder::new().build()).unwrap();
+    let e2 = storage.create_edge(n0, t2, "LINK", PropertyMapBuilder::new().build()).unwrap();
+
+    storage.compact_adjacency(); // Move to frozen
+
+    // Create tombstone
+    storage.delete_edge(e1).unwrap();
+
+    // Verify iterators filter tombstones correctly
+    let iter = storage.get_outgoing_entries_iter(n0);
+    assert_eq!(iter.len(), 1); // Should only see e2
+    let entries: Vec<_> = iter.collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].edge_id, e2);
+}
+
+#[test]
+fn test_entries_iter_mixed_frozen_delta_tombstones() {
+    let storage = CurrentStorage::new();
+    let n0 = storage.create_node("Source", PropertyMapBuilder::new().build()).unwrap();
+    let t1 = storage.create_node("T1", PropertyMapBuilder::new().build()).unwrap();
+    let t2 = storage.create_node("T2", PropertyMapBuilder::new().build()).unwrap();
+
+    // 1. Frozen edge
+    let e1 = storage.create_edge(n0, t1, "LINK", PropertyMapBuilder::new().build()).unwrap();
+    storage.compact_adjacency();
+
+    // 2. Delta edge
+    let e2 = storage.create_edge(n0, t2, "LINK", PropertyMapBuilder::new().build()).unwrap();
+
+    // 3. Tombstone on frozen edge
+    storage.delete_edge(e1).unwrap();
+
+    // Should see only e2 (from delta)
+    let iter = storage.get_outgoing_entries_iter(n0);
+    assert_eq!(iter.len(), 1);
+    let entries: Vec<_> = iter.collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].edge_id, e2);
+}

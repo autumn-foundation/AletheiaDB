@@ -253,13 +253,11 @@ macro_rules! impl_entry_iter {
                 };
 
                 let delta_rem = if let Some(delta) = &self.guard.delta {
-                    if self.guard.fast_path {
-                        delta.len().saturating_sub(self.delta_index)
-                    } else {
-                        delta[self.delta_index..].iter()
-                            .filter(|e| !self.guard.tombstones.contains_key(&e.edge_id))
-                            .count()
-                    }
+                    // Note: If delta is Some, fast_path is guaranteed to be false.
+                    // See MergedAdjacencyGuard construction in IncrementalAdjacencyIndex.
+                    delta[self.delta_index..].iter()
+                        .filter(|e| !self.guard.tombstones.contains_key(&e.edge_id))
+                        .count()
                 } else {
                     0
                 };
