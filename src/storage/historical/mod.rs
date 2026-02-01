@@ -905,8 +905,9 @@ impl HistoricalStorage {
         // Update temporal adjacency index if configured
         // Insert after all operations complete so temporal intervals are finalized
         // Skip tombstones - they represent deletions and shouldn't appear in traversal queries
-        if !is_tombstone && let Some(ref adj_index) = self.temporal_adjacency_index {
-            let _ = adj_index.insert_edge(
+        if !is_tombstone
+            && let Some(ref adj_index) = self.temporal_adjacency_index
+            && let Err(_e) = adj_index.insert_edge(
                 edge_id,
                 source,
                 target,
@@ -915,6 +916,15 @@ impl HistoricalStorage {
                 temporal.valid_time().end(),
                 temporal.transaction_time().start(),
                 temporal.transaction_time().end(),
+            )
+        {
+            #[cfg(feature = "observability")]
+            tracing::warn!(
+                edge_id = %edge_id,
+                source = %source,
+                target = %target,
+                error = %_e,
+                "Failed to insert edge into temporal adjacency index"
             );
         }
 
@@ -1692,8 +1702,10 @@ impl HistoricalStorage {
             .get_mut(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        // Get the edge ID before closing (needed for temporal index update)
+        // Get the edge ID and node IDs before closing (needed for index updates)
         let edge_id = version.edge_id;
+        let source = version.source;
+        let target = version.target;
 
         // Use TemporalVersion trait method
         version.close_transaction_time(end_timestamp);
@@ -1701,6 +1713,11 @@ impl HistoricalStorage {
         // Update temporal index to reflect the closed interval (Issue #209)
         if let Some(ref indexes) = self.temporal_indexes {
             indexes.update_edge_transaction_time_end(edge_id, version_id, end_timestamp);
+        }
+
+        // Update temporal adjacency index to reflect the closed transaction time
+        if let Some(ref adj_index) = self.temporal_adjacency_index {
+            adj_index.close_edge_transaction_time(edge_id, source, target, end_timestamp);
         }
 
         Ok(())

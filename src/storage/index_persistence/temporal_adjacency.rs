@@ -25,15 +25,14 @@ pub fn save_temporal_adjacency_index(
     let adjacency_dir = data_dir.join("temporal_adjacency");
     std::fs::create_dir_all(&adjacency_dir)?;
 
-    // Extract data from index
-    let (outgoing, incoming) = extract_index_data(index);
+    // Extract only outgoing edges (incoming will be rebuilt during load)
+    let outgoing = extract_outgoing_data(index);
 
     // Create persisted format
     let data = TemporalAdjacencyData {
         magic: TEMPORAL_ADJACENCY_MAGIC,
         version: MANIFEST_VERSION,
         outgoing,
-        incoming,
     };
 
     // Serialize with bitcode
@@ -46,11 +45,25 @@ pub fn save_temporal_adjacency_index(
     Ok(())
 }
 
+/// Maximum file size for temporal adjacency index (100 MB)
+const MAX_ADJACENCY_FILE_SIZE: u64 = 100 * 1024 * 1024;
+
 /// Load temporal adjacency index from disk.
 ///
 /// Reads `temporal_adjacency/adjacency.idx` and reconstructs the index.
+/// The incoming index is automatically rebuilt from outgoing edges during reconstruction.
 pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdjacencyIndex>> {
     let adjacency_file = data_dir.join("temporal_adjacency").join("adjacency.idx");
+
+    // Check file size to prevent DoS
+    let metadata = std::fs::metadata(&adjacency_file)?;
+    if metadata.len() > MAX_ADJACENCY_FILE_SIZE {
+        return Err(IndexPersistenceError::Serialization(format!(
+            "Temporal adjacency file too large: {} bytes (max: {})",
+            metadata.len(),
+            MAX_ADJACENCY_FILE_SIZE
+        )));
+    }
 
     // Read file
     let bytes = std::fs::read(&adjacency_file)?;
@@ -62,6 +75,14 @@ pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdja
             e
         ))
     })?;
+
+    // Validate version
+    if data.version != MANIFEST_VERSION {
+        return Err(IndexPersistenceError::Serialization(format!(
+            "Unsupported temporal adjacency format version: {} (expected: {})",
+            data.version, MANIFEST_VERSION
+        )));
+    }
 
     // Verify magic bytes
     if data.magic != TEMPORAL_ADJACENCY_MAGIC {
@@ -78,12 +99,12 @@ pub fn load_temporal_adjacency_index(data_dir: &Path) -> Result<Arc<TemporalAdja
     Ok(Arc::new(index))
 }
 
-/// Extract index data for persistence.
-fn extract_index_data(
-    index: &TemporalAdjacencyIndex,
-) -> (Vec<NodeAdjacencyEntry>, Vec<NodeAdjacencyEntry>) {
+/// Extract outgoing edges for persistence.
+///
+/// Only outgoing edges are persisted to disk. The incoming index is automatically
+/// rebuilt during load by calling insert_edge(), which populates both directions.
+fn extract_outgoing_data(index: &TemporalAdjacencyIndex) -> Vec<NodeAdjacencyEntry> {
     let mut outgoing_entries = Vec::new();
-    let mut incoming_entries = Vec::new();
 
     // Extract outgoing edges
     for item in index.outgoing.iter() {
@@ -94,16 +115,7 @@ fn extract_index_data(
         outgoing_entries.push(NodeAdjacencyEntry { node_id, entries });
     }
 
-    // Extract incoming edges
-    for item in index.incoming.iter() {
-        let node_id = item.key().as_u64();
-        let entries: Vec<PersistedTemporalAdjacencyEntry> =
-            item.value().iter().map(convert_to_persisted).collect();
-
-        incoming_entries.push(NodeAdjacencyEntry { node_id, entries });
-    }
-
-    (outgoing_entries, incoming_entries)
+    outgoing_entries
 }
 
 /// Convert runtime entry to persisted format.
@@ -124,6 +136,9 @@ fn convert_to_persisted(entry: &TemporalAdjacencyEntry) -> PersistedTemporalAdja
 }
 
 /// Reconstruct index from persisted data.
+///
+/// Only outgoing edges are loaded from disk. The incoming index is automatically
+/// rebuilt by calling `insert_edge()`, which populates both directions.
 fn reconstruct_index(data: TemporalAdjacencyData) -> Result<TemporalAdjacencyIndex> {
     let index = TemporalAdjacencyIndex::new(TemporalAdjacencyConfig::default());
 

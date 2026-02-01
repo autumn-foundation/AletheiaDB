@@ -119,11 +119,41 @@ impl TemporalAdjacencyIndex {
         }
     }
 
+    /// Close the transaction time of an edge's most recent entry.
+    ///
+    /// This updates the tx_to timestamp of the most recent entry for the given edge.
+    /// This is called when an edge is deleted or superseded, closing its transaction time.
+    pub fn close_edge_transaction_time(
+        &self,
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        tx_end: Timestamp,
+    ) {
+        // Update outgoing index
+        if let Some(mut entries) = self.outgoing.get_mut(&source)
+            // Find the most recent entry for this edge (should be last due to sorted insertion)
+            && let Some(entry) = entries.iter_mut().rev().find(|e| e.edge_id == edge_id)
+        {
+            entry.tx_to = tx_end;
+        }
+
+        // Update incoming index
+        if let Some(mut entries) = self.incoming.get_mut(&target)
+            && let Some(entry) = entries.iter_mut().rev().find(|e| e.edge_id == edge_id)
+        {
+            entry.tx_to = tx_end;
+        }
+    }
+
     /// Insert an edge into the index.
     ///
     /// # Errors
     ///
-    /// Returns `StorageError::TooManyEntries` if max entries per node exceeded.
+    /// Returns `StorageError::CapacityExceeded` if max entries per node exceeded.
+    ///
+    /// **Atomicity**: Pre-checks capacity for both nodes before any mutations to
+    /// prevent inconsistent state if one node exceeds capacity.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_edge(
         &self,
@@ -136,6 +166,29 @@ impl TemporalAdjacencyIndex {
         tx_from: Timestamp,
         tx_to: Timestamp,
     ) -> Result<(), StorageError> {
+        // Pre-check capacity for both nodes BEFORE any mutations
+        // This prevents inconsistent state where outgoing is inserted but incoming fails
+        let outgoing_entries = self.outgoing.entry(source).or_default();
+        if outgoing_entries.len() >= self.config.max_entries_per_node {
+            return Err(StorageError::CapacityExceeded {
+                resource: format!("temporal adjacency entries for node {}", source),
+                current: outgoing_entries.len(),
+                limit: self.config.max_entries_per_node,
+            });
+        }
+        drop(outgoing_entries);
+
+        let incoming_entries = self.incoming.entry(target).or_default();
+        if incoming_entries.len() >= self.config.max_entries_per_node {
+            return Err(StorageError::CapacityExceeded {
+                resource: format!("temporal adjacency entries for node {}", target),
+                current: incoming_entries.len(),
+                limit: self.config.max_entries_per_node,
+            });
+        }
+        drop(incoming_entries);
+
+        // Now safe to insert into both indexes
         let entry = TemporalAdjacencyEntry {
             edge_id,
             neighbor: target,
@@ -148,15 +201,6 @@ impl TemporalAdjacencyIndex {
 
         // Insert into outgoing index
         let mut outgoing_entries = self.outgoing.entry(source).or_default();
-        if outgoing_entries.len() >= self.config.max_entries_per_node {
-            return Err(StorageError::CapacityExceeded {
-                resource: format!("temporal adjacency entries for node {}", source),
-                current: outgoing_entries.len(),
-                limit: self.config.max_entries_per_node,
-            });
-        }
-
-        // Binary search to find insertion point (sorted by valid_from)
         let pos = outgoing_entries
             .binary_search_by_key(&valid_from, |e| e.valid_from)
             .unwrap_or_else(|pos| pos);
@@ -175,14 +219,6 @@ impl TemporalAdjacencyIndex {
         };
 
         let mut incoming_entries = self.incoming.entry(target).or_default();
-        if incoming_entries.len() >= self.config.max_entries_per_node {
-            return Err(StorageError::CapacityExceeded {
-                resource: format!("temporal adjacency entries for node {}", target),
-                current: incoming_entries.len(),
-                limit: self.config.max_entries_per_node,
-            });
-        }
-
         let pos = incoming_entries
             .binary_search_by_key(&valid_from, |e| e.valid_from)
             .unwrap_or_else(|pos| pos);
@@ -195,6 +231,10 @@ impl TemporalAdjacencyIndex {
     ///
     /// Returns a deduplicated list of edges that were valid at the given time.
     /// If multiple versions of the same edge match, the edge is returned once.
+    ///
+    /// **Performance**: O(log N + K) where N = total entries, K = matching entries.
+    /// Uses binary search to find the first potentially valid entry, then scans
+    /// forward only through candidates that could overlap the query time.
     pub fn get_outgoing_at_time(
         &self,
         node_id: NodeId,
@@ -205,8 +245,17 @@ impl TemporalAdjacencyIndex {
             .get(&node_id)
             .map(|entries| {
                 let mut seen = std::collections::HashSet::new();
-                entries
+
+                // Binary search to find first entry where valid_from <= valid_time
+                // Entries are sorted by valid_from, so we scan from this point forward
+                let start_idx = entries.partition_point(|e| e.valid_from <= valid_time);
+
+                // Scan backward from start_idx to find all entries that could be valid at valid_time
+                // An entry at index i could be valid if valid_from <= valid_time < valid_to
+                entries[..start_idx]
                     .iter()
+                    .rev()
+                    .take_while(|e| e.valid_to > valid_time) // Stop when valid_to <= valid_time
                     .filter(|e| e.is_valid_at(valid_time, tx_time))
                     .filter_map(|e| {
                         if seen.insert(e.edge_id) {
@@ -224,6 +273,10 @@ impl TemporalAdjacencyIndex {
     ///
     /// Returns a deduplicated list of edges that were valid at the given time.
     /// If multiple versions of the same edge match, the edge is returned once.
+    ///
+    /// **Performance**: O(log N + K) where N = total entries, K = matching entries.
+    /// Uses binary search to find the first potentially valid entry, then scans
+    /// forward only through candidates that could overlap the query time.
     pub fn get_incoming_at_time(
         &self,
         node_id: NodeId,
@@ -234,8 +287,15 @@ impl TemporalAdjacencyIndex {
             .get(&node_id)
             .map(|entries| {
                 let mut seen = std::collections::HashSet::new();
-                entries
+
+                // Binary search to find first entry where valid_from <= valid_time
+                let start_idx = entries.partition_point(|e| e.valid_from <= valid_time);
+
+                // Scan backward from start_idx to find all entries that could be valid at valid_time
+                entries[..start_idx]
                     .iter()
+                    .rev()
+                    .take_while(|e| e.valid_to > valid_time)
                     .filter(|e| e.is_valid_at(valid_time, tx_time))
                     .filter_map(|e| {
                         if seen.insert(e.edge_id) {
@@ -253,6 +313,10 @@ impl TemporalAdjacencyIndex {
     ///
     /// Returns a deduplicated list of edges that were valid at the given time.
     /// If multiple versions of the same edge match, the edge is returned once.
+    ///
+    /// **Performance**: O(log N + K) where N = total entries, K = matching entries.
+    /// Uses binary search to find the first potentially valid entry, then scans
+    /// forward only through candidates that could overlap the query time.
     pub fn get_outgoing_with_label_at_time(
         &self,
         node_id: NodeId,
@@ -264,8 +328,15 @@ impl TemporalAdjacencyIndex {
             .get(&node_id)
             .map(|entries| {
                 let mut seen = std::collections::HashSet::new();
-                entries
+
+                // Binary search to find first entry where valid_from <= valid_time
+                let start_idx = entries.partition_point(|e| e.valid_from <= valid_time);
+
+                // Scan backward from start_idx to find all entries that could be valid at valid_time
+                entries[..start_idx]
                     .iter()
+                    .rev()
+                    .take_while(|e| e.valid_to > valid_time)
                     .filter(|e| e.label == label && e.is_valid_at(valid_time, tx_time))
                     .filter_map(|e| {
                         if seen.insert(e.edge_id) {

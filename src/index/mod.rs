@@ -21,8 +21,6 @@ pub use incremental_adjacency::{
     Tombstone,
 };
 pub use temporal::TemporalIndexes;
-pub use temporal_adjacency::{
-    TemporalAdjacencyConfig, TemporalAdjacencyEntry, TemporalAdjacencyIndex,
-};
+pub use temporal_adjacency::{TemporalAdjacencyConfig, TemporalAdjacencyIndex};
 pub use vector::{DistanceMetric, VectorIndex};
 pub use vector::{HnswIndex, HnswIndexBuilder};

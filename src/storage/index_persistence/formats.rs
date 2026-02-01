@@ -382,6 +382,9 @@ pub struct EdgeAnchorEntry {
 // ============================================================================
 
 /// Temporal adjacency index data - maps (node_id, time) -> edge_ids.
+///
+/// Note: Only outgoing edges are persisted. The incoming index is automatically
+/// rebuilt during load via insert_edge(), which populates both directions.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct TemporalAdjacencyData {
     /// Magic bytes: "GTAJ" (Graph Temporal Adjacency)
@@ -389,10 +392,8 @@ pub struct TemporalAdjacencyData {
     /// Format version
     pub version: u16,
 
-    /// Outgoing edges per node
+    /// Outgoing edges per node (incoming is rebuilt during load)
     pub outgoing: Vec<NodeAdjacencyEntry>,
-    /// Incoming edges per node
-    pub incoming: Vec<NodeAdjacencyEntry>,
 }
 
 /// Adjacency entries for a single node.
