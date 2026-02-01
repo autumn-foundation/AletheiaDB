@@ -566,15 +566,15 @@ For unlimited historical depth with disk-backed cold storage:
 ```rust
 use gallifreydb::storage::{
     HistoricalStorage, TieredStorage, TieredStorageConfig,
-    FileColdStorage, ColdStorageConfig,
+    RedbColdStorage, RedbConfig,
 };
 use std::sync::Arc;
 
 // Create cold storage backend
-let cold = FileColdStorage::new("data/cold", ColdStorageConfig::default())?;
+let cold = RedbColdStorage::new("data/cold.redb", RedbConfig::default())?;
 
 // Create tiered storage
-let tiered = TieredStorage::new(TieredStorageConfig::default(), Box::new(cold));
+let tiered = TieredStorage::with_default_config(Box::new(cold));
 
 // Configure historical storage
 let mut historical = HistoricalStorage::new();

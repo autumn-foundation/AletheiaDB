@@ -41,31 +41,7 @@ flowchart TB
 
 ## Quick Start
 
-### Basic Setup (File-based Cold Storage)
-
-```rust
-use gallifreydb::storage::{
-    HistoricalStorage, TieredStorage, TieredStorageConfig,
-    FileColdStorage, ColdStorageConfig,
-};
-use std::sync::Arc;
-
-// 1. Create cold storage
-let cold_config = ColdStorageConfig::default();
-let cold = FileColdStorage::new("data/cold", cold_config)?;
-
-// 2. Create tiered storage
-let tiered_config = TieredStorageConfig::default();
-let tiered = TieredStorage::new(tiered_config, Box::new(cold));
-
-// 3. Configure historical storage
-let mut historical = HistoricalStorage::new();
-historical.set_tiered_storage(Arc::new(tiered));
-
-// Now historical storage will use tiered access!
-```
-
-### Redb Backend (Recommended for Production)
+### Basic Setup (Redb Cold Storage)
 
 Redb is a pure Rust embedded database that provides excellent performance without
 external dependencies. It's the recommended backend for production deployments.
@@ -87,6 +63,8 @@ let tiered = TieredStorage::with_default_config(Box::new(cold));
 // 3. Configure historical storage
 let mut historical = HistoricalStorage::new();
 historical.set_tiered_storage(Arc::new(tiered));
+Ok(())
+}
 ```
 
 ## Configuration
@@ -227,11 +205,14 @@ use std::sync::Arc;
 
 // Create migration service
 let policy = MigrationPolicy::default();
-let migration = MigrationService::new(tiered.cold_storage().clone(), policy);
+    // Assuming you have access to the cold storage instance
+    // let migration = MigrationService::new(tiered.cold_storage().clone(), policy);
 
 // Trigger migration from historical storage
-let migrated_count = historical.migrate_to_cold(&migration)?;
+    // let migrated_count = historical.migrate_to_cold(&migration)?;
 println!("Migrated {} versions", migrated_count);
+    Ok(())
+}
 ```
 
 ### Migration Callbacks
@@ -295,6 +276,7 @@ println!("avg: {} μs", latency.avg_us);
 // Check if meeting target (p50 < 1ms)
 if latency.meets_target() {
     println!("Latency target met!");
+}
 }
 ```
 
@@ -461,7 +443,7 @@ impl HistoricalStorage {
     pub fn get_edge_version_tiered(&self, id: VersionId) -> Result<Option<Arc<EdgeVersion>>>;
 
     /// Trigger migration
-    pub fn migrate_to_cold(&mut self, service: &MigrationService) -> Result<usize>;
+    pub fn migrate_to_cold(&mut self, service: &super::migration::MigrationService) -> Result<usize>;
 
     /// Hot tier stats
     pub fn hot_version_count(&self) -> usize;
