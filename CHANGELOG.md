@@ -148,6 +148,10 @@ db.query()
 
 ### Changed
 
+- **Storage Refactoring (Breaking Change)**: Removed the `ColdStorage` trait and `FileColdStorage` implementation.
+  - `RedbColdStorage` is now the sole concrete implementation for cold storage.
+  - `TieredStorage` and `MigrationService` now take `Arc<RedbColdStorage>` instead of `Arc<dyn ColdStorage>` or `Box<dyn ColdStorage>`.
+  - Simplifies the storage hierarchy and removes dynamic dispatch overhead.
 - Improved test coverage to 86.45% line coverage, 89.10% function coverage
 - Enhanced CI/CD with automated benchmarking and coverage reporting
 - Updated all documentation to reflect HybridTimestamp migration

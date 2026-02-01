@@ -58,7 +58,7 @@ let redb_config = RedbConfig::new();
 let cold = RedbColdStorage::new("data/cold.redb", redb_config)?;
 
 // 2. Create tiered storage
-let tiered = TieredStorage::with_default_config(Box::new(cold));
+let tiered = TieredStorage::with_default_config(Arc::new(cold));
 
 // 3. Configure historical storage
 let mut historical = HistoricalStorage::new();
@@ -92,33 +92,7 @@ pub struct TieredStorageConfig {
 - Disable `enable_prefetch` if your queries are random access (not following chains)
 - Reduce `prefetch_depth` to save memory if chains are short
 
-### ColdStorageConfig (File-based)
-
-```rust
-pub struct ColdStorageConfig {
-    /// Compression algorithm
-    /// Default: Zstd (best compression ratio)
-    pub compression: CompressionAlgorithm,
-
-    /// Compression level (1-22 for Zstd)
-    /// Default: 3 (good balance)
-    pub compression_level: u32,
-
-    /// Enable CRC32 checksums
-    /// Default: true
-    pub enable_checksums: bool,
-
-    /// Sync writes to disk
-    /// Default: false (async)
-    pub sync_writes: bool,
-
-    /// Batch size for bulk operations
-    /// Default: 1000
-    pub batch_size: usize,
-}
-```
-
-### RedbConfig
+### RedbConfig (Cold Storage)
 
 ```rust
 pub struct RedbConfig {
@@ -456,13 +430,13 @@ impl HistoricalStorage {
 ```rust
 impl TieredStorage {
     /// Create with config
-    pub fn new(config: TieredStorageConfig, cold: Box<dyn ColdStorage>) -> Self;
+    pub fn new(config: TieredStorageConfig, cold: Arc<RedbColdStorage>) -> Self;
 
     /// Create with defaults
-    pub fn with_default_config(cold: Box<dyn ColdStorage>) -> Self;
+    pub fn with_default_config(cold: Arc<RedbColdStorage>) -> Self;
 
     /// Get cold storage backend
-    pub fn cold_storage(&self) -> &dyn ColdStorage;
+    pub fn cold_storage(&self) -> &RedbColdStorage;
 
     /// Version access
     pub fn get_node_version_cold(&self, id: VersionId) -> Result<Option<Arc<NodeVersion>>>;
