@@ -9,7 +9,7 @@ use crate::core::property::MAX_VECTOR_DIMENSIONS;
 ///
 /// This tolerance (1e-6) is appropriate for most f32 operations where accumulated
 /// floating-point errors are expected to be small. It's used as the default for
-/// functions like [`is_normalized`] when checking if a vector has unit magnitude.
+/// functions like [`crate::core::vector::is_normalized`] when checking if a vector has unit magnitude.
 ///
 /// For stricter or looser comparisons, functions accept an explicit tolerance parameter.
 pub const NORMALIZATION_TOLERANCE: f32 = 1e-6;

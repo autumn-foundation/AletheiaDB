@@ -1670,7 +1670,7 @@ impl GallifreyDB {
 
     /// Find similar vectors at a specific point in time for a specific property.
     ///
-    /// This is the property-specific version of [`find_similar_as_of()`].
+    /// This is the property-specific version of [`find_similar_as_of`](Self::find_similar_as_of).
     /// It validates that the requested property matches the property for which
     /// the temporal vector index was enabled.
     ///
@@ -3342,5 +3342,41 @@ mod tests {
             &PropertyValue::String("Alice Smith".into()),
             "Version 2 should have name='Alice Smith'"
         );
+    }
+
+    #[test]
+    fn test_find_similar_as_of_in() {
+        use crate::index::vector::temporal::{SnapshotStrategy, TemporalVectorConfig};
+        use crate::index::vector::{DistanceMetric, HnswConfig};
+
+        let db = GallifreyDB::new().unwrap();
+
+        // Enable temporal vector index with immediate snapshot strategy
+        let hnsw_config = HnswConfig::new(4, DistanceMetric::Cosine);
+        let temporal_config = TemporalVectorConfig {
+            snapshot_strategy: SnapshotStrategy::TransactionInterval(1),
+            ..TemporalVectorConfig::default_with_hnsw(hnsw_config)
+        };
+        db.enable_temporal_vector_index("embedding", temporal_config)
+            .unwrap();
+
+        // Create a node with a vector
+        let vector = vec![1.0, 0.0, 0.0, 0.0];
+        let props = PropertyMapBuilder::new()
+            .insert("name", "Test")
+            .insert_vector("embedding", &vector)
+            .build();
+
+        let (node_id, commit_ts) = db
+            .write_with_timestamp(|tx| tx.create_node("TestNode", props))
+            .unwrap();
+
+        // Search using the specific property
+        let results = db
+            .find_similar_as_of_in("embedding", &vector, 10, commit_ts)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, node_id);
     }
 }

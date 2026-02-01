@@ -567,7 +567,7 @@ pub fn squared_magnitude(v: &[f32]) -> f32 {
 /// Unlike two-vector functions like [`cosine_similarity`], normalization functions
 /// do not validate against `MAX_VECTOR_DIMENSIONS`. This is intentional because:
 /// - Single-vector operations don't have dimension mismatch issues
-/// - Dimension limits are enforced at storage time (see [`PropertyValue::vector`])
+/// - Dimension limits are enforced at storage time (see [`crate::core::PropertyValue::vector`])
 /// - Additional checks would add overhead without safety benefit
 #[inline]
 pub fn normalize(v: &[f32]) -> Vec<f32> {
@@ -673,7 +673,7 @@ pub fn is_normalized(v: &[f32], tolerance: f32) -> bool {
 /// Checks if a vector is normalized using the default tolerance.
 ///
 /// This is a convenience wrapper around [`is_normalized`] that uses
-/// [`NORMALIZATION_TOLERANCE`] (1e-6) as the tolerance value.
+/// [`crate::core::vector::NORMALIZATION_TOLERANCE`] (1e-6) as the tolerance value.
 ///
 /// # Example
 ///
