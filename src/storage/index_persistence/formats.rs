@@ -42,6 +42,8 @@ pub struct IndexManifest {
     pub graph_index: Option<GraphIndexManifestEntry>,
     /// Temporal index entry
     pub temporal_index: Option<TemporalIndexManifestEntry>,
+    /// Temporal adjacency index entry
+    pub temporal_adjacency_index: Option<TemporalAdjacencyIndexManifestEntry>,
     /// String interner entry
     pub string_interner: Option<StringInternerManifestEntry>,
 }
@@ -94,6 +96,17 @@ pub struct StringInternerManifestEntry {
     pub interner_file: String,
     /// Number of interned strings
     pub string_count: u64,
+}
+
+/// Manifest entry for temporal adjacency index.
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct TemporalAdjacencyIndexManifestEntry {
+    /// Relative path to temporal adjacency file
+    pub adjacency_file: String,
+    /// Total number of entries
+    pub entry_count: u64,
+    /// Number of nodes with outgoing edges
+    pub node_count: u64,
 }
 
 // ============================================================================
@@ -362,6 +375,60 @@ pub struct EdgeAnchorEntry {
     pub anchor_tx_time: i64,
     /// Full state snapshot
     pub full_state: PersistedPropertyMap,
+}
+
+// ============================================================================
+// Temporal Adjacency Index Format
+// ============================================================================
+
+/// Temporal adjacency index data - maps (node_id, time) -> edge_ids.
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct TemporalAdjacencyData {
+    /// Magic bytes: "GTAJ" (Graph Temporal Adjacency)
+    pub magic: [u8; 4],
+    /// Format version
+    pub version: u16,
+
+    /// Outgoing edges per node
+    pub outgoing: Vec<NodeAdjacencyEntry>,
+    /// Incoming edges per node
+    pub incoming: Vec<NodeAdjacencyEntry>,
+}
+
+/// Adjacency entries for a single node.
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct NodeAdjacencyEntry {
+    /// Node ID
+    pub node_id: u64,
+    /// Temporal adjacency entries for this node
+    pub entries: Vec<PersistedTemporalAdjacencyEntry>,
+}
+
+/// Persisted temporal adjacency entry.
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct PersistedTemporalAdjacencyEntry {
+    /// Edge ID
+    pub edge_id: u64,
+    /// Neighbor node (target for outgoing, source for incoming)
+    pub neighbor: u64,
+    /// Edge label (interned string ID)
+    pub label: u32,
+    /// Valid time range start - wallclock component (microseconds since Unix epoch)
+    pub valid_from_wallclock: i64,
+    /// Valid time range start - logical counter
+    pub valid_from_logical: u32,
+    /// Valid time range end - wallclock component
+    pub valid_to_wallclock: i64,
+    /// Valid time range end - logical counter
+    pub valid_to_logical: u32,
+    /// Transaction time range start - wallclock component
+    pub tx_from_wallclock: i64,
+    /// Transaction time range start - logical counter
+    pub tx_from_logical: u32,
+    /// Transaction time range end - wallclock component
+    pub tx_to_wallclock: i64,
+    /// Transaction time range end - logical counter
+    pub tx_to_logical: u32,
 }
 
 // ============================================================================

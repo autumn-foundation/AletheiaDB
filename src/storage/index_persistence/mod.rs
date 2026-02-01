@@ -84,6 +84,7 @@ pub mod manifest;
 pub mod operations;
 pub mod strings;
 pub mod temporal;
+pub mod temporal_adjacency;
 /// Persistence mutation tracking.
 pub mod tracker;
 pub mod vector;
@@ -118,6 +119,9 @@ pub const DELTA_MAGIC: [u8; 4] = *b"GDLT";
 
 /// Magic bytes for temporal index files.
 pub const TEMPORAL_MAGIC: [u8; 4] = *b"GTMP";
+
+/// Magic bytes for temporal adjacency index files.
+pub const TEMPORAL_ADJACENCY_MAGIC: [u8; 4] = *b"GTAJ";
 
 /// Magic bytes for vector metadata files.
 pub const VECTOR_META_MAGIC: [u8; 4] = *b"GVEC";

@@ -41,7 +41,9 @@ impl Default for TemporalAdjacencyConfig {
 /// A single temporal adjacency entry.
 ///
 /// Tracks an edge's temporal validity for quick lookup.
+/// This struct is exposed for persistence but not part of the public API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct TemporalAdjacencyEntry {
     /// Edge ID
     pub edge_id: EdgeId,
@@ -73,9 +75,9 @@ impl TemporalAdjacencyEntry {
 /// Temporal adjacency index for graph traversal at specific points in time.
 pub struct TemporalAdjacencyIndex {
     /// Outgoing edges: source_node -> [entries]
-    outgoing: DashMap<NodeId, Vec<TemporalAdjacencyEntry>>,
+    pub(crate) outgoing: DashMap<NodeId, Vec<TemporalAdjacencyEntry>>,
     /// Incoming edges: target_node -> [entries]
-    incoming: DashMap<NodeId, Vec<TemporalAdjacencyEntry>>,
+    pub(crate) incoming: DashMap<NodeId, Vec<TemporalAdjacencyEntry>>,
     /// Configuration
     config: TemporalAdjacencyConfig,
 }
