@@ -53,16 +53,33 @@ macro_rules! increment_counter {
 macro_rules! timed_block {
     ($name:expr, [ $($labels:tt)* ], $block:expr) => {{
         #[cfg(feature = "observability-prometheus")]
-        let _start = std::time::Instant::now();
-
-        let result = $block;
-
-        #[cfg(feature = "observability-prometheus")]
         {
-            let duration = _start.elapsed().as_secs_f64();
-            metrics::histogram!($name, $($labels)*).record(duration);
+            struct TimedBlockGuard<F: FnMut(f64)> {
+                start: std::time::Instant,
+                callback: F,
+            }
+
+            impl<F: FnMut(f64)> Drop for TimedBlockGuard<F> {
+                fn drop(&mut self) {
+                    let duration = self.start.elapsed().as_secs_f64();
+                    (self.callback)(duration);
+                }
+            }
+
+            let _guard = TimedBlockGuard {
+                start: std::time::Instant::now(),
+                callback: |duration| {
+                    metrics::histogram!($name, $($labels)*).record(duration);
+                },
+            };
+
+            let result = $block;
+            result
         }
 
-        result
+        #[cfg(not(feature = "observability-prometheus"))]
+        {
+            $block
+        }
     }};
 }
