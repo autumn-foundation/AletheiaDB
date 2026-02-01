@@ -30,9 +30,9 @@ use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
 use redb::{ReadableDatabase, ReadableTable};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "config-toml")]
 use serde::{Deserialize, Serialize};
@@ -224,25 +224,25 @@ impl ColdStorageStats {
 /// Atomic statistics tracker for cold storage.
 #[derive(Debug, Default)]
 pub struct AtomicColdStorageStats {
-    /// Total number of node versions stored.
+    /// Total number of node versions stored (atomic).
     pub node_versions_stored: AtomicU64,
-    /// Total number of edge versions stored.
+    /// Total number of edge versions stored (atomic).
     pub edge_versions_stored: AtomicU64,
-    /// Total number of node version reads.
+    /// Total number of node version reads (atomic).
     pub node_version_reads: AtomicU64,
-    /// Total number of edge version reads.
+    /// Total number of edge version reads (atomic).
     pub edge_version_reads: AtomicU64,
-    /// Total bytes written (before compression).
+    /// Total bytes written (before compression, atomic).
     pub bytes_written_raw: AtomicU64,
-    /// Total bytes written (after compression).
+    /// Total bytes written (after compression, atomic).
     pub bytes_written_compressed: AtomicU64,
-    /// Total bytes read (compressed).
+    /// Total bytes read (compressed size from storage, atomic).
     pub bytes_read_compressed: AtomicU64,
-    /// Total bytes read (after decompression).
+    /// Total bytes read (after decompression, atomic).
     pub bytes_read_decompressed: AtomicU64,
-    /// Number of read errors.
+    /// Number of read errors (atomic).
     pub read_errors: AtomicU64,
-    /// Number of write errors.
+    /// Number of write errors (atomic).
     pub write_errors: AtomicU64,
 }
 
@@ -1468,11 +1468,6 @@ mod tests {
         let version = create_test_node_version(1);
         let result = storage.store_node_version(&version);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Simulated write failure")
-        );
+        assert!(result.unwrap_err().to_string().contains("Simulated write failure"));
     }
 }
