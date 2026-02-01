@@ -223,36 +223,28 @@ pub async fn handle_query(
                     let offset_val = offset.unwrap_or(0).min(MAX_PAGINATION_OFFSET);
                     let mut skipped = 0;
 
-                    // Helper closure to process edges
-                    let mut process_edge = |node_id: NodeId| {
-                        if neighbors.len() >= limit_val {
-                            return;
-                        }
-
-                        if let Ok(node) = db.get_node(node_id) {
-                            let id = node.id.as_u64();
-                            if seen_ids.insert(id) {
-                                if skipped < offset_val {
-                                    skipped += 1;
-                                    return;
-                                }
-                                neighbors.push(json!({
-                                    "id": id,
-                                    "label": interned_to_string(node.label),
-                                    "properties": property_map_to_json(&node.properties)
-                                }));
-                            }
-                        }
-                    };
-
                     // Outgoing
                     let outgoing = db.get_outgoing_edges(nid);
                     for edge_id in outgoing {
                         if neighbors.len() >= limit_val {
                             break;
                         }
+
                         if let Ok(target) = db.get_edge_target(edge_id) {
-                            process_edge(target);
+                            if let Ok(node) = db.get_node(target) {
+                                let id = node.id.as_u64();
+                                if seen_ids.insert(id) {
+                                    if skipped < offset_val {
+                                        skipped += 1;
+                                        continue;
+                                    }
+                                    neighbors.push(json!({
+                                        "id": id,
+                                        "label": interned_to_string(node.label),
+                                        "properties": property_map_to_json(&node.properties)
+                                    }));
+                                }
+                            }
                         }
                     }
 
@@ -263,8 +255,22 @@ pub async fn handle_query(
                             if neighbors.len() >= limit_val {
                                 break;
                             }
+
                             if let Ok(source) = db.get_edge_source(edge_id) {
-                                process_edge(source);
+                                if let Ok(node) = db.get_node(source) {
+                                    let id = node.id.as_u64();
+                                    if seen_ids.insert(id) {
+                                        if skipped < offset_val {
+                                            skipped += 1;
+                                            continue;
+                                        }
+                                        neighbors.push(json!({
+                                            "id": id,
+                                            "label": interned_to_string(node.label),
+                                            "properties": property_map_to_json(&node.properties)
+                                        }));
+                                    }
+                                }
                             }
                         }
                     }
