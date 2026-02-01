@@ -105,10 +105,8 @@ impl<'a> SemanticPathfinder<'a> {
             }
 
             // Optimization: Skip if we found a better path already
-            if let Some(&d) = dist.get(&node) {
-                if cost > d {
-                    continue;
-                }
+            if let Some(&d) = dist.get(&node) && cost > d {
+                continue;
             }
 
             // Check depth limit
@@ -181,10 +179,8 @@ impl<'a> SemanticPathfinder<'a> {
                 return Ok(Some(self.reconstruct_path(came_from, end)));
             }
 
-            if let Some(&d) = dist.get(&node) {
-                if cost > d {
-                    continue;
-                }
+            if let Some(&d) = dist.get(&node) && cost > d {
+                continue;
             }
 
             // Get POTENTIAL outgoing edges from current storage
@@ -234,15 +230,15 @@ impl<'a> SemanticPathfinder<'a> {
     fn calculate_semantic_cost(&self, node_id: NodeId, query: &[f32]) -> Result<f32> {
         let node = self.db.get_node(node_id)?;
 
-        if let Some(prop) = node.properties.get(&self.vector_property) {
-            if let Some(vec) = prop.as_vector() {
-                let sim = cosine_similarity(vec, query)?;
-                // Clamp to [0, 2] (cosine sim is [-1, 1])
-                // We want high similarity -> low cost
-                // 1.0 - 1.0 = 0.0 (perfect match)
-                // 1.0 - (-1.0) = 2.0 (opposite)
-                return Ok(1.0 - sim);
-            }
+        if let Some(prop) = node.properties.get(&self.vector_property)
+            && let Some(vec) = prop.as_vector()
+        {
+            let sim = cosine_similarity(vec, query)?;
+            // Clamp to [0, 2] (cosine sim is [-1, 1])
+            // We want high similarity -> low cost
+            // 1.0 - 1.0 = 0.0 (perfect match)
+            // 1.0 - (-1.0) = 2.0 (opposite)
+            return Ok(1.0 - sim);
         }
 
         // Penalize nodes without embeddings

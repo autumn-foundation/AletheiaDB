@@ -1811,4 +1811,55 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.message.contains("property expression"));
     }
+
+    #[test]
+    fn test_parse_recursion_limit_nested_parens() {
+        // Depth 101: 101 opening parens
+        let mut query = "MATCH (n) WHERE ".to_string();
+        for _ in 0..=MAX_RECURSION_DEPTH {
+            query.push('(');
+        }
+        query.push_str("n.age > 10");
+        for _ in 0..=MAX_RECURSION_DEPTH {
+            query.push(')');
+        }
+        query.push_str(" RETURN n");
+
+        let result = Parser::parse(&query);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Recursion limit exceeded"));
+    }
+
+    #[test]
+    fn test_parse_recursion_limit_nested_not() {
+        // Depth 101: 101 NOTs
+        let mut query = "MATCH (n) WHERE ".to_string();
+        for _ in 0..=MAX_RECURSION_DEPTH {
+            query.push_str("NOT ");
+        }
+        query.push_str("n.active = true RETURN n");
+
+        let result = Parser::parse(&query);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Recursion limit exceeded"));
+    }
+
+    #[test]
+    fn test_parse_recursion_limit_boundary() {
+        // Depth 100: Should pass
+        let mut query = "MATCH (n) WHERE ".to_string();
+        for _ in 0..MAX_RECURSION_DEPTH {
+            query.push('(');
+        }
+        query.push_str("n.age > 10");
+        for _ in 0..MAX_RECURSION_DEPTH {
+            query.push(')');
+        }
+        query.push_str(" RETURN n");
+
+        let result = Parser::parse(&query);
+        assert!(result.is_ok());
+    }
 }
