@@ -1,0 +1,29 @@
+use super::types::VectorDimension;
+use crate::core::property::MAX_VECTOR_DIMENSIONS;
+
+/// Default tolerance for floating-point comparisons in normalization operations.
+///
+/// This tolerance (1e-6) is appropriate for most f32 operations where accumulated
+/// floating-point errors are expected to be small. It's used as the default for
+/// functions like [`is_normalized`](crate::core::vector::is_normalized) when checking if a vector has unit magnitude.
+///
+/// For stricter or looser comparisons, functions accept an explicit tolerance parameter.
+pub const NORMALIZATION_TOLERANCE: f32 = 1e-6;
+
+/// Squared magnitude threshold for detecting near-zero vectors.
+///
+/// Vectors with squared magnitude below this threshold are treated as zero vectors
+/// in normalization operations. This prevents numerical instability from denormal
+/// numbers and avoids division by very small values that could cause overflow.
+///
+/// Value: 1e-14 corresponds to magnitude ≈ 1e-7, providing safety margin for f32
+/// precision (which has ~7 significant digits). This is more conservative than
+/// 1e-20 (magnitude ≈ 1e-10) which is too close to f32's precision limits.
+pub(crate) const SQUARED_MAGNITUDE_THRESHOLD: f32 = 1e-14;
+
+/// Maximum allowed vector dimension.
+///
+/// Re-exported from [`crate::core::property::MAX_VECTOR_DIMENSIONS`] for convenience.
+/// This limit (100,000) far exceeds typical embedding sizes and exists to prevent
+/// DoS attacks via memory exhaustion during deserialization.
+pub const MAX_DIMENSION: VectorDimension = VectorDimension::new(MAX_VECTOR_DIMENSIONS);
