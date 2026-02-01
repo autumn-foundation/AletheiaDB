@@ -130,7 +130,11 @@ mod tests {
 
         match result {
             Ok(_) => panic!("Recursion limit was not enforced!"),
-            Err(e) => assert!(e.contains("Recursion limit exceeded"), "Unexpected error: {}", e),
+            Err(e) => assert!(
+                e.contains("Recursion limit exceeded"),
+                "Unexpected error: {}",
+                e
+            ),
         }
     }
 }
