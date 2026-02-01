@@ -4,6 +4,9 @@
 //! They are gated behind the `nova` feature flag.
 
 #[cfg(feature = "nova")]
+/// Associative retrieval ("Fishing") module.
+pub mod fishing;
+#[cfg(feature = "nova")]
 pub mod semantic_pathfinding;
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
