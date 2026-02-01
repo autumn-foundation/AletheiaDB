@@ -21,3 +21,11 @@
 - Combining Vector + Graph + Time creates a rich "associative memory" feel.
 - `VersionMetadata` allows for easy "freshness" boosting.
 - Handling multiple vector indexes in a generic way requires some heuristics (currently picks the first enabled one).
+
+## GraphContext
+**Concept:** An LLM context exporter that combines node properties, temporal evolution (via Temporal Narrative), and neighborhood topology into a dense Markdown format.
+**Fate:** Merged (Experimental)
+**Lesson:**
+- LLMs need "context" more than just "data". Formatting the graph as a narrative document makes it consumable by text-based models.
+- Reusing `TemporalNarrative` avoided duplication.
+- InternedString resolution is a common friction point in experimental modules; maybe `GraphContext` logic could be generalized into a `Display` trait for Nodes?
