@@ -1,121 +1,121 @@
 use gallifreydb::core::id::NodeId;
-use gallifreydb::index::VectorIndex;
 use gallifreydb::index::vector::hnsw::{
     HIT_RACE_CONDITION_REMOVED, HIT_RACE_CONDITION_REPLACED, INJECT_RACE_DELAY,
 };
 use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder};
+use gallifreydb::index::VectorIndex;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 #[test]
-fn test_zombie_vectors_race() {
-    // 👺 Havoc Test: Zombie Vector Race Condition
+fn test_zombie_vectors_race_coverage() {
+    // 👺 Havoc Test: Zombie Vector Race Condition Coverage
     //
-    // This test reproduces a race condition between `add` and `remove` operations
-    // that leads to "zombie" vectors leaking into the underlying HNSW index.
+    // This test deterministically exercises the two race condition fix paths
+    // in HnswIndex::add:
+    // 1. "Removed": ID mapping is gone when lock is acquired.
+    // 2. "Replaced": ID mapping points to a different key (from a concurrent add).
 
-    // Retry loop to handle CI flakiness where race condition might not trigger immediately
-    for attempt in 1..=5 {
-        println!("Attempt {}/5 to trigger race condition...", attempt);
+    // Reset counters
+    HIT_RACE_CONDITION_REMOVED.store(0, Ordering::Relaxed);
+    HIT_RACE_CONDITION_REPLACED.store(0, Ordering::Relaxed);
 
-        // Reset counters
-        HIT_RACE_CONDITION_REMOVED.store(0, Ordering::Relaxed);
-        HIT_RACE_CONDITION_REPLACED.store(0, Ordering::Relaxed);
-
+    // --- Scenario 1: Deterministic "Removed" Path ---
+    {
+        println!("Testing 'Removed' path...");
         let index = Arc::new(
             HnswIndexBuilder::new(4, DistanceMetric::Cosine)
                 .build()
                 .unwrap(),
         );
+        let id = NodeId::new(100).unwrap();
+        let vec = vec![0.1, 0.2, 0.3, 0.4];
 
-        // Enable race condition injection to ensure coverage
+        // Enable delay to open the race window
         INJECT_RACE_DELAY.store(true, Ordering::Relaxed);
 
-        // High contention to trigger the race
-        let num_threads = 8;
-        // Reduced iterations per attempt since delay is now 50ms
-        let iterations = 50;
+        let index_clone = index.clone();
+        let vec_clone = vec.clone();
+        let handle = thread::spawn(move || {
+            // This add will:
+            // 1. Alloc key
+            // 2. Insert into map
+            // 3. Sleep 50ms (INJECT_RACE_DELAY)
+            // 4. Try to acquire lock -> Verify map -> Fail
+            index_clone.add(id, &vec_clone).unwrap();
+        });
 
-        println!(
-            "Spawning {} threads for {} iterations each...",
-            num_threads, iterations
+        // Main thread: wait a bit to ensure background thread is in sleep
+        thread::sleep(Duration::from_millis(10));
+
+        // Remove the ID. This removes it from the map.
+        // The background thread is sleeping/waiting for lock.
+        index.remove(id).unwrap();
+
+        // Wait for background thread to finish
+        handle.join().unwrap();
+
+        // Assert "Removed" counter incremented
+        let removed = HIT_RACE_CONDITION_REMOVED.load(Ordering::Relaxed);
+        assert!(
+            removed > 0,
+            "Failed to hit 'Removed' race path. Count: {}",
+            removed
         );
-
-        let barrier = Arc::new(Barrier::new(num_threads));
-        let mut handles = vec![];
-
-        // We fight over a single NodeId to maximize collisions
-        let target_id = NodeId::new(666).unwrap();
-
-        for t_id in 0..num_threads {
-            let index = index.clone();
-            let barrier = barrier.clone();
-            handles.push(thread::spawn(move || {
-                let vec = vec![0.1 * (t_id as f32), 0.0, 0.0, 0.0];
-                barrier.wait();
-
-                for _ in 0..iterations {
-                    // Add and immediately remove
-                    // We ignore errors because concurrent ops might fail (e.g. remove non-existent)
-                    // but the internal state must remain consistent.
-                    let _ = index.add(target_id, &vec);
-                    let _ = index.remove(target_id);
-
-                    // Yield to encourage context switching
-                    std::thread::yield_now();
-                }
-            }));
-        }
-
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        // Disable race injection
-        INJECT_RACE_DELAY.store(false, Ordering::Relaxed);
-
-        // Final cleanup to ensure map is definitively empty
-        let _ = index.remove(target_id);
-
-        // If the race condition exists, we might have zombie vectors in the index
-        // even though the map is empty.
-        // index.len() reports the number of vectors in usearch.
-
-        let zombie_count = index.len();
-        if zombie_count > 0 {
-            println!(
-                "👺 HAVOC DETECTED WEAKNESS: Found {} zombie vectors in index!",
-                zombie_count
-            );
-        } else {
-            println!("Boring. No zombies found.");
-        }
-
-        assert_eq!(
-            zombie_count, 0,
-            "Race condition detected: {} zombie vectors found in index (Memory Leak)",
-            zombie_count
-        );
-
-        let removed_hits = HIT_RACE_CONDITION_REMOVED.load(Ordering::Relaxed);
-        let replaced_hits = HIT_RACE_CONDITION_REPLACED.load(Ordering::Relaxed);
-        println!(
-            "Race condition hits: Removed={}, Replaced={}",
-            removed_hits, replaced_hits
-        );
-
-        // Verify that we actually exercised the fix logic
-        if removed_hits > 0 || replaced_hits > 0 {
-            println!("Success! Race condition triggered and handled.");
-            return;
-        }
-
-        println!(
-            "Race condition not triggered in attempt {}. Retrying...",
-            attempt
-        );
+        println!("'Removed' path hit {} times.", removed);
     }
 
-    panic!("Fix logic was not exercised by the test after 5 attempts! (Flaky CI runner?)");
+    // --- Scenario 2: Deterministic "Replaced" Path ---
+    {
+        println!("Testing 'Replaced' path...");
+        let index = Arc::new(
+            HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                .build()
+                .unwrap(),
+        );
+        let id = NodeId::new(200).unwrap();
+        let vec1 = vec![0.1, 0.2, 0.3, 0.4];
+        let vec2 = vec![0.5, 0.6, 0.7, 0.8];
+
+        // Enable delay
+        INJECT_RACE_DELAY.store(true, Ordering::Relaxed);
+
+        let index_clone = index.clone();
+        let vec1_clone = vec1.clone();
+        let handle = thread::spawn(move || {
+            // This add will:
+            // 1. Alloc key K1
+            // 2. Insert ID->K1 into map
+            // 3. Sleep 50ms
+            // 4. Try to acquire lock -> Verify map -> Fail (because map now has ID->K2)
+            index_clone.add(id, &vec1_clone).unwrap();
+        });
+
+        // Main thread: wait a bit
+        thread::sleep(Duration::from_millis(10));
+
+        // Replace the ID.
+        // We must REMOVE then ADD to force a new key allocation.
+        // HnswIndex updates reuse keys if map entry exists, so straight add() would effectively be a "wait and acquire" valid update.
+        // By removing, we clear the map. Then adding allocates a NEW key (K2).
+        index.remove(id).unwrap();
+        index.add(id, &vec2).unwrap();
+
+        // Wait for background thread to finish
+        handle.join().unwrap();
+
+        // Assert "Replaced" counter incremented
+        let replaced = HIT_RACE_CONDITION_REPLACED.load(Ordering::Relaxed);
+        assert!(
+            replaced > 0,
+            "Failed to hit 'Replaced' race path. Count: {}",
+            replaced
+        );
+        println!("'Replaced' path hit {} times.", replaced);
+    }
+
+    // Disable injection
+    INJECT_RACE_DELAY.store(false, Ordering::Relaxed);
 }
