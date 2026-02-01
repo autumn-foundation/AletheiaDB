@@ -1,7 +1,7 @@
 use gallifreydb::GallifreyDB;
-use gallifreydb::experimental::temporal_narrative::NarrativeGenerator;
 use gallifreydb::PropertyMapBuilder;
 use gallifreydb::WriteOps;
+use gallifreydb::experimental::temporal_narrative::NarrativeGenerator;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = GallifreyDB::new()?;
