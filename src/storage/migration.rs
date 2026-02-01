@@ -2619,12 +2619,15 @@ mod tests {
 
     #[test]
     fn test_migration_updates_flushed_lsn() {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig, CompressionAlgorithm};
+        use crate::storage::cold_storage::{
+            ColdStorageConfig, CompressionAlgorithm, RedbColdStorage,
+        };
         use tempfile::tempdir;
 
         let temp_dir = tempdir().unwrap();
         let config = ColdStorageConfig::new().compression(CompressionAlgorithm::None);
-        let cold = Arc::new(RedbColdStorage::new(temp_dir.path().join("cold.redb"), config).unwrap());
+        let cold =
+            Arc::new(RedbColdStorage::new(temp_dir.path().join("cold.redb"), config).unwrap());
 
         let policy = MigrationPolicy::default();
         let service = MigrationService::new(cold.clone(), policy);
@@ -2653,7 +2656,9 @@ mod tests {
 
     #[test]
     fn test_migration_with_coordinator_set() {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig, CompressionAlgorithm};
+        use crate::storage::cold_storage::{
+            ColdStorageConfig, CompressionAlgorithm, RedbColdStorage,
+        };
         use crate::storage::wal::flush_coordinator::FlushCoordinatorConfig;
         use tempfile::tempdir;
 
@@ -2663,7 +2668,8 @@ mod tests {
 
         // Create cold storage
         let config = ColdStorageConfig::new().compression(CompressionAlgorithm::None);
-        let cold = Arc::new(RedbColdStorage::new(temp_dir.path().join("cold.redb"), config).unwrap());
+        let cold =
+            Arc::new(RedbColdStorage::new(temp_dir.path().join("cold.redb"), config).unwrap());
 
         // Create flush coordinator
         let config = FlushCoordinatorConfig {
@@ -2734,17 +2740,25 @@ mod tests {
 
         // Should have failed
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Simulated write failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Simulated write failure")
+        );
     }
 
     #[test]
     fn test_migration_with_lsn_disabled_policy() {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig, CompressionAlgorithm};
+        use crate::storage::cold_storage::{
+            ColdStorageConfig, CompressionAlgorithm, RedbColdStorage,
+        };
         use tempfile::tempdir;
 
         let temp_dir = tempdir().unwrap();
         let config = ColdStorageConfig::new().compression(CompressionAlgorithm::None);
-        let cold = Arc::new(RedbColdStorage::new(temp_dir.path().join("cold.redb"), config).unwrap());
+        let cold =
+            Arc::new(RedbColdStorage::new(temp_dir.path().join("cold.redb"), config).unwrap());
 
         // Disabled policy
         let policy = MigrationPolicy::disabled();
@@ -2821,7 +2835,7 @@ mod tests {
     /// WAL_truncation_lsn <= cold_storage.get_flushed_lsn()
     #[test]
     fn test_truncation_uses_actual_flushed_lsn() {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
+        use crate::storage::cold_storage::{ColdStorageConfig, RedbColdStorage};
         use crate::storage::wal::flush_coordinator::FlushCoordinatorConfig;
         use tempfile::tempdir;
 
@@ -2858,7 +2872,7 @@ mod tests {
     /// Test that no WAL truncation occurs when there's no flush coordinator
     #[test]
     fn test_no_truncation_without_coordinator() {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
+        use crate::storage::cold_storage::{ColdStorageConfig, RedbColdStorage};
         use tempfile::tempdir;
 
         let temp_dir = tempdir().unwrap();
@@ -2886,7 +2900,7 @@ mod tests {
     /// 3. We verify the invariant is maintained even with concurrent operations
     #[test]
     fn test_lsn_invariant_maintained() {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
+        use crate::storage::cold_storage::{ColdStorageConfig, RedbColdStorage};
         use crate::storage::wal::flush_coordinator::FlushCoordinatorConfig;
         use tempfile::tempdir;
 

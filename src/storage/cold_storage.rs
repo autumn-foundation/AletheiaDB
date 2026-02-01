@@ -30,9 +30,9 @@ use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
 use redb::{ReadableDatabase, ReadableTable};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "config-toml")]
 use serde::{Deserialize, Serialize};
@@ -1468,6 +1468,11 @@ mod tests {
         let version = create_test_node_version(1);
         let result = storage.store_node_version(&version);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Simulated write failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Simulated write failure")
+        );
     }
 }

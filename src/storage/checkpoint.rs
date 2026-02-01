@@ -3037,7 +3037,7 @@ mod tests {
 
     #[test]
     fn test_recovery_loads_cold_storage_first() -> Result<()> {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
+        use crate::storage::cold_storage::{ColdStorageConfig, RedbColdStorage};
 
         // Cold storage with flushed_lsn should be checked before WAL replay
         let temp_dir = TempDir::new().unwrap();
@@ -3082,7 +3082,7 @@ mod tests {
 
     #[test]
     fn test_recovery_replays_wal_from_flushed_lsn() -> Result<()> {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
+        use crate::storage::cold_storage::{ColdStorageConfig, RedbColdStorage};
 
         // When cold storage has higher flushed_lsn than checkpoint,
         // WAL replay should start from flushed_lsn + 1
@@ -3153,7 +3153,7 @@ mod tests {
 
     #[test]
     fn test_recovery_with_no_wal_segments() -> Result<()> {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
+        use crate::storage::cold_storage::{ColdStorageConfig, RedbColdStorage};
 
         // Recovery with just cold storage data and no WAL
         let temp_dir = TempDir::new().unwrap();
@@ -3193,7 +3193,7 @@ mod tests {
 
     #[test]
     fn test_recovery_validates_lsn_consistency() -> Result<()> {
-        use crate::storage::cold_storage::{RedbColdStorage, ColdStorageConfig};
+        use crate::storage::cold_storage::{ColdStorageConfig, RedbColdStorage};
 
         // flushed_lsn ahead of WAL should be detected as inconsistency
         let temp_dir = TempDir::new().unwrap();
