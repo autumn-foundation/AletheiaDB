@@ -77,3 +77,14 @@ The JSON converter `json_to_property_value` and its inverse `property_value_to_j
 
 **Defense:** Recursion Depth Limit
 Refactored both functions to use recursive helpers that track depth. Enforced `MAX_JSON_RECURSION_DEPTH = 100` (strictly `>=`). Changed `property_value_to_json` to return `Result` to propagate errors. Verified with unit tests covering deserialization, serialization, and boundary conditions (depth 99 vs 100).
+
+## 2026-02-15 - Vector Index Memory Safety Lockdown
+
+**Threat:** Buffer Over-read in Custom Metrics
+The `usearch` library supports quantized vector storage (I8, F16), which reduces memory usage. However, user-defined custom metrics are defined to operate on `f32` slices. When using a custom metric with quantized storage, `usearch` passes pointers to the quantized data (e.g., `i8*`), but the Rust wrapper blindly cast these to `f32*`. This resulted in reading 4x (for I8) or 2x (for F16) more memory than allocated, leading to potential crashes (DoS) or information leakage (reading uninitialized/unrelated memory).
+
+**Defense:** Configuration Validation
+Enforced a strict validation rule in `HnswIndexBuilder::build` and `HnswIndex::load`: Custom metrics are now **only** allowed when using `Quantization::F32`. Attempting to combine `custom_metric` with `I8` or `F16` quantization now returns a specific `InvalidVector` error instead of proceeding with unsafe memory access.
+
+**Verification:** Regression Test
+Added `tests/security_custom_metric.rs` which attempts to build and load an index with this dangerous combination. Verified that the operation fails safely with the expected error message, whereas previously it would read out-of-bounds memory.
