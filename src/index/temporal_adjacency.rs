@@ -152,8 +152,9 @@ impl TemporalAdjacencyIndex {
     ///
     /// Returns `StorageError::CapacityExceeded` if max entries per node exceeded.
     ///
-    /// **Atomicity**: Pre-checks capacity for both nodes before any mutations to
-    /// prevent inconsistent state if one node exceeds capacity.
+    /// **Atomicity**: Holds locks for both nodes throughout the operation to prevent
+    /// TOCTOU race conditions. Acquires locks in consistent order (by node ID) to
+    /// prevent deadlock when two threads insert edges in opposite directions.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_edge(
         &self,
@@ -166,9 +167,79 @@ impl TemporalAdjacencyIndex {
         tx_from: Timestamp,
         tx_to: Timestamp,
     ) -> Result<(), StorageError> {
-        // Pre-check capacity for both nodes BEFORE any mutations
-        // This prevents inconsistent state where outgoing is inserted but incoming fails
-        let outgoing_entries = self.outgoing.entry(source).or_default();
+        // Acquire locks in consistent order (by node ID) to prevent deadlock
+        // If source == target (self-loop), only acquire one lock
+        let (mut first_lock, mut second_lock, is_self_loop) = if source == target {
+            let lock = self.outgoing.entry(source).or_default();
+            // For self-loops, we need to access the same vector twice, so we can't hold two mutable refs
+            // Instead, we'll handle this as a special case after the normal path
+            (lock, None, true)
+        } else if source.as_u64() < target.as_u64() {
+            // Acquire source first, then target
+            let source_lock = self.outgoing.entry(source).or_default();
+            let target_lock = Some(self.incoming.entry(target).or_default());
+            (source_lock, target_lock, false)
+        } else {
+            // Acquire target first, then source (reversed to maintain order)
+            let target_lock = self.incoming.entry(target).or_default();
+            let source_lock = Some(self.outgoing.entry(source).or_default());
+            (target_lock, source_lock, false)
+        };
+
+        if is_self_loop {
+            // Self-loop: check capacity for both outgoing and incoming in the same vector
+            // Each self-loop adds 2 entries (outgoing and incoming)
+            if first_lock.len() + 2 > self.config.max_entries_per_node {
+                return Err(StorageError::CapacityExceeded {
+                    resource: format!("temporal adjacency entries for node {}", source),
+                    current: first_lock.len(),
+                    limit: self.config.max_entries_per_node,
+                });
+            }
+
+            // Insert both entries into outgoing
+            let entry_out = TemporalAdjacencyEntry {
+                edge_id,
+                neighbor: target,
+                label,
+                valid_from,
+                valid_to,
+                tx_from,
+                tx_to,
+            };
+            let pos = first_lock
+                .binary_search_by_key(&valid_from, |e| e.valid_from)
+                .unwrap_or_else(|pos| pos);
+            first_lock.insert(pos, entry_out);
+
+            // Insert into incoming (same node, so same lock)
+            let entry_in = TemporalAdjacencyEntry {
+                edge_id,
+                neighbor: source,
+                label,
+                valid_from,
+                valid_to,
+                tx_from,
+                tx_to,
+            };
+            let mut incoming_entries = self.incoming.entry(target).or_default();
+            let pos = incoming_entries
+                .binary_search_by_key(&valid_from, |e| e.valid_from)
+                .unwrap_or_else(|pos| pos);
+            incoming_entries.insert(pos, entry_in);
+
+            return Ok(());
+        }
+
+        // Normal case: source != target
+        // Identify which lock corresponds to which node based on acquisition order
+        let (outgoing_entries, incoming_entries) = if source.as_u64() < target.as_u64() {
+            (&mut first_lock, second_lock.as_mut().unwrap())
+        } else {
+            (second_lock.as_mut().unwrap(), &mut first_lock)
+        };
+
+        // Check capacity while holding both locks
         if outgoing_entries.len() >= self.config.max_entries_per_node {
             return Err(StorageError::CapacityExceeded {
                 resource: format!("temporal adjacency entries for node {}", source),
@@ -176,9 +247,7 @@ impl TemporalAdjacencyIndex {
                 limit: self.config.max_entries_per_node,
             });
         }
-        drop(outgoing_entries);
 
-        let incoming_entries = self.incoming.entry(target).or_default();
         if incoming_entries.len() >= self.config.max_entries_per_node {
             return Err(StorageError::CapacityExceeded {
                 resource: format!("temporal adjacency entries for node {}", target),
@@ -186,10 +255,9 @@ impl TemporalAdjacencyIndex {
                 limit: self.config.max_entries_per_node,
             });
         }
-        drop(incoming_entries);
 
-        // Now safe to insert into both indexes
-        let entry = TemporalAdjacencyEntry {
+        // Insert into both indexes while still holding locks
+        let entry_out = TemporalAdjacencyEntry {
             edge_id,
             neighbor: target,
             label,
@@ -198,31 +266,24 @@ impl TemporalAdjacencyIndex {
             tx_from,
             tx_to,
         };
-
-        // Insert into outgoing index
-        let mut outgoing_entries = self.outgoing.entry(source).or_default();
         let pos = outgoing_entries
             .binary_search_by_key(&valid_from, |e| e.valid_from)
             .unwrap_or_else(|pos| pos);
-        outgoing_entries.insert(pos, entry);
-        drop(outgoing_entries);
+        outgoing_entries.insert(pos, entry_out);
 
-        // Insert into incoming index
-        let entry_incoming = TemporalAdjacencyEntry {
+        let entry_in = TemporalAdjacencyEntry {
             edge_id,
-            neighbor: source, // For incoming, neighbor is the source
+            neighbor: source,
             label,
             valid_from,
             valid_to,
             tx_from,
             tx_to,
         };
-
-        let mut incoming_entries = self.incoming.entry(target).or_default();
         let pos = incoming_entries
             .binary_search_by_key(&valid_from, |e| e.valid_from)
             .unwrap_or_else(|pos| pos);
-        incoming_entries.insert(pos, entry_incoming);
+        incoming_entries.insert(pos, entry_in);
 
         Ok(())
     }
