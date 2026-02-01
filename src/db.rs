@@ -132,6 +132,15 @@ pub struct GallifreyDB {
 impl GallifreyDB {
     /// Create a new empty database with default configuration.
     ///
+    /// # Configuration
+    ///
+    /// This creates a **disk-based** database with:
+    /// - **WAL directory**: `./gallifreydb/wal` (relative to current working directory)
+    /// - **Durability**: Group Commit (ACID compliant)
+    /// - **History**: Anchor interval 10
+    ///
+    /// To use a different path or in-memory storage (for testing), use [`with_unified_config`](Self::with_unified_config).
+    ///
     /// # Errors
     ///
     /// Returns an error if WAL initialization fails (e.g., cannot create WAL directory).

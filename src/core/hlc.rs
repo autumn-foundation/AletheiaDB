@@ -33,7 +33,7 @@ impl HybridTimestamp {
     #[inline]
     pub fn new(wallclock: i64, logical: u32) -> Result<Self, TemporalError> {
         if wallclock > MAX_VALID_TIMESTAMP {
-            // Phase 2: Error field expects HybridTimestamp, not i64
+            // Construct invalid timestamp for error reporting
             let invalid_ts = HybridTimestamp { wallclock, logical };
             return Err(TemporalError::InvalidTimestamp {
                 timestamp: invalid_ts,
