@@ -437,56 +437,85 @@ impl PropertyValue {
     /// | Bytes  | `[tag:1][len:4][bytes:len]`                 |
     /// | Array  | `[tag:1][count:4][elements...]`             |
     /// | Vector | `[tag:1][dim:4][f32_values:dim*4]`          |
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut buffer = Vec::with_capacity(self.serialized_size());
-        self.serialize_into(&mut buffer);
-        buffer
+    ///
+    /// # Errors
+    /// Returns `StorageError::CorruptedData` if recursion depth exceeds limits.
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        let mut buffer = Vec::with_capacity(self.serialized_size().map_err(|_| {
+            StorageError::CorruptedData("Recursion depth limit exceeded in serialized_size".to_string())
+        })?);
+        self.serialize_into(&mut buffer)?;
+        Ok(buffer)
     }
 
     /// Serialize this PropertyValue into an existing buffer.
     ///
     /// This is more efficient when serializing multiple values as it avoids
     /// allocating a new Vec for each value.
-    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+    ///
+    /// # Errors
+    /// Returns `StorageError::CorruptedData` if recursion depth exceeds limits.
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<()> {
+        self.serialize_recursive(buffer, 0)
+    }
+
+    fn serialize_recursive(&self, buffer: &mut Vec<u8>, depth: usize) -> Result<()> {
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(StorageError::CorruptedData(format!(
+                "Property value recursion depth limit exceeded (max {})",
+                MAX_RECURSION_DEPTH
+            ))
+            .into());
+        }
+
         match self {
             PropertyValue::Null => {
                 buffer.push(TAG_NULL);
+                Ok(())
             }
             PropertyValue::Bool(b) => {
                 buffer.push(TAG_BOOL);
                 buffer.push(if *b { 1 } else { 0 });
+                Ok(())
             }
             PropertyValue::Int(i) => {
                 buffer.push(TAG_INT);
                 buffer.extend_from_slice(&i.to_le_bytes());
+                Ok(())
             }
             PropertyValue::Float(f) => {
                 buffer.push(TAG_FLOAT);
                 buffer.extend_from_slice(&f.to_le_bytes());
+                Ok(())
             }
             PropertyValue::String(s) => {
                 buffer.push(TAG_STRING);
                 let bytes = s.as_bytes();
                 buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(bytes);
+                Ok(())
             }
             PropertyValue::Bytes(b) => {
                 buffer.push(TAG_BYTES);
                 buffer.extend_from_slice(&(b.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(b);
+                Ok(())
             }
             PropertyValue::Array(arr) => {
                 buffer.push(TAG_ARRAY);
                 buffer.extend_from_slice(&(arr.len() as u32).to_le_bytes());
                 for item in arr.iter() {
-                    item.serialize_into(buffer);
+                    item.serialize_recursive(buffer, depth + 1)?;
                 }
+                Ok(())
             }
             PropertyValue::Vector(v) => {
                 serialize_vector_into(v, buffer);
+                Ok(())
             }
             PropertyValue::SparseVector(sv) => {
                 serialize_sparse_vector_into(sv, buffer);
+                Ok(())
             }
         }
     }
@@ -692,26 +721,43 @@ impl PropertyValue {
     /// assert_eq!(string.estimated_heap_size(), 11); // String length
     /// ```
     pub fn estimated_heap_size(&self) -> usize {
+        // Return a large "penalty" size (10MB) on error (recursion limit exceeded).
+        // This ensures that malicious or excessively nested structures are
+        // considered "large" by cache eviction policies, rather than "small" (0),
+        // preventing them from monopolizing the cache.
+        self.estimated_heap_size_recursive(0)
+            .unwrap_or(10 * 1024 * 1024)
+    }
+
+    fn estimated_heap_size_recursive(&self, depth: usize) -> Result<usize> {
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(StorageError::CorruptedData(format!(
+                "Property value recursion depth limit exceeded (max {})",
+                MAX_RECURSION_DEPTH
+            ))
+            .into());
+        }
+
         match self {
             PropertyValue::Null
             | PropertyValue::Bool(_)
             | PropertyValue::Int(_)
-            | PropertyValue::Float(_) => 0,
-            PropertyValue::String(s) => s.len(),
-            PropertyValue::Bytes(b) => b.len(),
+            | PropertyValue::Float(_) => Ok(0),
+            PropertyValue::String(s) => Ok(s.len()),
+            PropertyValue::Bytes(b) => Ok(b.len()),
             PropertyValue::Array(arr) => {
                 // Vec capacity overhead + recursive element sizes
                 let mut size = arr.capacity() * std::mem::size_of::<PropertyValue>();
                 for item in arr.iter() {
-                    size += item.estimated_heap_size();
+                    size += item.estimated_heap_size_recursive(depth + 1)?;
                 }
-                size
+                Ok(size)
             }
-            PropertyValue::Vector(v) => v.len() * std::mem::size_of::<f32>(),
+            PropertyValue::Vector(v) => Ok(v.len() * std::mem::size_of::<f32>()),
             PropertyValue::SparseVector(sv) => {
                 // Indices + values + SparseVec struct overhead
-                sv.nnz() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
-                    + std::mem::size_of::<usize>() // dimension field
+                Ok(sv.nnz() * (std::mem::size_of::<u32>() + std::mem::size_of::<f32>())
+                    + std::mem::size_of::<usize>()) // dimension field
             }
         }
     }
@@ -731,20 +777,35 @@ impl PropertyValue {
     /// - Array: 1 + 4 + sum(elements)
     /// - Vector: 1 + 4 + (dims * 4)
     /// - SparseVector: 1 + 4 + 4 + (nnz * 8)
-    pub fn serialized_size(&self) -> usize {
+    pub fn serialized_size(&self) -> Result<usize> {
+        self.serialized_size_recursive(0)
+    }
+
+    fn serialized_size_recursive(&self, depth: usize) -> Result<usize> {
+        if depth > MAX_RECURSION_DEPTH {
+            return Err(StorageError::CorruptedData(format!(
+                "Property value recursion depth limit exceeded (max {})",
+                MAX_RECURSION_DEPTH
+            ))
+            .into());
+        }
+
         match self {
-            PropertyValue::Null => 1,
-            PropertyValue::Bool(_) => 2,
-            PropertyValue::Int(_) => 9,
-            PropertyValue::Float(_) => 9,
-            PropertyValue::String(s) => 1 + 4 + s.len(),
-            PropertyValue::Bytes(b) => 1 + 4 + b.len(),
+            PropertyValue::Null => Ok(1),
+            PropertyValue::Bool(_) => Ok(2),
+            PropertyValue::Int(_) => Ok(9),
+            PropertyValue::Float(_) => Ok(9),
+            PropertyValue::String(s) => Ok(1 + 4 + s.len()),
+            PropertyValue::Bytes(b) => Ok(1 + 4 + b.len()),
             PropertyValue::Array(arr) => {
-                let elements_size: usize = arr.iter().map(|v| v.serialized_size()).sum();
-                1 + 4 + elements_size
+                let mut elements_size = 0;
+                for v in arr.iter() {
+                    elements_size += v.serialized_size_recursive(depth + 1)?;
+                }
+                Ok(1 + 4 + elements_size)
             }
-            PropertyValue::Vector(v) => 1 + 4 + (v.len() * 4),
-            PropertyValue::SparseVector(sv) => 1 + 4 + 4 + (sv.nnz() * 8),
+            PropertyValue::Vector(v) => Ok(1 + 4 + (v.len() * 4)),
+            PropertyValue::SparseVector(sv) => Ok(1 + 4 + 4 + (sv.nnz() * 8)),
         }
     }
 }
@@ -1478,7 +1539,7 @@ impl PropertyMap {
                 })?;
 
             // Serialize value
-            value.serialize_into(buffer);
+            value.serialize_into(buffer)?;
         }
         Ok(())
     }
@@ -1534,7 +1595,7 @@ impl PropertyMap {
             let key_size = 4 + key_len;
             calculated_size = calculated_size
                 .saturating_add(key_size)
-                .saturating_add(value.serialized_size());
+                .saturating_add(value.serialized_size()?);
 
             offset += consumed;
 
@@ -1625,7 +1686,7 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
             // Need key size for serialization
             let key_len = GLOBAL_INTERNER.with_str(key, |s| s.len()).unwrap_or(256);
             let key_size = 4 + key_len;
-            let val_size = value.serialized_size();
+            let val_size = value.serialized_size().expect("Recursion depth limit exceeded in FromIterator");
 
             size = size.saturating_add(key_size).saturating_add(val_size);
 
@@ -1634,7 +1695,7 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
                 // Key size is the same since it's the same key ID
                 size = size
                     .saturating_sub(key_size)
-                    .saturating_sub(old_val.serialized_size());
+                    .saturating_sub(old_val.serialized_size().expect("Recursion depth limit exceeded in FromIterator"));
             }
         }
 
@@ -1674,19 +1735,26 @@ impl PropertyMapBuilder {
     ///
     /// The key is automatically interned. If interning fails (capacity exceeded),
     /// returns self unchanged.
-    pub fn insert<V: Into<PropertyValue>>(mut self, key: &str, value: V) -> Self {
+    ///
+    /// Panics if recursion depth limit is exceeded.
+    pub fn insert<V: Into<PropertyValue>>(self, key: &str, value: V) -> Self {
+        self.try_insert(key, value).expect("Property insertion failed (recursion depth limit exceeded)")
+    }
+
+    /// Insert a property (fallible).
+    pub fn try_insert<V: Into<PropertyValue>>(mut self, key: &str, value: V) -> Result<Self> {
         let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
-            return self;
+            return Ok(self);
         };
         let val = value.into();
-        let val_size = val.serialized_size();
+        let val_size = val.serialized_size()?;
 
         if let Some(old_val) = self.map.insert(interned_key, val) {
             // Replaced existing entry
             // Key size is unchanged (same key ID means same string)
             self.current_size = self
                 .current_size
-                .saturating_sub(old_val.serialized_size())
+                .saturating_sub(old_val.serialized_size()?)
                 .saturating_add(val_size);
         } else {
             // New entry
@@ -1696,21 +1764,25 @@ impl PropertyMapBuilder {
                 .saturating_add(key_size)
                 .saturating_add(val_size);
         }
-        self
+        Ok(self)
     }
 
     /// Insert a property with an already-interned key.
     ///
-    /// This is more efficient than `insert()` when you already have a PropertyKey.
-    /// For internal use and performance-critical paths.
-    pub fn insert_by_key(mut self, key: PropertyKey, value: PropertyValue) -> Self {
-        let val_size = value.serialized_size();
+    /// Panics if recursion depth limit is exceeded.
+    pub fn insert_by_key(self, key: PropertyKey, value: PropertyValue) -> Self {
+        self.try_insert_by_key(key, value).expect("Property insertion failed (recursion depth limit exceeded)")
+    }
+
+    /// Insert a property with an already-interned key (fallible).
+    pub fn try_insert_by_key(mut self, key: PropertyKey, value: PropertyValue) -> Result<Self> {
+        let val_size = value.serialized_size()?;
 
         if let Some(old_val) = self.map.insert(key, value) {
             // Replaced existing entry - key size constant
             self.current_size = self
                 .current_size
-                .saturating_sub(old_val.serialized_size())
+                .saturating_sub(old_val.serialized_size()?)
                 .saturating_add(val_size);
         } else {
             // New entry - need key size!
@@ -1732,7 +1804,7 @@ impl PropertyMapBuilder {
                 .saturating_add(key_size)
                 .saturating_add(val_size);
         }
-        self
+        Ok(self)
     }
 
     /// Insert a vector property (convenience method for embeddings).
@@ -1760,33 +1832,48 @@ impl PropertyMapBuilder {
         self.insert(key, PropertyValue::vector(vector))
     }
 
+    /// Insert a vector property (fallible).
+    pub fn try_insert_vector(self, key: &str, vector: &[f32]) -> Result<Self> {
+        self.try_insert(key, PropertyValue::vector(vector))
+    }
+
     /// Remove a property.
     ///
     /// The key is automatically interned before removal.
     /// If interning fails (capacity exceeded), returns self unchanged.
+    ///
+    /// Panics if serialization size calculation fails.
     pub fn remove(self, key: &str) -> Self {
+        self.try_remove(key).expect("Property removal failed")
+    }
+
+    /// Remove a property (fallible).
+    pub fn try_remove(self, key: &str) -> Result<Self> {
         let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
-            return self;
+            return Ok(self);
         };
-        // We could optimize removal here since we have key.len(), but delegate to keep DRY
-        // unless removal becomes a hot path bottleneck.
-        self.remove_by_key(&interned_key)
+        self.try_remove_by_key(&interned_key)
     }
 
     /// Remove a property by an already-interned key.
     ///
-    /// This is more efficient than `remove()` when you already have an InternedString.
-    /// For internal use and performance-critical paths.
-    pub fn remove_by_key(mut self, key: &PropertyKey) -> Self {
-        if let Some(old_val) = self.map.remove(key) {
+    /// Panics if serialization size calculation fails.
+    pub fn remove_by_key(self, key: &PropertyKey) -> Self {
+        self.try_remove_by_key(key).expect("Property removal failed")
+    }
+
+    /// Remove a property by an already-interned key (fallible).
+    pub fn try_remove_by_key(mut self, key: &PropertyKey) -> Result<Self> {
+        let old_val = self.map.remove(key);
+        if let Some(old_val) = old_val {
             let key_len = GLOBAL_INTERNER.with_str(*key, |s| s.len()).unwrap_or(256);
             let key_size = 4 + key_len;
             self.current_size = self
                 .current_size
                 .saturating_sub(key_size)
-                .saturating_sub(old_val.serialized_size());
+                .saturating_sub(old_val.serialized_size()?);
         }
-        self
+        Ok(self)
     }
 
     /// Build the final PropertyMap.
@@ -2231,7 +2318,7 @@ mod tests {
     #[test]
     fn test_serialize_null() {
         let value = PropertyValue::Null;
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
         assert_eq!(bytes, vec![TAG_NULL]);
 
         let (deserialized, consumed) = PropertyValue::deserialize(&bytes).unwrap();
@@ -2243,7 +2330,7 @@ mod tests {
     fn test_serialize_bool() {
         // Test true
         let value = PropertyValue::Bool(true);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
         assert_eq!(bytes, vec![TAG_BOOL, 1]);
 
         let (deserialized, consumed) = PropertyValue::deserialize(&bytes).unwrap();
@@ -2252,7 +2339,7 @@ mod tests {
 
         // Test false
         let value = PropertyValue::Bool(false);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
         assert_eq!(bytes, vec![TAG_BOOL, 0]);
 
         let (deserialized, consumed) = PropertyValue::deserialize(&bytes).unwrap();
@@ -2265,7 +2352,7 @@ mod tests {
         let test_values = [0i64, 1, -1, i64::MAX, i64::MIN, 42, -12345];
         for &v in &test_values {
             let value = PropertyValue::Int(v);
-            let bytes = value.serialize();
+            let bytes = value.serialize().expect("Serialization failed");
 
             assert_eq!(bytes[0], TAG_INT);
             assert_eq!(bytes.len(), 9);
@@ -2281,7 +2368,7 @@ mod tests {
         let test_values = [0.0f64, 1.0, -1.0, f64::MAX, f64::MIN, 1.5, -2.5];
         for &v in &test_values {
             let value = PropertyValue::Float(v);
-            let bytes = value.serialize();
+            let bytes = value.serialize().expect("Serialization failed");
 
             assert_eq!(bytes[0], TAG_FLOAT);
             assert_eq!(bytes.len(), 9);
@@ -2296,19 +2383,19 @@ mod tests {
     fn test_serialize_float_special_values() {
         // Test infinity
         let value = PropertyValue::Float(f64::INFINITY);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
         let (deserialized, _) = PropertyValue::deserialize(&bytes).unwrap();
         assert_eq!(deserialized.as_float(), Some(f64::INFINITY));
 
         // Test negative infinity
         let value = PropertyValue::Float(f64::NEG_INFINITY);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
         let (deserialized, _) = PropertyValue::deserialize(&bytes).unwrap();
         assert_eq!(deserialized.as_float(), Some(f64::NEG_INFINITY));
 
         // Test NaN - special case, NaN != NaN
         let value = PropertyValue::Float(f64::NAN);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
         let (deserialized, _) = PropertyValue::deserialize(&bytes).unwrap();
         assert!(deserialized.as_float().unwrap().is_nan());
     }
@@ -2318,7 +2405,7 @@ mod tests {
         let test_values = ["", "hello", "world", "hello world!", "こんにちは", "🎉"];
         for s in test_values {
             let value = PropertyValue::string(s);
-            let bytes = value.serialize();
+            let bytes = value.serialize().expect("Serialization failed");
 
             assert_eq!(bytes[0], TAG_STRING);
 
@@ -2333,7 +2420,7 @@ mod tests {
         let test_values: &[&[u8]] = &[&[], &[1], &[1, 2, 3], &[0, 255, 128]];
         for &b in test_values {
             let value = PropertyValue::bytes(b);
-            let bytes = value.serialize();
+            let bytes = value.serialize().expect("Serialization failed");
 
             assert_eq!(bytes[0], TAG_BYTES);
 
@@ -2347,7 +2434,7 @@ mod tests {
     fn test_serialize_array() {
         // Empty array
         let value = PropertyValue::array(vec![]);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
         let (deserialized, _) = PropertyValue::deserialize(&bytes).unwrap();
         assert_eq!(deserialized, value);
 
@@ -2358,14 +2445,14 @@ mod tests {
             PropertyValue::Bool(true),
             PropertyValue::Float(1.5),
         ]);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
         let (deserialized, _) = PropertyValue::deserialize(&bytes).unwrap();
         assert_eq!(deserialized, value);
 
         // Nested array
         let inner = PropertyValue::array(vec![PropertyValue::Int(1), PropertyValue::Int(2)]);
         let value = PropertyValue::array(vec![inner, PropertyValue::Int(3)]);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
         let (deserialized, _) = PropertyValue::deserialize(&bytes).unwrap();
         assert_eq!(deserialized, value);
     }
@@ -2374,7 +2461,7 @@ mod tests {
     fn test_serialize_vector_basic() {
         let data = [1.0f32, 2.0, 3.0];
         let value = PropertyValue::vector(data);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
 
         // Check format: tag (1) + dimension (4) + 3*4 bytes
         assert_eq!(bytes[0], TAG_VECTOR);
@@ -2716,7 +2803,7 @@ mod tests {
         // Test that serialize_into appends to existing buffer correctly
         let mut buffer = vec![0xAA, 0xBB]; // Some existing data
         let value = PropertyValue::Int(42);
-        value.serialize_into(&mut buffer);
+        value.serialize_into(&mut buffer).unwrap();
 
         assert_eq!(buffer[0], 0xAA);
         assert_eq!(buffer[1], 0xBB);
@@ -2750,7 +2837,7 @@ mod tests {
         ];
 
         for value in values {
-            let bytes = value.serialize();
+            let bytes = value.serialize().expect("Serialization failed");
             let (deserialized, consumed) = PropertyValue::deserialize(&bytes).unwrap();
             assert_eq!(
                 consumed,
@@ -2779,7 +2866,7 @@ mod tests {
     fn test_endianness() {
         // Verify little-endian serialization
         let value = PropertyValue::Int(0x0102030405060708i64);
-        let bytes = value.serialize();
+        let bytes = value.serialize().expect("Serialization failed");
 
         // Little-endian: least significant byte first
         assert_eq!(bytes[0], TAG_INT);
@@ -3141,7 +3228,7 @@ mod tests {
 
         let sparse = SparseVec::new(vec![0, 2, 4], vec![1.0, 2.0, 3.0], 5).unwrap();
         let prop = PropertyValue::sparse_vector(sparse);
-        let bytes = prop.serialize();
+        let bytes = prop.serialize().expect("Serialization failed");
 
         assert_eq!(bytes[0], TAG_SPARSE_VECTOR);
 
@@ -3509,8 +3596,8 @@ mod tests {
         ];
 
         for value in values {
-            let predicted = value.serialized_size();
-            let actual = value.serialize().len();
+            let predicted = value.serialized_size().expect("Size calculation failed");
+            let actual = value.serialize().expect("Serialization failed").len();
             assert_eq!(
                 predicted,
                 actual,
@@ -3611,12 +3698,12 @@ mod tests {
         let key = "a";
         buffer.extend_from_slice(&(key.len() as u32).to_le_bytes());
         buffer.extend_from_slice(key.as_bytes());
-        PropertyValue::Int(1).serialize_into(&mut buffer);
+        PropertyValue::Int(1).serialize_into(&mut buffer).unwrap();
 
         // Entry 2: "a" -> 2 (Duplicate!)
         buffer.extend_from_slice(&(key.len() as u32).to_le_bytes());
         buffer.extend_from_slice(key.as_bytes());
-        PropertyValue::Int(2).serialize_into(&mut buffer);
+        PropertyValue::Int(2).serialize_into(&mut buffer).unwrap();
 
         // Deserialization should fail
         let result = PropertyMap::deserialize(&buffer);

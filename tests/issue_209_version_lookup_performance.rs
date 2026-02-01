@@ -133,6 +133,7 @@ fn test_version_lookup_correctness_many_versions() {
 #[test]
 fn test_version_lookup_performance_scaling() {
     use gallifreydb::config::{GallifreyDBConfigBuilder, HistoricalConfigBuilder};
+    use gallifreydb::storage::index_persistence::PersistenceConfig;
 
     // Create database with increased version limit (need extra headroom)
     let historical_config = HistoricalConfigBuilder::new()
@@ -140,8 +141,15 @@ fn test_version_lookup_performance_scaling() {
         .expect("Failed to set max versions")
         .build();
 
+    // Disable persistence to avoid stale index data from previous runs
+    let persistence_config = PersistenceConfig {
+        enabled: false,
+        ..Default::default()
+    };
+
     let config = GallifreyDBConfigBuilder::new()
         .historical(historical_config)
+        .persistence(persistence_config)
         .build();
 
     let db = GallifreyDB::with_unified_config(config).expect("Failed to create database");
