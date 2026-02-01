@@ -324,8 +324,13 @@ impl HistoricalStorage {
             DEFAULT_MAX_VERSION_AGE_MS, // Keep existing default for age
         );
 
+        let anchor_config = AnchorConfig {
+            anchor_interval: config.anchor_interval,
+            max_delta_chain: config.max_delta_chain,
+        };
+
         let mut storage = Self::with_config_retention_and_cache_size(
-            AnchorConfig::default(),
+            anchor_config,
             retention_policy,
             config.reconstruction_cache_size,
         );
