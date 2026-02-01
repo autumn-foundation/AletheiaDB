@@ -5,3 +5,11 @@
 - Connecting graph topology with vector embeddings creates powerful "conceptual navigation".
 - Time-travel pathfinding is tricky without a historical adjacency index (deleted edges are lost to `get_outgoing_edges`), highlighting a future architectural need.
 - `GallifreyDB`'s modular design made it easy to hook into `get_node` and `get_edge`.
+
+## Temporal Narrative
+**Concept:** A generator that produces natural language logs of a node's history by diffing temporal versions.
+**Fate:** Merged (Experimental)
+**Lesson:**
+- `EntityHistory` and `VersionDiff` primitives made this trivial to implement.
+- This creates a bridge between raw bi-temporal data and LLM prompt generation (context injection).
+- Timestamp formatting and string interning were the main integration points.
