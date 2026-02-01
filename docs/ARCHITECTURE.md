@@ -57,23 +57,26 @@ This document describes the core architecture principles, design patterns, and s
 
 ### Hybrid Storage Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│              Query Engine                            │
-│  - Temporal Query Planner                           │
-│  - Graph Traversal Engine                           │
-└─────────────────────────────────────────────────────┘
-                        │
-        ┌───────────────┴───────────────┐
-        │                               │
-┌───────▼─────────┐          ┌─────────▼─────────┐
-│ Current Storage │          │ Historical Storage │
-│  (Fast Path)    │          │  (Temporal Path)  │
-│                 │          │                   │
-│ - Live graph    │          │ - Version chains  │
-│ - Hot indexes   │          │ - Anchor+delta    │
-│ - No temporal   │          │ - Compressed      │
-└─────────────────┘          └───────────────────┘
+```mermaid
+classDiagram
+    namespace Core {
+        class QueryEngine
+        class TemporalPlanner
+        class TraversalEngine
+        class StorageTrait {
+            <<interface>>
+        }
+    }
+    namespace Storage {
+        class CurrentStorage
+        class HistoricalStorage
+        class RedbImplementation
+    }
+
+    QueryEngine --> StorageTrait : Uses (Trait Bound)
+    RedbImplementation ..|> StorageTrait : Implements
+    CurrentStorage --|> StorageTrait : Implements
+    HistoricalStorage --|> StorageTrait : Implements
 ```
 
 **When to Use Each:**
@@ -116,17 +119,33 @@ GallifreyDB's architecture separates current state from historical data for opti
 
 ### Storage Flow
 
-```
-Write Path:
-User → Current Storage → WAL → Historical Storage (async)
-         ↓
-    Temporal Index
-         ↓
-    Version Chain
+```mermaid
+sequenceDiagram
+    participant User
+    participant Current as Current Storage
+    participant WAL
+    participant Historical as Historical Storage
 
-Query Path:
-Current Query → Current Storage (fast path)
-Temporal Query → Historical Storage → Anchor Lookup → Delta Application
+    Note over User, Current: Write Path
+    User->>Current: Write Transaction
+    Current->>WAL: Append Entry
+    WAL-->>Current: LSN
+    Current->>Current: Update In-Memory State
+    Current-->>User: Success
+
+    rect rgb(240, 240, 240)
+        Note right of Current: Async Background Process
+        Current->>Historical: Background Flush
+        Historical->>Historical: Compress & Index
+    end
+
+    Note over User, Current: Query Path
+    User->>Current: Query (Latest)
+    Current-->>User: Result (Fast Path)
+
+    User->>Historical: Query (Time Travel)
+    Historical->>Historical: Reconstruct State
+    Historical-->>User: Result (Temporal Path)
 ```
 
 ## Temporal Query Processing
