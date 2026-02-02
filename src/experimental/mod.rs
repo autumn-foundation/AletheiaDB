@@ -12,3 +12,6 @@ pub mod graph_context;
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
+#[cfg(feature = "nova")]
+/// Semantic graph clustering ("Cartographer").
+pub mod cartographer;

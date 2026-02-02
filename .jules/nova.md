@@ -29,3 +29,11 @@
 - LLMs need "context" more than just "data". Formatting the graph as a narrative document makes it consumable by text-based models.
 - Reusing `TemporalNarrative` avoided duplication.
 - InternedString resolution is a common friction point in experimental modules; maybe `GraphContext` logic could be generalized into a `Display` trait for Nodes?
+
+## The Cartographer
+**Concept:** A semantic clustering engine that analyzes node vectors to discover natural clusters and reifies them as "Region" nodes in the graph.
+**Fate:** Merged (Experimental)
+**Lesson:**
+- Combining `scan(None)` with batch processing enables powerful global graph analysis.
+- Reifying analysis results back into the graph ("Region" nodes) makes the structure queryable by other tools.
+- `QueryBuilder` provides a flexible way to harvest data for experimental algorithms.
