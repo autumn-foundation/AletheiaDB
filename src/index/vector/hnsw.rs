@@ -1035,11 +1035,7 @@ impl HnswIndex {
 
     /// Helper method to stream mappings to a writer with CRC calculation.
     /// Extracted for testability of error paths.
-    fn write_mappings_to_writer<W, I>(
-        writer: &mut W,
-        mappings_iter: I,
-        count: usize,
-    ) -> Result<()>
+    fn write_mappings_to_writer<W, I>(writer: &mut W, mappings_iter: I, count: usize) -> Result<()>
     where
         W: Write,
         I: Iterator<Item = (NodeId, u64)>,
