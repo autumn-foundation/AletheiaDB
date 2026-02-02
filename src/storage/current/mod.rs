@@ -996,7 +996,6 @@ impl CurrentStorage {
         self.vector_indexes.iter().map(|r| r.key().clone()).min()
     }
 
-
     /// Get or create filter statistics for a label (Issue #334).
     ///
     /// Returns an Arc to the FilterStats for the given label, creating it if needed.
@@ -1330,7 +1329,6 @@ impl CurrentStorage {
     ) -> Result<Vec<(NodeId, f32)>> {
         self.find_similar_by_embedding_in(property_name, embedding, k)
     }
-
 
     // ========================================================================
     // Temporal Vector Indexing (Phase 3)
@@ -1973,9 +1971,11 @@ impl CurrentStorage {
             .ok_or_else(|| StorageError::PropertyNotFound(prop_name.to_string()))?
             .as_arc_vector()
             .ok_or_else(|| {
-                crate::utils::error::Error::Vector(crate::utils::error::VectorError::InvalidVector {
-                    reason: "Property is not a vector".to_string(),
-                })
+                crate::utils::error::Error::Vector(
+                    crate::utils::error::VectorError::InvalidVector {
+                        reason: "Property is not a vector".to_string(),
+                    },
+                )
             })
     }
 
@@ -2025,13 +2025,12 @@ impl CurrentStorage {
             let label_id = GLOBAL_INTERNER.intern(label)?;
             let (candidates, stats) = self.calculate_adaptive_candidates(k, label);
 
-            let mut results =
-                index.search_with_filter(query, candidates, |node_id| {
-                    self.indexes
-                        .get_node(*node_id)
-                        .map(|n| n.label == label_id)
-                        .unwrap_or(false)
-                })?;
+            let mut results = index.search_with_filter(query, candidates, |node_id| {
+                self.indexes
+                    .get_node(*node_id)
+                    .map(|n| n.label == label_id)
+                    .unwrap_or(false)
+            })?;
 
             if let Some(exclude_id) = exclude_node {
                 results.retain(|(id, _)| *id != exclude_id);
