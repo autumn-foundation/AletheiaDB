@@ -74,6 +74,8 @@ sqlparser = { version = "0.40", optional = true }
 rayon = "1.8"
 comfy-table = "7.2.2"
 crossterm = "0.29.0"
+ratatui = { version = "0.26", optional = true }
+rand = { version = "0.8", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -87,7 +89,7 @@ lazy_static = "1.4"
 
 [features]
 # Nova experimental features
-nova = []
+nova = ["dep:ratatui", "dep:rand"]
 
 # Enable Tracy profiling (use with: cargo build --release --features tracy)
 tracy = ["tracy-client/enable"]
