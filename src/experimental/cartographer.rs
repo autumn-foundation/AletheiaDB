@@ -71,10 +71,7 @@ impl Cartographer {
         for row_result in query {
             let row = row_result?;
             if let Some(node) = row.entity.as_node() {
-                if let Some(vector) = node
-                    .get_property(property_name)
-                    .and_then(|v| v.as_vector())
-                {
+                if let Some(vector) = node.get_property(property_name).and_then(|v| v.as_vector()) {
                     points.push((node.id, vector.to_vec()));
                 }
             }
