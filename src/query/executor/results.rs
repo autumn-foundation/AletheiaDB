@@ -473,7 +473,8 @@ impl std::fmt::Display for QueryResult {
                                 if b {
                                     format!(
                                         "{}",
-                                        crossterm::style::style(b).with(crossterm::style::Color::Green)
+                                        crossterm::style::style(b)
+                                            .with(crossterm::style::Color::Green)
                                     )
                                 } else {
                                     format!("{}", v)
