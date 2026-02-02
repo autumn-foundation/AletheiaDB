@@ -13,7 +13,7 @@
 use crate::core::graph::{Edge, Node};
 use crate::core::history::{EntityHistory, VersionDiff, VersionInfo};
 use crate::core::id::{EdgeId, NodeId, VersionId};
-use crate::core::interning::InternedString;
+use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
@@ -2056,7 +2056,10 @@ impl HistoricalStorage {
                     version_id: *version_id,
                     temporal: version.temporal,
                     properties,
-                    label: version.label.to_string(),
+                    label: GLOBAL_INTERNER
+                        .resolve(version.label)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| version.label.to_string()),
                 });
             }
         }
@@ -2200,7 +2203,10 @@ impl HistoricalStorage {
                     version_id: *version_id,
                     temporal: version.temporal,
                     properties,
-                    label: version.label.to_string(),
+                    label: GLOBAL_INTERNER
+                        .resolve(version.label)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| version.label.to_string()),
                 });
             }
         }
