@@ -3,8 +3,8 @@
 //! This module implements functionality to analyze the vector space of the graph,
 //! identify natural clusters, and reify them as explicit "Region" nodes.
 
-use crate::{GallifreyDB, PropertyMapBuilder, WriteOps};
 use crate::core::NodeId;
+use crate::{GallifreyDB, PropertyMapBuilder, WriteOps};
 use std::collections::HashMap;
 
 /// The result of a clustering operation.
@@ -31,7 +31,9 @@ impl<'a> Cartographer<'a> {
     pub fn analyze(&self, property: &str, k: usize) -> crate::utils::Result<ClusteringResult> {
         // Step 1: Harvest vectors
         // We use the query engine to scan all nodes.
-        let results = self.db.query()
+        let results = self
+            .db
+            .query()
             .scan(None) // Scan all nodes
             .execute(self.db)?;
 
@@ -39,6 +41,7 @@ impl<'a> Cartographer<'a> {
 
         for row_result in results {
             let row = row_result?;
+            #[allow(clippy::collapsible_if)]
             if let Some(node) = row.entity.as_node() {
                 if let Some(prop_val) = node.get_property(property) {
                     if let Some(vector) = prop_val.as_vector() {
@@ -91,7 +94,7 @@ impl<'a> Cartographer<'a> {
                         *node_id,
                         region_id,
                         "LOCATED_IN",
-                        PropertyMapBuilder::new().build()
+                        PropertyMapBuilder::new().build(),
                     )?;
                 }
             }
@@ -201,10 +204,7 @@ impl KMeans {
 }
 
 fn euclidean_distance_sq(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum()
+    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
 }
 
 #[cfg(test)]
@@ -229,12 +229,7 @@ mod tests {
         let v3 = vec![10.0, 10.0];
         let v4 = vec![10.1, 10.1];
 
-        let data = vec![
-            (n1, v1),
-            (n2, v2),
-            (n3, v3),
-            (n4, v4),
-        ];
+        let data = vec![(n1, v1), (n2, v2), (n3, v3), (n4, v4)];
 
         let result = kmeans.train(&data);
 
@@ -265,12 +260,40 @@ mod tests {
 
         // Create nodes with vectors
         // Cluster 1
-        let n1 = db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[0.0, 0.0]).build()).unwrap();
-        let n2 = db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[0.1, 0.1]).build()).unwrap();
+        let n1 = db
+            .create_node(
+                "Point",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.0, 0.0])
+                    .build(),
+            )
+            .unwrap();
+        let n2 = db
+            .create_node(
+                "Point",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[0.1, 0.1])
+                    .build(),
+            )
+            .unwrap();
 
         // Cluster 2
-        let n3 = db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[10.0, 10.0]).build()).unwrap();
-        let n4 = db.create_node("Point", PropertyMapBuilder::new().insert_vector("embedding", &[10.1, 10.1]).build()).unwrap();
+        let n3 = db
+            .create_node(
+                "Point",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[10.0, 10.0])
+                    .build(),
+            )
+            .unwrap();
+        let n4 = db
+            .create_node(
+                "Point",
+                PropertyMapBuilder::new()
+                    .insert_vector("embedding", &[10.1, 10.1])
+                    .build(),
+            )
+            .unwrap();
 
         let cartographer = Cartographer::new(&db);
 
