@@ -169,6 +169,98 @@ impl FlushNotifier {
 /// Threshold for consecutive flush errors before logging a critical warning.
 const FLUSH_ERROR_WARNING_THRESHOLD: u64 = 3;
 
+/// Helper struct to encapsulate background flush logic.
+struct BackgroundFlusher {
+    wal: Arc<ConcurrentWal>,
+    coordinator: Arc<FlushCoordinator>,
+    shutdown: Arc<AtomicBool>,
+    flush_notifier: Arc<FlushNotifier>,
+    group_commit: Option<Arc<GroupCommitCoordinator>>,
+    error_counter: Arc<AtomicU64>,
+    interval: Duration,
+    sync_on_flush: bool,
+}
+
+impl BackgroundFlusher {
+    fn run(&self) {
+        while !self.shutdown.load(Ordering::Relaxed) {
+            self.perform_flush_cycle();
+            // Wait for flush interval OR immediate signal (batch full)
+            self.flush_notifier.wait_timeout(self.interval);
+        }
+        self.perform_final_flush();
+    }
+
+    fn perform_flush_cycle(&self) {
+        let entries = self.wal.drain_all();
+
+        // Always try to advance the epoch when there are entries OR when
+        // group commit has pending transactions.
+        //
+        // LOCK POISONING: If current_batch_size() fails, the coordinator lock is
+        // poisoned and the system is in an unrecoverable state. Panicking is correct
+        // here - continuing would leave waiting transactions hanging indefinitely.
+        let should_mark_flushed = !entries.is_empty()
+            || self.group_commit.as_ref().is_some_and(|gc| {
+                gc.current_batch_size()
+                    .expect("GroupCommitCoordinator lock poisoned - flush thread cannot continue")
+                    > 0
+            });
+
+        if !entries.is_empty() {
+            // Flush to coordinator
+            let result = self.coordinator.flush(entries, self.sync_on_flush);
+            self.handle_flush_result(result.map(|_| ()));
+        } else if should_mark_flushed {
+            // No entries but there are pending transactions - advance epoch anyway
+            self.handle_flush_result(Ok(()));
+        }
+    }
+
+    fn perform_final_flush(&self) {
+        let entries = self.wal.drain_all();
+        if !entries.is_empty() {
+            let result = self.coordinator.flush(entries, true);
+            self.handle_flush_result(result.map(|_| ()));
+        }
+    }
+
+    fn handle_flush_result(&self, result: Result<()>) {
+        match result {
+            Ok(_) => {
+                // Reset error counter on success
+                self.error_counter.store(0, Ordering::Relaxed);
+                if let Some(ref gc) = self.group_commit {
+                    gc.mark_flushed(Ok(())).expect(
+                        "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
+                    );
+                }
+            }
+            Err(e) => {
+                // Track consecutive errors for health monitoring
+                let errors = self.error_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if errors == FLUSH_ERROR_WARNING_THRESHOLD {
+                    eprintln!(
+                        "CRITICAL: WAL flush failed {} consecutive times. \
+                         Data durability may be compromised. Last error: {}",
+                        errors, e
+                    );
+                } else {
+                    eprintln!("WAL flush error: {}", e);
+                }
+
+                if let Some(ref gc) = self.group_commit {
+                    // Create a new error from the string representation
+                    gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
+                        .expect(
+                            "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
+                        );
+                }
+            }
+        }
+    }
+}
+
 /// Unified concurrent WAL system.
 ///
 /// This combines the striped concurrent WAL with the flush coordinator
@@ -309,106 +401,17 @@ impl ConcurrentWalSystem {
         interval: Duration,
         sync_on_flush: bool,
     ) {
-        while !shutdown.load(Ordering::Relaxed) {
-            // Drain all entries from stripes
-            let entries = wal.drain_all();
-
-            // Always try to advance the epoch when there are entries OR when
-            // group commit has pending transactions. This handles the race where
-            // transactions register with GroupCommitCoordinator but their entries
-            // were already drained by a previous flush iteration.
-            //
-            // LOCK POISONING: If current_batch_size() fails, the coordinator lock is
-            // poisoned and the system is in an unrecoverable state. Panicking is correct
-            // here - continuing would leave waiting transactions hanging indefinitely.
-            let should_mark_flushed = !entries.is_empty()
-                || group_commit.as_ref().is_some_and(|gc| {
-                    gc.current_batch_size().expect(
-                        "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                    ) > 0
-                });
-
-            if !entries.is_empty() {
-                // Flush to coordinator
-                let result = coordinator.flush(entries, sync_on_flush);
-
-                // Notify group commit waiters and handle errors
-                //
-                // LOCK POISONING: If mark_flushed() fails due to lock poisoning, we panic.
-                // This is an unrecoverable state - waiting transactions would hang forever.
-                // Panicking the flush thread ensures fail-fast behavior rather than silent
-                // degradation.
-                match result {
-                    Ok(_) => {
-                        // Reset error counter on success
-                        error_counter.store(0, Ordering::Relaxed);
-                        if let Some(ref gc) = group_commit {
-                            gc.mark_flushed(Ok(())).expect(
-                                "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        // Track consecutive errors for health monitoring
-                        let errors = error_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        if errors == FLUSH_ERROR_WARNING_THRESHOLD {
-                            eprintln!(
-                                "CRITICAL: WAL flush failed {} consecutive times. \
-                                 Data durability may be compromised. Last error: {}",
-                                errors, e
-                            );
-                        } else {
-                            eprintln!("WAL flush error: {}", e);
-                        }
-
-                        if let Some(ref gc) = group_commit {
-                            // Create a new error from the string representation
-                            // (Error doesn't implement Clone, but mark_flushed only stores the string)
-                            gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
-                                .expect(
-                                    "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                                );
-                        }
-                    }
-                }
-            } else if should_mark_flushed {
-                // No entries but there are pending transactions - advance epoch anyway
-                // This handles the race where entries were flushed before transactions
-                // called register_transaction()
-                if let Some(ref gc) = group_commit {
-                    gc.mark_flushed(Ok(())).expect(
-                        "GroupCommitCoordinator lock poisoned - flush thread cannot continue",
-                    );
-                }
-            }
-
-            // Wait for flush interval OR immediate signal (batch full)
-            // This allows batch-triggered flushes to happen immediately
-            flush_notifier.wait_timeout(interval);
-        }
-
-        // Final flush on shutdown
-        let entries = wal.drain_all();
-        if !entries.is_empty() {
-            let result = coordinator.flush(entries, true);
-
-            match result {
-                Ok(_) => {
-                    error_counter.store(0, Ordering::Relaxed);
-                    if let Some(ref gc) = group_commit {
-                        gc.mark_flushed(Ok(()))
-                            .expect("GroupCommitCoordinator lock poisoned during shutdown");
-                    }
-                }
-                Err(e) => {
-                    error_counter.fetch_add(1, Ordering::Relaxed);
-                    if let Some(ref gc) = group_commit {
-                        gc.mark_flushed(Err(crate::utils::error::Error::other(e.to_string())))
-                            .expect("GroupCommitCoordinator lock poisoned during shutdown");
-                    }
-                }
-            }
-        }
+        let flusher = BackgroundFlusher {
+            wal,
+            coordinator,
+            shutdown,
+            flush_notifier,
+            group_commit,
+            error_counter,
+            interval,
+            sync_on_flush,
+        };
+        flusher.run();
     }
 
     /// Append an operation asynchronously (fire and forget).
