@@ -92,7 +92,8 @@ use crate::utils::{Error, Result, error::VectorError};
 use crc32fast::Hasher;
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1017,32 +1018,55 @@ impl HnswIndex {
             .len()
             .checked_mul(16)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
-        let total_size = count_size
+        let _total_size = count_size
             .checked_add(4 + 1 + 8 + 4)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
 
-        let mut file_data = Vec::with_capacity(total_size);
+        // Open file with streaming writer
+        let file = File::create(&mappings_path).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to create mappings file: {}",
+                e
+            )))
+        })?;
+        let mut writer = BufWriter::new(file);
+        let mut hasher = Hasher::new();
+
+        // Helper closure to write and update hasher
+        let mut write_and_hash = |data: &[u8]| -> Result<()> {
+            writer.write_all(data).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to write mappings: {}",
+                    e
+                )))
+            })?;
+            hasher.update(data);
+            Ok(())
+        };
 
         // Write header
-        file_data.extend_from_slice(MAPPING_MAGIC);
-        file_data.push(MAPPING_VERSION);
-        file_data.extend_from_slice(&count.to_le_bytes());
+        write_and_hash(MAPPING_MAGIC)?;
+        write_and_hash(&[MAPPING_VERSION])?;
+        write_and_hash(&count.to_le_bytes())?;
 
         // Write data directly
         for (node_id, key) in &mappings {
-            file_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
-            file_data.extend_from_slice(&key.to_le_bytes());
+            write_and_hash(&node_id.as_u64().to_le_bytes())?;
+            write_and_hash(&key.to_le_bytes())?;
         }
 
-        // Calculate CRC32 over all data (header + mappings)
-        let mut hasher = Hasher::new();
-        hasher.update(&file_data);
+        // Calculate and write CRC32
         let crc = hasher.finalize();
-        file_data.extend_from_slice(&crc.to_le_bytes());
-
-        std::fs::write(&mappings_path, &file_data).map_err(|e| {
+        writer.write_all(&crc.to_le_bytes()).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
-                "Failed to save mappings: {}",
+                "Failed to write CRC: {}",
+                e
+            )))
+        })?;
+
+        writer.flush().map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to flush mappings: {}",
                 e
             )))
         })?;
@@ -2037,6 +2061,33 @@ mod tests {
                 e
             ),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_mappings_large_streaming() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_streaming.usearch");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        // Add enough items to exceed typical buffer sizes (e.g. 8KB)
+        // 2000 items * 16 bytes = 32KB
+        let count = 2000;
+        for i in 1..=count {
+            index.add(NodeId::new(i).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        }
+
+        index.save(&path)?;
+
+        // Verify we can load it back
+        let loaded = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine))?;
+        assert_eq!(loaded.len(), count as usize);
+
+        // Verify a few items
+        let results = loaded.search(&[1.0, 0.0, 0.0, 0.0], 1)?;
+        assert!(!results.is_empty());
+
         Ok(())
     }
 }
