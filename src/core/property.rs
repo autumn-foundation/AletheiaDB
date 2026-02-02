@@ -52,6 +52,10 @@ pub const MAX_ARRAY_ELEMENTS: usize = 1_000_000;
 /// Set to 100,000 - far exceeds typical embedding sizes (384-4096 dimensions).
 pub const MAX_VECTOR_DIMENSIONS: usize = 100_000;
 
+/// Maximum capacity allowed for a deserialized property map.
+/// Set to 10,000 to prevent OOM DoS attacks via malicious count fields.
+pub const MAX_PROPERTY_MAP_CAPACITY: usize = 10_000;
+
 /// Maximum recursion depth for nested properties (e.g., arrays of arrays).
 /// Set to 100 to prevent stack overflow from malicious input.
 pub const MAX_RECURSION_DEPTH: usize = 100;
@@ -1133,6 +1137,15 @@ pub fn deserialize_sparse_vector(bytes: &[u8]) -> Result<(Arc<SparseVec>, usize)
         .into());
     }
 
+    // Prevent DoS via memory exhaustion from malicious input
+    if nnz > MAX_VECTOR_DIMENSIONS {
+        return Err(StorageError::CorruptedData(format!(
+            "Sparse vector nnz {} exceeds maximum allowed {}",
+            nnz, MAX_VECTOR_DIMENSIONS
+        ))
+        .into());
+    }
+
     // Calculate required size
     let data_start: usize = 9;
     let indices_len = nnz
@@ -1564,6 +1577,16 @@ impl PropertyMap {
         }
 
         let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+
+        // Prevent DoS via memory exhaustion from malicious input
+        if count > MAX_PROPERTY_MAP_CAPACITY {
+            return Err(StorageError::CorruptedData(format!(
+                "PropertyMap count {} exceeds maximum allowed {}",
+                count, MAX_PROPERTY_MAP_CAPACITY
+            ))
+            .into());
+        }
+
         let mut offset = 4;
         let mut map = HashMap::with_capacity(count);
         // Track the actual logical size of the map to validate against consumed bytes
