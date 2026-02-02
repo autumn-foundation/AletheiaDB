@@ -874,8 +874,15 @@ impl VectorIndex for HnswIndex {
         let panic_error_ref = &panic_error;
 
         let filter = |key: u64| -> bool {
-            // Fast path: if a panic already occurred, stop processing
-            if panic_error_ref.lock().unwrap().is_some() {
+            // Fast path: if a panic already occurred or lock is poisoned, stop processing
+            // Use match/if let instead of unwrap() to prevent double-panic on PoisonError
+            if let Ok(guard) = panic_error_ref.lock() {
+                if guard.is_some() {
+                    return false;
+                }
+            } else {
+                // Lock is poisoned - a panic happened in another thread or previous call.
+                // Fail safe by stopping the search.
                 return false;
             }
 
@@ -891,7 +898,11 @@ impl VectorIndex for HnswIndex {
             match result {
                 Ok(val) => val,
                 Err(e) => {
-                    *panic_error_ref.lock().unwrap() = Some(e);
+                    // Try to store the panic. If lock is poisoned, just ignore it and return false
+                    // to stop the search (we can't propagate if we can't lock).
+                    if let Ok(mut guard) = panic_error_ref.lock() {
+                        *guard = Some(e);
+                    }
                     false
                 }
             }
