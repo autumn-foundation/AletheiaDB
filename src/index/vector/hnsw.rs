@@ -2036,4 +2036,42 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn test_mmap_modification_errors() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mmap_test.usearch");
+
+        // Create and save a valid index
+        {
+            let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+            index.add(NodeId::new(1).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+            index.save(&path)?;
+        }
+
+        // Open as mmap (read-only)
+        let mmap_index = HnswIndex::open_mmap(&path)?;
+
+        // Attempt add - should fail
+        let err = mmap_index
+            .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
+            .unwrap_err();
+        match err {
+            Error::Vector(VectorError::IndexError(msg)) => {
+                assert!(msg.contains("read-only"));
+            }
+            _ => panic!("Expected IndexError(read-only), got: {:?}", err),
+        }
+
+        // Attempt remove - should fail
+        let err = mmap_index.remove(NodeId::new(1).unwrap()).unwrap_err();
+        match err {
+            Error::Vector(VectorError::IndexError(msg)) => {
+                assert!(msg.contains("read-only"));
+            }
+            _ => panic!("Expected IndexError(read-only), got: {:?}", err),
+        }
+
+        Ok(())
+    }
 }
