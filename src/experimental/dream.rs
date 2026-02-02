@@ -6,21 +6,21 @@
 
 use crate::GallifreyDB;
 use crate::utils::Result;
-use std::collections::VecDeque;
 use rand::Rng;
+use std::collections::VecDeque;
 
 // TUI Imports
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Terminal,
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, ListItem, Paragraph, Sparkline},
-    Terminal,
 };
 
 /// Configuration for the dream.
@@ -52,11 +52,16 @@ impl Default for DreamConfig {
 
 /// The state of the dream.
 pub struct DreamState {
+    /// Current position in vector space.
     pub current_vector: Vec<f32>,
+    /// Current velocity vector.
     pub velocity: Vec<f32>,
+    /// History of encountered concepts.
     pub memory_stream: VecDeque<String>,
-    pub last_results: Vec<(String, f32)>, // (Label, Score)
-    pub arousal: f32, // 0.0 to 1.0
+    /// Last search results (Label, Score).
+    pub last_results: Vec<(String, f32)>,
+    /// Simulation arousal level (0.0 to 1.0).
+    pub arousal: f32,
 }
 
 /// The engine that drives the dream.
@@ -67,6 +72,7 @@ pub struct DreamEngine<'a> {
 }
 
 impl<'a> DreamEngine<'a> {
+    /// Create a new DreamEngine.
     pub fn new(db: &'a GallifreyDB, config: DreamConfig) -> Self {
         let current_vector = vec![0.0; config.dimensions];
         let velocity = vec![0.0; config.dimensions];
@@ -107,23 +113,35 @@ impl<'a> DreamEngine<'a> {
         }
 
         // 3. Normalize position (Keep it on the hypersphere)
-        let magnitude: f32 = self.state.current_vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let magnitude: f32 = self
+            .state
+            .current_vector
+            .iter()
+            .map(|x| x * x)
+            .sum::<f32>()
+            .sqrt();
         if magnitude > 1e-6 {
-             for x in &mut self.state.current_vector {
-                 *x /= magnitude;
-             }
+            for x in &mut self.state.current_vector {
+                *x /= magnitude;
+            }
         } else {
             // Re-seed if collapsed to zero
             for i in 0..self.config.dimensions {
                 self.state.current_vector[i] = rng.gen_range(-1.0..1.0);
             }
             // Normalize again
-             let magnitude: f32 = self.state.current_vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-             if magnitude > 1e-6 {
+            let magnitude: f32 = self
+                .state
+                .current_vector
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt();
+            if magnitude > 1e-6 {
                 for x in &mut self.state.current_vector {
                     *x /= magnitude;
                 }
-             }
+            }
         }
 
         // 4. Apply friction to velocity
@@ -136,32 +154,38 @@ impl<'a> DreamEngine<'a> {
         let indexes = self.db.list_vector_indexes();
         // Just pick the first one for now
         if let Some(idx_info) = indexes.first() {
-             let results = self.db.search_vectors_in(&idx_info.property_name, &self.state.current_vector, 5)?;
+            let results = self.db.search_vectors_in(
+                &idx_info.property_name,
+                &self.state.current_vector,
+                5,
+            )?;
 
-             // Update last results
-             self.state.last_results.clear();
+            // Update last results
+            self.state.last_results.clear();
 
-             // In the future: Calculate attraction (Gravity towards memories)
-             // For now just record results
-             for (node_id, score) in results {
-                 // Fetch node label
-                 let label = if let Ok(_node) = self.db.get_node(node_id) {
-                     // Try to find a name property
-                     // But properties are interned. For now just use ID.
-                     // TODO: Resolve node labels properly
-                     format!("Node {}", node_id.as_u64())
-                 } else {
-                     format!("Node {}", node_id.as_u64())
-                 };
+            // In the future: Calculate attraction (Gravity towards memories)
+            // For now just record results
+            for (node_id, score) in results {
+                // Fetch node label
+                let label = if let Ok(_node) = self.db.get_node(node_id) {
+                    // Try to find a name property
+                    // But properties are interned. For now just use ID.
+                    // TODO: Resolve node labels properly
+                    format!("Node {}", node_id.as_u64())
+                } else {
+                    format!("Node {}", node_id.as_u64())
+                };
 
-                 self.state.last_results.push((label.clone(), score));
+                self.state.last_results.push((label.clone(), score));
 
-                 // Add to memory stream
-                 self.state.memory_stream.push_front(format!("[{:.3}] {}", score, label));
-                 if self.state.memory_stream.len() > self.config.history_limit {
-                     self.state.memory_stream.pop_back();
-                 }
-             }
+                // Add to memory stream
+                self.state
+                    .memory_stream
+                    .push_front(format!("[{:.3}] {}", score, label));
+                if self.state.memory_stream.len() > self.config.history_limit {
+                    self.state.memory_stream.pop_back();
+                }
+            }
         }
 
         Ok(())
@@ -180,22 +204,24 @@ impl<'a> DreamEngine<'a> {
     /// Run the TUI visualization loop.
     pub fn run_tui(&mut self) -> Result<()> {
         // Setup terminal
-        enable_raw_mode().map_err(|e| crate::utils::Error::Io(e))?;
+        enable_raw_mode().map_err(crate::utils::Error::Io)?;
         let mut stdout = std::io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture).map_err(|e| crate::utils::Error::Io(e))?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+            .map_err(crate::utils::Error::Io)?;
         let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend).map_err(|e| crate::utils::Error::Io(e))?;
+        let mut terminal = Terminal::new(backend).map_err(crate::utils::Error::Io)?;
 
         let res = self.run_app(&mut terminal);
 
         // Restore terminal
-        disable_raw_mode().map_err(|e| crate::utils::Error::Io(e))?;
+        disable_raw_mode().map_err(crate::utils::Error::Io)?;
         execute!(
             terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture
-        ).map_err(|e| crate::utils::Error::Io(e))?;
-        terminal.show_cursor().map_err(|e| crate::utils::Error::Io(e))?;
+        )
+        .map_err(crate::utils::Error::Io)?;
+        terminal.show_cursor().map_err(crate::utils::Error::Io)?;
 
         if let Err(err) = res {
             println!("{:?}", err);
@@ -211,17 +237,11 @@ impl<'a> DreamEngine<'a> {
                 let chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .margin(1)
-                    .constraints(
-                        [
-                            Constraint::Percentage(50),
-                            Constraint::Percentage(50),
-                        ]
-                        .as_ref(),
-                    )
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
                     .split(size);
 
                 // Left Panel: Memory Stream
-                let items: Vec<ListItem> = self
+                let items: Vec<ListItem<'_>> = self
                     .state
                     .memory_stream
                     .iter()
@@ -229,7 +249,11 @@ impl<'a> DreamEngine<'a> {
                     .collect();
 
                 let list = List::new(items)
-                    .block(Block::default().borders(Borders::ALL).title("The Cortical Stack"))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("The Cortical Stack"),
+                    )
                     .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
                 f.render_widget(list, chunks[0]);
@@ -241,31 +265,44 @@ impl<'a> DreamEngine<'a> {
                     .split(chunks[1]);
 
                 // Vector Viz (Sparkline of first 40 dims)
-                let spark_data: Vec<u64> = self.state.current_vector.iter().take(40)
+                let spark_data: Vec<u64> = self
+                    .state
+                    .current_vector
+                    .iter()
+                    .take(40)
                     .map(|&v| ((v + 1.0) * 50.0).clamp(0.0, 100.0) as u64)
                     .collect();
 
                 let sparkline = Sparkline::default()
-                    .block(Block::default().title("Neural Activity").borders(Borders::ALL))
+                    .block(
+                        Block::default()
+                            .title("Neural Activity")
+                            .borders(Borders::ALL),
+                    )
                     .data(&spark_data)
                     .style(Style::default().fg(Color::Cyan));
 
                 f.render_widget(sparkline, right_chunks[0]);
 
                 // Status
-                let velocity_mag = self.state.velocity.iter().map(|x| x*x).sum::<f32>().sqrt();
+                let velocity_mag = self
+                    .state
+                    .velocity
+                    .iter()
+                    .map(|x| x * x)
+                    .sum::<f32>()
+                    .sqrt();
                 let status_text = format!(
                     "Arousal: {:.2}\nVelocity: {:.4}\n\nPress 'q' to wake up.",
-                    self.state.arousal,
-                    velocity_mag
+                    self.state.arousal, velocity_mag
                 );
                 let paragraph = Paragraph::new(status_text)
-                     .block(Block::default().borders(Borders::ALL).title("Status"));
+                    .block(Block::default().borders(Borders::ALL).title("Status"));
                 f.render_widget(paragraph, right_chunks[1]);
-
             })?;
 
             // Input
+            #[allow(clippy::collapsible_if)]
             if event::poll(std::time::Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if let KeyCode::Char('q') = key.code {
@@ -275,7 +312,7 @@ impl<'a> DreamEngine<'a> {
             }
 
             // Tick
-            if let Err(_) = self.tick() {
+            if self.tick().is_err() {
                 // Ignore tick errors (like empty DB)
             }
         }
@@ -318,6 +355,9 @@ mod tests {
 
         // Should remain normalized
         let magnitude: f32 = new_pos.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((magnitude - 1.0).abs() < 1e-4, "Vector should remain normalized");
+        assert!(
+            (magnitude - 1.0).abs() < 1e-4,
+            "Vector should remain normalized"
+        );
     }
 }

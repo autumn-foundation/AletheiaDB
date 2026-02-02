@@ -4,6 +4,9 @@
 //! They are gated behind the `nova` feature flag.
 
 #[cfg(feature = "nova")]
+/// Dream mode visualization.
+pub mod dream;
+#[cfg(feature = "nova")]
 /// Associative retrieval ("Fishing") module.
 pub mod fishing;
 #[cfg(feature = "nova")]
@@ -12,6 +15,3 @@ pub mod graph_context;
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
-#[cfg(feature = "nova")]
-/// Dream mode visualization.
-pub mod dream;

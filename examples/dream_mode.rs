@@ -6,11 +6,11 @@
 //! a knowledge graph), and then launches the "Dream Mode" visualization.
 
 use gallifreydb::GallifreyDB;
+use gallifreydb::HnswConfig;
+use gallifreydb::PropertyMapBuilder;
 #[cfg(feature = "nova")]
 use gallifreydb::experimental::dream::{DreamConfig, DreamEngine};
-use gallifreydb::HnswConfig;
 use gallifreydb::index::vector::DistanceMetric;
-use gallifreydb::PropertyMapBuilder;
 use rand::Rng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,7 +53,7 @@ fn run_dream() -> Result<(), Box<dyn std::error::Error>> {
             *x = rng.gen_range(-1.0..1.0);
         }
         // Normalize
-        let mag: f32 = vector.iter().map(|x| x*x).sum::<f32>().sqrt();
+        let mag: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
         if mag > 1e-6 {
             for x in &mut vector {
                 *x /= mag;
