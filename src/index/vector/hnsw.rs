@@ -870,6 +870,7 @@ impl VectorIndex for HnswIndex {
         // FFI Safety: We must catch any panics in the predicate to prevent them
         // from unwinding into C++ code (usearch), which is Undefined Behavior
         // and can cause process aborts.
+        // We use a Mutex to capture the panic payload safely across threads.
         let panic_error = std::sync::Mutex::new(None);
         let panic_error_ref = &panic_error;
 
