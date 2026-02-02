@@ -3,17 +3,17 @@
 | Metadata | Details |
 | :--- | :--- |
 | **ID** | SPEC-001 |
-| **Status** | 🚧 Draft |
+| **Status** | 🔍 Review |
 | **Owner** | Vantage (Product) |
 | **Implementer** | Nova (Engineering) |
 | **Priority** | P1 (High) |
-| **Related Code** | `src/experimental/semantic_pathfinding.rs` |
+| **Related Code** | `src/experimental/semantic_pathfinding.rs` (Planned) |
 
 ## 1. 👤 User Story
 
 > **As a** RAG (Retrieval-Augmented Generation) Developer,
-> **I want to** find paths between entities that are semantically consistent with a specific concept or topic,
-> **So that** I can retrieve multi-hop context for an LLM that explains *how* two things are related without polluting the context window with irrelevant ("off-topic") structural connections.
+> **I want to** find nodes that are semantically similar but structurally distant, and the paths connecting them,
+> **So that** I can discover and explain non-obvious relationships without polluting the context window with irrelevant ("off-topic") structural connections.
 
 ## 2. 🧐 The "So What?" (Business Value)
 
@@ -41,17 +41,19 @@ Real-world reasoning often requires traversing a graph but staying "in context".
 2.  **Time-Travel Support**:
     - Must expose `find_path_at_time(start, end, query, timestamp)`.
     - Must strictly respect the `valid_time` of edges and nodes (do not traverse edges that didn't exist or were deleted at `timestamp`).
-    - *Note:* The current experimental implementation has limitations regarding deleted edges in `CurrentStorage`. This must be fixed or documented as a known limitation for V1.
 
 3.  **Result Format**:
     - Returns an ordered `Vec<NodeId>` representing the path.
     - Should optionally return the "Semantic Cost" of the path (confidence score).
+    - Must handle cases where no path is found gracefully (return empty `Option` or specific Error, no panic).
 
 4.  **Configuration**:
     - Allow tuning the balance between Structural Weight vs. Semantic Weight (e.g., `alpha` parameter).
 
 ### Non-Functional Requirements (Constraints)
--   **Performance**: Must be significantly faster than exhaustive BFS for "deep" graphs when a strong semantic signal exists (heuristic pruning).
+-   **Performance**:
+    - Latency < 50ms for 5-hop paths on 1M node graph.
+    - Must be significantly faster than exhaustive BFS for "deep" graphs when a strong semantic signal exists.
 -   **Safety**: Must handle `NaN` in vectors gracefully (no panics).
 -   **Scale**: Must support paths up to 50 hops (configurable `max_depth`).
 
@@ -63,16 +65,16 @@ Real-world reasoning often requires traversing a graph but staying "in context".
 
 ## 5. 📝 Gap Analysis (Current vs. Spec)
 
-| Feature | Current State (`experimental`) | Required State (`core`) | Action |
+| Feature | Current State | Required State | Action |
 | :--- | :--- | :--- | :--- |
-| **Algorithm** | Manual `BinaryHeap` impl | Optimized generic `A*` | Refactor to use `pathfinding` crate or optimized internal struct |
-| **Time-Travel** | Broken for deleted edges | Robust | Fix `CurrentStorage` visibility logic or force `HistoricalStorage` lookup |
-| **API** | Internal Struct | Public `Graph` Trait method | Expose via `QueryBuilder` |
-| **Weighting** | Hardcoded `0.1` structural cost | Configurable | Add configuration struct |
+| **Code** | Missing (`src/experimental/semantic_pathfinding.rs`) | Implemented | Create experimental module |
+| **Algorithm** | None | Optimized `A*` | Implement heuristic traversal |
+| **Time-Travel** | N/A | Robust | Ensure `CurrentStorage` visibility logic handles deletions |
+| **API** | None | Public `Graph` Trait method | Expose via `QueryBuilder` |
 
 ## 6. 📅 Execution Plan
 
-1.  **Promote** `src/experimental/semantic_pathfinding.rs` to `src/algo/pathfinding.rs`.
-2.  **Refactor** to fix the Time-Travel edge deletion bug (Critical).
-3.  **Expose** via the main `GallifreyDB` struct and `QueryBuilder`.
+1.  **Create** `src/experimental/semantic_pathfinding.rs` (gated by `nova`).
+2.  **Implement** A* heuristic using `pathfinding` crate or internal structure.
+3.  **Refactor** `CurrentStorage` access to ensure time-travel correctness.
 4.  **Test** with the standard "Apple vs. Orange" dataset.
