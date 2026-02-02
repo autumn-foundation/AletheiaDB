@@ -449,7 +449,12 @@ for (node_id, drift_score) in drifted_nodes {
 
 ### Narrative Generation (Experimental)
 
-> **Note**: This feature requires the `nova` feature flag enabled in `Cargo.toml`.
+> **Requires `nova` feature**
+>
+> Run the demo:
+> ```bash
+> cargo run --example story_demo --features nova
+> ```
 
 ```rust
 use gallifreydb::experimental::temporal_narrative::NarrativeGenerator;
@@ -790,7 +795,7 @@ See `docs/adr/` for all architectural decisions.
 **Other Examples:**
 - `examples/observability_demo.rs` - Production observability features
 - `examples/doctor_who_demo.rs` - Temporal graph modeling example
-- `examples/story_demo.rs` - Narrative generation example (requires `nova` feature)
+- `examples/story_demo.rs` - Narrative generation example (Run: `cargo run --example story_demo --features nova`)
 
 ## Use Cases
 
