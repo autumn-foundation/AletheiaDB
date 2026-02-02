@@ -22,11 +22,14 @@ pub mod redb_cold_storage;
 pub mod sharding;
 pub mod snapshot;
 pub mod tiered_storage;
-pub mod version;
 pub mod wal;
 pub mod wal_reader;
 
 // Re-export commonly used types
+pub use crate::core::version;
+pub use crate::core::version::{
+    AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData,
+};
 pub use checkpoint::{
     CheckpointConfig as UnifiedCheckpointConfig, CheckpointManager, CheckpointStats,
 };
@@ -46,6 +49,5 @@ pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot, StorageSna
 pub use tiered_storage::{
     LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
 };
-pub use version::{AnchorConfig, EdgeVersion, NodeVersion, PropertyDelta, VersionData};
 pub use wal::{LSN, WalEntry, WalOperation};
 pub use wal_reader::read_wal_entries;
