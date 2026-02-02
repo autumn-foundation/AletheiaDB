@@ -447,6 +447,28 @@ for (node_id, drift_score) in drifted_nodes {
 }
 ```
 
+### Narrative Generation (Experimental)
+
+> **Note**: This feature requires the `nova` feature flag enabled in `Cargo.toml`.
+
+```rust
+use gallifreydb::experimental::temporal_narrative::NarrativeGenerator;
+
+// Generate natural language history of a node
+let generator = NarrativeGenerator::new(&db);
+let narrative = generator.generate_node_narrative(node_id)?;
+
+for event in narrative {
+    println!("Version {}: {}", event.version_number, event.description);
+    // Output: "Version 1: Node created with label 'Person'."
+
+    for change in event.changes {
+        println!("  - {}", change);
+        // Output: "  - Initial property 'name': 'Alice'"
+    }
+}
+```
+
 ### Index Persistence (Fast Cold Starts)
 
 ```rust
