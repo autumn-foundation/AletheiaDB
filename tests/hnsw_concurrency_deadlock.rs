@@ -10,7 +10,11 @@ fn test_deadlock_save_vs_update() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("deadlock_test");
 
-    let index = Arc::new(HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap());
+    let index = Arc::new(
+        HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap(),
+    );
 
     // Add an initial node
     let node_id = NodeId::new(1).unwrap();
@@ -34,11 +38,11 @@ fn test_deadlock_save_vs_update() {
     // This locks `id_mapping` (bucket write/entry), then `inner` (write)
     let handle_update = thread::spawn(move || {
         for i in 0..1000 {
-             // Short sleep to increase interleaving chances
+            // Short sleep to increase interleaving chances
             // thread::sleep(Duration::from_millis(1));
             // Toggle vector to force updates
             let val = if i % 2 == 0 { 1.0 } else { 0.0 };
-            let _ = index_clone2.add(node_id, &[val, 1.0-val, 0.0, 0.0]);
+            let _ = index_clone2.add(node_id, &[val, 1.0 - val, 0.0, 0.0]);
         }
     });
 
