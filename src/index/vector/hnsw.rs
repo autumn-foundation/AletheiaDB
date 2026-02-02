@@ -380,7 +380,13 @@ where
         // We verified they are not null above.
         let slice_a = unsafe { std::slice::from_raw_parts(a, dims) };
         let slice_b = unsafe { std::slice::from_raw_parts(b, dims) };
-        distance_fn(slice_a, slice_b)
+
+        // FFI Safety: Wrap user code in catch_unwind to prevent panics from unwinding into C++
+        // If user metric panics, return infinity to effectively ignore this comparison
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            distance_fn(slice_a, slice_b)
+        }))
+        .unwrap_or(f32::MAX)
     })
 }
 
@@ -860,18 +866,48 @@ impl VectorIndex for HnswIndex {
         // This avoids ~1-2ns of validation overhead per candidate node examined.
         // For searches examining 1,000 nodes, this saves ~1-2μs total.
         let reverse_mapping = &self.reverse_mapping;
+
+        // FFI Safety: We must catch any panics in the predicate to prevent them
+        // from unwinding into C++ code (usearch), which is Undefined Behavior
+        // and can cause process aborts.
+        let panic_error = std::sync::Mutex::new(None);
+        let panic_error_ref = &panic_error;
+
         let filter = |key: u64| -> bool {
-            if let Some(node_id_ref) = reverse_mapping.get(&key) {
-                predicate(node_id_ref.value())
-            } else {
-                false
+            // Fast path: if a panic already occurred, stop processing
+            if panic_error_ref.lock().unwrap().is_some() {
+                return false;
+            }
+
+            // Wrap the user predicate in catch_unwind
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some(node_id_ref) = reverse_mapping.get(&key) {
+                    predicate(node_id_ref.value())
+                } else {
+                    false
+                }
+            }));
+
+            match result {
+                Ok(val) => val,
+                Err(e) => {
+                    *panic_error_ref.lock().unwrap() = Some(e);
+                    false
+                }
             }
         };
 
         // Retry with exponential backoff to handle thread pool exhaustion
         // Under heavy concurrent load, usearch may fail with "No available threads to lock"
         for attempt in 0..MAX_SEARCH_ATTEMPTS {
-            match index.filtered_search(query, k_capped, filter) {
+            let search_result = index.filtered_search(query, k_capped, filter);
+
+            // Check if a panic occurred during execution
+            if let Some(e) = panic_error.lock().unwrap().take() {
+                std::panic::resume_unwind(e);
+            }
+
+            match search_result {
                 Ok(matches) => {
                     self.stats
                         .searches_performed
@@ -2239,5 +2275,41 @@ mod tests {
             // Then save_mappings should fail.
             panic!("Expected IndexError, got {:?}", result);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "Intentional panic")]
+    fn test_search_with_filter_panic_propagation() {
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        let node1 = NodeId::new(1).unwrap();
+        index.add(node1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // This panics inside the filter callback, which is called by FFI.
+        // If not handled, this is UB and might abort.
+        // If handled correctly, it should unwind back to here and be caught by should_panic.
+        let _ = index.search_with_filter(&[1.0, 0.0, 0.0, 0.0], 1, |_| {
+            panic!("Intentional panic");
+        });
+    }
+
+    #[test]
+    fn test_metric_wrapper_user_panic() {
+        // Create a wrapper with a panicking function
+        let distance_fn = Arc::new(|_: &[f32], _: &[f32]| -> f32 {
+            panic!("Metric panic");
+        });
+        let wrapper = create_metric_wrapper(4, distance_fn);
+
+        let vec = [0.0f32; 4];
+        let ptr = vec.as_ptr();
+
+        // This should NOT panic/abort. It should return f32::MAX.
+        // Currently (before fix), it will panic/abort.
+        let result = wrapper(ptr, ptr);
+
+        // Assert loose equality for float
+        assert!(result > 3.4e38); // f32::MAX is ~3.4028e38
     }
 }
