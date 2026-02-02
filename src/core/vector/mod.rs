@@ -92,9 +92,9 @@ pub mod validation;
 pub(crate) mod simd;
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod simd_safety;
+#[cfg(test)]
+mod tests;
 
 pub use constants::*;
 pub use metric::*;
