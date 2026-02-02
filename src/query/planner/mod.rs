@@ -115,99 +115,42 @@ impl QueryPlanner {
 
     /// Apply a QueryOp to the current logical plan
     fn apply_query_op(&self, current: Option<LogicalOp>, op: &QueryOp) -> Result<LogicalOp> {
+        // Check if it is a source operation (starts a new pipeline)
+        if let Some(source_op) = self.apply_source_op(op)? {
+            return Ok(source_op);
+        }
+
+        // If not a source op, we must have a current input
+        let input = current.ok_or_else(|| self.missing_source_error(op))?;
+
+        self.apply_unary_op(input, op)
+    }
+
+    /// Try to apply a source operation. Returns Ok(Some(op)) if successful,
+    /// Ok(None) if it's not a source operation.
+    fn apply_source_op(&self, op: &QueryOp) -> Result<Option<LogicalOp>> {
         match op {
-            // Source operations
-            QueryOp::StartNode(id) => Ok(LogicalOp::Scan(ScanOp::NodeLookup(vec![*id]))),
+            QueryOp::StartNode(id) => Ok(Some(LogicalOp::Scan(ScanOp::NodeLookup(vec![*id])))),
 
-            QueryOp::StartNodes(ids) => Ok(LogicalOp::Scan(ScanOp::NodeLookup(ids.clone()))),
+            QueryOp::StartNodes(ids) => Ok(Some(LogicalOp::Scan(ScanOp::NodeLookup(ids.clone())))),
 
-            QueryOp::ScanNodes { label } => Ok(LogicalOp::Scan(ScanOp::NodeScan {
+            QueryOp::ScanNodes { label } => Ok(Some(LogicalOp::Scan(ScanOp::NodeScan {
                 label: label.clone(),
                 estimated_rows: None,
-            })),
+            }))),
 
             QueryOp::VectorSearch {
                 embedding,
                 k,
                 metric,
                 property_key,
-            } => Ok(LogicalOp::Scan(ScanOp::VectorSearch {
+            } => Ok(Some(LogicalOp::Scan(ScanOp::VectorSearch {
                 embedding: embedding.clone(),
                 k: *k,
                 label_filter: None,
                 metric: *metric,
                 property_key: property_key.clone(),
-            })),
-
-            // Graph operations - require input
-            QueryOp::TraverseOut { label, depth } => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Traverse requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(
-                    UnaryOp::Traverse {
-                        direction: super::ir::Direction::Outgoing,
-                        label: label.clone(),
-                        depth: *depth,
-                    },
-                    input,
-                ))
-            }
-
-            QueryOp::TraverseIn { label, depth } => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Traverse requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(
-                    UnaryOp::Traverse {
-                        direction: super::ir::Direction::Incoming,
-                        label: label.clone(),
-                        depth: *depth,
-                    },
-                    input,
-                ))
-            }
-
-            QueryOp::TraverseBoth { label, depth } => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Traverse requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(
-                    UnaryOp::Traverse {
-                        direction: super::ir::Direction::Both,
-                        label: label.clone(),
-                        depth: *depth,
-                    },
-                    input,
-                ))
-            }
-
-            // Vector operations
-            QueryOp::RankBySimilarity {
-                embedding,
-                top_k,
-                property_key,
-            } => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "RankBySimilarity requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(
-                    UnaryOp::VectorRank {
-                        embedding: embedding.clone(),
-                        top_k: *top_k,
-                        property_key: property_key.clone(),
-                    },
-                    input,
-                ))
-            }
+            }))),
 
             QueryOp::SimilarTo {
                 source_node,
@@ -217,101 +160,88 @@ impl QueryPlanner {
             } => {
                 // SimilarTo is a scan operation that looks up a node, extracts its embedding,
                 // and performs k-NN search - all handled by the executor
-                Ok(LogicalOp::Scan(ScanOp::SimilarToNode {
+                Ok(Some(LogicalOp::Scan(ScanOp::SimilarToNode {
                     source_node: *source_node,
                     property_key: property_key.as_deref().unwrap_or("embedding").to_string(),
                     k: *k,
                     label_filter: label_filter.clone(),
-                }))
+                })))
             }
 
+            _ => Ok(None),
+        }
+    }
+
+    /// Apply a unary operation to an input logical op.
+    fn apply_unary_op(&self, input: LogicalOp, op: &QueryOp) -> Result<LogicalOp> {
+        match op {
+            // Graph operations
+            QueryOp::TraverseOut { label, depth } => Ok(LogicalOp::unary(
+                UnaryOp::Traverse {
+                    direction: super::ir::Direction::Outgoing,
+                    label: label.clone(),
+                    depth: *depth,
+                },
+                input,
+            )),
+
+            QueryOp::TraverseIn { label, depth } => Ok(LogicalOp::unary(
+                UnaryOp::Traverse {
+                    direction: super::ir::Direction::Incoming,
+                    label: label.clone(),
+                    depth: *depth,
+                },
+                input,
+            )),
+
+            QueryOp::TraverseBoth { label, depth } => Ok(LogicalOp::unary(
+                UnaryOp::Traverse {
+                    direction: super::ir::Direction::Both,
+                    label: label.clone(),
+                    depth: *depth,
+                },
+                input,
+            )),
+
+            // Vector operations
+            QueryOp::RankBySimilarity {
+                embedding,
+                top_k,
+                property_key,
+            } => Ok(LogicalOp::unary(
+                UnaryOp::VectorRank {
+                    embedding: embedding.clone(),
+                    top_k: *top_k,
+                    property_key: property_key.clone(),
+                },
+                input,
+            )),
+
+            // Filter operations
             QueryOp::Filter(predicate) => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Filter requires a source".to_string(),
-                    })
-                })?;
                 Ok(LogicalOp::unary(UnaryOp::Filter(predicate.clone()), input))
             }
 
-            QueryOp::FilterLabel(label) => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "FilterLabel requires a source".to_string(),
-                    })
-                })?;
-                // Convert label filter to predicate on _label property
-                Ok(LogicalOp::unary(
-                    UnaryOp::Filter(super::ir::Predicate::Eq {
-                        key: "_label".to_string(),
-                        value: super::ir::PredicateValue::String(label.clone()),
-                    }),
-                    input,
-                ))
-            }
+            QueryOp::FilterLabel(label) => Ok(LogicalOp::unary(
+                UnaryOp::Filter(super::ir::Predicate::Eq {
+                    key: "_label".to_string(),
+                    value: super::ir::PredicateValue::String(label.clone()),
+                }),
+                input,
+            )),
 
-            QueryOp::Limit(n) => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Limit requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(UnaryOp::Limit(*n), input))
-            }
+            QueryOp::Limit(n) => Ok(LogicalOp::unary(UnaryOp::Limit(*n), input)),
 
-            QueryOp::Skip(n) => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Skip requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(UnaryOp::Skip(*n), input))
-            }
-
-            // Temporal operations are handled at plan level, not as operators
-            QueryOp::AsOf { .. } | QueryOp::Between { .. } | QueryOp::TrackChanges { .. } => {
-                // These are handled by temporal_context in the plan
-                current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Temporal operation requires context".to_string(),
-                    })
-                })
-            }
+            QueryOp::Skip(n) => Ok(LogicalOp::unary(UnaryOp::Skip(*n), input)),
 
             // Aggregation operations
-            QueryOp::Count => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Count requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(UnaryOp::Count, input))
-            }
+            QueryOp::Count => Ok(LogicalOp::unary(UnaryOp::Count, input)),
 
-            QueryOp::Distinct => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Distinct requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(UnaryOp::Distinct, input))
-            }
+            QueryOp::Distinct => Ok(LogicalOp::unary(UnaryOp::Distinct, input)),
 
-            QueryOp::Project(props) => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Project requires a source".to_string(),
-                    })
-                })?;
-                Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input))
-            }
+            QueryOp::Project(props) => Ok(LogicalOp::unary(UnaryOp::Project(props.clone()), input)),
 
             QueryOp::Sort { key, descending } => {
-                let input = current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "Sort requires a source".to_string(),
-                    })
-                })?;
                 // Convert IR SortKey to Plan SortKey
                 let plan_key = match key {
                     crate::query::ir::SortKey::Property(prop) => SortKey::Property(prop.clone()),
@@ -329,13 +259,44 @@ impl QueryPlanner {
 
             QueryOp::GetEdges { direction: _ } => {
                 // Handle get edges - for now, just pass through
-                current.ok_or_else(|| {
-                    Error::Query(QueryError::SyntaxError {
-                        message: "GetEdges requires a source".to_string(),
-                    })
-                })
+                Ok(input)
             }
+
+            // Temporal operations are handled at plan level, not as operators
+            QueryOp::AsOf { .. } | QueryOp::Between { .. } | QueryOp::TrackChanges { .. } => {
+                // Pass through the input unchanged (original behavior)
+                Ok(input)
+            }
+
+            // Should have been handled by apply_source_op
+            _ => Err(Error::Query(QueryError::SyntaxError {
+                message: format!("Unexpected source operation in unary context: {:?}", op),
+            })),
         }
+    }
+
+    /// Generate an appropriate error message for missing source.
+    fn missing_source_error(&self, op: &QueryOp) -> Error {
+        let op_name = match op {
+            QueryOp::TraverseOut { .. }
+            | QueryOp::TraverseIn { .. }
+            | QueryOp::TraverseBoth { .. } => "Traverse",
+            QueryOp::Filter(_) => "Filter",
+            QueryOp::FilterLabel(_) => "FilterLabel",
+            QueryOp::Limit(_) => "Limit",
+            QueryOp::Skip(_) => "Skip",
+            QueryOp::Count => "Count",
+            QueryOp::Distinct => "Distinct",
+            QueryOp::Project(_) => "Project",
+            QueryOp::Sort { .. } => "Sort",
+            QueryOp::RankBySimilarity { .. } => "RankBySimilarity",
+            QueryOp::GetEdges { .. } => "GetEdges",
+            _ => "Operation",
+        };
+
+        Error::Query(QueryError::SyntaxError {
+            message: format!("{} requires a source", op_name),
+        })
     }
 
     /// Apply optimization rules iteratively until no more changes
@@ -407,6 +368,23 @@ impl QueryPlanner {
         }
     }
 
+    /// Helper to validate vector index existence
+    fn validate_vector_index(&self, property_key: Option<&str>) -> Result<String> {
+        let effective_property = property_key.unwrap_or("embedding").to_string();
+
+        if !self.storage.has_vector_index(&effective_property) {
+            return Err(Error::Query(QueryError::IndexNotFound {
+                index_type: "vector".to_string(),
+                property_name: effective_property.clone(),
+                hint: Some(format!(
+                    "Call db.enable_vector_index(\"{}\", config) first",
+                    effective_property
+                )),
+            }));
+        }
+        Ok(effective_property)
+    }
+
     /// Convert a scan operation to physical
     ///
     /// # Index Validation
@@ -452,20 +430,7 @@ impl QueryPlanner {
                 metric: _,
                 property_key,
             } => {
-                // Use specified property or default to "embedding"
-                let effective_property = property_key.as_deref().unwrap_or("embedding").to_string();
-
-                // Validate that vector index is enabled for the property
-                if !self.storage.has_vector_index(&effective_property) {
-                    return Err(Error::Query(QueryError::IndexNotFound {
-                        index_type: "vector".to_string(),
-                        property_name: effective_property,
-                        hint: Some(format!(
-                            "Call db.enable_vector_index(\"{}\", config) first",
-                            property_key.as_deref().unwrap_or("embedding")
-                        )),
-                    }));
-                }
+                self.validate_vector_index(property_key.as_deref())?;
 
                 if let Some((_, tx_time)) = temporal.as_ref().and_then(|ctx| ctx.as_of_tuple()) {
                     return Ok(PhysicalOp::TemporalVectorSearch {
@@ -499,36 +464,13 @@ impl QueryPlanner {
                 })
             }
 
-            // TemporalVectorSearch can be created via two paths:
-            // 1. Direct: ScanOp::TemporalVectorSearch (from programmatic logical plan construction)
-            //    - This path is used when code directly creates a LogicalPlan with TemporalVectorSearch
-            //    - Less common, mainly for advanced use cases or internal transformations
-            // 2. Conversion: ScanOp::VectorSearch + temporal_context → PhysicalOp::TemporalVectorSearch
-            //    - This is the primary path used by QueryBuilder when .as_of() or .between() is combined
-            //      with .find_similar() or .find_similar_builder().property("key")
-            //    - Handled above at lines 447-453 where VectorSearch checks temporal_context
-            //    - The property_key from VectorSearch is preserved in the conversion
-            // Both paths validate property_key against enabled vector indexes.
             ScanOp::TemporalVectorSearch {
                 embedding,
                 k,
                 timestamp,
                 property_key,
             } => {
-                // Use specified property or default to "embedding"
-                let effective_property = property_key.as_deref().unwrap_or("embedding");
-
-                // Validate that vector index is enabled for the property
-                if !self.storage.has_vector_index(effective_property) {
-                    return Err(Error::Query(QueryError::IndexNotFound {
-                        index_type: "vector".to_string(),
-                        property_name: effective_property.to_string(),
-                        hint: Some(format!(
-                            "Call db.enable_vector_index(\"{}\", config) first",
-                            effective_property
-                        )),
-                    }));
-                }
+                self.validate_vector_index(property_key.as_deref())?;
 
                 Ok(PhysicalOp::TemporalVectorSearch {
                     embedding: embedding.clone(),
@@ -543,17 +485,7 @@ impl QueryPlanner {
                 k,
                 label_filter,
             } => {
-                // Validate that vector index is enabled for SimilarTo queries
-                if !self.storage.is_vector_index_enabled() {
-                    let property_name = property_key.clone();
-                    return Err(Error::Query(QueryError::IndexNotFound {
-                        index_type: "vector".to_string(),
-                        property_name,
-                        hint: Some(
-                            "Call db.enable_vector_index(\"embedding\", config) first".to_string(),
-                        ),
-                    }));
-                }
+                self.validate_vector_index(Some(property_key))?;
 
                 Ok(PhysicalOp::SimilarToNode {
                     source_node: *source_node,
@@ -616,20 +548,7 @@ impl QueryPlanner {
                 top_k,
                 property_key,
             } => {
-                // Use specified property or default to "embedding"
-                let effective_property = property_key.as_deref().unwrap_or("embedding").to_string();
-
-                // Validate that vector index is enabled for reranking
-                if !self.storage.has_vector_index(&effective_property) {
-                    return Err(Error::Query(QueryError::IndexNotFound {
-                        index_type: "vector".to_string(),
-                        property_name: effective_property,
-                        hint: Some(format!(
-                            "Call db.enable_vector_index(\"{}\", config) first",
-                            property_key.as_deref().unwrap_or("embedding")
-                        )),
-                    }));
-                }
+                self.validate_vector_index(property_key.as_deref())?;
 
                 Ok(PhysicalOp::VectorRerank {
                     input: Box::new(input),
