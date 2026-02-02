@@ -5,12 +5,17 @@
 //! This example creates a database, seeds it with random vectors (simulating
 //! a knowledge graph), and then launches the "Dream Mode" visualization.
 
+#[cfg(feature = "nova")]
 use gallifreydb::GallifreyDB;
+#[cfg(feature = "nova")]
 use gallifreydb::HnswConfig;
+#[cfg(feature = "nova")]
 use gallifreydb::PropertyMapBuilder;
 #[cfg(feature = "nova")]
 use gallifreydb::experimental::dream::{DreamConfig, DreamEngine};
+#[cfg(feature = "nova")]
 use gallifreydb::index::vector::DistanceMetric;
+#[cfg(feature = "nova")]
 use rand::Rng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         println!("This example requires the 'nova' feature.");
         println!("Run with: cargo run --example dream_mode --features nova");
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(feature = "nova")]
