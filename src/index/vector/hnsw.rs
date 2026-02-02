@@ -2056,21 +2056,21 @@ mod tests {
         let err = mmap_index
             .add(NodeId::new(2).unwrap(), &[0.0, 1.0, 0.0, 0.0])
             .unwrap_err();
-        match err {
-            Error::Vector(VectorError::IndexError(msg)) => {
-                assert!(msg.contains("read-only"));
-            }
-            _ => panic!("Expected IndexError(read-only), got: {:?}", err),
-        }
+
+        assert!(
+            matches!(err, Error::Vector(VectorError::IndexError(ref msg)) if msg.contains("read-only")),
+            "Expected IndexError(read-only), got: {:?}",
+            err
+        );
 
         // Attempt remove - should fail
         let err = mmap_index.remove(NodeId::new(1).unwrap()).unwrap_err();
-        match err {
-            Error::Vector(VectorError::IndexError(msg)) => {
-                assert!(msg.contains("read-only"));
-            }
-            _ => panic!("Expected IndexError(read-only), got: {:?}", err),
-        }
+
+        assert!(
+            matches!(err, Error::Vector(VectorError::IndexError(ref msg)) if msg.contains("read-only")),
+            "Expected IndexError(read-only), got: {:?}",
+            err
+        );
 
         Ok(())
     }
