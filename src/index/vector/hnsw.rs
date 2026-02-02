@@ -571,6 +571,14 @@ impl HnswIndexBuilder {
 ///
 /// Indexes opened via `open_mmap()` are read-only. Attempting to call `add()`
 /// or `remove()` on a memory-mapped index will return an error.
+///
+/// # Lock Ordering Invariant
+///
+/// To prevent deadlocks, locks MUST be acquired in this order:
+/// 1. `id_mapping` (DashMap)
+/// 2. `inner` (RwLock<Index>)
+///
+/// Never acquire `id_mapping` while holding `inner`.
 pub struct HnswIndex {
     /// Underlying usearch index
     inner: Arc<RwLock<Index>>,
@@ -692,7 +700,7 @@ impl VectorIndex for HnswIndex {
 
                 #[cfg(test)]
                 if INJECT_RACE_DELAY.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
 
                 // Re-acquire map lock (read) to ensure lock ordering (Map -> Index) and verify state.
@@ -714,7 +722,9 @@ impl VectorIndex for HnswIndex {
                 if !is_valid {
                     #[cfg(test)]
                     HIT_RACE_CONDITION.fetch_add(1, Ordering::Relaxed);
-                    // Race lost: node was removed or replaced. Abort add.
+                    // Race lost: node was removed or replaced.
+                    // Clean up the reverse mapping before aborting to avoid leaking a stale key->id entry.
+                    self.reverse_mapping.remove(&key);
                     return Ok(());
                 }
 
@@ -2090,8 +2100,60 @@ mod tests {
 
             // Assert counter incremented
             let hits = HIT_RACE_CONDITION.load(Ordering::Relaxed);
-            assert!(hits > 0, "Failed to hit race path. Count: {}", hits);
-            println!("Race path hit {} times.", hits);
+            assert!(
+                hits > 0,
+                "Failed to hit 'Removed' race path. Count: {}",
+                hits
+            );
+            println!("'Removed' race path hit {} times.", hits);
+        }
+
+        // --- Scenario 2: Deterministic "Replaced" Path ---
+        {
+            println!("Testing 'Replaced' race condition handling...");
+            let index = Arc::new(
+                HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+                    .build()
+                    .unwrap(),
+            );
+            let id = NodeId::new(200).unwrap();
+            let vec1 = vec![0.1, 0.2, 0.3, 0.4];
+            let vec2 = vec![0.5, 0.6, 0.7, 0.8];
+
+            // Enable delay
+            INJECT_RACE_DELAY.store(true, Ordering::Relaxed);
+            // Reset hits
+            HIT_RACE_CONDITION.store(0, Ordering::Relaxed);
+
+            let index_clone = index.clone();
+            let vec1_clone = vec1.clone();
+            let handle = thread::spawn(move || {
+                // Thread 1: Add (vacant) -> Insert Key1 -> Sleep 50ms -> Verify
+                let _ = index_clone.add(id, &vec1_clone);
+            });
+
+            // Main thread: Wait for key to appear (Key1)
+            while !index.id_mapping.contains_key(&id) {
+                thread::yield_now();
+            }
+
+            // Replace: Remove then Add (Key2)
+            // Note: We must remove to clear the map entry so the next add generates a NEW key.
+            // If we just called add() again, it would update the existing entry (Key1) and succeed.
+            let _ = index.remove(id);
+            let _ = index.add(id, &vec2);
+
+            // Wait for Thread 1
+            handle.join().unwrap();
+
+            // Assert hit
+            let hits = HIT_RACE_CONDITION.load(Ordering::Relaxed);
+            assert!(
+                hits > 0,
+                "Failed to hit 'Replaced' race path. Count: {}",
+                hits
+            );
+            println!("'Replaced' race path hit {} times.", hits);
         }
 
         // Disable injection
