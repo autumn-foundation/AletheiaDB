@@ -11,8 +11,8 @@ use crate::query::planner::Statistics;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::tracker::PersistenceTracker;
-use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use crate::storage::wal::DurabilityMode;
+use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
 use parking_lot::RwLock;
 use std::sync::{Arc, Mutex};
 
@@ -121,7 +121,8 @@ pub struct GallifreyDB {
     #[allow(dead_code)]
     pub(crate) persistence_config: crate::storage::index_persistence::PersistenceConfig,
     /// Index persistence manager (if enabled)
-    pub(crate) persistence_manager: Option<Arc<crate::storage::index_persistence::IndexPersistenceManager>>,
+    pub(crate) persistence_manager:
+        Option<Arc<crate::storage::index_persistence::IndexPersistenceManager>>,
     /// Persistence mutation tracking
     pub(crate) persistence_tracker: Option<Arc<PersistenceTracker>>,
     /// Background persistence thread health flag - set to true if thread panics or stops

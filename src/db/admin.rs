@@ -6,7 +6,9 @@ use crate::query::planner::Statistics;
 #[cfg(test)]
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::{HistoricalStats, HistoricalStorage};
-use crate::storage::index_persistence::operations::{persist_temporal_index, persist_vector_indexes};
+use crate::storage::index_persistence::operations::{
+    persist_temporal_index, persist_vector_indexes,
+};
 use crate::utils::error::{Result, StorageError};
 use crate::utils::lock::RwLockExt;
 use parking_lot::RwLock;

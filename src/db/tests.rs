@@ -1,8 +1,8 @@
 use super::*;
 use crate::api::transaction::{ReadOps, WriteOps};
 use crate::core::GLOBAL_INTERNER;
-use crate::core::property::{PropertyMapBuilder, PropertyValue};
 use crate::core::id::NodeId;
+use crate::core::property::{PropertyMapBuilder, PropertyValue};
 use crate::utils::error::Result;
 
 #[test]
@@ -753,8 +753,8 @@ fn test_full_bitemporal_workflow() {
             PropertyMapBuilder::new()
                 .insert("name", "Alice Smith")
                 .build(),
-                Some(feb_1), // Name changed on Feb 1
-            )
+            Some(feb_1), // Name changed on Feb 1
+        )
     })
     .unwrap();
 
