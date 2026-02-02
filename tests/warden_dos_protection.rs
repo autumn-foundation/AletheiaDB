@@ -1,6 +1,4 @@
-use gallifreydb::core::property::{
-    deserialize_sparse_vector, PropertyMap, TAG_SPARSE_VECTOR,
-};
+use gallifreydb::core::property::{PropertyMap, TAG_SPARSE_VECTOR, deserialize_sparse_vector};
 
 #[test]
 fn test_property_map_allocation_limit() {
@@ -11,8 +9,9 @@ fn test_property_map_allocation_limit() {
     buffer.extend_from_slice(&count.to_le_bytes());
 
     // We don't provide the actual data.
-    // Without the fix, this would allocate HashMap(1_000_001) and then fail with "Buffer too short".
-    // With the fix, this should fail immediately with "exceeds maximum allowed".
+    // Without the fix, this would allocate HashMap(1_000_001) and then fail with
+    // "Buffer too short". With the fix, this should fail immediately with
+    // "exceeds maximum allowed".
 
     let result = PropertyMap::deserialize(&buffer);
 
@@ -20,7 +19,8 @@ fn test_property_map_allocation_limit() {
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("exceeds maximum allowed"),
-        "Expected error about maximum capacity, got: {}", err
+        "Expected error about maximum capacity, got: {}",
+        err
     );
 }
 
@@ -45,6 +45,7 @@ fn test_sparse_vector_allocation_limit() {
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("exceeds maximum allowed"),
-        "Expected error about maximum capacity, got: {}", err
+        "Expected error about maximum capacity, got: {}",
+        err
     );
 }
