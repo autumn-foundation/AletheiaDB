@@ -5,6 +5,7 @@ This document describes the core architecture principles, design patterns, and s
 ## Table of Contents
 
 - [Architecture Principles](#architecture-principles)
+- [System Context (C4 Model)](#system-context-c4-model)
 - [Design Patterns](#design-patterns)
 - [Hybrid Storage Architecture](#hybrid-storage-architecture)
 - [Temporal Query Processing](#temporal-query-processing)
@@ -53,6 +54,20 @@ This document describes the core architecture principles, design patterns, and s
 - **Isolation**: MVCC provides snapshot isolation
 - **Durability**: WAL + fsync guarantees
 
+## System Context (C4 Model)
+
+```mermaid
+C4Context
+  title System Context diagram for GallifreyDB
+
+  Person(user, "Developer / LLM Agent", "Uses the database for knowledge retrieval")
+  System(gallifreydb, "GallifreyDB", "Bi-temporal Graph Database")
+  System_Ext(filesystem, "File System", "Stores WAL, Indexes, and Cold Data")
+
+  Rel(user, gallifreydb, "Reads/Writes", "Rust API / GQL")
+  Rel(gallifreydb, filesystem, "Persists", "mmap / fsync")
+```
+
 ## Design Patterns
 
 ### Hybrid Storage Architecture
@@ -74,6 +89,7 @@ classDiagram
     }
 
     QueryEngine --> StorageTrait : Uses (Trait Bound)
+    %% Removed the circular dependency arrow
     RedbImplementation ..|> StorageTrait : Implements
     CurrentStorage --|> StorageTrait : Implements
     HistoricalStorage --|> StorageTrait : Implements
@@ -122,30 +138,35 @@ GallifreyDB's architecture separates current state from historical data for opti
 ```mermaid
 sequenceDiagram
     participant User
-    participant Current as Current Storage
+    participant Core as Core (QueryEngine)
+    participant Storage as Storage (Current/Historical)
     participant WAL
-    participant Historical as Historical Storage
 
-    Note over User, Current: Write Path
-    User->>Current: Write Transaction
-    Current->>WAL: Append Entry
-    WAL-->>Current: LSN
-    Current->>Current: Update In-Memory State
-    Current-->>User: Success
+    Note over User, Core: Write Path
+    User->>Core: Write Transaction
+    Core->>Storage: Apply Changes (via Trait)
+    Storage->>WAL: Append Entry
+    WAL-->>Storage: LSN
+    Storage-->>Core: Success
+    Core-->>User: Commit ID
 
     rect rgb(240, 240, 240)
-        Note right of Current: Async Background Process
-        Current->>Historical: Background Flush
-        Historical->>Historical: Compress & Index
+        Note right of Storage: Async Background Process
+        Storage->>Storage: Background Flush
+        Storage->>Storage: Compress & Index
     end
 
-    Note over User, Current: Query Path
-    User->>Current: Query (Latest)
-    Current-->>User: Result (Fast Path)
+    Note over User, Core: Query Path
+    User->>Core: Query (Latest)
+    Core->>Storage: Get Node (Current)
+    Storage-->>Core: Result
+    Core-->>User: Result (Fast Path)
 
-    User->>Historical: Query (Time Travel)
-    Historical->>Historical: Reconstruct State
-    Historical-->>User: Result (Temporal Path)
+    User->>Core: Query (Time Travel)
+    Core->>Storage: Get History
+    Storage->>Storage: Reconstruct State
+    Storage-->>Core: Versioned Node
+    Core-->>User: Result (Temporal Path)
 ```
 
 ## Temporal Query Processing
