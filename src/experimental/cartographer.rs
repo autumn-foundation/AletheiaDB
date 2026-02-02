@@ -1,7 +1,6 @@
 use crate::core::id::NodeId;
 use crate::db::GallifreyDB;
 use crate::utils::Result;
-use std::collections::HashMap;
 
 /// A semantic region in the graph, defined by a cluster of similar vectors.
 #[derive(Debug, Clone)]
@@ -81,23 +80,21 @@ impl Cartographer {
             }
         }
 
-        if points.is_empty() {
-            return Ok(RegionMap { regions: Vec::new() });
-        }
-
-        if num_regions == 0 {
-             return Ok(RegionMap { regions: Vec::new() });
+        if points.is_empty() || num_regions == 0 {
+            return Ok(RegionMap {
+                regions: Vec::new(),
+            });
         }
 
         let dimensions = points[0].1.len();
         // Validate dimensions
         for (_, p) in &points {
             if p.len() != dimensions {
-                 return Err(crate::utils::Error::Vector(
+                return Err(crate::utils::Error::Vector(
                     crate::utils::error::VectorError::DimensionMismatch {
                         expected: dimensions,
                         actual: p.len(),
-                    }
+                    },
                 ));
             }
         }
@@ -108,11 +105,7 @@ impl Cartographer {
         // 2. Initialize Centroids (Deterministic: First k points)
         // In a real implementation, we might use K-Means++ or random initialization.
         // For reproducibility and minimal dependencies, we use the first k points.
-        let mut centroids: Vec<Vec<f32>> = points
-            .iter()
-            .take(k)
-            .map(|(_, v)| v.clone())
-            .collect();
+        let mut centroids: Vec<Vec<f32>> = points.iter().take(k).map(|(_, v)| v.clone()).collect();
 
         // 3. K-Means Loop
         let mut assignments: Vec<usize> = vec![0; points.len()];
@@ -209,32 +202,40 @@ mod tests {
 
         // Create 2 clusters of points
         // Cluster A: Around [0, 0]
-        let a1 = db.create_node(
-            "Point",
-            PropertyMapBuilder::new()
-                .insert_vector("vec", &[0.1, 0.1])
-                .build()
-        ).unwrap();
-        let a2 = db.create_node(
-            "Point",
-            PropertyMapBuilder::new()
-                .insert_vector("vec", &[0.2, 0.2])
-                .build()
-        ).unwrap();
+        let a1 = db
+            .create_node(
+                "Point",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.1, 0.1])
+                    .build(),
+            )
+            .unwrap();
+        let a2 = db
+            .create_node(
+                "Point",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[0.2, 0.2])
+                    .build(),
+            )
+            .unwrap();
 
         // Cluster B: Around [10, 10]
-        let b1 = db.create_node(
-            "Point",
-            PropertyMapBuilder::new()
-                .insert_vector("vec", &[10.1, 10.1])
-                .build()
-        ).unwrap();
-        let b2 = db.create_node(
-            "Point",
-            PropertyMapBuilder::new()
-                .insert_vector("vec", &[10.2, 10.2])
-                .build()
-        ).unwrap();
+        let b1 = db
+            .create_node(
+                "Point",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[10.1, 10.1])
+                    .build(),
+            )
+            .unwrap();
+        let b2 = db
+            .create_node(
+                "Point",
+                PropertyMapBuilder::new()
+                    .insert_vector("vec", &[10.2, 10.2])
+                    .build(),
+            )
+            .unwrap();
 
         let cartographer = Cartographer::new();
         let map = cartographer.generate_map(&db, "vec", 2).unwrap();
@@ -242,7 +243,11 @@ mod tests {
         assert_eq!(map.regions.len(), 2);
 
         // Find which region contains a1
-        let region_a_idx = map.regions.iter().position(|r| r.members.contains(&a1)).unwrap();
+        let region_a_idx = map
+            .regions
+            .iter()
+            .position(|r| r.members.contains(&a1))
+            .unwrap();
         let region_a = &map.regions[region_a_idx];
 
         // Ensure a2 is in the same region
@@ -273,14 +278,16 @@ mod tests {
             "Point",
             PropertyMapBuilder::new()
                 .insert_vector("vec", &[0.1, 0.1])
-                .build()
-        ).unwrap();
+                .build(),
+        )
+        .unwrap();
         db.create_node(
             "Point",
             PropertyMapBuilder::new()
                 .insert_vector("vec", &[0.1, 0.1, 0.1]) // 3D
-                .build()
-        ).unwrap();
+                .build(),
+        )
+        .unwrap();
 
         let cartographer = Cartographer::new();
         let result = cartographer.generate_map(&db, "vec", 2);
