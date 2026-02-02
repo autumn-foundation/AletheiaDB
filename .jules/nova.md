@@ -29,3 +29,11 @@
 - LLMs need "context" more than just "data". Formatting the graph as a narrative document makes it consumable by text-based models.
 - Reusing `TemporalNarrative` avoided duplication.
 - InternedString resolution is a common friction point in experimental modules; maybe `GraphContext` logic could be generalized into a `Display` trait for Nodes?
+
+## Chronoscope
+**Concept:** A TUI (Text User Interface) explorer for visualizing the bi-temporal history of nodes using `ratatui`.
+**Fate:** Merged (Experimental)
+**Lesson:**
+- Visualizing Valid Time vs Transaction Time as a scatter plot makes the bi-temporal model much more intuitive.
+- The `QueryBuilder::scan(None)` method is powerful but needed a limit to be safe for TUI usage.
+- `ratatui` integration was smooth, but TTY dependency makes automated testing tricky (relies on manual verification or mocks).
