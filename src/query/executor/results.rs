@@ -9,6 +9,8 @@ use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
 use crate::utils::error::Result;
 
+use crossterm::style::Stylize;
+
 use super::iterators::ResultIterator;
 
 /// A path through the graph, represented as a sequence of entity IDs.
@@ -467,7 +469,19 @@ impl std::fmt::Display for QueryResult {
                                 .resolve(*k)
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| format!("key:{}", k.as_u32()));
-                            format!("{}: {}", k_str, v)
+                            let val_str = if let Some(b) = v.as_bool() {
+                                if b {
+                                    format!(
+                                        "{}",
+                                        crossterm::style::style(b).with(crossterm::style::Color::Green)
+                                    )
+                                } else {
+                                    format!("{}", v)
+                                }
+                            } else {
+                                format!("{}", v)
+                            };
+                            format!("{}: {}", k_str, val_str)
                         })
                         .collect();
 
