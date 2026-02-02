@@ -116,7 +116,12 @@ pub struct GallifreyDB {
     default_durability: DurabilityMode,
     /// Query optimization statistics - cached across queries for effective cost-based optimization
     stats: Arc<Statistics>,
-    /// Index persistence configuration (stored for potential future use)
+    /// Index persistence configuration.
+    ///
+    /// Stored for potential future use (e.g., dynamic reconfiguration or
+    /// checking config values at runtime). Currently marked `dead_code`
+    /// as it's not actively read after initialization, but kept for
+    /// API completeness and future-proofing.
     #[allow(dead_code)]
     persistence_config: crate::storage::index_persistence::PersistenceConfig,
     /// Index persistence manager (if enabled)
@@ -2307,25 +2312,17 @@ impl GallifreyDB {
 
     /// Get the current WAL LSN (test-only helper).
     ///
-    /// This method provides access to the current WAL Log Sequence Number for
-    /// test verification purposes. This is particularly useful for testing index
-    /// persistence where LSN coordination with the WAL is critical for correctness.
+    /// # Developer Note
     ///
-    /// **Warning**: This method exposes internal implementation details and
-    /// should only be used in tests.
+    /// This method is prefixed with `__test_` to indicate it is an internal
+    /// helper strictly for integration tests. It exposes implementation details
+    /// (WAL LSN) that are not part of the public API contract and may change
+    /// without warning.
     ///
-    /// # Returns
+    /// **Do not use in production code.**
     ///
-    /// The current LSN from the WAL system.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let db = GallifreyDB::new();
-    /// db.create_node("Person", properties)?;
-    /// let lsn = db.__test_current_wal_lsn();
-    /// assert!(lsn > 0); // LSN advances after operations
-    /// ```
+    /// This is particularly useful for testing index persistence where LSN
+    /// coordination with the WAL is critical for correctness.
     #[doc(hidden)]
     pub fn __test_current_wal_lsn(&self) -> u64 {
         self.wal.current_lsn().0

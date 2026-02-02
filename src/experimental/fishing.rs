@@ -11,6 +11,54 @@
 //! - **Casting**: Finding the initial set of nodes similar to the bait.
 //! - **Spreading the Net**: traversing edges from the initial set.
 //! - **Freshness**: Preferring recently updated information.
+//!
+//! # Feature Requirement
+//!
+//! **⚠️ This module requires the `nova` feature to be enabled.**
+//!
+//! Add this to your `Cargo.toml`:
+//! ```toml
+//! [dependencies]
+//! gallifreydb = { version = "0.1", features = ["nova"] }
+//! ```
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use gallifreydb::GallifreyDB;
+//! use gallifreydb::experimental::fishing::{FishingRod, FishingTrip, Bait};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = GallifreyDB::new()?;
+//!
+//! // Configure the trip
+//! let trip = FishingTrip {
+//!     limit: 10,
+//!     depth: 1, // Look 1 hop away from similar nodes
+//!     vector_weight: 1.0,
+//!     graph_weight: 0.5,
+//!     freshness_weight: 0.2, // Prefer recent nodes
+//!     ..Default::default()
+//! };
+//!
+//! // Cast the line with a vector "bait"
+//! let bait = Bait::Vector {
+//!     vector: vec![0.1, 0.2, 0.3], // Your query embedding
+//!     property: None, // Auto-detect vector index
+//! };
+//!
+//! let rod = FishingRod::new(&db);
+//! let catches = rod.cast(bait, trip)?;
+//!
+//! for catch in catches {
+//!     println!(
+//!         "Caught Node {:?} (Score: {:.2})\nProvenance: {}",
+//!         catch.node_id, catch.score, catch.provenance
+//!     );
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::GallifreyDB;
 use crate::core::id::NodeId;
