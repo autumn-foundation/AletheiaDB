@@ -1,6 +1,6 @@
 # ADR-0027: Decouple Storage from Core
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-01-27
 **Deciders:** GallifreyDB Core Team
 **Categories:** architecture, storage, core, modularity
