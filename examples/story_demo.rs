@@ -1,3 +1,27 @@
+//! Narrative Generation Example (Story Demo)
+//!
+//! This example demonstrates how to use the experimental Narrative Generation feature
+//! to create natural language histories of graph nodes.
+//!
+//! # Prerequisites
+//!
+//! This feature is experimental and requires the `nova` feature flag.
+//!
+//! ## Running this example
+//!
+//! ```bash
+//! cargo run --features nova --example story_demo
+//! ```
+//!
+//! ## Using in your project
+//!
+//! Add the `nova` feature to your `Cargo.toml`:
+//!
+//! ```toml
+//! [dependencies]
+//! gallifreydb = { version = "0.1", features = ["nova"] }
+//! ```
+
 use gallifreydb::GallifreyDB;
 use gallifreydb::PropertyMapBuilder;
 use gallifreydb::WriteOps;
