@@ -44,6 +44,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::storage::index_persistence::PersistenceConfig;
+use crate::storage::version::AnchorConfig;
 
 /// Configuration for WAL (Write-Ahead Log) system.
 ///
@@ -332,14 +333,25 @@ pub struct HistoricalConfig {
     /// Larger cache improves temporal query performance.
     /// Default: 10000
     pub reconstruction_cache_size: usize,
+
+    /// Create an anchor every N versions (default: 10).
+    /// Smaller intervals mean faster reconstruction but more storage.
+    pub anchor_interval: u32,
+
+    /// Maximum delta chain length before forcing an anchor (default: 20).
+    /// Ensures reconstruction cost is bounded.
+    pub max_delta_chain: u32,
 }
 
 impl Default for HistoricalConfig {
     fn default() -> Self {
+        let anchor_defaults = AnchorConfig::default();
         Self {
             max_versions_per_entity: 1000,
             max_reconstruction_depth: 100,
             reconstruction_cache_size: 10000,
+            anchor_interval: anchor_defaults.anchor_interval,
+            max_delta_chain: anchor_defaults.max_delta_chain,
         }
     }
 }
@@ -408,6 +420,36 @@ impl HistoricalConfigBuilder {
             ));
         }
         self.config.reconstruction_cache_size = size;
+        Ok(self)
+    }
+
+    /// Set the anchor interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `interval` is 0.
+    pub fn anchor_interval(mut self, interval: u32) -> Result<Self, ConfigError> {
+        if interval == 0 {
+            return Err(ConfigError::InvalidValue(
+                "anchor_interval must be greater than 0".into(),
+            ));
+        }
+        self.config.anchor_interval = interval;
+        Ok(self)
+    }
+
+    /// Set the maximum delta chain length.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidValue` if `max` is 0.
+    pub fn max_delta_chain(mut self, max: u32) -> Result<Self, ConfigError> {
+        if max == 0 {
+            return Err(ConfigError::InvalidValue(
+                "max_delta_chain must be greater than 0".into(),
+            ));
+        }
+        self.config.max_delta_chain = max;
         Ok(self)
     }
 
@@ -773,6 +815,8 @@ mod tests {
         assert_eq!(config.max_versions_per_entity, 1000);
         assert_eq!(config.max_reconstruction_depth, 100);
         assert_eq!(config.reconstruction_cache_size, 10000);
+        assert_eq!(config.anchor_interval, 10);
+        assert_eq!(config.max_delta_chain, 20);
     }
 
     #[test]
@@ -784,11 +828,17 @@ mod tests {
             .unwrap()
             .reconstruction_cache_size(20000)
             .unwrap()
+            .anchor_interval(5)
+            .unwrap()
+            .max_delta_chain(10)
+            .unwrap()
             .build();
 
         assert_eq!(config.max_versions_per_entity, 5000);
         assert_eq!(config.max_reconstruction_depth, 200);
         assert_eq!(config.reconstruction_cache_size, 20000);
+        assert_eq!(config.anchor_interval, 5);
+        assert_eq!(config.max_delta_chain, 10);
     }
 
     #[test]
@@ -950,6 +1000,7 @@ mod tests {
         assert!(toml_string.contains("num_stripes"));
         assert!(toml_string.contains("max_versions_per_entity"));
         assert!(toml_string.contains("max_k"));
+        assert!(toml_string.contains("anchor_interval"));
     }
 
     #[test]
@@ -994,6 +1045,8 @@ flush_interval_ms = 20
 max_versions_per_entity = 5000
 max_reconstruction_depth = 200
 reconstruction_cache_size = 20000
+anchor_interval = 5
+max_delta_chain = 10
 
 [vector]
 max_k = 20000
@@ -1013,6 +1066,8 @@ max_layer = 32
         assert_eq!(config.historical.max_versions_per_entity, 5000);
         assert_eq!(config.historical.max_reconstruction_depth, 200);
         assert_eq!(config.historical.reconstruction_cache_size, 20000);
+        assert_eq!(config.historical.anchor_interval, 5);
+        assert_eq!(config.historical.max_delta_chain, 10);
 
         // Vector config
         assert_eq!(config.vector.max_k, 20000);
@@ -1275,6 +1330,20 @@ wal_dir = "/custom/path/to/wal"
     #[test]
     fn test_historical_config_zero_cache_size() {
         let result = HistoricalConfigBuilder::new().reconstruction_cache_size(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_historical_config_zero_anchor_interval() {
+        let result = HistoricalConfigBuilder::new().anchor_interval(0);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn test_historical_config_zero_max_delta_chain() {
+        let result = HistoricalConfigBuilder::new().max_delta_chain(0);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::InvalidValue(_)));
     }
