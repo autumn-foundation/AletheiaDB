@@ -150,16 +150,22 @@ impl<'a> SemanticPathfinder<'a> {
     /// Find a path at a specific point in time.
     ///
     /// Similar to `find_path`, but only considers nodes and edges valid at `time`.
+    /// Uses the temporal adjacency index to find edges that existed at the specified
+    /// time, even if they have been deleted from current storage.
     ///
-    /// # Limitations
-    /// Currently only considers edges that exist in the *current* storage but checks
-    /// their validity at `time`. Does not find edges that were deleted.
+    /// # Arguments
+    /// * `start` - Starting node ID.
+    /// * `end` - Target node ID.
+    /// * `query_embedding` - Vector representing the semantic concept to follow.
+    /// * `time` - The timestamp at which to evaluate the graph.
+    /// * `max_depth` - Maximum path length (to prevent infinite loops in large graphs).
     pub fn find_path_at_time(
         &self,
         start: NodeId,
         end: NodeId,
         query_embedding: &[f32],
         time: Timestamp,
+        max_depth: usize,
     ) -> Result<Option<Vec<NodeId>>> {
         let mut pq = BinaryHeap::new();
         let mut dist = HashMap::new();
@@ -189,12 +195,17 @@ impl<'a> SemanticPathfinder<'a> {
                 }
             }
 
-            // Get POTENTIAL outgoing edges from current storage
-            // Note: This misses deleted edges!
-            let potential_edges = self.db.get_outgoing_edges(node);
+            // Check depth limit to prevent infinite loops
+            if depth >= max_depth {
+                continue;
+            }
 
-            for edge_id in potential_edges {
-                // Check if edge existed at time T
+            // Get outgoing edges at the specified time using temporal adjacency index
+            // This includes edges that have been deleted from current storage
+            let temporal_edges = self.db.get_outgoing_edges_at_time(node, time, time);
+
+            for edge_id in temporal_edges {
+                // Get edge details at the specified time
                 if let Ok(edge) = self.db.get_edge_at_time(edge_id, time, time) {
                     let target = edge.target;
 
@@ -401,7 +412,7 @@ mod tests {
 
         // Query at t0: Path should exist (BEFORE DELETION)
         let path_t0 = pathfinder
-            .find_path_at_time(start, end, &query, t0)
+            .find_path_at_time(start, end, &query, t0, 10)
             .unwrap();
         assert!(path_t0.is_some(), "Path should exist at t0 before deletion");
 
@@ -415,15 +426,20 @@ mod tests {
             .unwrap();
         let _t1 = t_delete;
 
-        // Query at t0 AFTER deletion: Path should NOT exist due to limitation
-        // (Deleted edges are removed from current storage adjacency)
+        // Query at t0 AFTER deletion: With temporal adjacency index (enabled by default),
+        // the path SHOULD be found even though edges are deleted from current storage
         let path_t0_after_delete = pathfinder
-            .find_path_at_time(start, end, &query, t0)
+            .find_path_at_time(start, end, &query, t0, 10)
             .unwrap();
         assert!(
-            path_t0_after_delete.is_none(),
-            "Should be None due to current storage limitation"
+            path_t0_after_delete.is_some(),
+            "Temporal adjacency index (enabled by default) should find path through deleted edges"
         );
+        let path = path_t0_after_delete.unwrap();
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0], start);
+        assert_eq!(path[1], middle);
+        assert_eq!(path[2], end);
 
         // Test "Future Path" scenario: Path exists now but didn't in past
 
@@ -448,23 +464,22 @@ mod tests {
 
         // Path exists at t2
         let path_t2 = pathfinder
-            .find_path_at_time(start, end, &query, t2)
+            .find_path_at_time(start, end, &query, t2, 10)
             .unwrap();
         assert!(path_t2.is_some(), "Path should exist at t2");
 
-        // Path through NewMiddle did NOT exist at t0
-        // (And we know path through Middle is effectively invisible due to deletion)
-        // But specifically, NewMiddle edges shouldn't be valid at t0
-        // find_path_at_time iterates current edges (which include NewMiddle edges)
-        // but filters them by `is_visible_at(t0)`.
-        // NewMiddle edges are valid from t2. t0 < t2. So they should NOT be visible.
-
+        // Query at t0 again: Should find the ORIGINAL path through middle
+        // (not the new path through new_middle which was created at t2)
+        // With temporal adjacency index, deleted edges are still accessible
+        // when querying at times before they were deleted.
         let path_t0_check = pathfinder
-            .find_path_at_time(start, end, &query, t0)
+            .find_path_at_time(start, end, &query, t0, 10)
             .unwrap();
         assert!(
-            path_t0_check.is_none(),
-            "New path should not be visible at t0"
+            path_t0_check.is_some(),
+            "Should find original path at t0 (through middle, not new_middle)"
         );
+        // Verify it's the original middle node, not new_middle
+        assert_eq!(path_t0_check.as_ref().unwrap()[1], middle);
     }
 }

@@ -307,6 +307,16 @@ impl GallifreyDB {
             .write()
             .set_temporal_indexes(Arc::clone(&db.temporal_indexes));
 
+        // Initialize and enable temporal adjacency index for efficient temporal pathfinding
+        let temporal_adjacency_index = Arc::new(
+            crate::index::temporal_adjacency::TemporalAdjacencyIndex::new(
+                crate::index::temporal_adjacency::TemporalAdjacencyConfig::default(),
+            ),
+        );
+        db.historical
+            .write()
+            .set_temporal_adjacency_index(temporal_adjacency_index);
+
         Ok(db)
     }
 
@@ -368,6 +378,16 @@ impl GallifreyDB {
         db.historical
             .write()
             .set_temporal_indexes(Arc::clone(&db.temporal_indexes));
+
+        // Initialize and enable temporal adjacency index for efficient temporal pathfinding
+        let temporal_adjacency_index = Arc::new(
+            crate::index::temporal_adjacency::TemporalAdjacencyIndex::new(
+                crate::index::temporal_adjacency::TemporalAdjacencyConfig::default(),
+            ),
+        );
+        db.historical
+            .write()
+            .set_temporal_adjacency_index(temporal_adjacency_index);
 
         Ok(db)
     }
@@ -825,6 +845,84 @@ impl GallifreyDB {
     /// Get outgoing edges with a specific label (current state).
     pub fn get_outgoing_edges_with_label(&self, node_id: NodeId, label: &str) -> Vec<EdgeId> {
         self.current.get_outgoing_edges_with_label(node_id, label)
+    }
+
+    /// Get outgoing edges from a node at a specific point in time.
+    ///
+    /// This method uses the temporal adjacency index to efficiently find all
+    /// edges that were valid at the specified time, including edges that have
+    /// been deleted in current storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The source node ID
+    /// * `valid_time` - The valid time to query
+    /// * `tx_time` - The transaction time to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of edge IDs that were valid at the specified time. Returns an
+    /// empty vector if no temporal adjacency index is configured.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::GallifreyDB;
+    /// use gallifreydb::core::temporal::time;
+    ///
+    /// let db = GallifreyDB::new().unwrap();
+    /// // ... create and delete edges ...
+    /// let edges = db.get_outgoing_edges_at_time(node_id, valid_time, tx_time);
+    /// ```
+    pub fn get_outgoing_edges_at_time(
+        &self,
+        source: NodeId,
+        valid_time: Timestamp,
+        tx_time: Timestamp,
+    ) -> Vec<EdgeId> {
+        self.historical
+            .read_or_err()
+            .map(|storage| storage.get_outgoing_edges_at_time(source, valid_time, tx_time))
+            .unwrap_or_else(|_| Vec::new())
+    }
+
+    /// Get incoming edges to a node at a specific point in time.
+    ///
+    /// This method uses the temporal adjacency index to efficiently find all
+    /// edges that were valid at the specified time, including edges that have
+    /// been deleted in current storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The target node ID
+    /// * `valid_time` - The valid time to query
+    /// * `tx_time` - The transaction time to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of edge IDs that were valid at the specified time. Returns an
+    /// empty vector if no temporal adjacency index is configured.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gallifreydb::GallifreyDB;
+    /// use gallifreydb::core::temporal::time;
+    ///
+    /// let db = GallifreyDB::new().unwrap();
+    /// // ... create and delete edges ...
+    /// let edges = db.get_incoming_edges_at_time(node_id, valid_time, tx_time);
+    /// ```
+    pub fn get_incoming_edges_at_time(
+        &self,
+        target: NodeId,
+        valid_time: Timestamp,
+        tx_time: Timestamp,
+    ) -> Vec<EdgeId> {
+        self.historical
+            .read_or_err()
+            .map(|storage| storage.get_incoming_edges_at_time(target, valid_time, tx_time))
+            .unwrap_or_else(|_| Vec::new())
     }
 
     /// Get a node as it existed at a specific point in bi-temporal space.
