@@ -107,3 +107,20 @@ Refactored `OpenAIConfig::from_env` and `HuggingFaceConfig::from_env` to use an 
 - **Audited:** Verified that `serialize_vector_into` and `deserialize_vector` perform strict bounds checking (`data_slice.len() == dimension * 4`) and handle alignment correctly via `Vec::with_capacity`.
 - **Documented:** Added "Verified by Warden" comments explaining the safety proofs (validity of f32 bit patterns, alignment guarantees).
 - **Verified:** Added `tests/warden_property_safety.rs` to fuzz truncated and malformed inputs, confirming that safe guards trigger before `unsafe` blocks are reached.
+
+## 2026-02-16 - Allocation Bomb DoS Hardening
+
+**Threat:** Allocation Bomb in Property Deserialization
+`PropertyMap::deserialize` and `deserialize_sparse_vector` blindly trusted the declared count/size fields from the input buffer.
+- `PropertyMap::deserialize` would call `HashMap::with_capacity(count)`. A malicious payload declaring `count = 4_000_000_000` would cause the server to attempt a massive allocation (32GB+), leading to an immediate OOM crash (DoS).
+- `deserialize_sparse_vector` had a similar issue with `nnz` (number of non-zero elements).
+
+**Defense:** Capacity Limits
+Enforced strict capacity limits during deserialization:
+- `PropertyMap`: `count` must be <= `MAX_PROPERTY_MAP_CAPACITY` (10,000).
+- `SparseVector`: `nnz` must be <= `MAX_VECTOR_DIMENSIONS` (100,000).
+
+**Verification:** Reproduction Test
+Added `tests/warden_dos_repro.rs` which simulates malicious payloads with excessive counts.
+- Before fix: Code attempted allocation (and failed with "Buffer too short" or potentially OOM).
+- After fix: Code immediately returns `StorageError::CorruptedData` citing the capacity limit, protecting memory resources.
