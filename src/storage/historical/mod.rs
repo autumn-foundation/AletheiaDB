@@ -3131,6 +3131,6 @@ impl HistoricalStats {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod coverage_tests;
+#[cfg(test)]
+mod tests;

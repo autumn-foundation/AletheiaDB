@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
-use tempfile::tempdir;
 use std::sync::Arc;
+use tempfile::tempdir;
 
 #[test]
 fn test_cold_storage_accessor_coverage() {
@@ -70,8 +70,18 @@ fn test_get_version_tiered_fallback_coverage() {
     assert_eq!(retrieved_edge.unwrap().id, edge_ver_id);
 
     // Verify missing version returns None
-    assert!(historical.get_node_version_tiered(VersionId::new(999).unwrap()).unwrap().is_none());
-    assert!(historical.get_edge_version_tiered(VersionId::new(999).unwrap()).unwrap().is_none());
+    assert!(
+        historical
+            .get_node_version_tiered(VersionId::new(999).unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        historical
+            .get_edge_version_tiered(VersionId::new(999).unwrap())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
