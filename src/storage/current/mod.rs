@@ -996,65 +996,6 @@ impl CurrentStorage {
         self.vector_indexes.iter().map(|r| r.key().clone()).min()
     }
 
-    /// Helper method to prepare for vector search.
-    /// Returns the `Arc<HnswIndex>` and the query vector.
-    ///
-    /// This uses the "default" property (first enabled) for backward compatibility.
-    /// For multi-property searches, use `find_similar_in` instead.
-    ///
-    /// # Performance (Issue #188)
-    ///
-    /// This method returns `Arc<[f32]>` instead of `Vec<f32>` to avoid unnecessary
-    /// memory allocation. The query vector is stored internally as `Arc<[f32]>`,
-    /// so returning an Arc clone (O(1) refcount increment) is much cheaper than
-    /// copying the entire vector (O(n) allocation + copy).
-    ///
-    /// For 384-dim embeddings, this saves ~1.5KB allocation per search.
-    /// For 1536-dim embeddings, this saves ~6KB allocation per search.
-    fn prepare_vector_search(&self, query_node_id: NodeId) -> Result<(Arc<HnswIndex>, Arc<[f32]>)> {
-        // Get the default property name
-        let prop_name = self.get_default_vector_property_name().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Vector index is not enabled".to_string(),
-            ))
-        })?;
-
-        // Get the index from DashMap (where actual data is stored)
-        let entry = self.vector_indexes.get(&prop_name).ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                format!("Vector index not found for property '{}'", prop_name),
-            ))
-        })?;
-
-        let query_node = self
-            .indexes
-            .get_node(query_node_id)
-            .ok_or(StorageError::NodeNotFound(query_node_id))?;
-
-        // Use as_arc_vector() to get an Arc clone (O(1)) instead of to_vec() (O(n))
-        // This avoids unnecessary memory allocation - Issue #188
-        let query_vector = query_node
-            .properties
-            .get(&prop_name)
-            .ok_or_else(|| StorageError::PropertyNotFound(prop_name.clone()))?
-            .as_arc_vector()
-            .ok_or_else(|| {
-                crate::utils::error::Error::Vector(
-                    crate::utils::error::VectorError::InvalidVector {
-                        reason: "Property is not a vector".to_string(),
-                    },
-                )
-            })?;
-
-        // Explicitly drop query_node before cloning the index Arc.
-        // While get_node() returns an owned Node (not a lock guard), this
-        // makes the lifetime scope explicit and matches the original code.
-        drop(query_node);
-
-        let index = Arc::clone(&entry.value().index);
-
-        Ok((index, query_vector))
-    }
 
     /// Get or create filter statistics for a label (Issue #334).
     ///
@@ -1135,12 +1076,9 @@ impl CurrentStorage {
     /// - Query node does not have the indexed vector property
     /// - The property is not a vector
     pub fn find_similar(&self, query_node_id: NodeId, k: usize) -> Result<Vec<(NodeId, f32)>> {
-        let (index, query_vector) = self.prepare_vector_search(query_node_id)?;
-
-        let mut results = index.search(&query_vector, k + 1)?;
-        results.retain(|(id, _)| *id != query_node_id);
-        results.truncate(k);
-        Ok(results)
+        let (prop_name, index, _) = self.get_vector_index_internal(None)?;
+        let query_vector = self.get_node_vector(query_node_id, &prop_name)?;
+        self.run_vector_search(&index, &query_vector, k, None, Some(query_node_id))
     }
 
     /// Find k most similar nodes with a specific label.
@@ -1153,27 +1091,9 @@ impl CurrentStorage {
         label: &str,
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let (index, query_vector) = self.prepare_vector_search(query_node_id)?;
-        let label_id = GLOBAL_INTERNER.intern(label)?;
-
-        let (candidates_to_fetch, stats) = self.calculate_adaptive_candidates(k, label);
-
-        let mut results =
-            index.search_with_filter(&query_vector, candidates_to_fetch, |node_id| {
-                self.indexes
-                    .get_node(*node_id)
-                    .map(|n| n.label == label_id)
-                    .unwrap_or(false)
-            })?;
-
-        results.retain(|(id, _)| *id != query_node_id);
-        let results_count = results.len();
-        results.truncate(k);
-
-        // Record search statistics for adaptive learning (Issue #334)
-        stats.record_search(candidates_to_fetch, results_count);
-
-        Ok(results)
+        let (prop_name, index, _) = self.get_vector_index_internal(None)?;
+        let query_vector = self.get_node_vector(query_node_id, &prop_name)?;
+        self.run_vector_search(&index, &query_vector, k, Some(label), Some(query_node_id))
     }
 
     /// Find k most similar nodes to a raw embedding vector.
@@ -1200,9 +1120,18 @@ impl CurrentStorage {
         embedding: &[f32],
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let index = self.prepare_vector_search_raw(embedding)?;
-        let results = index.search(embedding, k)?;
-        Ok(results)
+        let (_, index, config) = self.get_vector_index_internal(None)?;
+
+        if embedding.len() != config.dimensions {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::DimensionMismatch {
+                    expected: config.dimensions,
+                    actual: embedding.len(),
+                },
+            ));
+        }
+
+        self.run_vector_search(&index, embedding, k, None, None)
     }
 
     /// Find k most similar nodes with a specific label to a raw embedding vector.
@@ -1232,28 +1161,18 @@ impl CurrentStorage {
         label: &str,
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let index = self.prepare_vector_search_raw(embedding)?;
+        let (_, index, config) = self.get_vector_index_internal(None)?;
 
-        // Intern the label for efficient comparison
-        let label_id = GLOBAL_INTERNER.intern(label)?;
+        if embedding.len() != config.dimensions {
+            return Err(crate::utils::error::Error::Vector(
+                crate::utils::error::VectorError::DimensionMismatch {
+                    expected: config.dimensions,
+                    actual: embedding.len(),
+                },
+            ));
+        }
 
-        let (candidates_to_fetch, stats) = self.calculate_adaptive_candidates(k, label);
-
-        // Filter during HNSW traversal for better performance
-        let mut results = index.search_with_filter(embedding, candidates_to_fetch, |node_id| {
-            self.indexes
-                .get_node(*node_id)
-                .is_some_and(|n| n.label == label_id)
-        })?;
-
-        let results_count = results.len();
-        // Truncate to requested k (search_with_filter may return more)
-        results.truncate(k);
-
-        // Record search statistics for adaptive learning (Issue #334)
-        stats.record_search(candidates_to_fetch, results_count);
-
-        Ok(results)
+        self.run_vector_search(&index, embedding, k, Some(label), None)
     }
 
     /// Find k most similar nodes to a raw embedding in a specific property's index.
@@ -1282,28 +1201,18 @@ impl CurrentStorage {
         embedding: &[f32],
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let entry = self.vector_indexes.get(property_name).ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                format!(
-                    "No vector index enabled for property '{}'. Call enable_vector_index() first.",
-                    property_name
-                ),
-            ))
-        })?;
+        let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
 
-        // Validate embedding dimensions
-        let expected_dims = entry.value().config.dimensions;
-        if embedding.len() != expected_dims {
+        if embedding.len() != config.dimensions {
             return Err(crate::utils::error::Error::Vector(
                 crate::utils::error::VectorError::DimensionMismatch {
-                    expected: expected_dims,
+                    expected: config.dimensions,
                     actual: embedding.len(),
                 },
             ));
         }
 
-        let results = entry.value().index.search(embedding, k)?;
-        Ok(results)
+        self.run_vector_search(&index, embedding, k, None, None)
     }
 
     /// Find k most similar nodes with a label to a raw embedding in a specific property's index.
@@ -1323,47 +1232,18 @@ impl CurrentStorage {
         label: &str,
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        let entry = self.vector_indexes.get(property_name).ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                format!(
-                    "No vector index enabled for property '{}'. Call enable_vector_index() first.",
-                    property_name
-                ),
-            ))
-        })?;
+        let (_, index, config) = self.get_vector_index_internal(Some(property_name))?;
 
-        // Validate embedding dimensions
-        let expected_dims = entry.value().config.dimensions;
-        if embedding.len() != expected_dims {
+        if embedding.len() != config.dimensions {
             return Err(crate::utils::error::Error::Vector(
                 crate::utils::error::VectorError::DimensionMismatch {
-                    expected: expected_dims,
+                    expected: config.dimensions,
                     actual: embedding.len(),
                 },
             ));
         }
 
-        let label_id = GLOBAL_INTERNER.intern(label)?;
-
-        let (candidates_to_fetch, stats) = self.calculate_adaptive_candidates(k, label);
-
-        let mut results =
-            entry
-                .value()
-                .index
-                .search_with_filter(embedding, candidates_to_fetch, |node_id| {
-                    self.indexes
-                        .get_node(*node_id)
-                        .is_some_and(|n| n.label == label_id)
-                })?;
-
-        let results_count = results.len();
-        results.truncate(k);
-
-        // Record search statistics for adaptive learning (Issue #334)
-        stats.record_search(candidates_to_fetch, results_count);
-
-        Ok(results)
+        self.run_vector_search(&index, embedding, k, Some(label), None)
     }
 
     // ========================================================================
@@ -1409,41 +1289,9 @@ impl CurrentStorage {
         query_node_id: NodeId,
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        // Get the index for this property
-        let entry = self.vector_indexes.get(property_name).ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                format!(
-                    "No vector index enabled for property '{}'. Call enable_vector_index() first.",
-                    property_name
-                ),
-            ))
-        })?;
-
-        // Get the query node and its vector
-        let query_node = self
-            .indexes
-            .get_node(query_node_id)
-            .ok_or(StorageError::NodeNotFound(query_node_id))?;
-
-        let query_vec = query_node
-            .get_property(property_name)
-            .and_then(|v| v.as_vector())
-            .ok_or_else(|| {
-                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                    format!(
-                        "Node {} does not have vector property '{}'",
-                        query_node_id.as_u64(),
-                        property_name
-                    ),
-                ))
-            })?;
-
-        // Perform the search
-        let index = Arc::clone(&entry.value().index);
-        let mut results = index.search(query_vec, k + 1)?;
-        results.retain(|(id, _)| *id != query_node_id);
-        results.truncate(k);
-        Ok(results)
+        let (_, index, _) = self.get_vector_index_internal(Some(property_name))?;
+        let query_vector = self.get_node_vector(query_node_id, property_name)?;
+        self.run_vector_search(&index, &query_vector, k, None, Some(query_node_id))
     }
 
     /// Search a specific property's vector index with a raw embedding.
@@ -1480,68 +1328,9 @@ impl CurrentStorage {
         embedding: &[f32],
         k: usize,
     ) -> Result<Vec<(NodeId, f32)>> {
-        // Get the index for this property
-        let entry = self.vector_indexes.get(property_name).ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                format!(
-                    "No vector index enabled for property '{}'. Call enable_vector_index() first.",
-                    property_name
-                ),
-            ))
-        })?;
-
-        // Validate embedding dimensions
-        let expected_dims = entry.value().config.dimensions;
-        if embedding.len() != expected_dims {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::DimensionMismatch {
-                    expected: expected_dims,
-                    actual: embedding.len(),
-                },
-            ));
-        }
-
-        // Perform the search
-        let index = Arc::clone(&entry.value().index);
-        let results = index.search(embedding, k)?;
-        Ok(results)
+        self.find_similar_by_embedding_in(property_name, embedding, k)
     }
 
-    /// Helper method to prepare for raw embedding vector search.
-    /// Returns the `Arc<HnswIndex>` and validates the embedding.
-    ///
-    /// This uses the "default" property (first enabled) for backward compatibility.
-    /// For multi-property searches, use `search_vectors_in` instead.
-    fn prepare_vector_search_raw(&self, embedding: &[f32]) -> Result<Arc<HnswIndex>> {
-        // Get the default property name
-        let prop_name = self.get_default_vector_property_name().ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                "Vector index is not enabled. Call enable_vector_index() first.".to_string(),
-            ))
-        })?;
-
-        // Get the index from DashMap (where actual data is stored)
-        let entry = self.vector_indexes.get(&prop_name).ok_or_else(|| {
-            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
-                format!("Vector index not found for property '{}'", prop_name),
-            ))
-        })?;
-
-        // Validate embedding dimensions match index
-        let expected_dims = entry.value().config.dimensions;
-        if embedding.len() != expected_dims {
-            return Err(crate::utils::error::Error::Vector(
-                crate::utils::error::VectorError::DimensionMismatch {
-                    expected: expected_dims,
-                    actual: embedding.len(),
-                },
-            ));
-        }
-
-        let index = Arc::clone(&entry.value().index);
-
-        Ok(index)
-    }
 
     // ========================================================================
     // Temporal Vector Indexing (Phase 3)
@@ -2165,6 +1954,104 @@ impl CurrentStorage {
             .collect();
 
         CurrentStorageSnapshot::new(lsn, nodes, edges)
+    }
+
+    /// Internal helper to get vector index and configuration.
+    ///
+    /// If `property_name` is Some, looks up that specific property.
+    /// If None, looks up the default property.
+    ///
+    /// Returns (property_name, index, config).
+    fn get_node_vector(&self, node_id: NodeId, prop_name: &str) -> Result<Arc<[f32]>> {
+        let node = self
+            .indexes
+            .get_node(node_id)
+            .ok_or(StorageError::NodeNotFound(node_id))?;
+
+        node.properties
+            .get(prop_name)
+            .ok_or_else(|| StorageError::PropertyNotFound(prop_name.to_string()))?
+            .as_arc_vector()
+            .ok_or_else(|| {
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::InvalidVector {
+                    reason: "Property is not a vector".to_string(),
+                })
+            })
+    }
+
+    fn get_vector_index_internal(
+        &self,
+        property_name: Option<&str>,
+    ) -> Result<(String, Arc<HnswIndex>, HnswConfig)> {
+        let prop_name = if let Some(name) = property_name {
+            name.to_string()
+        } else {
+            self.get_default_vector_property_name().ok_or_else(|| {
+                crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                    "Vector index is not enabled. Call enable_vector_index() first.".to_string(),
+                ))
+            })?
+        };
+
+        let entry = self.vector_indexes.get(&prop_name).ok_or_else(|| {
+            crate::utils::error::Error::Vector(crate::utils::error::VectorError::IndexError(
+                format!("Vector index not found for property '{}'", prop_name),
+            ))
+        })?;
+
+        Ok((
+            prop_name,
+            entry.value().index.clone(),
+            entry.value().config.clone(),
+        ))
+    }
+
+    /// Internal helper to execute vector search with common logic.
+    ///
+    /// Handles:
+    /// - Adaptive over-fetch candidate calculation
+    /// - Filtering by label
+    /// - Excluding specific nodes
+    /// - Recording statistics
+    fn run_vector_search(
+        &self,
+        index: &Arc<HnswIndex>,
+        query: &[f32],
+        k: usize,
+        label_filter: Option<&str>,
+        exclude_node: Option<NodeId>,
+    ) -> Result<Vec<(NodeId, f32)>> {
+        let mut results = if let Some(label) = label_filter {
+            let label_id = GLOBAL_INTERNER.intern(label)?;
+            let (candidates, stats) = self.calculate_adaptive_candidates(k, label);
+
+            let mut results =
+                index.search_with_filter(query, candidates, |node_id| {
+                    self.indexes
+                        .get_node(*node_id)
+                        .map(|n| n.label == label_id)
+                        .unwrap_or(false)
+                })?;
+
+            if let Some(exclude_id) = exclude_node {
+                results.retain(|(id, _)| *id != exclude_id);
+            }
+
+            stats.record_search(candidates, results.len());
+            results
+        } else {
+            // If we need to exclude a node, we might need one more result
+            let search_k = if exclude_node.is_some() { k + 1 } else { k };
+            let mut results = index.search(query, search_k)?;
+
+            if let Some(exclude_id) = exclude_node {
+                results.retain(|(id, _)| *id != exclude_id);
+            }
+            results
+        };
+
+        results.truncate(k);
+        Ok(results)
     }
 }
 
