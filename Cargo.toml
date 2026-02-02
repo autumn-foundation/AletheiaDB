@@ -128,9 +128,6 @@ embedding-all = [
 # MCP server support
 mcp-server = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:serde_json", "dep:base64"]
 
-# Sharding RPC client support (uses blocking reqwest)
-sharding-rpc = ["dep:reqwest", "dep:serde", "dep:serde_json"]
-
 # SQL:2011 temporal syntax support
 sql = ["dep:sqlparser"]
 

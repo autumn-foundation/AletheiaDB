@@ -9,7 +9,6 @@
 //! - WAL: Write-ahead log for durability and crash recovery
 //! - Persistence: Memory-mapped file storage and checkpointing
 //! - Checkpoint: Full state snapshots via index persistence
-//! - Sharding: Horizontal scaling via domain-based partitioning (ADR-0014)
 
 pub mod checkpoint;
 pub mod compression;
@@ -19,7 +18,6 @@ pub mod index_persistence;
 pub mod migration;
 pub mod persistence;
 pub mod redb_cold_storage;
-pub mod sharding;
 pub mod snapshot;
 pub mod tiered_storage;
 pub mod version;
