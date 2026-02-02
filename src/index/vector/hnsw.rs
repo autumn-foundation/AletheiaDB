@@ -92,7 +92,8 @@ use crate::utils::{Error, Result, error::VectorError};
 use crc32fast::Hasher;
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1010,6 +1011,7 @@ impl HnswIndex {
         }
 
         let count = mappings.len() as u64;
+        let _count = count; // Suppress unused variable warning while keeping logic clear
 
         // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
         // Use checked arithmetic to prevent overflow
@@ -1017,32 +1019,76 @@ impl HnswIndex {
             .len()
             .checked_mul(16)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
-        let total_size = count_size
+        let _total_size = count_size
             .checked_add(4 + 1 + 8 + 4)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
 
-        let mut file_data = Vec::with_capacity(total_size);
+        // Open file with streaming writer
+        let file = File::create(&mappings_path).map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to create mappings file: {}",
+                e
+            )))
+        })?;
+        let mut writer = BufWriter::new(file);
 
-        // Write header
-        file_data.extend_from_slice(MAPPING_MAGIC);
-        file_data.push(MAPPING_VERSION);
-        file_data.extend_from_slice(&count.to_le_bytes());
+        Self::write_mappings_to_writer(&mut writer, &mappings)
+    }
 
-        // Write data directly
-        for (node_id, key) in &mappings {
-            file_data.extend_from_slice(&node_id.as_u64().to_le_bytes());
-            file_data.extend_from_slice(&key.to_le_bytes());
+    /// Helper method to stream mappings to a writer with CRC calculation.
+    /// Extracted for testability of error paths.
+    fn write_mappings_to_writer<W: Write>(
+        writer: &mut W,
+        mappings: &[(NodeId, u64)],
+    ) -> Result<()> {
+        let mut hasher = Hasher::new();
+        let count = mappings.len() as u64;
+
+        // Helper closure to write and update hasher
+        // We cannot use a simple closure that borrows writer mutably because
+        // we need to call it multiple times.
+        // Instead, we use a macro or just call a helper function.
+        // For simplicity and to avoid borrow checker issues with closures capturing mutable refs,
+        // we'll implement the logic inline or via a local helper function that takes the writer.
+
+        fn write_and_hash<W: Write>(
+            writer: &mut W,
+            hasher: &mut Hasher,
+            data: &[u8],
+        ) -> Result<()> {
+            writer.write_all(data).map_err(|e| {
+                Error::Vector(VectorError::IndexError(format!(
+                    "Failed to write mappings: {}",
+                    e
+                )))
+            })?;
+            hasher.update(data);
+            Ok(())
         }
 
-        // Calculate CRC32 over all data (header + mappings)
-        let mut hasher = Hasher::new();
-        hasher.update(&file_data);
-        let crc = hasher.finalize();
-        file_data.extend_from_slice(&crc.to_le_bytes());
+        // Write header
+        write_and_hash(writer, &mut hasher, MAPPING_MAGIC)?;
+        write_and_hash(writer, &mut hasher, &[MAPPING_VERSION])?;
+        write_and_hash(writer, &mut hasher, &count.to_le_bytes())?;
 
-        std::fs::write(&mappings_path, &file_data).map_err(|e| {
+        // Write data directly
+        for (node_id, key) in mappings {
+            write_and_hash(writer, &mut hasher, &node_id.as_u64().to_le_bytes())?;
+            write_and_hash(writer, &mut hasher, &key.to_le_bytes())?;
+        }
+
+        // Calculate and write CRC32
+        let crc = hasher.finalize();
+        writer.write_all(&crc.to_le_bytes()).map_err(|e| {
             Error::Vector(VectorError::IndexError(format!(
-                "Failed to save mappings: {}",
+                "Failed to write CRC: {}",
+                e
+            )))
+        })?;
+
+        writer.flush().map_err(|e| {
+            Error::Vector(VectorError::IndexError(format!(
+                "Failed to flush mappings: {}",
                 e
             )))
         })?;
@@ -2038,5 +2084,160 @@ mod tests {
             ),
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_save_mappings_large_streaming() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_streaming.usearch");
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build()?;
+
+        // Add enough items to exceed typical buffer sizes (e.g. 8KB)
+        // 2000 items * 16 bytes = 32KB
+        let count = 2000;
+        for i in 1..=count {
+            index.add(NodeId::new(i).unwrap(), &[1.0, 0.0, 0.0, 0.0])?;
+        }
+
+        index.save(&path)?;
+
+        // Verify we can load it back
+        let loaded = HnswIndex::load(&path, HnswConfig::new(4, DistanceMetric::Cosine))?;
+        assert_eq!(loaded.len(), count as usize);
+
+        // Verify a few items
+        let results = loaded.search(&[1.0, 0.0, 0.0, 0.0], 1)?;
+        assert!(!results.is_empty());
+
+        Ok(())
+    }
+
+    // Mock writer that fails after writing N bytes
+    struct MockFailWriter {
+        fail_after: usize,
+        written: usize,
+    }
+
+    impl MockFailWriter {
+        fn new(fail_after: usize) -> Self {
+            Self {
+                fail_after,
+                written: 0,
+            }
+        }
+    }
+
+    impl std::io::Write for MockFailWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.written + buf.len() > self.fail_after {
+                return Err(std::io::Error::other("Mock write error"));
+            }
+            self.written += buf.len();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            // Can simulate flush failure if needed, but write failure is sufficient for coverage
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_save_mappings_write_errors() {
+        // Create dummy mappings
+        let mappings = vec![
+            (NodeId::new(1).unwrap(), 100),
+            (NodeId::new(2).unwrap(), 200),
+        ];
+
+        // Case 1: Fail during header (MAGIC)
+        // Magic is 4 bytes. Fail at byte 3.
+        let mut writer = MockFailWriter::new(3);
+        let result = HnswIndex::write_mappings_to_writer(&mut writer, &mappings);
+        assert!(result.is_err());
+        if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
+            assert!(msg.contains("Failed to write mappings"));
+        } else {
+            panic!("Expected IndexError");
+        }
+
+        // Case 2: Fail during data writing
+        // Magic(4) + Version(1) + Count(8) = 13 bytes header
+        // Data is 16 bytes per item.
+        // Fail after header + 1st item (16 bytes) + 1 byte
+        let mut writer = MockFailWriter::new(13 + 16 + 1);
+        let result = HnswIndex::write_mappings_to_writer(&mut writer, &mappings);
+        assert!(result.is_err());
+        if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
+            assert!(msg.contains("Failed to write mappings"));
+        }
+
+        // Case 3: Fail during CRC writing
+        // Total data size = 13 + 32 = 45 bytes.
+        // CRC is 4 bytes.
+        // Fail at 45 + 1 byte (during CRC write)
+        let mut writer = MockFailWriter::new(45 + 1);
+        let result = HnswIndex::write_mappings_to_writer(&mut writer, &mappings);
+        assert!(result.is_err());
+        if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
+            assert!(msg.contains("Failed to write CRC"));
+        }
+    }
+
+    struct MockFlushFailWriter;
+    impl std::io::Write for MockFlushFailWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("Mock flush error"))
+        }
+    }
+
+    #[test]
+    fn test_save_mappings_flush_error() {
+        let mappings = vec![];
+        let mut writer = MockFlushFailWriter;
+        let result = HnswIndex::write_mappings_to_writer(&mut writer, &mappings);
+        assert!(result.is_err());
+        if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
+            assert!(msg.contains("Failed to flush mappings"));
+        } else {
+            panic!("Expected IndexError");
+        }
+    }
+
+    #[test]
+    fn test_save_mappings_file_create_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create index
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+
+        // Path for the index file
+        let index_path = dir.path().join("test.index");
+
+        // Create a directory where the mappings file should be
+        // Mappings file path will be "test.usearch.mappings" (since extension replaces "index")
+        // Wait, .with_extension("usearch.mappings") replaces "index".
+        let mappings_path = index_path.with_extension("usearch.mappings");
+        std::fs::create_dir(&mappings_path).unwrap();
+
+        // Attempt to save to index_path.
+        // This will try to create mappings file at `mappings_path`, which is a directory.
+        // File::create should fail.
+        let result = index.save(&index_path);
+
+        assert!(result.is_err());
+        if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
+            assert!(msg.contains("Failed to create mappings file"));
+        } else {
+            // Note: Depending on OS, saving the index itself might fail first if index_path is valid but related calls fail.
+            // But here index_path is valid (does not exist). usearch index save should succeed.
+            // Then save_mappings should fail.
+            panic!("Expected IndexError, got {:?}", result);
+        }
     }
 }
