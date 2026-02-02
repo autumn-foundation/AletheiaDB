@@ -1,3 +1,13 @@
+//! Type conversion utilities for the HTTP API.
+//!
+//! This module provides functions to convert between GallifreyDB's internal types
+//! (like [`PropertyMap`] and [`PropertyValue`]) and JSON values used in the HTTP API.
+//!
+//! # Safety Limits
+//!
+//! To prevent stack overflow attacks via deeply nested JSON structures, recursive
+//! conversion functions enforce a maximum recursion depth of 100 levels.
+
 use crate::core::{GLOBAL_INTERNER, PropertyMap, PropertyMapBuilder, PropertyValue};
 use serde_json::json;
 use std::collections::HashMap;
@@ -6,6 +16,16 @@ use std::sync::Arc;
 /// Maximum recursion depth for JSON processing to prevent stack overflow.
 const MAX_JSON_RECURSION_DEPTH: usize = 100;
 
+/// Resolves an interned string to its string representation.
+///
+/// # Arguments
+///
+/// * `interned` - The interned string handle to resolve.
+///
+/// # Returns
+///
+/// The string value if resolution succeeds, or a placeholder `<unknown:ID>` if
+/// the interned string cannot be found (which should not happen in normal operation).
 pub fn interned_to_string(interned: crate::core::InternedString) -> String {
     GLOBAL_INTERNER
         .resolve(interned)
@@ -13,6 +33,19 @@ pub fn interned_to_string(interned: crate::core::InternedString) -> String {
         .unwrap_or_else(|| format!("<unknown:{}>", interned.as_u32()))
 }
 
+/// Converts a [`PropertyMap`] to a JSON object (HashMap).
+///
+/// Keys are resolved from interned strings to standard strings.
+/// Values are recursively converted using [`property_value_to_json`].
+///
+/// # Arguments
+///
+/// * `props` - The property map to convert.
+///
+/// # Returns
+///
+/// * `Ok(HashMap)` - The JSON object representation.
+/// * `Err(String)` - If a value conversion fails (e.g., recursion depth exceeded).
 pub fn property_map_to_json(
     props: &PropertyMap,
 ) -> Result<HashMap<String, serde_json::Value>, String> {
@@ -24,6 +57,25 @@ pub fn property_map_to_json(
     Ok(result)
 }
 
+/// Converts a [`PropertyValue`] to a serde JSON Value.
+///
+/// # Mappings
+///
+/// | GallifreyDB Type | JSON Type | Notes |
+/// |------------------|-----------|-------|
+/// | `Null` | `null` | |
+/// | `Bool` | `boolean` | |
+/// | `Int` | `number` | |
+/// | `Float` | `number` | |
+/// | `String` | `string` | |
+/// | `Bytes` | `array` | Array of integers (byte values) |
+/// | `Array` | `array` | Recursive conversion |
+/// | `Vector` | `array` | Array of floats |
+/// | `SparseVector` | `object` | `{"indices": [...], "values": [...]}` |
+///
+/// # Errors
+///
+/// Returns an error if the structure is too deeply nested (exceeds 100 levels).
 pub fn property_value_to_json(value: &PropertyValue) -> Result<serde_json::Value, String> {
     property_value_to_json_recursive(value, 0)
 }
@@ -68,6 +120,16 @@ fn property_value_to_json_recursive(
     }
 }
 
+/// Converts a JSON object to a [`PropertyMap`].
+///
+/// # Arguments
+///
+/// * `json` - The JSON object (HashMap) to convert.
+///
+/// # Returns
+///
+/// * `Ok(PropertyMap)` - The converted property map.
+/// * `Err(String)` - If conversion fails (e.g., unsupported types or recursion limit).
 pub fn json_to_property_map(
     json: &HashMap<String, serde_json::Value>,
 ) -> Result<PropertyMap, String> {
@@ -79,6 +141,32 @@ pub fn json_to_property_map(
     Ok(builder.build())
 }
 
+/// Converts a serde JSON Value to a [`PropertyValue`].
+///
+/// # Mappings
+///
+/// | JSON Type | GallifreyDB Type | Notes |
+/// |-----------|------------------|-------|
+/// | `null` | `Null` | |
+/// | `boolean` | `Bool` | |
+/// | `number` (int) | `Int` | |
+/// | `number` (float)| `Float` | |
+/// | `string` | `String` | |
+/// | `array` | `Vector` | If array contains only numbers |
+/// | `array` | `Array` | Mixed types or nested arrays |
+/// | `object` | N/A | Not supported (returns error) |
+///
+/// # Heuristics
+///
+/// When encountering a JSON array, the converter attempts to interpret it as a
+/// numeric vector (`PropertyValue::Vector`) if all elements are numbers. If
+/// any element is not a number, it falls back to a generic array (`PropertyValue::Array`).
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The structure is too deeply nested (exceeds 100 levels).
+/// - The JSON contains objects (nested objects are not supported as property values).
 pub fn json_to_property_value(value: &serde_json::Value) -> Result<PropertyValue, String> {
     json_to_property_value_recursive(value, 0)
 }
@@ -164,7 +252,8 @@ mod tests {
     #[test]
     fn test_json_recursion_boundary() {
         // Depth 99 should succeed (depth 0 is root, so 0..99 is 100 levels)
-        let mut value_99 = json!(1);
+        // Use "null" to avoid vector optimization shortcut
+        let mut value_99 = json!(null);
 
         // Creating nesting level 99
         for _ in 0..99 {
@@ -176,7 +265,7 @@ mod tests {
         );
 
         // Creating nesting level 100
-        let mut value_100 = json!(1);
+        let mut value_100 = json!(null);
         for _ in 0..100 {
             value_100 = json!([value_100]);
         }
