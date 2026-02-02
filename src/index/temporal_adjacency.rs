@@ -335,9 +335,17 @@ impl TemporalAdjacencyIndex {
     /// Returns a deduplicated list of edges that were valid at the given time.
     /// If multiple versions of the same edge match, the edge is returned once.
     ///
+    /// **Deduplication**: Necessary because multiple versions of an edge (with
+    /// different valid_from times) can be valid at the same query point. For
+    /// example, an edge created at t0, deleted at t1, and recreated at t2 will
+    /// have multiple entries, but only one should be returned per query.
+    ///
     /// **Performance**: O(log N + K) where N = total entries, K = matching entries.
     /// Uses binary search to find the first potentially valid entry, then scans
-    /// forward only through candidates that could overlap the query time.
+    /// backward through candidates that could overlap the query time.
+    ///
+    /// **Future Optimization**: Consider using SmallVec or inline array for
+    /// common case of <10 edges to avoid HashSet allocation overhead.
     pub fn get_outgoing_at_time(
         &self,
         node_id: NodeId,

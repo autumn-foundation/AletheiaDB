@@ -406,6 +406,28 @@ pub(crate) fn persist_string_interner(
     Ok(())
 }
 
+/// Persist temporal adjacency index to disk.
+pub(crate) fn persist_temporal_adjacency_index(
+    historical: &Arc<RwLock<HistoricalStorage>>,
+    manager: &Arc<IndexPersistenceManager>,
+) -> Result<()> {
+    use crate::storage::index_persistence::temporal_adjacency::save_temporal_adjacency_index;
+    use crate::utils::lock::RwLockExt;
+
+    // Get the temporal adjacency index from historical storage
+    let historical_read = historical.read_or_err()?;
+    if let Some(adj_index) = historical_read.get_temporal_adjacency_index() {
+        save_temporal_adjacency_index(adj_index, manager.base_path()).map_err(|e| {
+            StorageError::PersistenceError(format!(
+                "Failed to save temporal adjacency index: {}",
+                e
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Persist all indexes on shutdown.
 pub(crate) fn persist_all_indexes(
     current: &Arc<CurrentStorage>,
@@ -425,6 +447,9 @@ pub(crate) fn persist_all_indexes(
     if let Err(e) = persist_temporal_index(historical, temporal_indexes, manager, tracker) {
         eprintln!("Failed to persist temporal index: {}", e);
     }
+    if let Err(e) = persist_temporal_adjacency_index(historical, manager) {
+        eprintln!("Failed to persist temporal adjacency index: {}", e);
+    }
     if let Err(e) = persist_vector_indexes(current, manager, Some(tracker)) {
         eprintln!("Failed to persist vector indexes: {}", e);
     }
@@ -432,7 +457,9 @@ pub(crate) fn persist_all_indexes(
     // Save manifest
     use crate::storage::index_persistence::formats::{
         GraphIndexManifestEntry, IndexManifest, StringInternerManifestEntry,
+        TemporalAdjacencyIndexManifestEntry,
     };
+    use crate::utils::lock::RwLockExt;
 
     let current_lsn = wal.current_lsn().0;
     let mut manifest = IndexManifest::new(current_lsn);
@@ -452,6 +479,26 @@ pub(crate) fn persist_all_indexes(
             node_count: node_count as u64,
             edge_count: edge_count as u64,
         });
+    }
+
+    // Add temporal adjacency index entry if configured
+    if let Ok(hist_read) = historical.read_or_err()
+        && let Some(adj_index) = hist_read.get_temporal_adjacency_index()
+    {
+        let total_entries: usize = adj_index
+            .outgoing
+            .iter()
+            .map(|entry| entry.value().len())
+            .sum();
+        let node_count = adj_index.outgoing.len();
+
+        if total_entries > 0 {
+            manifest.temporal_adjacency_index = Some(TemporalAdjacencyIndexManifestEntry {
+                adjacency_file: "temporal_adjacency/adjacency.idx".to_string(),
+                entry_count: total_entries as u64,
+                node_count: node_count as u64,
+            });
+        }
     }
 
     manager
@@ -747,5 +794,29 @@ pub(crate) fn load_indexes_startup(
     // Load vector indexes
     if let Err(e) = load_vector_indexes(current, manager) {
         eprintln!("Warning: Failed to load vector indexes: {}", e);
+    }
+
+    // Load temporal adjacency index
+    use crate::storage::index_persistence::temporal_adjacency::load_temporal_adjacency_index;
+    use crate::utils::lock::RwLockExt;
+
+    let adjacency_file = manager
+        .base_path()
+        .join("temporal_adjacency")
+        .join("adjacency.idx");
+    if adjacency_file.exists() {
+        match load_temporal_adjacency_index(manager.base_path()) {
+            Ok(adj_index) => {
+                if let Ok(mut hist_write) = historical.write_or_err() {
+                    hist_write.set_temporal_adjacency_index(adj_index);
+                    eprintln!("Loaded temporal adjacency index from disk");
+                } else {
+                    eprintln!("Warning: Failed to acquire write lock for temporal adjacency index");
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to load temporal adjacency index: {}", e);
+            }
+        }
     }
 }

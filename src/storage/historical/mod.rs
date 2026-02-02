@@ -1423,6 +1423,15 @@ impl HistoricalStorage {
         self.temporal_adjacency_index = Some(index);
     }
 
+    /// Get a reference to the temporal adjacency index if configured.
+    ///
+    /// Used by persistence layer to save the index to disk.
+    pub fn get_temporal_adjacency_index(
+        &self,
+    ) -> Option<&Arc<crate::index::temporal_adjacency::TemporalAdjacencyIndex>> {
+        self.temporal_adjacency_index.as_ref()
+    }
+
     /// Get outgoing edges from a node at a specific point in time.
     ///
     /// This method uses the temporal adjacency index to efficiently find all

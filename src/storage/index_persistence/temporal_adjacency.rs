@@ -45,8 +45,12 @@ pub fn save_temporal_adjacency_index(
     Ok(())
 }
 
-/// Maximum file size for temporal adjacency index (100 MB)
-const MAX_ADJACENCY_FILE_SIZE: u64 = 100 * 1024 * 1024;
+/// Maximum file size for temporal adjacency index (10 MB)
+///
+/// With 64 bytes per entry, this allows ~163K entries total.
+/// At 1M entries/node limit and assuming moderate node connectivity,
+/// this provides protection against DoS while allowing typical workloads.
+const MAX_ADJACENCY_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Load temporal adjacency index from disk.
 ///
