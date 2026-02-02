@@ -1,3 +1,4 @@
+use crate::core::property::MAX_ARRAY_ELEMENTS;
 use crate::core::{GLOBAL_INTERNER, PropertyMap, PropertyMapBuilder, PropertyValue};
 use serde_json::json;
 use std::collections::HashMap;
@@ -109,6 +110,15 @@ fn json_to_property_value_recursive(
         }
         serde_json::Value::String(s) => Ok(PropertyValue::String(Arc::from(s.as_str()))),
         serde_json::Value::Array(arr) => {
+            // Prevent DoS via memory exhaustion from massive arrays
+            if arr.len() > MAX_ARRAY_ELEMENTS {
+                return Err(format!(
+                    "Array count {} exceeds maximum allowed {}",
+                    arr.len(),
+                    MAX_ARRAY_ELEMENTS
+                ));
+            }
+
             if arr.iter().all(|v| v.is_number()) && !arr.is_empty() {
                 let floats: Result<Vec<f32>, String> = arr
                     .iter()
@@ -205,3 +215,20 @@ mod tests {
         }
     }
 }
+
+    #[test]
+    fn test_json_array_element_limit() {
+        use crate::core::property::MAX_ARRAY_ELEMENTS;
+        // Construct a JSON array that exceeds the limit
+        // 1M elements. This might take a bit of memory but is necessary to verify.
+        let limit = MAX_ARRAY_ELEMENTS;
+        let mut vec = Vec::with_capacity(limit + 1);
+        for _ in 0..=limit {
+            vec.push(json!(1));
+        }
+        let json_arr = serde_json::Value::Array(vec);
+
+        let result = json_to_property_value(&json_arr);
+        assert!(result.is_err(), "Should fail due to array element limit");
+        assert!(result.unwrap_err().contains("exceeds maximum allowed"));
+    }

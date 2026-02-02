@@ -124,3 +124,16 @@ Enforced strict capacity limits during deserialization:
 Added `tests/warden_dos_repro.rs` which simulates malicious payloads with excessive counts.
 - Before fix: Code attempted allocation (and failed with "Buffer too short" or potentially OOM).
 - After fix: Code immediately returns `StorageError::CorruptedData` citing the capacity limit, protecting memory resources.
+
+## 2026-02-16 - JSON Input Validation Hardening
+
+**Threat:** Inconsistent Input Validation (JSON vs WAL)
+User input via JSON API allowed arrays larger than `MAX_ARRAY_ELEMENTS`. This data could be written to the WAL but would fail validation during recovery deserialization, leading to potential data loss or inability to recover.
+
+**Defense:** Input Validation
+Enforced `MAX_ARRAY_ELEMENTS` limit in `json_to_property_value` in `src/http/converters.rs`. Now, attempts to create property arrays exceeding the limit are rejected at the API boundary.
+
+**Verification:** Reproduction Test
+Added `test_json_array_element_limit` in `src/http/converters.rs`.
+- Before fix: Test asserted failure, but operation succeeded (test failed).
+- After fix: Test asserted failure, and operation returned error (test passed).
