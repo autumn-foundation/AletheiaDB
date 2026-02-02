@@ -3,8 +3,7 @@
 //! This module contains storage engines for both current and historical data:
 //! - Current storage: Optimized for fast current-state queries (hot path)
 //! - Historical storage: Anchor+delta compression for temporal queries
-//! - Cold storage: Disk-based tiered storage for historical versions
-//! - Tiered storage: Transparent hot/warm/cold data access
+//! - Cold storage: Disk-based storage for historical versions
 //! - Version management: Version chain structures and compression
 //! - WAL: Write-ahead log for durability and crash recovery
 //! - Persistence: Memory-mapped file storage and checkpointing
@@ -21,7 +20,6 @@ pub mod persistence;
 pub mod redb_cold_storage;
 pub mod sharding;
 pub mod snapshot;
-pub mod tiered_storage;
 pub mod wal;
 pub mod wal_reader;
 
@@ -46,8 +44,5 @@ pub use redb_cold_storage::{
     encode_node_version,
 };
 pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot, StorageSnapshot};
-pub use tiered_storage::{
-    LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
-};
 pub use wal::{LSN, WalEntry, WalOperation};
 pub use wal_reader::read_wal_entries;

@@ -23,8 +23,9 @@
 //!
 //! ```ignore
 //! use gallifreydb::storage::migration::{MigrationPolicy, MigrationService};
-//! use gallifreydb::storage::tiered_storage::TieredStorage;
+//! use gallifreydb::storage::redb_cold_storage::RedbColdStorage;
 //! use std::time::Duration;
+//! use std::sync::Arc;
 //!
 //! let policy = MigrationPolicy::builder()
 //!     .age_threshold(Duration::from_secs(7 * 24 * 60 * 60)) // 7 days
@@ -32,7 +33,8 @@
 //!     .min_hot_versions(1)
 //!     .build();
 //!
-//! let service = MigrationService::new(tiered_storage, policy);
+//! let cold_storage = Arc::new(RedbColdStorage::with_default_config("data/cold.redb")?);
+//! let service = MigrationService::new(cold_storage, policy);
 //! service.start(); // Starts background migration thread
 //! ```
 

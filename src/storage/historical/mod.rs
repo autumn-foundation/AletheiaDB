@@ -260,11 +260,11 @@ pub struct HistoricalStorage {
     /// snapshots. The returned snapshot ID is stored atomically with the anchor,
     /// enabling strong consistency for provenance tracking.
     pre_edge_anchor_hook: Option<PreAnchorHook>,
-    /// Optional tiered storage for cold data access.
+    /// Optional cold storage for data access.
     ///
     /// When configured, versions not found in hot storage will be looked up
-    /// from cold storage via the tiered storage layer.
-    tiered_storage: Option<Arc<super::tiered_storage::TieredStorage>>,
+    /// from cold storage.
+    cold_storage: Option<Arc<super::redb_cold_storage::RedbColdStorage>>,
     /// Temporal indexes for O(log n) version lookups (Issue #209).
     ///
     /// When available, `find_node_version_at_time` and `find_edge_version_at_time`
@@ -393,7 +393,7 @@ impl HistoricalStorage {
             observers: Vec::new(),
             pre_node_anchor_hook: None,
             pre_edge_anchor_hook: None,
-            tiered_storage: None,
+            cold_storage: None,
             temporal_indexes: None,
             temporal_adjacency_index: None,
         }
@@ -1364,42 +1364,41 @@ impl HistoricalStorage {
     }
 
     // ========================================================================
-    // Tiered Storage Integration
+    // Cold Storage Integration
     // ========================================================================
 
-    /// Configure tiered storage for this historical storage.
+    /// Configure cold storage for this historical storage.
     ///
-    /// When tiered storage is configured, versions not found in hot storage
-    /// will be looked up from cold storage via the tiered storage layer.
+    /// When cold storage is configured, versions not found in hot storage
+    /// will be looked up from cold storage.
     ///
     /// # Arguments
     ///
-    /// * `tiered` - The tiered storage instance to use
+    /// * `cold` - The cold storage instance to use
     ///
     /// # Example
     ///
     /// ```ignore
     /// use gallifreydb::storage::historical::HistoricalStorage;
-    /// use gallifreydb::storage::tiered_storage::TieredStorage;
     /// use gallifreydb::storage::redb_cold_storage::RedbColdStorage;
+    /// use std::sync::Arc;
     ///
     /// let mut historical = HistoricalStorage::new();
     /// let cold = RedbColdStorage::with_default_config("data/cold.redb")?;
-    /// let tiered = TieredStorage::with_default_config(Box::new(cold));
-    /// historical.set_tiered_storage(Arc::new(tiered));
+    /// historical.set_cold_storage(Arc::new(cold));
     /// ```
-    pub fn set_tiered_storage(&mut self, tiered: Arc<super::tiered_storage::TieredStorage>) {
-        self.tiered_storage = Some(tiered);
+    pub fn set_cold_storage(&mut self, cold: Arc<super::redb_cold_storage::RedbColdStorage>) {
+        self.cold_storage = Some(cold);
     }
 
-    /// Get the tiered storage instance, if configured.
-    pub fn tiered_storage(&self) -> Option<&super::tiered_storage::TieredStorage> {
-        self.tiered_storage.as_deref()
+    /// Get the cold storage instance, if configured.
+    pub fn cold_storage(&self) -> Option<&super::redb_cold_storage::RedbColdStorage> {
+        self.cold_storage.as_deref()
     }
 
-    /// Check if tiered storage is enabled.
-    pub fn has_tiered_storage(&self) -> bool {
-        self.tiered_storage.is_some()
+    /// Check if cold storage is enabled.
+    pub fn has_cold_storage(&self) -> bool {
+        self.cold_storage.is_some()
     }
 
     /// Set the temporal indexes for optimized version lookups (Issue #209).
@@ -1498,7 +1497,7 @@ impl HistoricalStorage {
     /// Get a node version from any tier (hot or cold).
     ///
     /// This method first checks hot storage, then falls back to cold storage
-    /// via the tiered storage layer (if configured).
+    /// (if configured).
     ///
     /// # Arguments
     ///
@@ -1514,15 +1513,12 @@ impl HistoricalStorage {
     ) -> Result<Option<Arc<NodeVersion>>> {
         // Check hot storage first
         if let Some(version) = self.node_versions.get(&version_id) {
-            if let Some(ref tiered) = self.tiered_storage {
-                tiered.record_hot_hit();
-            }
             return Ok(Some(Arc::new(version.clone())));
         }
 
-        // Fall back to cold storage if tiered storage is configured
-        if let Some(ref tiered) = self.tiered_storage {
-            return tiered.get_node_version_cold(version_id);
+        // Fall back to cold storage if configured
+        if let Some(ref cold) = self.cold_storage {
+            return Ok(cold.get_node_version(version_id)?.map(Arc::new));
         }
 
         Ok(None)
@@ -1531,22 +1527,19 @@ impl HistoricalStorage {
     /// Get an edge version from any tier (hot or cold).
     ///
     /// This method first checks hot storage, then falls back to cold storage
-    /// via the tiered storage layer (if configured).
+    /// (if configured).
     pub fn get_edge_version_tiered(
         &self,
         version_id: VersionId,
     ) -> Result<Option<Arc<EdgeVersion>>> {
         // Check hot storage first
         if let Some(version) = self.edge_versions.get(&version_id) {
-            if let Some(ref tiered) = self.tiered_storage {
-                tiered.record_hot_hit();
-            }
             return Ok(Some(Arc::new(version.clone())));
         }
 
-        // Fall back to cold storage if tiered storage is configured
-        if let Some(ref tiered) = self.tiered_storage {
-            return tiered.get_edge_version_cold(version_id);
+        // Fall back to cold storage if configured
+        if let Some(ref cold) = self.cold_storage {
+            return Ok(cold.get_edge_version(version_id)?.map(Arc::new));
         }
 
         Ok(None)
@@ -1571,7 +1564,7 @@ impl HistoricalStorage {
     ) -> Result<usize> {
         use std::time::Instant;
 
-        if self.tiered_storage.is_none() {
+        if self.cold_storage.is_none() {
             return Ok(0);
         }
 

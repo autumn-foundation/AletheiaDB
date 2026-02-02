@@ -11,7 +11,6 @@ use gallifreydb::core::id::{NodeId, VersionId};
 use gallifreydb::core::temporal::time;
 use gallifreydb::storage::historical::HistoricalStorage;
 use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
-use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -32,14 +31,12 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
     let temp_dir = TempDir::new().unwrap();
     let cold_path = temp_dir.path().join("cold.redb");
 
-    // Create cold storage and tiered storage
-    let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();
-    let tiered_config = TieredStorageConfig::default();
-    let tiered = Arc::new(TieredStorage::new(tiered_config, Arc::new(cold)));
+    // Create cold storage
+    let cold = Arc::new(RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap());
 
-    // Create historical storage with tiered storage enabled
+    // Create historical storage with cold storage enabled
     let mut historical = HistoricalStorage::new();
-    historical.set_tiered_storage(tiered.clone());
+    historical.set_cold_storage(cold.clone());
 
     let node_id = NodeId::new(1).unwrap();
     let label = GLOBAL_INTERNER.intern("Person").unwrap();
@@ -145,9 +142,9 @@ fn test_reconstruct_properties_with_cold_versions_in_chain() {
     let v4 = historical.get_node_version(v4_id).unwrap().clone();
 
     // Store in cold storage
-    tiered.cold_storage().store_node_version(&v2).unwrap();
-    tiered.cold_storage().store_node_version(&v3).unwrap();
-    tiered.cold_storage().store_node_version(&v4).unwrap();
+    cold.store_node_version(&v2).unwrap();
+    cold.store_node_version(&v3).unwrap();
+    cold.store_node_version(&v4).unwrap();
 
     // Remove from hot storage to simulate migration
     println!(
@@ -212,14 +209,10 @@ fn test_reconstruct_properties_for_version_in_cold_storage() {
     let temp_dir = TempDir::new().unwrap();
     let cold_path = temp_dir.path().join("cold.redb");
 
-    let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();
-    let tiered = Arc::new(TieredStorage::new(
-        TieredStorageConfig::default(),
-        Arc::new(cold),
-    ));
+    let cold = Arc::new(RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap());
 
     let mut historical = HistoricalStorage::new();
-    historical.set_tiered_storage(tiered.clone());
+    historical.set_cold_storage(cold.clone());
 
     let node_id = NodeId::new(1).unwrap();
     let label = GLOBAL_INTERNER.intern("Person").unwrap();
@@ -256,7 +249,7 @@ fn test_reconstruct_properties_for_version_in_cold_storage() {
 
     // Migrate v2 itself to cold storage
     let v2 = historical.get_node_version(v2_id).unwrap().clone();
-    tiered.cold_storage().store_node_version(&v2).unwrap();
+    cold.store_node_version(&v2).unwrap();
     historical.__test_remove_node_version(v2_id);
 
     // Reconstruct v2 (which is now in cold storage)

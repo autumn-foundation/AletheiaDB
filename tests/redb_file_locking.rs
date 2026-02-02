@@ -10,7 +10,6 @@ use gallifreydb::PropertyMapBuilder;
 use gallifreydb::config::GallifreyDBConfig;
 use gallifreydb::storage::index_persistence::PersistenceConfig;
 use gallifreydb::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
-use gallifreydb::storage::tiered_storage::{TieredStorage, TieredStorageConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -18,7 +17,7 @@ use tempfile::TempDir;
 ///
 /// This is the core issue: When GallifreyDB has a background persistence thread,
 /// dropping the database signals shutdown but doesn't wait for the thread to finish.
-/// The background thread holds Arc references to TieredStorage → RedbColdStorage,
+/// The background thread holds Arc references to ColdStorage → RedbColdStorage,
 /// which keeps the Redb database file locked. When we try to reopen the same file,
 /// it fails because Redb requires exclusive file access.
 ///
@@ -50,16 +49,12 @@ fn test_reopen_redb_after_shutdown_with_background_thread() {
         let db = GallifreyDB::with_unified_config(config).unwrap();
 
         // Create Redb cold storage
-        let cold = RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap();
-        let tiered = Arc::new(TieredStorage::new(
-            TieredStorageConfig::default(),
-            Arc::new(cold),
-        ));
+        let cold = Arc::new(RedbColdStorage::new(&cold_path, RedbConfig::new()).unwrap());
 
-        // Wire up tiered storage to historical storage
+        // Wire up cold storage to historical storage
         {
             let mut historical = db.__test_historical_storage().write();
-            historical.set_tiered_storage(tiered.clone());
+            historical.set_cold_storage(cold.clone());
         }
 
         // Add some data to trigger background thread activity
