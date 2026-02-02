@@ -1,5 +1,3 @@
-use super::*;
-
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use super::simd::x86_ops;
 
