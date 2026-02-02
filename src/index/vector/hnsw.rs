@@ -1005,18 +1005,15 @@ impl HnswIndex {
         // Save mappings to companion file with integrity checks
         // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
         let mappings_path = path.with_extension("usearch.mappings");
-        let mut mappings = Vec::with_capacity(self.id_mapping.len());
-        for entry in self.id_mapping.iter() {
-            mappings.push((*entry.key(), *entry.value()));
-        }
 
-        let count = mappings.len() as u64;
-        let _count = count; // Suppress unused variable warning while keeping logic clear
+        // Streaming implementation: Iterate directly over id_mapping to avoid large allocations
+        // ⚡ Bolt Optimization: Removed intermediate Vec<mappings> (O(N) allocation)
+        // Also improves concurrency by interleaving DashMap shard locks with I/O
+        let count = self.id_mapping.len();
 
         // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
         // Use checked arithmetic to prevent overflow
-        let count_size = mappings
-            .len()
+        let count_size = count
             .checked_mul(16)
             .ok_or_else(|| Error::Vector(VectorError::IndexError("Index too large".to_string())))?;
         let _total_size = count_size
@@ -1032,17 +1029,19 @@ impl HnswIndex {
         })?;
         let mut writer = BufWriter::new(file);
 
-        Self::write_mappings_to_writer(&mut writer, &mappings)
+        let mappings_iter = self.id_mapping.iter().map(|e| (*e.key(), *e.value()));
+        Self::write_mappings_to_writer(&mut writer, mappings_iter, count)
     }
 
     /// Helper method to stream mappings to a writer with CRC calculation.
     /// Extracted for testability of error paths.
-    fn write_mappings_to_writer<W: Write>(
-        writer: &mut W,
-        mappings: &[(NodeId, u64)],
-    ) -> Result<()> {
+    fn write_mappings_to_writer<W, I>(writer: &mut W, mappings_iter: I, count: usize) -> Result<()>
+    where
+        W: Write,
+        I: Iterator<Item = (NodeId, u64)>,
+    {
         let mut hasher = Hasher::new();
-        let count = mappings.len() as u64;
+        let count_u64 = count as u64;
 
         // Helper closure to write and update hasher
         // We cannot use a simple closure that borrows writer mutably because
@@ -1069,10 +1068,10 @@ impl HnswIndex {
         // Write header
         write_and_hash(writer, &mut hasher, MAPPING_MAGIC)?;
         write_and_hash(writer, &mut hasher, &[MAPPING_VERSION])?;
-        write_and_hash(writer, &mut hasher, &count.to_le_bytes())?;
+        write_and_hash(writer, &mut hasher, &count_u64.to_le_bytes())?;
 
         // Write data directly
-        for (node_id, key) in mappings {
+        for (node_id, key) in mappings_iter {
             write_and_hash(writer, &mut hasher, &node_id.as_u64().to_le_bytes())?;
             write_and_hash(writer, &mut hasher, &key.to_le_bytes())?;
         }
@@ -2146,7 +2145,7 @@ mod tests {
     #[test]
     fn test_save_mappings_write_errors() {
         // Create dummy mappings
-        let mappings = vec![
+        let mappings = [
             (NodeId::new(1).unwrap(), 100),
             (NodeId::new(2).unwrap(), 200),
         ];
@@ -2154,7 +2153,11 @@ mod tests {
         // Case 1: Fail during header (MAGIC)
         // Magic is 4 bytes. Fail at byte 3.
         let mut writer = MockFailWriter::new(3);
-        let result = HnswIndex::write_mappings_to_writer(&mut writer, &mappings);
+        let result = HnswIndex::write_mappings_to_writer(
+            &mut writer,
+            mappings.iter().copied(),
+            mappings.len(),
+        );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
             assert!(msg.contains("Failed to write mappings"));
@@ -2167,7 +2170,11 @@ mod tests {
         // Data is 16 bytes per item.
         // Fail after header + 1st item (16 bytes) + 1 byte
         let mut writer = MockFailWriter::new(13 + 16 + 1);
-        let result = HnswIndex::write_mappings_to_writer(&mut writer, &mappings);
+        let result = HnswIndex::write_mappings_to_writer(
+            &mut writer,
+            mappings.iter().copied(),
+            mappings.len(),
+        );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
             assert!(msg.contains("Failed to write mappings"));
@@ -2178,7 +2185,11 @@ mod tests {
         // CRC is 4 bytes.
         // Fail at 45 + 1 byte (during CRC write)
         let mut writer = MockFailWriter::new(45 + 1);
-        let result = HnswIndex::write_mappings_to_writer(&mut writer, &mappings);
+        let result = HnswIndex::write_mappings_to_writer(
+            &mut writer,
+            mappings.iter().copied(),
+            mappings.len(),
+        );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
             assert!(msg.contains("Failed to write CRC"));
@@ -2197,9 +2208,13 @@ mod tests {
 
     #[test]
     fn test_save_mappings_flush_error() {
-        let mappings = vec![];
+        let mappings = [];
         let mut writer = MockFlushFailWriter;
-        let result = HnswIndex::write_mappings_to_writer(&mut writer, &mappings);
+        let result = HnswIndex::write_mappings_to_writer(
+            &mut writer,
+            mappings.iter().copied(),
+            mappings.len(),
+        );
         assert!(result.is_err());
         if let Err(Error::Vector(VectorError::IndexError(msg))) = result {
             assert!(msg.contains("Failed to flush mappings"));
