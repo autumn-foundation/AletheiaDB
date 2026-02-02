@@ -628,25 +628,25 @@ impl VectorIndex for HnswIndex {
             }));
         }
 
+        // DEADLOCK FIX: Acquire index lock FIRST.
+        // This prevents deadlock where add() holds id_mapping -> waits for inner,
+        // while save() holds inner -> waits for id_mapping (iter).
+        //
+        // By holding inner lock first, we ensure add() and save() are mutually exclusive
+        // at the top level, preventing interleaved lock acquisition.
+        let index = self.inner.write();
+
         // Get or create key for this NodeId
-        // Use entry API for atomic check-and-update to prevent race conditions
+        // Use entry API inside the lock. This is safe because we hold the global index lock.
         match self.id_mapping.entry(id) {
             dashmap::mapref::entry::Entry::Occupied(entry) => {
                 // Re-adding existing node: remove old vector from usearch if it exists
                 // Optimization (Issue #207): Only call remove() if key actually exists in usearch.
-                // This avoids unnecessary FFI calls during recovery or when mappings are out of sync.
                 let existing_key = *entry.get();
-
-                // CRITICAL: Hold write lock continuously from remove to add to prevent race conditions
-                // where multiple threads try to update the same node concurrently (issue #567).
-                // Without this, thread A could remove, thread B could remove (fail), then both try to add,
-                // causing "Duplicate keys not allowed" error.
-                let index = self.inner.write();
 
                 // Check if key exists before removing to avoid wasteful FFI call
                 if index.contains(existing_key) {
                     // Key exists in usearch - remove it before re-adding
-                    // (usearch requires explicit remove before add with same key)
                     index.remove(existing_key).map_err(|e| {
                         Error::Vector(VectorError::IndexError(format!(
                             "Failed to remove existing vector: {}",
@@ -654,10 +654,8 @@ impl VectorIndex for HnswIndex {
                         )))
                     })?;
                 }
-                // Note: If key doesn't exist, we skip remove() and proceed directly to add()
-                // This is safe because add() with a non-existent key will succeed
 
-                // Keep lock held - check if we need to expand capacity
+                // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
                     // Double capacity, minimum 1024
                     let new_capacity = (index.capacity() * 2).max(1024);
@@ -669,7 +667,7 @@ impl VectorIndex for HnswIndex {
                     })?;
                 }
 
-                // Add the new vector while still holding the lock
+                // Add the new vector
                 index.add(existing_key, vector).map_err(|e| {
                     Error::Vector(VectorError::IndexError(format!(
                         "Failed to add vector: {}",
@@ -682,7 +680,6 @@ impl VectorIndex for HnswIndex {
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 // New node: allocate key with overflow protection
-                // Check BEFORE incrementing to avoid leaving next_key in invalid state
                 const MAX_VALID_KEY: u64 = u64::MAX - 1000;
                 let key = loop {
                     let current = self.next_key.load(Ordering::SeqCst);
@@ -707,9 +704,6 @@ impl VectorIndex for HnswIndex {
                         Err(_) => continue, // Retry with new current value
                     }
                 };
-
-                // Insert into usearch index (auto-expand capacity if needed)
-                let index = self.inner.write();
 
                 // Check if we need to expand capacity
                 if index.size() >= index.capacity() {
@@ -744,12 +738,15 @@ impl VectorIndex for HnswIndex {
             )));
         }
 
+        // DEADLOCK FIX: Acquire index lock FIRST.
+        // See add() for details.
+        let index = self.inner.write();
+
         // Find the key for this NodeId
         if let Some((_, key)) = self.id_mapping.remove(&id) {
             self.reverse_mapping.remove(&key);
 
             // Native delete in usearch
-            let index = self.inner.write();
             index.remove(key).map_err(|e| {
                 Error::Vector(VectorError::IndexError(format!(
                     "Failed to remove vector: {}",
