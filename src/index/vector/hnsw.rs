@@ -2055,4 +2055,45 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_save_invalid_utf8_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        // Invalid UTF-8 byte sequence
+        let bytes = b"foo\xffbar";
+        let path = Path::new(OsStr::from_bytes(bytes));
+
+        let result = index.save(path);
+        assert!(result.is_err());
+        match result {
+            Err(Error::Vector(VectorError::IndexError(msg))) => {
+                assert!(msg.contains("invalid UTF-8"));
+            }
+            _ => panic!("Expected invalid UTF-8 error"),
+        }
+    }
+
+    #[test]
+    fn test_save_failure_path_is_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path(); // Directory, not file
+
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
+        let result = index.save(path);
+
+        assert!(result.is_err());
+        // Exact error message depends on OS/usearch, but it should be an IndexError
+        match result {
+            Err(Error::Vector(VectorError::IndexError(_))) => {}
+            _ => panic!("Expected IndexError when saving to directory"),
+        }
+    }
 }
