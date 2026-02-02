@@ -45,6 +45,7 @@ use crate::core::GLOBAL_INTERNER;
 use crate::core::graph::{Edge, Node};
 use crate::core::id::{EdgeId, NodeId, VersionId};
 use crate::core::interning::InternedString;
+use crate::core::version::VersionData;
 use crate::storage::current::CurrentStorage;
 use crate::storage::historical::HistoricalStorage;
 use crate::storage::index_persistence::{
@@ -55,7 +56,6 @@ use crate::storage::index_persistence::{
     },
     graph::{persist_property_map, restore_property_map},
 };
-use crate::core::version::VersionData;
 use crate::storage::redb_cold_storage::RedbColdStorage;
 use crate::storage::wal::LSN;
 use crate::storage::wal::concurrent_system::ConcurrentWalSystem;
