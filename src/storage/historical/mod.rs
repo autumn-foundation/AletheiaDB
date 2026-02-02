@@ -17,7 +17,7 @@ use crate::core::interning::InternedString;
 use crate::core::observer::{Observer, StorageEvent, notify_observers};
 use crate::core::property::PropertyMap;
 use crate::core::temporal::{BiTemporalInterval, TIMESTAMP_MAX, Timestamp};
-use crate::storage::version::{
+use crate::core::version::{
     AnchorConfig, EdgeVersion, EntityVersion, NodeVersion, TemporalVersion, VersionData,
 };
 use crate::utils::error::{Result, StorageError, TemporalError};

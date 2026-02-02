@@ -853,8 +853,10 @@ mod phase5_background_compaction {
         }
 
         // Wait for background compaction (poll)
+        // We wait for frozen_edge_count to reach 15, as delta might be drained
+        // slightly before frozen is updated (race condition).
         let mut attempts = 0;
-        while index.delta_edge_count() > 0 && attempts < 50 {
+        while index.frozen_edge_count() < 15 && attempts < 50 {
             thread::sleep(Duration::from_millis(50));
             attempts += 1;
         }
@@ -908,14 +910,16 @@ mod phase5_background_compaction {
         scheduler.resume();
 
         // Wait for compaction (poll)
+        // Wait for frozen count to increase (should be 15)
         let mut attempts = 0;
-        while index.delta_edge_count() > 0 && attempts < 50 {
+        while index.frozen_edge_count() < 15 && attempts < 50 {
             thread::sleep(Duration::from_millis(50));
             attempts += 1;
         }
 
         // Should now compact
         assert_eq!(index.delta_edge_count(), 0);
+        assert_eq!(index.frozen_edge_count(), 15);
 
         scheduler.shutdown();
         handle.join().unwrap();
@@ -1020,8 +1024,9 @@ mod phase5_background_compaction {
         }
 
         // Wait for successful compaction (poll)
+        // Wait for frozen count to reach 12 (7 from first batch + 5 from second)
         attempts = 0;
-        while index.delta_edge_count() > 0 && attempts < 50 {
+        while index.frozen_edge_count() < 12 && attempts < 50 {
             thread::sleep(Duration::from_millis(50));
             attempts += 1;
         }

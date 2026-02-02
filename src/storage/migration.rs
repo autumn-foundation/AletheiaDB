@@ -37,8 +37,8 @@
 //! ```
 
 use crate::core::id::{EdgeId, NodeId, VersionId};
+use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::redb_cold_storage::RedbColdStorage;
-use crate::storage::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use crate::storage::wal::flush_coordinator::FlushCoordinator;
 use crate::utils::error::Result;
@@ -1302,8 +1302,8 @@ mod tests {
     use crate::core::interning::GLOBAL_INTERNER;
     use crate::core::property::PropertyMapBuilder;
     use crate::core::temporal::BiTemporalInterval;
+    use crate::core::version::EdgeVersion;
     use crate::storage::redb_cold_storage::{RedbColdStorage, RedbConfig};
-    use crate::storage::version::EdgeVersion;
     use std::sync::atomic::AtomicUsize;
     use std::thread;
     use tempfile::tempdir;

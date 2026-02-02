@@ -36,7 +36,7 @@
 //! ```
 
 use crate::core::graph::{Edge, Node};
-use crate::storage::version::{EdgeVersion, NodeVersion};
+use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use std::sync::Arc;
 

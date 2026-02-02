@@ -34,7 +34,7 @@
 //! ```
 
 use crate::core::id::VersionId;
-use crate::storage::version::{EdgeVersion, NodeVersion};
+use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use crate::utils::error::{Result, StorageError};
 use redb::{ReadableDatabase, ReadableTable};
