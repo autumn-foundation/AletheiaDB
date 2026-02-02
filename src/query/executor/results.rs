@@ -1445,7 +1445,7 @@ mod tests {
         assert_eq!(versions[1], VersionId::new(0).unwrap()); // Clamped
         assert_eq!(versions[2], VersionId::new(0).unwrap());
     }
-}
+
     #[test]
     fn test_query_result_display_formatting_coverage() {
         use crate::core::property::PropertyMapBuilder;
@@ -1462,8 +1462,7 @@ mod tests {
             .insert("score", 100)
             .build();
 
-        let result = QueryResult::with_nodes(nodes)
-            .with_properties(vec![props]);
+        let result = QueryResult::with_nodes(nodes).with_properties(vec![props]);
 
         let output = format!("{}", result);
 
@@ -1478,3 +1477,4 @@ mod tests {
         assert!(output.contains("false"));
         assert!(output.contains("100"));
     }
+}
