@@ -3,17 +3,21 @@
 | Metadata | Details |
 | :--- | :--- |
 | **ID** | SPEC-001 |
-| **Status** | 🚧 Draft |
+| **Status** | ✅ Ready for Implementation |
 | **Owner** | Vantage (Product) |
 | **Implementer** | Nova (Engineering) |
 | **Priority** | P1 (High) |
-| **Related Code** | `src/experimental/semantic_pathfinding.rs` |
+| **Related Code** | `src/algo/pathfinding.rs` (To be created) |
 
-## 1. 👤 User Story
+## 1. 👤 User Stories
 
 > **As a** RAG (Retrieval-Augmented Generation) Developer,
 > **I want to** find paths between entities that are semantically consistent with a specific concept or topic,
 > **So that** I can retrieve multi-hop context for an LLM that explains *how* two things are related without polluting the context window with irrelevant ("off-topic") structural connections.
+
+> **As a** Fraud Analyst,
+> **I want to** find connections between a "Suspect Account" and a "Known Laundry Service" that align with the concept of "Financial Transaction",
+> **So that** I can ignore benign social connections (like "Shared Address") and focus on the money trail.
 
 ## 2. 🧐 The "So What?" (Business Value)
 
@@ -21,58 +25,70 @@ Standard Graph Databases offer shortest-path algorithms (BFS/Dijkstra) which opt
 Standard Vector Databases offer similarity search (ANN) which optimizes for *semantic* proximity (synonyms).
 
 **The Gap:**
-Real-world reasoning often requires traversing a graph but staying "in context".
-*Example:* Finding a connection between "Apple" (the company) and "Foxconn" (the manufacturer).
-- *Structural Search* might go through "Steve Jobs" -> "Pixar" -> "Disney" -> ... (drifting off topic).
-- *Semantic Pathfinding* with query "Manufacturing" forces the traversal to prefer nodes related to supply chain/tech, avoiding the "Pixar" detour.
+Real-world reasoning often requires traversing a graph but staying "in context". A shortest path often passes through high-degree "supernodes" (like "Internet" or "USA") that lose the semantic thread.
 
 **ROI:**
 - **Differentiation:** Positions GallifreyDB as a "Reasoning Engine", not just a storage engine.
 - **Utility:** Directly improves RAG accuracy by filtering "hallucination-inducing" noise from retrieved subgraphs.
+- **Efficiency:** Prunes the search space using semantic heuristics, potentially faster than exhaustive BFS on massive graphs.
 
-## 3. ✅ Acceptance Criteria
+## 3. 📝 Concrete Scenario: "The Apple Ambiguity"
+
+Consider a graph with two clusters:
+1.  **Tech Cluster:** Apple Inc -> iPhone -> Foxconn -> Manufacturing
+2.  **Food Cluster:** Apple (Fruit) -> Pie -> Flour -> Manufacturing
+
+**Query:** `find_path(start="Apple Inc", end="Manufacturing", concept="Technology")`
+
+-   **Standard BFS:** Might find `Apple Inc` -> `Shareholder` -> `Bakery` -> `Pie` -> `Manufacturing` (if specific edges exist).
+-   **Semantic Pathfinding:**
+    -   Calculates cost for neighbors of "Apple Inc".
+    -   "iPhone" is semantically close to "Technology" -> Low Cost.
+    -   "Shareholder" might be neutral -> Medium Cost.
+    -   Path follows the "Tech" route because the cumulative semantic cost is lower.
+
+## 4. ✅ Acceptance Criteria
 
 ### Functional Requirements
-1.  **Weighted Traversal API**:
-    - Must expose `find_path(start_node, end_node, query_concept)` where `query_concept` is a vector or text string.
-    - The algorithm must use an A* (or Dijkstra) approach where `Cost = Structural_Cost + (1.0 - Cosine_Similarity(Node, Query))`.
-    - Nodes with high semantic similarity to the query must be "cheaper" to traverse.
+1.  **Public API**:
+    -   `find_path(start: NodeId, end: NodeId, concept: Vector) -> Result<Path>`
+    -   `find_path_by_text(start: NodeId, end: NodeId, concept: &str) -> Result<Path>` (Convenience wrapper utilizing embedding provider)
+2.  **Algorithm**:
+    -   Must use **A\*** (A-Star) or similar heuristic search.
+    -   **Cost Function**: $Cost(u, v) = W_{struct} + W_{semantic} \cdot (1.0 - \text{sim}(v, \text{concept}))$
+    -   Nodes semantically dissimilar to the query concept incur a high penalty, effectively blocking "off-topic" paths.
+3.  **Configurability**:
+    -   `PathfindingConfig` struct exposing `structural_weight` (default 1.0) and `semantic_weight` (default 5.0).
+    -   `max_depth` (default 50).
+    -   `heuristic_factor` (for A* optimization).
+4.  **Result**:
+    -   Return `Vec<NodeId>` (ordered path).
+    -   Return `total_cost` and `semantic_score` of the path.
 
-2.  **Time-Travel Support**:
-    - Must expose `find_path_at_time(start, end, query, timestamp)`.
-    - Must strictly respect the `valid_time` of edges and nodes (do not traverse edges that didn't exist or were deleted at `timestamp`).
-    - *Note:* The current experimental implementation has limitations regarding deleted edges in `CurrentStorage`. This must be fixed or documented as a known limitation for V1.
+### Performance Requirements
+-   **Latency**: < 50ms for a 5-hop path on a graph with 100k nodes (assuming vectors are cached).
+-   **Memory**: Must not load the entire graph. Use the existing cache/disk paging mechanisms.
 
-3.  **Result Format**:
-    - Returns an ordered `Vec<NodeId>` representing the path.
-    - Should optionally return the "Semantic Cost" of the path (confidence score).
+### Edge Cases
+-   **Disconnected**: Return `None` or specific error if no path exists within `max_depth`.
+-   **No Vector**: If a node lacks a vector, apply a default "Neutral" penalty (configurable).
+-   **Self-Loop**: Path from A to A returns cost 0.
 
-4.  **Configuration**:
-    - Allow tuning the balance between Structural Weight vs. Semantic Weight (e.g., `alpha` parameter).
+## 5. 🛠 Technical Constraints & Recommendations
 
-### Non-Functional Requirements (Constraints)
--   **Performance**: Must be significantly faster than exhaustive BFS for "deep" graphs when a strong semantic signal exists (heuristic pruning).
--   **Safety**: Must handle `NaN` in vectors gracefully (no panics).
--   **Scale**: Must support paths up to 50 hops (configurable `max_depth`).
-
-## 4. 🚫 Out of Scope (Phase 1)
-
--   **Bi-directional Search**: Starting from both ends simultaneously (complexity with semantic heuristics).
--   **Negative Constraints**: "Find path A->B avoiding topic X".
--   **Multi-Vector Queries**: "Start with topic A, then switch to topic B halfway" (Semantic waypoint navigation).
-
-## 5. 📝 Gap Analysis (Current vs. Spec)
-
-| Feature | Current State (`experimental`) | Required State (`core`) | Action |
-| :--- | :--- | :--- | :--- |
-| **Algorithm** | Manual `BinaryHeap` impl | Optimized generic `A*` | Refactor to use `pathfinding` crate or optimized internal struct |
-| **Time-Travel** | Broken for deleted edges | Robust | Fix `CurrentStorage` visibility logic or force `HistoricalStorage` lookup |
-| **API** | Internal Struct | Public `Graph` Trait method | Expose via `QueryBuilder` |
-| **Weighting** | Hardcoded `0.1` structural cost | Configurable | Add configuration struct |
+-   **Dependency**: Use the `pathfinding` crate (or similar) for the generic A* implementation if possible, implementing the `Graph` trait for `GallifreyDB`.
+-   **Vector Access**: Accessing vectors for every node expansion is expensive.
+    -   *Optimization*: Use `HnswIndex` to pre-filter or cache hot vectors?
+    -   *Constraint*: Must work with `TieredStorage` (fetch from disk if needed).
+-   **Time-Travel**: Phase 2 will add `find_path_at_time`. For Phase 1, use `CurrentStorage`.
 
 ## 6. 📅 Execution Plan
 
-1.  **Promote** `src/experimental/semantic_pathfinding.rs` to `src/algo/pathfinding.rs`.
-2.  **Refactor** to fix the Time-Travel edge deletion bug (Critical).
-3.  **Expose** via the main `GallifreyDB` struct and `QueryBuilder`.
-4.  **Test** with the standard "Apple vs. Orange" dataset.
+1.  **Core Implementation**:
+    -   Create `src/algo/pathfinding.rs`.
+    -   Implement `CostFunction` trait.
+2.  **Integration**:
+    -   Expose via `QueryBuilder` extensions (`.traverse_semantically(...)`).
+3.  **Testing**:
+    -   Unit tests with small, hand-crafted graphs (The "Apple" scenario).
+    -   Integration test with `fishing` module to combine retrieval + pathfinding.
