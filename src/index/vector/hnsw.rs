@@ -2217,7 +2217,9 @@ mod tests {
     fn test_save_mappings_file_create_error() {
         let dir = tempfile::tempdir().unwrap();
         // Create index
-        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine).build().unwrap();
+        let index = HnswIndexBuilder::new(4, DistanceMetric::Cosine)
+            .build()
+            .unwrap();
 
         // Path for the index file
         let index_path = dir.path().join("test.index");
