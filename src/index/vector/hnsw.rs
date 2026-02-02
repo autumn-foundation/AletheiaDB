@@ -1011,6 +1011,7 @@ impl HnswIndex {
         }
 
         let count = mappings.len() as u64;
+        let _count = count; // Suppress unused variable warning while keeping logic clear
 
         // Calculate total size: Magic(4) + Version(1) + Count(8) + Data(count * 16) + CRC(4)
         // Use checked arithmetic to prevent overflow
@@ -2130,10 +2131,7 @@ mod tests {
     impl std::io::Write for MockFailWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             if self.written + buf.len() > self.fail_after {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Mock write error",
-                ));
+                return Err(std::io::Error::other("Mock write error"));
             }
             self.written += buf.len();
             Ok(buf.len())
@@ -2193,10 +2191,7 @@ mod tests {
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Mock flush error",
-            ))
+            Err(std::io::Error::other("Mock flush error"))
         }
     }
 
