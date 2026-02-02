@@ -167,37 +167,30 @@ impl TemporalAdjacencyIndex {
         tx_from: Timestamp,
         tx_to: Timestamp,
     ) -> Result<(), StorageError> {
-        // Acquire locks in consistent order (by node ID) to prevent deadlock
-        // If source == target (self-loop), only acquire one lock
-        let (mut first_lock, mut second_lock, is_self_loop) = if source == target {
-            let lock = self.outgoing.entry(source).or_default();
-            // For self-loops, we need to access the same vector twice, so we can't hold two mutable refs
-            // Instead, we'll handle this as a special case after the normal path
-            (lock, None, true)
-        } else if source.as_u64() < target.as_u64() {
-            // Acquire source first, then target
-            let source_lock = self.outgoing.entry(source).or_default();
-            let target_lock = Some(self.incoming.entry(target).or_default());
-            (source_lock, target_lock, false)
-        } else {
-            // Acquire target first, then source (reversed to maintain order)
-            let target_lock = self.incoming.entry(target).or_default();
-            let source_lock = Some(self.outgoing.entry(source).or_default());
-            (target_lock, source_lock, false)
-        };
+        // Handle self-loops separately to avoid borrow checker issues
+        if source == target {
+            // For self-loops, acquire BOTH outgoing and incoming locks atomically
+            let mut outgoing_lock = self.outgoing.entry(source).or_default();
+            let mut incoming_lock = self.incoming.entry(source).or_default();
 
-        if is_self_loop {
-            // Self-loop: check capacity for both outgoing and incoming in the same vector
-            // Each self-loop adds 2 entries (outgoing and incoming)
-            if first_lock.len() + 2 > self.config.max_entries_per_node {
+            // Check capacity for BOTH indexes while holding both locks
+            if outgoing_lock.len() >= self.config.max_entries_per_node {
                 return Err(StorageError::CapacityExceeded {
-                    resource: format!("temporal adjacency entries for node {}", source),
-                    current: first_lock.len(),
+                    resource: format!("temporal adjacency outgoing entries for node {}", source),
+                    current: outgoing_lock.len(),
                     limit: self.config.max_entries_per_node,
                 });
             }
 
-            // Insert both entries into outgoing
+            if incoming_lock.len() >= self.config.max_entries_per_node {
+                return Err(StorageError::CapacityExceeded {
+                    resource: format!("temporal adjacency incoming entries for node {}", source),
+                    current: incoming_lock.len(),
+                    limit: self.config.max_entries_per_node,
+                });
+            }
+
+            // Insert into outgoing while holding lock
             let entry_out = TemporalAdjacencyEntry {
                 edge_id,
                 neighbor: target,
@@ -207,12 +200,12 @@ impl TemporalAdjacencyIndex {
                 tx_from,
                 tx_to,
             };
-            let pos = first_lock
+            let pos = outgoing_lock
                 .binary_search_by_key(&valid_from, |e| e.valid_from)
                 .unwrap_or_else(|pos| pos);
-            first_lock.insert(pos, entry_out);
+            outgoing_lock.insert(pos, entry_out);
 
-            // Insert into incoming (same node, so same lock)
+            // Insert into incoming while holding lock
             let entry_in = TemporalAdjacencyEntry {
                 edge_id,
                 neighbor: source,
@@ -222,68 +215,117 @@ impl TemporalAdjacencyIndex {
                 tx_from,
                 tx_to,
             };
-            let mut incoming_entries = self.incoming.entry(target).or_default();
-            let pos = incoming_entries
+            let pos = incoming_lock
                 .binary_search_by_key(&valid_from, |e| e.valid_from)
                 .unwrap_or_else(|pos| pos);
-            incoming_entries.insert(pos, entry_in);
+            incoming_lock.insert(pos, entry_in);
 
             return Ok(());
         }
 
         // Normal case: source != target
-        // Identify which lock corresponds to which node based on acquisition order
-        let (outgoing_entries, incoming_entries) = if source.as_u64() < target.as_u64() {
-            (&mut first_lock, second_lock.as_mut().unwrap())
+        // Acquire locks in consistent order (by node ID) to prevent deadlock
+        if source.as_u64() < target.as_u64() {
+            // Acquire source (outgoing) first, then target (incoming)
+            let mut outgoing_lock = self.outgoing.entry(source).or_default();
+            let mut incoming_lock = self.incoming.entry(target).or_default();
+
+            // Check capacity while holding both locks
+            if outgoing_lock.len() >= self.config.max_entries_per_node {
+                return Err(StorageError::CapacityExceeded {
+                    resource: format!("temporal adjacency entries for node {}", source),
+                    current: outgoing_lock.len(),
+                    limit: self.config.max_entries_per_node,
+                });
+            }
+
+            if incoming_lock.len() >= self.config.max_entries_per_node {
+                return Err(StorageError::CapacityExceeded {
+                    resource: format!("temporal adjacency entries for node {}", target),
+                    current: incoming_lock.len(),
+                    limit: self.config.max_entries_per_node,
+                });
+            }
+
+            // Insert while holding both locks
+            let entry_out = TemporalAdjacencyEntry {
+                edge_id,
+                neighbor: target,
+                label,
+                valid_from,
+                valid_to,
+                tx_from,
+                tx_to,
+            };
+            let pos = outgoing_lock
+                .binary_search_by_key(&valid_from, |e| e.valid_from)
+                .unwrap_or_else(|pos| pos);
+            outgoing_lock.insert(pos, entry_out);
+
+            let entry_in = TemporalAdjacencyEntry {
+                edge_id,
+                neighbor: source,
+                label,
+                valid_from,
+                valid_to,
+                tx_from,
+                tx_to,
+            };
+            let pos = incoming_lock
+                .binary_search_by_key(&valid_from, |e| e.valid_from)
+                .unwrap_or_else(|pos| pos);
+            incoming_lock.insert(pos, entry_in);
         } else {
-            (second_lock.as_mut().unwrap(), &mut first_lock)
-        };
+            // Acquire target (incoming) first, then source (outgoing) - reversed order
+            let mut incoming_lock = self.incoming.entry(target).or_default();
+            let mut outgoing_lock = self.outgoing.entry(source).or_default();
 
-        // Check capacity while holding both locks
-        if outgoing_entries.len() >= self.config.max_entries_per_node {
-            return Err(StorageError::CapacityExceeded {
-                resource: format!("temporal adjacency entries for node {}", source),
-                current: outgoing_entries.len(),
-                limit: self.config.max_entries_per_node,
-            });
+            // Check capacity while holding both locks
+            if outgoing_lock.len() >= self.config.max_entries_per_node {
+                return Err(StorageError::CapacityExceeded {
+                    resource: format!("temporal adjacency entries for node {}", source),
+                    current: outgoing_lock.len(),
+                    limit: self.config.max_entries_per_node,
+                });
+            }
+
+            if incoming_lock.len() >= self.config.max_entries_per_node {
+                return Err(StorageError::CapacityExceeded {
+                    resource: format!("temporal adjacency entries for node {}", target),
+                    current: incoming_lock.len(),
+                    limit: self.config.max_entries_per_node,
+                });
+            }
+
+            // Insert while holding both locks
+            let entry_out = TemporalAdjacencyEntry {
+                edge_id,
+                neighbor: target,
+                label,
+                valid_from,
+                valid_to,
+                tx_from,
+                tx_to,
+            };
+            let pos = outgoing_lock
+                .binary_search_by_key(&valid_from, |e| e.valid_from)
+                .unwrap_or_else(|pos| pos);
+            outgoing_lock.insert(pos, entry_out);
+
+            let entry_in = TemporalAdjacencyEntry {
+                edge_id,
+                neighbor: source,
+                label,
+                valid_from,
+                valid_to,
+                tx_from,
+                tx_to,
+            };
+            let pos = incoming_lock
+                .binary_search_by_key(&valid_from, |e| e.valid_from)
+                .unwrap_or_else(|pos| pos);
+            incoming_lock.insert(pos, entry_in);
         }
-
-        if incoming_entries.len() >= self.config.max_entries_per_node {
-            return Err(StorageError::CapacityExceeded {
-                resource: format!("temporal adjacency entries for node {}", target),
-                current: incoming_entries.len(),
-                limit: self.config.max_entries_per_node,
-            });
-        }
-
-        // Insert into both indexes while still holding locks
-        let entry_out = TemporalAdjacencyEntry {
-            edge_id,
-            neighbor: target,
-            label,
-            valid_from,
-            valid_to,
-            tx_from,
-            tx_to,
-        };
-        let pos = outgoing_entries
-            .binary_search_by_key(&valid_from, |e| e.valid_from)
-            .unwrap_or_else(|pos| pos);
-        outgoing_entries.insert(pos, entry_out);
-
-        let entry_in = TemporalAdjacencyEntry {
-            edge_id,
-            neighbor: source,
-            label,
-            valid_from,
-            valid_to,
-            tx_from,
-            tx_to,
-        };
-        let pos = incoming_entries
-            .binary_search_by_key(&valid_from, |e| e.valid_from)
-            .unwrap_or_else(|pos| pos);
-        incoming_entries.insert(pos, entry_in);
 
         Ok(())
     }

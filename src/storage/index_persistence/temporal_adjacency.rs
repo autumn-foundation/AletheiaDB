@@ -185,6 +185,9 @@ fn convert_from_persisted(
 
     let label = InternedString::from_raw(entry.label);
 
+    // SAFETY: Timestamps were validated when originally created by HybridTimestamp::new()
+    // before being persisted. We trust the persisted data to contain valid timestamp values.
+    // This avoids redundant validation on every load while maintaining correctness.
     let valid_from =
         HybridTimestamp::new_unchecked(entry.valid_from_wallclock, entry.valid_from_logical);
     let valid_to = HybridTimestamp::new_unchecked(entry.valid_to_wallclock, entry.valid_to_logical);

@@ -152,12 +152,20 @@ impl<'a> SemanticPathfinder<'a> {
     /// Similar to `find_path`, but only considers nodes and edges valid at `time`.
     /// Uses the temporal adjacency index to find edges that existed at the specified
     /// time, even if they have been deleted from current storage.
+    ///
+    /// # Arguments
+    /// * `start` - Starting node ID.
+    /// * `end` - Target node ID.
+    /// * `query_embedding` - Vector representing the semantic concept to follow.
+    /// * `time` - The timestamp at which to evaluate the graph.
+    /// * `max_depth` - Maximum path length (to prevent infinite loops in large graphs).
     pub fn find_path_at_time(
         &self,
         start: NodeId,
         end: NodeId,
         query_embedding: &[f32],
         time: Timestamp,
+        max_depth: usize,
     ) -> Result<Option<Vec<NodeId>>> {
         let mut pq = BinaryHeap::new();
         let mut dist = HashMap::new();
@@ -185,6 +193,11 @@ impl<'a> SemanticPathfinder<'a> {
                 if cost > d {
                     continue;
                 }
+            }
+
+            // Check depth limit to prevent infinite loops
+            if depth >= max_depth {
+                continue;
             }
 
             // Get outgoing edges at the specified time using temporal adjacency index
@@ -399,7 +412,7 @@ mod tests {
 
         // Query at t0: Path should exist (BEFORE DELETION)
         let path_t0 = pathfinder
-            .find_path_at_time(start, end, &query, t0)
+            .find_path_at_time(start, end, &query, t0, 10)
             .unwrap();
         assert!(path_t0.is_some(), "Path should exist at t0 before deletion");
 
@@ -416,7 +429,7 @@ mod tests {
         // Query at t0 AFTER deletion: With temporal adjacency index (enabled by default),
         // the path SHOULD be found even though edges are deleted from current storage
         let path_t0_after_delete = pathfinder
-            .find_path_at_time(start, end, &query, t0)
+            .find_path_at_time(start, end, &query, t0, 10)
             .unwrap();
         assert!(
             path_t0_after_delete.is_some(),
@@ -451,7 +464,7 @@ mod tests {
 
         // Path exists at t2
         let path_t2 = pathfinder
-            .find_path_at_time(start, end, &query, t2)
+            .find_path_at_time(start, end, &query, t2, 10)
             .unwrap();
         assert!(path_t2.is_some(), "Path should exist at t2");
 
@@ -460,7 +473,7 @@ mod tests {
         // With temporal adjacency index, deleted edges are still accessible
         // when querying at times before they were deleted.
         let path_t0_check = pathfinder
-            .find_path_at_time(start, end, &query, t0)
+            .find_path_at_time(start, end, &query, t0, 10)
             .unwrap();
         assert!(
             path_t0_check.is_some(),
