@@ -3,7 +3,6 @@ use gallifreydb::index::VectorIndex;
 use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::Duration;
 
 #[test]
 fn test_hnsw_save_add_deadlock() {
