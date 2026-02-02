@@ -1446,3 +1446,35 @@ mod tests {
         assert_eq!(versions[2], VersionId::new(0).unwrap());
     }
 }
+    #[test]
+    fn test_query_result_display_formatting_coverage() {
+        use crate::core::property::PropertyMapBuilder;
+
+        let nodes = vec![NodeId::new(1).unwrap()];
+
+        // Property map with:
+        // - "active": true (hits green path)
+        // - "verified": false (hits non-green boolean path)
+        // - "score": 100 (hits fallback path)
+        let props = PropertyMapBuilder::new()
+            .insert("active", true)
+            .insert("verified", false)
+            .insert("score", 100)
+            .build();
+
+        let result = QueryResult::with_nodes(nodes)
+            .with_properties(vec![props]);
+
+        let output = format!("{}", result);
+
+        // Verify output contains the keys
+        assert!(output.contains("active"));
+        assert!(output.contains("verified"));
+        assert!(output.contains("score"));
+
+        // Note: verifying exact ANSI codes is fragile, but we can verify the content is present
+        // The coverage tool will confirm the branches are taken.
+        assert!(output.contains("true"));
+        assert!(output.contains("false"));
+        assert!(output.contains("100"));
+    }
