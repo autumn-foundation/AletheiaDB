@@ -4,6 +4,9 @@
 //! They are gated behind the `nova` feature flag.
 
 #[cfg(feature = "nova")]
+/// Semantic clustering / map generation.
+pub mod cartographer;
+#[cfg(feature = "nova")]
 /// Associative retrieval ("Fishing") module.
 pub mod fishing;
 #[cfg(feature = "nova")]
