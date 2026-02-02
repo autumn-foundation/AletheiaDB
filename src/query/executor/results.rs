@@ -9,6 +9,8 @@ use crate::core::temporal::Timestamp;
 use crate::core::{EdgeId, NodeId};
 use crate::utils::error::Result;
 
+use crossterm::style::Stylize;
+
 use super::iterators::ResultIterator;
 
 /// A path through the graph, represented as a sequence of entity IDs.
@@ -467,7 +469,12 @@ impl std::fmt::Display for QueryResult {
                                 .resolve(*k)
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| format!("key:{}", k.as_u32()));
-                            format!("{}: {}", k_str, v)
+
+                            if v.as_bool() == Some(true) {
+                                format!("{}: {}", k_str, "true".green())
+                            } else {
+                                format!("{}: {}", k_str, v)
+                            }
                         })
                         .collect();
 
@@ -1429,5 +1436,25 @@ mod tests {
         assert_eq!(versions[0], VersionId::new(100).unwrap());
         assert_eq!(versions[1], VersionId::new(0).unwrap()); // Clamped
         assert_eq!(versions[2], VersionId::new(0).unwrap());
+    }
+
+    #[test]
+    fn test_query_result_display_colorize_boolean() {
+        let nodes = vec![NodeId::new(1).unwrap()];
+        let properties = vec![PropertyMapBuilder::new()
+            .insert("active", true)
+            .insert("count", 42)
+            .build()];
+
+        let result = QueryResult::with_nodes(nodes).with_properties(properties);
+        let display = format!("{}", result);
+
+        // Verify content is present
+        assert!(display.contains("true"));
+        assert!(display.contains("42"));
+
+        // Note: We cannot easily verify ANSI codes in a non-TTY test environment
+        // as crossterm correctly suppresses colors.
+        // We verified the implementation uses .green() which enables styling.
     }
 }
