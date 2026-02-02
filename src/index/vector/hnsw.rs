@@ -987,27 +987,43 @@ impl HnswIndex {
     /// and its mappings. It is separated from `save()` to allow the latter to use
     /// `tokio::task::block_in_place` when running within a Tokio runtime.
     fn save_internal(&self, path: &Path) -> Result<()> {
-        let index = self.inner.read();
-        index
-            .save(path.to_str().ok_or_else(|| {
-                Error::Vector(VectorError::IndexError(
-                    "Path contains invalid UTF-8".to_string(),
-                ))
-            })?)
-            .map_err(|e| {
-                Error::Vector(VectorError::IndexError(format!(
-                    "Failed to save index: {}",
-                    e
-                )))
-            })?;
-
-        // Save mappings to companion file with integrity checks
-        // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
-        let mappings_path = path.with_extension("usearch.mappings");
+        // Collect mappings first to avoid deadlock with add() (Issue #deadlock)
+        // deadlock happens if we hold inner lock (waiting for add to release)
+        // and add holds map lock (waiting for inner to release)
+        //
+        // NOTE: This introduces a "split snapshot" where mappings and index
+        // might be slightly out of sync if an add/remove happens in between.
+        // This is acceptable because:
+        // 1. Orphan vectors (in index, not map) are filtered out by
+        //    convert_and_sort_matches() which checks reverse_mapping.
+        // 2. Dangling mappings (in map, not index) are handled gracefully
+        //    by add() (checks contains() before remove) and are harmless
+        //    for search (not returned by index).
         let mut mappings = Vec::with_capacity(self.id_mapping.len());
         for entry in self.id_mapping.iter() {
             mappings.push((*entry.key(), *entry.value()));
         }
+
+        // Save index (requires inner lock)
+        {
+            let index = self.inner.read();
+            index
+                .save(path.to_str().ok_or_else(|| {
+                    Error::Vector(VectorError::IndexError(
+                        "Path contains invalid UTF-8".to_string(),
+                    ))
+                })?)
+                .map_err(|e| {
+                    Error::Vector(VectorError::IndexError(format!(
+                        "Failed to save index: {}",
+                        e
+                    )))
+                })?;
+        }
+
+        // Save mappings to companion file with integrity checks
+        // Format: [MAGIC:4][VERSION:1][COUNT:8][DATA:16*count][CRC32:4]
+        let mappings_path = path.with_extension("usearch.mappings");
 
         let count = mappings.len() as u64;
 
