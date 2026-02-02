@@ -97,6 +97,7 @@ pub mod parser;
 pub mod plan;
 pub mod planner;
 pub mod result;
+pub mod semantic_pathfinding;
 
 // Re-export commonly used types
 pub use ast::QueryAst;
@@ -110,3 +111,4 @@ pub use parser::{ParseError, Parser};
 pub use plan::{LogicalOp, LogicalPlan};
 pub use planner::{PhysicalPlan, QueryPlanner};
 pub use result::{EntityHistory, VersionDiff, VersionInfo, VersionSummary};
+pub use semantic_pathfinding::SemanticPathfinder;

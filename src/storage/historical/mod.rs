@@ -275,6 +275,11 @@ pub struct HistoricalStorage {
     /// The temporal indexes are maintained externally by the database and shared
     /// with HistoricalStorage for query optimization.
     temporal_indexes: Option<Arc<crate::index::temporal::TemporalIndexes>>,
+    /// Temporal adjacency index for fast temporal graph traversal.
+    ///
+    /// When available, pathfinding queries can efficiently find edges that existed
+    /// at specific points in time, including edges that have been deleted.
+    temporal_adjacency_index: Option<Arc<crate::index::temporal_adjacency::TemporalAdjacencyIndex>>,
 }
 
 impl HistoricalStorage {
@@ -385,6 +390,7 @@ impl HistoricalStorage {
             pre_edge_anchor_hook: None,
             tiered_storage: None,
             temporal_indexes: None,
+            temporal_adjacency_index: None,
         }
     }
 
@@ -833,6 +839,19 @@ impl HistoricalStorage {
                     );
                 }
             }
+
+            // Update temporal adjacency index to reflect closed valid time
+            if let Some(ref adj_index) = self.temporal_adjacency_index {
+                let new_temporal = *prev.temporal();
+                if old_temporal.valid_time().end() != new_temporal.valid_time().end() {
+                    adj_index.close_edge_valid_time(
+                        edge_id,
+                        source,
+                        target,
+                        new_temporal.valid_time().end(),
+                    );
+                }
+            }
         }
 
         // Check if anchor before storing (for notifications and caching)
@@ -880,6 +899,32 @@ impl HistoricalStorage {
                     edge_id,
                     timestamp,
                 },
+            );
+        }
+
+        // Update temporal adjacency index if configured
+        // Insert after all operations complete so temporal intervals are finalized
+        // Skip tombstones - they represent deletions and shouldn't appear in traversal queries
+        if !is_tombstone
+            && let Some(ref adj_index) = self.temporal_adjacency_index
+            && let Err(_e) = adj_index.insert_edge(
+                edge_id,
+                source,
+                target,
+                label,
+                temporal.valid_time().start(),
+                temporal.valid_time().end(),
+                temporal.transaction_time().start(),
+                temporal.transaction_time().end(),
+            )
+        {
+            #[cfg(feature = "observability")]
+            tracing::warn!(
+                edge_id = %edge_id,
+                source = %source,
+                target = %target,
+                error = %_e,
+                "Failed to insert edge into temporal adjacency index"
             );
         }
 
@@ -1364,6 +1409,87 @@ impl HistoricalStorage {
         self.temporal_indexes = Some(indexes);
     }
 
+    /// Set the temporal adjacency index for this storage.
+    ///
+    /// When the temporal adjacency index is set, it will be automatically updated
+    /// when edges are added or modified, enabling efficient temporal pathfinding
+    /// queries that can find paths through deleted edges.
+    ///
+    /// This is typically called during database initialization.
+    pub fn set_temporal_adjacency_index(
+        &mut self,
+        index: Arc<crate::index::temporal_adjacency::TemporalAdjacencyIndex>,
+    ) {
+        self.temporal_adjacency_index = Some(index);
+    }
+
+    /// Get a reference to the temporal adjacency index if configured.
+    ///
+    /// Used by persistence layer to save the index to disk.
+    pub fn get_temporal_adjacency_index(
+        &self,
+    ) -> Option<&Arc<crate::index::temporal_adjacency::TemporalAdjacencyIndex>> {
+        self.temporal_adjacency_index.as_ref()
+    }
+
+    /// Get outgoing edges from a node at a specific point in time.
+    ///
+    /// This method uses the temporal adjacency index to efficiently find all
+    /// edges that were valid at the specified time, including edges that have
+    /// been deleted in current storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The source node ID
+    /// * `valid_time` - The valid time to query
+    /// * `tx_time` - The transaction time to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of edge IDs that were valid at the specified time. Returns an
+    /// empty vector if no temporal adjacency index is configured.
+    pub fn get_outgoing_edges_at_time(
+        &self,
+        source: NodeId,
+        valid_time: Timestamp,
+        tx_time: Timestamp,
+    ) -> Vec<EdgeId> {
+        if let Some(ref index) = self.temporal_adjacency_index {
+            index.get_outgoing_at_time(source, valid_time, tx_time)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get incoming edges to a node at a specific point in time.
+    ///
+    /// This method uses the temporal adjacency index to efficiently find all
+    /// edges that were valid at the specified time, including edges that have
+    /// been deleted in current storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The target node ID
+    /// * `valid_time` - The valid time to query
+    /// * `tx_time` - The transaction time to query
+    ///
+    /// # Returns
+    ///
+    /// A vector of edge IDs that were valid at the specified time. Returns an
+    /// empty vector if no temporal adjacency index is configured.
+    pub fn get_incoming_edges_at_time(
+        &self,
+        target: NodeId,
+        valid_time: Timestamp,
+        tx_time: Timestamp,
+    ) -> Vec<EdgeId> {
+        if let Some(ref index) = self.temporal_adjacency_index {
+            index.get_incoming_at_time(target, valid_time, tx_time)
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Get a node version from any tier (hot or cold).
     ///
     /// This method first checks hot storage, then falls back to cold storage
@@ -1585,8 +1711,10 @@ impl HistoricalStorage {
             .get_mut(&version_id)
             .ok_or(StorageError::VersionNotFound(version_id))?;
 
-        // Get the edge ID before closing (needed for temporal index update)
+        // Get the edge ID and node IDs before closing (needed for index updates)
         let edge_id = version.edge_id;
+        let source = version.source;
+        let target = version.target;
 
         // Use TemporalVersion trait method
         version.close_transaction_time(end_timestamp);
@@ -1594,6 +1722,11 @@ impl HistoricalStorage {
         // Update temporal index to reflect the closed interval (Issue #209)
         if let Some(ref indexes) = self.temporal_indexes {
             indexes.update_edge_transaction_time_end(edge_id, version_id, end_timestamp);
+        }
+
+        // Update temporal adjacency index to reflect the closed transaction time
+        if let Some(ref adj_index) = self.temporal_adjacency_index {
+            adj_index.close_edge_transaction_time(edge_id, source, target, end_timestamp);
         }
 
         Ok(())

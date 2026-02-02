@@ -27,6 +27,7 @@ impl IndexManifest {
             vector_indexes: Vec::new(),
             graph_index: None,
             temporal_index: None,
+            temporal_adjacency_index: None,
             string_interner: None,
         }
     }
