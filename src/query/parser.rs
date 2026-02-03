@@ -1928,18 +1928,68 @@ mod tests {
     // =====================================================
 
     #[test]
-    fn test_parse_error_display() {
+    fn test_parse_error_traits() {
+        let err1 = ParseError {
+            message: "msg".to_string(),
+            position: 0,
+            expected: None,
+            found: None,
+        };
+        // Test Clone
+        let err2 = err1.clone();
+        // Test PartialEq
+        assert_eq!(err1, err2);
+        // Test Debug
+        let debug_str = format!("{:?}", err1);
+        assert!(debug_str.contains("ParseError"));
+        assert!(debug_str.contains("msg"));
+    }
+
+    #[test]
+    fn test_parse_error_display_full() {
+        // Case 1: All fields present
         let err = ParseError {
-            message: "Test error".to_string(),
-            position: 10,
-            expected: Some("identifier".to_string()),
+            message: "Error".to_string(),
+            position: 1,
+            expected: Some("exp".to_string()),
             found: Some(Token::Eof),
         };
-        let output = format!("{}", err);
-        assert!(output.contains("Test error"));
-        assert!(output.contains("position 10"));
-        assert!(output.contains("expected identifier"));
-        assert!(output.contains("found EOF"));
+        let s = format!("{}", err);
+        assert!(s.contains("Parse error at position 1: Error"));
+        assert!(s.contains("(expected exp)"));
+        assert!(s.contains("(found EOF)"));
+
+        // Case 2: No expected, no found
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: None,
+            found: None,
+        };
+        let s = format!("{}", err);
+        assert_eq!(s, "Parse error at position 1: Error");
+
+        // Case 3: Expected only
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: Some("exp".to_string()),
+            found: None,
+        };
+        let s = format!("{}", err);
+        assert!(s.contains("(expected exp)"));
+        assert!(!s.contains("(found"));
+
+        // Case 4: Found only
+        let err = ParseError {
+            message: "Error".to_string(),
+            position: 1,
+            expected: None,
+            found: Some(Token::Eof),
+        };
+        let s = format!("{}", err);
+        assert!(!s.contains("(expected"));
+        assert!(s.contains("(found EOF)"));
     }
 
     #[test]
