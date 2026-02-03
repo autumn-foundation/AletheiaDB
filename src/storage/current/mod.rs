@@ -446,15 +446,13 @@ impl CurrentStorage {
         let version_id = VersionId::new_unchecked(self.version_id_gen.next()?);
         let label_interned = GLOBAL_INTERNER.intern(label)?;
 
-        let node = Node::new(node_id, label_interned, properties.clone(), version_id);
-        self.indexes.insert_node(node.clone());
+        // CRITICAL: Index vector BEFORE inserting node. If vector indexing fails,
+        // we have not modified any graph state, so we can safely return error without rollback.
+        // This also avoids unnecessary clones of Node and PropertyMap.
+        self.try_index_vector(node_id, &properties)?;
 
-        // Try to index vector property if enabled
-        if let Err(e) = self.try_index_vector(node_id, &properties) {
-            // Rollback: remove node from indexes
-            self.indexes.remove_node(node_id);
-            return Err(e);
-        }
+        let node = Node::new(node_id, label_interned, properties, version_id);
+        self.indexes.insert_node(node);
 
         Ok(node_id)
     }
@@ -654,23 +652,20 @@ impl CurrentStorage {
 
     /// Update a node directly (used by WriteTransaction).
     pub fn update_node_direct(&self, node: Node, timestamp: Timestamp) -> Result<()> {
-        // Save old node for potential rollback
+        // Save old node for vector index update
         let old_node = self.indexes.get_node(node.id);
 
-        // Update node
-        self.indexes.insert_node(node.clone());
-
-        // Update vector index
-        if let Some(ref old) = old_node
-            && let Err(e) = self.update_vector_index(node.id, &node.properties, &old.properties)
-        {
-            // Rollback: restore the original node
-            self.indexes.insert_node(old.clone());
-            return Err(e);
+        // Update vector index BEFORE updating node in main indexes.
+        // If vector indexing fails, we haven't modified any state yet.
+        if let Some(ref old) = old_node {
+            self.update_vector_index(node.id, &node.properties, &old.properties)?;
         }
 
         // Update temporal vector index if enabled
         self.try_index_temporal_vector(node.id, &node.properties, timestamp)?;
+
+        // Finally, insert node into main indexes. This avoids node.clone().
+        self.indexes.insert_node(node);
 
         Ok(())
     }
