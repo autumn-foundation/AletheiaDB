@@ -74,6 +74,15 @@ pub struct GroupCommitConfig {
     pub max_delay_ms: u64,
     /// Maximum transactions to batch before forcing a flush.
     pub max_batch_size: usize,
+
+    /// Multiplier for max_delay_ms to calculate base timeout.
+    pub timeout_multiplier: u32,
+    /// Fixed overhead added to base timeout in milliseconds.
+    pub timeout_base_ms: u64,
+    /// Minimum timeout in milliseconds.
+    pub timeout_min_ms: u64,
+    /// Maximum timeout in milliseconds.
+    pub timeout_max_ms: u64,
 }
 
 impl Default for GroupCommitConfig {
@@ -81,6 +90,10 @@ impl Default for GroupCommitConfig {
         Self {
             max_delay_ms: 10,
             max_batch_size: 200,
+            timeout_multiplier: 10,
+            timeout_base_ms: 200,
+            timeout_min_ms: 500,
+            timeout_max_ms: 5000,
         }
     }
 }
@@ -99,6 +112,15 @@ struct GroupCommitState {
 impl GroupCommitCoordinator {
     /// Create a new GroupCommitCoordinator with the given configuration.
     pub fn new(max_delay_ms: u64, max_batch_size: usize) -> Self {
+        Self::with_config(GroupCommitConfig {
+            max_delay_ms,
+            max_batch_size,
+            ..GroupCommitConfig::default()
+        })
+    }
+
+    /// Create a new GroupCommitCoordinator with the given full configuration.
+    pub fn with_config(config: GroupCommitConfig) -> Self {
         Self {
             state: Mutex::new(GroupCommitState {
                 current_epoch: 1, // Start at 1 so flushed_epoch=0 means "nothing flushed yet"
@@ -107,10 +129,7 @@ impl GroupCommitCoordinator {
                 last_flush_error: None,
             }),
             flush_complete: Condvar::new(),
-            config: GroupCommitConfig {
-                max_delay_ms,
-                max_batch_size,
-            },
+            config,
         }
     }
 
@@ -157,33 +176,32 @@ impl GroupCommitCoordinator {
     /// The timeout is a **deadlock detection mechanism**, not a performance target.
     /// It's designed to catch stuck flush threads, not to enforce timing.
     ///
-    /// Formula: `max(max_delay_ms * 50 + 5000ms, 10000ms)` with cap at 60s
-    /// - 50x multiplier: Allows for multiple flush cycles with extreme CI thread scheduling delays
-    /// - +5000ms: Fixed overhead for fsync, thread scheduling, and CI variability
-    /// - Minimum 10000ms (10s): Handles CI environments with severe system load and thread starvation
-    /// - Maximum 60s: Prevents indefinite waiting on stuck threads
+    /// Formula: `clamp(max_delay_ms * multiplier + base, min, max)`
+    /// - multiplier: Allows for thread scheduling overhead
+    /// - base: Fixed overhead for thread startup
+    /// - min: Handles very fast configs in slow CI
+    /// - max: Prevents indefinite waiting on stuck threads
     ///
-    /// The generous timeout accounts for:
-    /// - CI environments with unpredictable thread scheduling (especially Windows CI)
-    /// - Shared CI runners under heavy load causing thread starvation
-    /// - Slow virtualized disks causing long fsync times
-    /// - Multiple tests running concurrently competing for I/O
+    /// The timeout accounts for:
+    /// - Environments with unpredictable thread scheduling (e.g., CI runners)
+    /// - Systems under heavy load causing thread starvation
+    /// - Variable I/O latency for disk flushes
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The flush for this epoch failed
-    /// - The wait times out (indicates stuck flush thread)
+    /// - The wait times out (indicates a stuck flush thread or excessive system load)
     pub fn wait_for_flush(&self, epoch: u64) -> Result<(), Error> {
         let mut state = self.state.lock_or_err()?;
 
         // Deadlock detection timeout (NOT a performance SLA)
-        // Very generous to handle worst-case CI environments with thread starvation
-        let base_timeout =
-            Duration::from_millis(self.config.max_delay_ms * 50) + Duration::from_millis(5000);
+        let base_timeout = Duration::from_millis(
+            self.config.max_delay_ms * self.config.timeout_multiplier as u64,
+        ) + Duration::from_millis(self.config.timeout_base_ms);
         let timeout = base_timeout
-            .max(Duration::from_millis(10000))
-            .min(Duration::from_secs(60));
+            .max(Duration::from_millis(self.config.timeout_min_ms))
+            .min(Duration::from_millis(self.config.timeout_max_ms));
 
         // RACE CONDITION SAFETY: If the epoch was already flushed between register_transaction()
         // and this wait (rare but possible on fast systems), this loop exits immediately since
@@ -651,5 +669,33 @@ mod tests {
         let coord = GroupCommitCoordinator::with_defaults();
         assert_eq!(coord.max_delay(), Duration::from_millis(10));
         // Can't easily test max_batch_size without registering 200 transactions
+    }
+
+    #[test]
+    fn test_custom_timeout_config() {
+        let config = GroupCommitConfig {
+            max_delay_ms: 1,
+            max_batch_size: 100,
+            timeout_multiplier: 2,
+            timeout_base_ms: 10,
+            timeout_min_ms: 20,
+            timeout_max_ms: 100,
+        };
+        let coord = GroupCommitCoordinator::with_config(config);
+
+        let (epoch, _) = coord.register_transaction().unwrap();
+
+        // Formula: clamp(1 * 2 + 10, 20, 100) = 20ms
+        // Wait without anyone calling mark_flushed - should timeout quickly
+        let start = std::time::Instant::now();
+        let result = coord.wait_for_flush(epoch);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timeout"));
+        // Should be around 20ms. Let's check it's within a reasonable range.
+        // We use a generous upper bound for slow CI.
+        assert!(elapsed >= Duration::from_millis(20));
+        assert!(elapsed < Duration::from_millis(500));
     }
 }
