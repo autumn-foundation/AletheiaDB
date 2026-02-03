@@ -1922,4 +1922,33 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.message.contains("property expression"));
     }
+
+    // =====================================================
+    // Coverage Tests
+    // =====================================================
+
+    #[test]
+    fn test_parse_error_display() {
+        let err = ParseError {
+            message: "Test error".to_string(),
+            position: 10,
+            expected: Some("identifier".to_string()),
+            found: Some(Token::Eof),
+        };
+        let output = format!("{}", err);
+        assert!(output.contains("Test error"));
+        assert!(output.contains("position 10"));
+        assert!(output.contains("expected identifier"));
+        assert!(output.contains("found EOF"));
+    }
+
+    #[test]
+    fn test_parse_error_from_lexer_error() {
+        // Trigger a lexer error (invalid character)
+        let result = Parser::parse("MATCH @");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Unexpected character"));
+        // This implicitly tests From<LexerError> for ParseError
+    }
 }
