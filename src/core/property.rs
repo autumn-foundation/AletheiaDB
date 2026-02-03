@@ -1715,7 +1715,9 @@ impl FromIterator<(PropertyKey, PropertyValue)> for PropertyMap {
 
         for (key, value) in iter {
             // Need key size for serialization
-            let key_len = GLOBAL_INTERNER.resolve_with(key, |s| s.len()).unwrap_or(256);
+            let key_len = GLOBAL_INTERNER
+                .resolve_with(key, |s| s.len())
+                .unwrap_or(256);
             let key_size = 4 + key_len;
             let val_size = value
                 .serialized_size()
@@ -1904,7 +1906,9 @@ impl PropertyMapBuilder {
     pub fn try_remove_by_key(mut self, key: &PropertyKey) -> Result<Self> {
         let old_val = self.map.remove(key);
         if let Some(old_val) = old_val {
-            let key_len = GLOBAL_INTERNER.resolve_with(*key, |s| s.len()).unwrap_or(256);
+            let key_len = GLOBAL_INTERNER
+                .resolve_with(*key, |s| s.len())
+                .unwrap_or(256);
             let key_size = 4 + key_len;
             self.current_size = self
                 .current_size

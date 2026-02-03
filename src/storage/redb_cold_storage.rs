@@ -1220,7 +1220,9 @@ fn encode_version_data(data: &crate::storage::version::VersionData) -> Serializa
                 .iter()
                 .map(|(k, v)| {
                     (
-                        GLOBAL_INTERNER.resolve_with(*k, |s| s.to_string()).unwrap_or_default(),
+                        GLOBAL_INTERNER
+                            .resolve_with(*k, |s| s.to_string())
+                            .unwrap_or_default(),
                         encode_property_value(v),
                     )
                 })
@@ -1233,7 +1235,9 @@ fn encode_version_data(data: &crate::storage::version::VersionData) -> Serializa
                 .iter()
                 .map(|(k, v)| {
                     (
-                        GLOBAL_INTERNER.resolve_with(*k, |s| s.to_string()).unwrap_or_default(),
+                        GLOBAL_INTERNER
+                            .resolve_with(*k, |s| s.to_string())
+                            .unwrap_or_default(),
                         encode_property_value(v),
                     )
                 })
@@ -1241,7 +1245,11 @@ fn encode_version_data(data: &crate::storage::version::VersionData) -> Serializa
             removed: delta
                 .removed
                 .iter()
-                .map(|k| GLOBAL_INTERNER.resolve_with(*k, |s| s.to_string()).unwrap_or_default())
+                .map(|k| {
+                    GLOBAL_INTERNER
+                        .resolve_with(*k, |s| s.to_string())
+                        .unwrap_or_default()
+                })
                 .collect(),
         },
     }
