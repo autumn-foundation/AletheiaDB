@@ -1,3 +1,4 @@
+# Bard's Journal 🎻
 
 ## 2024-05-23 - Outdated Vector Index Docs
 **Confusion:** The `src/index/vector/mod.rs` documentation contained outdated comments stating "no VectorIndex implementation exists yet" and referencing future phases, despite `HnswIndex` being fully implemented. The examples were also marked `no_run`.
@@ -18,3 +19,7 @@
 ## 2024-05-25 - WAL Entry Binary Format
 **Confusion:** The on-disk binary format of `WalEntry` was only documented in code comments within the serialization logic, making it hard to understand the storage format without deep diving into implementation details.
 **Clarification:** Added detailed binary layout documentation to the `WalEntry` struct in `src/storage/wal/entry.rs`, including field sizes and ordering.
+
+## 2024-05-26 - HTTP JSON Conversion Limits
+**Confusion:** The HTTP API's JSON conversion logic enforces a recursion depth limit (100) to prevent stack overflow attacks, but this behavior was undocumented and could surprise developers working with deeply nested data.
+**Clarification:** Added documentation to `src/http/converters.rs` explicitly stating the recursion limit and detailing the type mappings between GallifreyDB types and JSON types.
