@@ -18,7 +18,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_id = db.write(|tx| {
         tx.create_node(
             "Supercalifragilisticexpialidocious",
-            PropertyMapBuilder::new().insert("meaning", "something to say when you have nothing to say").build()
+            PropertyMapBuilder::new()
+                .insert("meaning", "something to say when you have nothing to say")
+                .build(),
         )
     })?;
 
