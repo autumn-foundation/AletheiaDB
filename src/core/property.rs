@@ -599,91 +599,9 @@ impl PropertyValue {
                 Ok((PropertyValue::Float(value), 9))
             }
 
-            TAG_STRING => {
-                if bytes.len() < 5 {
-                    return Err(StorageError::CorruptedData(
-                        "Buffer too short for String length".to_string(),
-                    )
-                    .into());
-                }
-                let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-                offset = 5;
-
-                if bytes.len() < offset + len {
-                    return Err(StorageError::CorruptedData(format!(
-                        "Buffer too short for String data: need {} bytes, have {}",
-                        offset + len,
-                        bytes.len()
-                    ))
-                    .into());
-                }
-
-                let string_data = &bytes[offset..offset + len];
-                let s = std::str::from_utf8(string_data).map_err(|e| {
-                    StorageError::CorruptedData(format!("Invalid UTF-8 in String: {}", e))
-                })?;
-                Ok((PropertyValue::String(Arc::from(s)), offset + len))
-            }
-
-            TAG_BYTES => {
-                if bytes.len() < 5 {
-                    return Err(StorageError::CorruptedData(
-                        "Buffer too short for Bytes length".to_string(),
-                    )
-                    .into());
-                }
-                let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-                offset = 5;
-
-                if bytes.len() < offset + len {
-                    return Err(StorageError::CorruptedData(format!(
-                        "Buffer too short for Bytes data: need {} bytes, have {}",
-                        offset + len,
-                        bytes.len()
-                    ))
-                    .into());
-                }
-
-                let byte_data = &bytes[offset..offset + len];
-                Ok((PropertyValue::Bytes(Arc::from(byte_data)), offset + len))
-            }
-
-            TAG_ARRAY => {
-                if bytes.len() < 5 {
-                    return Err(StorageError::CorruptedData(
-                        "Buffer too short for Array count".to_string(),
-                    )
-                    .into());
-                }
-                let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-                offset = 5;
-
-                // Prevent DoS via memory exhaustion from malicious input
-                if count > MAX_ARRAY_ELEMENTS {
-                    return Err(StorageError::CorruptedData(format!(
-                        "Array count {} exceeds maximum allowed {}",
-                        count, MAX_ARRAY_ELEMENTS
-                    ))
-                    .into());
-                }
-
-                let mut items = Vec::with_capacity(count);
-                for _ in 0..count {
-                    if offset >= bytes.len() {
-                        return Err(StorageError::CorruptedData(
-                            "Buffer exhausted while reading Array elements".to_string(),
-                        )
-                        .into());
-                    }
-                    // Recursive call with depth increment
-                    let (item, consumed) =
-                        PropertyValue::deserialize_recursive(&bytes[offset..], depth + 1)?;
-                    items.push(item);
-                    offset += consumed;
-                }
-                Ok((PropertyValue::Array(Arc::new(items)), offset))
-            }
-
+            TAG_STRING => Self::deserialize_string(bytes),
+            TAG_BYTES => Self::deserialize_bytes(bytes),
+            TAG_ARRAY => Self::deserialize_array(bytes, depth),
             TAG_VECTOR => {
                 let (vector, consumed) = deserialize_vector(bytes)?;
                 Ok((PropertyValue::Vector(vector), consumed))
@@ -700,6 +618,90 @@ impl PropertyValue {
             ))
             .into()),
         }
+    }
+
+    fn deserialize_string(bytes: &[u8]) -> Result<(Self, usize)> {
+        if bytes.len() < 5 {
+            return Err(StorageError::CorruptedData(
+                "Buffer too short for String length".to_string(),
+            )
+            .into());
+        }
+        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let offset = 5;
+
+        if bytes.len() < offset + len {
+            return Err(StorageError::CorruptedData(format!(
+                "Buffer too short for String data: need {} bytes, have {}",
+                offset + len,
+                bytes.len()
+            ))
+            .into());
+        }
+
+        let string_data = &bytes[offset..offset + len];
+        let s = std::str::from_utf8(string_data)
+            .map_err(|e| StorageError::CorruptedData(format!("Invalid UTF-8 in String: {}", e)))?;
+        Ok((PropertyValue::String(Arc::from(s)), offset + len))
+    }
+
+    fn deserialize_bytes(bytes: &[u8]) -> Result<(Self, usize)> {
+        if bytes.len() < 5 {
+            return Err(StorageError::CorruptedData(
+                "Buffer too short for Bytes length".to_string(),
+            )
+            .into());
+        }
+        let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let offset = 5;
+
+        if bytes.len() < offset + len {
+            return Err(StorageError::CorruptedData(format!(
+                "Buffer too short for Bytes data: need {} bytes, have {}",
+                offset + len,
+                bytes.len()
+            ))
+            .into());
+        }
+
+        let byte_data = &bytes[offset..offset + len];
+        Ok((PropertyValue::Bytes(Arc::from(byte_data)), offset + len))
+    }
+
+    fn deserialize_array(bytes: &[u8], depth: usize) -> Result<(Self, usize)> {
+        if bytes.len() < 5 {
+            return Err(StorageError::CorruptedData(
+                "Buffer too short for Array count".to_string(),
+            )
+            .into());
+        }
+        let count = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let mut offset = 5;
+
+        // Prevent DoS via memory exhaustion from malicious input
+        if count > MAX_ARRAY_ELEMENTS {
+            return Err(StorageError::CorruptedData(format!(
+                "Array count {} exceeds maximum allowed {}",
+                count, MAX_ARRAY_ELEMENTS
+            ))
+            .into());
+        }
+
+        let mut items = Vec::with_capacity(count);
+        for _ in 0..count {
+            if offset >= bytes.len() {
+                return Err(StorageError::CorruptedData(
+                    "Buffer exhausted while reading Array elements".to_string(),
+                )
+                .into());
+            }
+            // Recursive call with depth increment
+            let (item, consumed) =
+                PropertyValue::deserialize_recursive(&bytes[offset..], depth + 1)?;
+            items.push(item);
+            offset += consumed;
+        }
+        Ok((PropertyValue::Array(Arc::new(items)), offset))
     }
 
     /// Estimate the heap memory usage of this property value in bytes.
@@ -1593,34 +1595,8 @@ impl PropertyMap {
         let mut calculated_size: usize = 4;
 
         for _ in 0..count {
-            // Read key length
-            if bytes.len() < offset + 4 {
-                return Err(StorageError::CorruptedData(
-                    "Buffer too short for property key length".to_string(),
-                )
-                .into());
-            }
-            // SAFETY: Length check above guarantees 4 bytes available
-            let key_len =
-                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-            offset += 4;
-
-            // Read key
-            if bytes.len() < offset + key_len {
-                return Err(StorageError::CorruptedData(
-                    "Buffer too short for property key data".to_string(),
-                )
-                .into());
-            }
-            let key_str = std::str::from_utf8(&bytes[offset..offset + key_len]).map_err(|e| {
-                StorageError::CorruptedData(format!("Invalid UTF-8 in property key: {}", e))
-            })?;
-            // Intern the key for efficient storage and comparison
-            let key = GLOBAL_INTERNER.intern(key_str)?;
-            offset += key_len;
-
-            // Read value
-            let (value, consumed) = PropertyValue::deserialize(&bytes[offset..])?;
+            let (key, value, consumed, key_len) =
+                Self::deserialize_property_entry(&bytes[offset..])?;
 
             // Validate size consistency
             let key_size = 4 + key_len;
@@ -1637,6 +1613,10 @@ impl PropertyMap {
                 //
                 // We enforce strict validation: offset (consumed bytes) must match
                 // the logical size of the constructed map.
+                let key_str = GLOBAL_INTERNER
+                    .resolve_with(key, |s| s.to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+
                 return Err(StorageError::CorruptedData(format!(
                     "Duplicate property key found during deserialization: '{}'. \
                      This indicates corrupted data or invalid serialization format.",
@@ -1665,6 +1645,41 @@ impl PropertyMap {
             },
             offset,
         ))
+    }
+
+    fn deserialize_property_entry(
+        bytes: &[u8],
+    ) -> Result<(PropertyKey, PropertyValue, usize, usize)> {
+        // Read key length
+        if bytes.len() < 4 {
+            return Err(StorageError::CorruptedData(
+                "Buffer too short for property key length".to_string(),
+            )
+            .into());
+        }
+        // SAFETY: Length check above guarantees 4 bytes available
+        let key_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let mut offset = 4;
+
+        // Read key
+        if bytes.len() < offset + key_len {
+            return Err(StorageError::CorruptedData(
+                "Buffer too short for property key data".to_string(),
+            )
+            .into());
+        }
+        let key_str = std::str::from_utf8(&bytes[offset..offset + key_len]).map_err(|e| {
+            StorageError::CorruptedData(format!("Invalid UTF-8 in property key: {}", e))
+        })?;
+        // Intern the key for efficient storage and comparison
+        let key = GLOBAL_INTERNER.intern(key_str)?;
+        offset += key_len;
+
+        // Read value
+        let (value, consumed) = PropertyValue::deserialize(&bytes[offset..])?;
+        offset += consumed;
+
+        Ok((key, value, offset, key_len))
     }
 
     /// Estimate the heap memory usage of this property map in bytes.

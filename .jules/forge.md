@@ -5,3 +5,7 @@
 ## src/query/parser.rs God Function
 **Learning:** `parse_primary_predicate` in `src/query/parser.rs` was a 100+ line function mixing multiple predicate parsing logic (EXISTS, string ops, IN, comparison), making it hard to read and maintain.
 **Action:** Extracted specific predicate logic into helper functions (`parse_exists_predicate`, `parse_string_predicate`, etc.) to flatten the structure and improve readability.
+
+## src/core/property.rs Serialization Logic
+**Learning:** `deserialize_recursive` was a Pyramid of Doom with deep nesting inside match arms. Extracting logic for complex types (String, Array) into private associated functions flattened the structure.
+**Action:** When handling complex enums with large variants in serialization, prefer creating private helper methods for each variant to keep the main dispatch loop clean.
