@@ -112,10 +112,8 @@ impl<'a> DigitalGarden<'a> {
                     )?;
 
                     // Skip self in neighbors check
-                    let valid_neighbors: Vec<_> = neighbors
-                        .iter()
-                        .filter(|(id, _)| *id != node_id)
-                        .collect();
+                    let valid_neighbors: Vec<_> =
+                        neighbors.iter().filter(|(id, _)| *id != node_id).collect();
 
                     let isolation_score = if valid_neighbors.is_empty() {
                         1.0 // Maximum isolation if no neighbors
@@ -339,7 +337,8 @@ impl<'a> DigitalGarden<'a> {
 
     fn mutate(&self, parent: &[f32], seed: u64) -> Vec<f32> {
         let mut rng = SimpleRng::new(seed);
-        parent.iter()
+        parent
+            .iter()
             .map(|g| {
                 let mutation = (rng.next_f32() - 0.5) * self.config.mutation_rate * 2.0;
                 *g + mutation
@@ -352,8 +351,8 @@ impl<'a> DigitalGarden<'a> {
 mod tests {
     use super::*;
     use crate::api::transaction::ReadOps;
-    use crate::index::vector::hnsw::HnswConfig;
     use crate::index::vector::DistanceMetric;
+    use crate::index::vector::hnsw::HnswConfig;
 
     #[test]
     fn test_garden_simulation() -> Result<()> {
