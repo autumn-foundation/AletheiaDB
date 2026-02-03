@@ -126,4 +126,4 @@ pub use group_commit::GroupCommitCoordinator;
 pub use entry::{LSN, WalEntry, WalOperation};
 
 // Re-export serialization helpers (needed by concurrent.rs via super::)
-pub(crate) use serialization::{estimate_entry_capacity, serialize_entry_into};
+pub(crate) use serialization::estimate_entry_capacity;

@@ -5,6 +5,8 @@
 //!
 //! Run with: cargo run --example echo_complaint
 
+#![allow(deprecated)]
+
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 // Users have to find and import this to make sense of their data?
 use gallifreydb::{GLOBAL_INTERNER, WriteOps};

@@ -66,20 +66,14 @@
 //! - Increasing `num_stripes`
 //! - Reducing flush interval
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-
-// Thread-local serialization buffer to avoid lock contention on the hot path.
-// Each thread gets its own buffer, eliminating the need for synchronization.
-thread_local! {
-    static SERIALIZE_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
-}
 
 use super::lsn_allocator::LsnAllocator;
 use super::ring_buffer::{CompletionHandle, PendingEntry};
 use super::stripe::{StripeMetrics, WalStripe};
-use super::{LSN, WalEntry, WalOperation};
+use super::{LSN, WalOperation};
 
 use crate::utils::error::{Error, Result, StorageError};
 
@@ -403,35 +397,24 @@ impl ConcurrentWal {
 
     /// Serialize a WAL entry to bytes.
     ///
-    /// Uses a thread-local buffer to avoid lock contention on the hot path.
-    /// Each thread has its own serialization buffer, eliminating synchronization overhead.
-    ///
     /// # Performance Optimization
     ///
     /// Pre-allocates buffer capacity based on operation type to avoid reallocations
-    /// during serialization. This is especially important for property-heavy operations
-    /// that may exceed the default 4KB thread-local buffer capacity.
+    /// during serialization.
+    ///
+    /// This implementation avoids `WalOperation::clone()` and eliminates the
+    /// need for a temporary buffer copy, reducing both CPU and memory overhead.
     fn serialize_entry(&self, lsn: LSN, operation: &WalOperation) -> Result<Vec<u8>> {
-        SERIALIZE_BUFFER.with(|cell| {
-            let mut buffer = cell.borrow_mut();
-            buffer.clear();
+        let estimated_capacity = super::estimate_entry_capacity(operation);
+        let mut buffer = Vec::with_capacity(estimated_capacity);
 
-            // Estimate required capacity and ensure buffer has enough space
-            // This avoids reallocations during serialization (issue #217)
-            let estimated_capacity = super::estimate_entry_capacity(operation);
-            let current_capacity = buffer.capacity();
-            if current_capacity < estimated_capacity {
-                buffer.reserve(estimated_capacity - current_capacity);
-            }
+        // Generate timestamp
+        let timestamp = crate::core::temporal::time::now();
 
-            let entry = WalEntry::new(lsn, operation.clone());
+        // Serialize directly into the buffer without creating an intermediate WalEntry
+        super::serialization::serialize_operation_into(lsn, timestamp, operation, &mut buffer)?;
 
-            // Serialize using the existing function
-            super::serialize_entry_into(&entry, &mut buffer)?;
-
-            // Clone the buffer contents (we reuse the buffer itself)
-            Ok(buffer.clone())
-        })
+        Ok(buffer)
     }
 
     /// Drain all pending entries from all stripes.
@@ -870,5 +853,17 @@ mod tests {
         assert_eq!(batch_lsns[1], LSN(3));
         assert_eq!(lsn4, LSN(4));
         assert_eq!(wal.total_appends(), 4);
+    }
+
+    #[test]
+    fn test_concurrent_wal_accessors() {
+        let dir = tempdir().unwrap();
+        let config = ConcurrentWalConfig::new(dir.path());
+        let wal = ConcurrentWal::new(config.clone()).unwrap();
+
+        assert_eq!(wal.wal_dir(), dir.path());
+        assert_eq!(wal.config().num_stripes, config.num_stripes);
+        assert!(wal.stripe(0).is_some());
+        assert!(wal.stripe(1000).is_none());
     }
 }
