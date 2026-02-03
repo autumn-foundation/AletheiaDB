@@ -23,8 +23,9 @@ def count_lines(filepath):
             continue
 
         if stripped.startswith('/*'):
-            in_block_comment = True
             doc_lines += 1
+            if '*/' not in stripped:
+                in_block_comment = True
             continue
 
         if stripped.startswith('///') or stripped.startswith('//!'):
