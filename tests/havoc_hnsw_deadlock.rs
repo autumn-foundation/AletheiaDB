@@ -6,18 +6,19 @@ use tempfile::tempdir;
 
 use gallifreydb::core::id::NodeId;
 
-/// 👺 HAVOC DEADLOCK REPRODUCTION
+/// 👺 HAVOC DEADLOCK REGRESSION TEST (Fixed in PR #751)
 ///
-/// Triggers a deadlock between `add` (Occupied path) and `save`.
+/// Previously triggered a deadlock between `add` (Occupied path) and `save`.
 ///
-/// Lock Inversion:
-/// - Thread 1 (`add`): Acquires Shard Lock (via entry) -> Waits for Inner Write Lock
-/// - Thread 2 (`save`): Acquires Inner Read Lock -> Waits for Shard Lock (via iter)
+/// Lock Inversion (FIXED):
+/// - Thread 1 (`add`): Acquires Shard Lock (via entry) -> Then acquires Inner Write Lock
+/// - Thread 2 (`save`): Previously acquired Inner Read Lock -> Then iterated Shard Locks
 ///
-/// To detonate:
-/// `cargo test --test havoc_hnsw_deadlock -- --ignored --nocapture`
+/// Fix: save_internal() now collects mappings BEFORE acquiring any locks,
+/// establishing consistent lock ordering: inner -> DashMap
+///
+/// This test now serves as a regression test to ensure the deadlock doesn't return.
 #[test]
-#[ignore = "This test intentionally deadlocks. Run manually to verify fragility."]
 fn havoc_deadlock_add_vs_save() {
     let dir = tempdir().unwrap();
     let index_path = dir.path().join("havoc_deadlock.index");

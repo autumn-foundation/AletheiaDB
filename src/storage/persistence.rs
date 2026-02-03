@@ -726,7 +726,7 @@ impl PersistenceManager {
     ) -> Result<()> {
         // Validate that the InternedString ID exists in the interner
         // This protects against corrupted WAL files or missing checkpoint data
-        GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
+        GLOBAL_INTERNER.resolve_with(label, |_| ()).ok_or_else(|| {
             StorageError::CorruptedData(format!(
                 "InternedString ID {} for node_id={} not found in interner. \
                  This indicates corrupted WAL or missing checkpoint data.",
@@ -790,7 +790,7 @@ impl PersistenceManager {
         next_version_id: &mut u64,
     ) -> Result<()> {
         // Validate that the InternedString ID exists in the interner
-        GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
+        GLOBAL_INTERNER.resolve_with(label, |_| ()).ok_or_else(|| {
             StorageError::CorruptedData(format!(
                 "InternedString ID {} for edge_id={} not found in interner. \
                  This indicates corrupted WAL or missing checkpoint data.",
@@ -856,7 +856,7 @@ impl PersistenceManager {
         tx_time: Timestamp,
     ) -> Result<()> {
         // Validate that the InternedString ID exists in the interner
-        GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
+        GLOBAL_INTERNER.resolve_with(label, |_| ()).ok_or_else(|| {
             StorageError::CorruptedData(format!(
                 "InternedString ID {} for node_id={} version_id={} not found in interner. \
                  This indicates corrupted WAL or missing checkpoint data.",
@@ -923,7 +923,7 @@ impl PersistenceManager {
         tx_time: Timestamp,
     ) -> Result<()> {
         // Validate that the InternedString ID exists in the interner
-        GLOBAL_INTERNER.resolve(label).ok_or_else(|| {
+        GLOBAL_INTERNER.resolve_with(label, |_| ()).ok_or_else(|| {
             StorageError::CorruptedData(format!(
                 "InternedString ID {} for edge_id={} version_id={} not found in interner. \
                  This indicates corrupted WAL or missing checkpoint data.",

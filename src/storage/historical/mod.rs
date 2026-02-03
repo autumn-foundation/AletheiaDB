@@ -553,9 +553,6 @@ impl HistoricalStorage {
         // Check if this node already has versions
         let prev_version_id = self.node_version_heads.get(&node_id).copied();
 
-        // Clone properties for hook call and caching (since new_anchor takes ownership)
-        let properties_for_hook = properties.clone();
-
         // Create version (anchor or delta based on chain length)
         let mut version = if let Some(prev_id) = prev_version_id {
             // Verify previous version exists (properties reconstructed later via reconstruct_node_properties)
@@ -574,8 +571,14 @@ impl HistoricalStorage {
 
             if versions_since_anchor >= self.config.anchor_interval as usize {
                 // Create anchor with link to previous version
-                let mut anchor =
-                    NodeVersion::new_anchor(version_id, node_id, temporal, label, properties);
+                // Use properties.clone() here as we need original for caching later
+                let mut anchor = NodeVersion::new_anchor(
+                    version_id,
+                    node_id,
+                    temporal,
+                    label,
+                    properties.clone(),
+                );
                 anchor.prev_version = Some(prev_id);
                 // Reset counter to 0 after creating anchor
                 self.node_versions_since_anchor.insert(node_id, 0);
@@ -600,7 +603,7 @@ impl HistoricalStorage {
             // First version is always an anchor
             // Initialize counter to 0
             self.node_versions_since_anchor.insert(node_id, 0);
-            NodeVersion::new_anchor(version_id, node_id, temporal, label, properties)
+            NodeVersion::new_anchor(version_id, node_id, temporal, label, properties.clone())
         };
 
         // Handle pre-anchor hook (BEFORE storing)
@@ -610,7 +613,7 @@ impl HistoricalStorage {
                     entity_type: "node",
                     entity_id: node_id.as_u64(),
                     timestamp: temporal.transaction_time().start(),
-                    properties: &properties_for_hook,
+                    properties: &properties,
                 },
                 &mut version.data,
                 &self.pre_node_anchor_hook,
@@ -672,7 +675,7 @@ impl HistoricalStorage {
         //         the previous delta's properties even though we just added them.
         // AFTER:  All versions are cached in the main property cache, eliminating
         //         unnecessary reconstructions during consecutive writes.
-        let props_arc = Arc::new(properties_for_hook);
+        let props_arc = Arc::new(properties);
         self.node_property_cache
             .insert(version_id, props_arc.clone());
 
@@ -744,9 +747,6 @@ impl HistoricalStorage {
         // Check if this edge already has versions
         let prev_version_id = self.edge_version_heads.get(&edge_id).copied();
 
-        // Clone properties for hook call and caching (since new_anchor takes ownership)
-        let properties_for_hook = properties.clone();
-
         // Create version (anchor or delta based on chain length)
         let mut version = if let Some(prev_id) = prev_version_id {
             // Verify previous version exists (properties reconstructed later via reconstruct_edge_properties)
@@ -765,8 +765,15 @@ impl HistoricalStorage {
 
             if versions_since_anchor >= self.config.anchor_interval as usize {
                 // Create anchor with link to previous version
+                // Use properties.clone() here as we need original for caching later
                 let mut anchor = EdgeVersion::new_anchor(
-                    version_id, edge_id, temporal, label, source, target, properties,
+                    version_id,
+                    edge_id,
+                    temporal,
+                    label,
+                    source,
+                    target,
+                    properties.clone(),
                 );
                 anchor.prev_version = Some(prev_id);
                 // Reset counter to 0 after creating anchor
@@ -795,7 +802,13 @@ impl HistoricalStorage {
             // Initialize counter to 0
             self.edge_versions_since_anchor.insert(edge_id, 0);
             EdgeVersion::new_anchor(
-                version_id, edge_id, temporal, label, source, target, properties,
+                version_id,
+                edge_id,
+                temporal,
+                label,
+                source,
+                target,
+                properties.clone(),
             )
         };
 
@@ -806,7 +819,7 @@ impl HistoricalStorage {
                     entity_type: "edge",
                     entity_id: edge_id.as_u64(),
                     timestamp: temporal.transaction_time().start(),
-                    properties: &properties_for_hook,
+                    properties: &properties,
                 },
                 &mut version.data,
                 &self.pre_edge_anchor_hook,
@@ -876,7 +889,7 @@ impl HistoricalStorage {
 
         // Issue #210: Cache properties for ALL versions (anchors and deltas) to avoid
         // reconstructing properties we just added when creating the next delta.
-        let props_arc = Arc::new(properties_for_hook);
+        let props_arc = Arc::new(properties);
         self.edge_property_cache
             .insert(version_id, props_arc.clone());
 
@@ -2057,8 +2070,7 @@ impl HistoricalStorage {
                     temporal: version.temporal,
                     properties,
                     label: GLOBAL_INTERNER
-                        .resolve(version.label)
-                        .map(|s| s.to_string())
+                        .resolve_with(version.label, |s| s.to_string())
                         .unwrap_or_else(|| version.label.to_string()),
                 });
             }
@@ -2204,8 +2216,7 @@ impl HistoricalStorage {
                     temporal: version.temporal,
                     properties,
                     label: GLOBAL_INTERNER
-                        .resolve(version.label)
-                        .map(|s| s.to_string())
+                        .resolve_with(version.label, |s| s.to_string())
                         .unwrap_or_else(|| version.label.to_string()),
                 });
             }

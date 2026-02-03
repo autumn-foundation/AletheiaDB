@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Integration tests for durability modes.
 //!
 //! Tests the three durability modes (Synchronous, Async, GroupCommit)
