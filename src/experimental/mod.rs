@@ -15,3 +15,6 @@ pub mod graph_context;
 #[cfg(feature = "nova")]
 /// Temporal narrative generator for natural language history logs.
 pub mod temporal_narrative;
+#[cfg(feature = "nova")]
+/// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
+pub mod echo;
