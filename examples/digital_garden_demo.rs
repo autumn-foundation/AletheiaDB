@@ -1,8 +1,10 @@
+#[cfg(feature = "nova")]
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+#[cfg(feature = "nova")]
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -11,7 +13,9 @@ use ratatui::{
     text::Span,
     widgets::{Block, Borders, Paragraph, canvas::Canvas},
 };
+#[cfg(feature = "nova")]
 use std::sync::Arc;
+#[cfg(feature = "nova")]
 use std::{error::Error, io, time::Duration};
 
 #[cfg(feature = "nova")]
@@ -55,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(feature = "nova")]
-fn run_app<B: ratatui::backend::Backend>(
+fn run_app<B: ratatui::backend::Backend<Error = std::io::Error>>(
     terminal: &mut Terminal<B>,
     garden: &mut DigitalGarden,
 ) -> io::Result<()> {
