@@ -7,6 +7,9 @@
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
 #[cfg(feature = "nova")]
+/// Digital Garden simulation ("Memetic Garden").
+pub mod digital_garden;
+#[cfg(feature = "nova")]
 /// Associative retrieval ("Fishing") module.
 pub mod fishing;
 #[cfg(feature = "nova")]

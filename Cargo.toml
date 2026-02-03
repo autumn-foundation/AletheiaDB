@@ -74,6 +74,8 @@ sqlparser = { version = "0.40", optional = true }
 rayon = "1.8"
 comfy-table = "7.2.2"
 crossterm = "0.29.0"
+ratatui = "0.30.0"
+rand = "0.8"
 
 [dev-dependencies]
 criterion = "0.5"
