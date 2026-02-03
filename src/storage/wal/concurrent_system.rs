@@ -699,20 +699,27 @@ impl ConcurrentWalSystem {
     /// ```ignore
     /// wal.append_async(op1)?;
     /// wal.append_async(op2)?;
-    /// let epoch = wal.commit()?;  // Register for durability
-    /// if let Some(epoch) = epoch {
-    ///     wal.group_commit_coordinator().unwrap().wait_for_flush(epoch)?;
+    /// let wait_info = wal.commit()?;  // Register for durability
+    /// if let Some((epoch, coordinator)) = wait_info {
+    ///     coordinator.wait_for_flush(epoch)?;
     /// }
     /// ```
     ///
     /// # Returns
     ///
-    /// Returns an epoch number for GroupCommit/AsyncBatched modes that the
-    /// caller should wait on using `group_commit_coordinator().wait_for_flush(epoch)`.
+    /// Returns `Some((epoch, coordinator))` for GroupCommit/AsyncBatched modes.
+    /// The caller should wait on the epoch using `coordinator.wait_for_flush(epoch)`.
     ///
     /// For other modes, returns `None`:
     /// - Synchronous: Data is already durable when this returns
     /// - Async: No waiting needed (fire-and-forget)
+    ///
+    /// # TOCTOU Race Prevention
+    ///
+    /// This method returns BOTH the epoch and coordinator atomically to prevent
+    /// TOCTOU races during durability mode switches. The coordinator reference
+    /// keeps the GroupCommitCoordinator alive even if the mode is switched,
+    /// ensuring transactions can complete their durability wait safely.
     ///
     /// # Race Condition Handling
     ///
@@ -724,7 +731,7 @@ impl ConcurrentWalSystem {
     /// the epoch will still advance (with no entries), ensuring waiters
     /// are notified. The data durability is guaranteed because entries
     /// must be in the ring buffer before this method is called.
-    pub fn commit(&self) -> Result<Option<u64>> {
+    pub fn commit(&self) -> Result<Option<(u64, Arc<GroupCommitCoordinator>)>> {
         // Capture both mode and coordinator atomically to avoid TOCTOU race
         let (mode, group_commit) = {
             let state = self.state.read();
@@ -745,8 +752,8 @@ impl ConcurrentWalSystem {
                 Ok(None)
             }
             DurabilityMode::GroupCommit { .. } | DurabilityMode::AsyncBatched { .. } => {
-                // Register with coordinator and return epoch to wait for
-                if let Some(ref gc) = group_commit {
+                // Register with coordinator and return both epoch and coordinator
+                if let Some(gc) = group_commit {
                     let (epoch, should_trigger) = gc.register_transaction()?;
 
                     // If batch is full, signal flush thread to wake up immediately
@@ -754,7 +761,7 @@ impl ConcurrentWalSystem {
                         self.flush_notifier.notify();
                     }
 
-                    Ok(Some(epoch))
+                    Ok(Some((epoch, gc)))
                 } else {
                     // Fallback to sync if no coordinator (can happen during mode switch)
                     #[cfg(feature = "observability")]
