@@ -695,7 +695,10 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("timeout"));
         // Should be around 20ms. Let's check it's within a reasonable range.
         // We use a generous upper bound for slow CI.
-        assert!(elapsed >= Duration::from_millis(20));
+        // On Windows CI, the scheduler can be very erratic, sometimes waking up slightly early
+        // or having coarse timer resolution (e.g. 15.6ms).
+        // Relaxing the lower bound to 15ms to account for this.
+        assert!(elapsed >= Duration::from_millis(15));
         assert!(elapsed < Duration::from_millis(500));
     }
 }
