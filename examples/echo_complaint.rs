@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. The "Read the Docs" Approach (The Friction)
     println!("\nAttempt 2: The Boilerplate Dance");
     let resolved = GLOBAL_INTERNER
-        .resolve(node.label)
+        .resolve_with(node.label, |s| s.to_string())
         .expect("Why would it be None if I just got it from the DB?");
 
     println!("Result: {}", resolved);
