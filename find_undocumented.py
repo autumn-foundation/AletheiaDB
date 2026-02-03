@@ -54,7 +54,7 @@ def main():
     print("-" * 90)
     for filepath, ratio, code, doc in results:
         if ratio < 0.2 and code > 20: # Filter out tiny files or files with very little code
-             print(f"{filepath:<60} {ratio:.2f}       {code:<10} {doc:<10}")
+            print(f"{filepath:<60} {ratio:<10.2f} {code:<10} {doc:<10}")
 
 if __name__ == "__main__":
     main()
