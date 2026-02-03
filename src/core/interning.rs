@@ -450,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_resolve() {
         let interner = StringInterner::new();
 
@@ -460,6 +461,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_resolve_invalid_id() {
         let interner = StringInterner::new();
 
@@ -506,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_clear() {
         let interner = StringInterner::new();
 
@@ -566,6 +569,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_global_interner() {
         let id1 = GLOBAL_INTERNER.intern("global").unwrap();
         let id2 = GLOBAL_INTERNER.intern("global").unwrap();
@@ -626,6 +630,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_resolve_with_no_arc_clone() {
         let interner = StringInterner::new();
         let id = interner.intern("performance test").unwrap();
@@ -681,6 +686,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_resolve_with_vs_resolve_equivalence() {
         let interner = StringInterner::new();
         let id = interner.intern("equivalence test").unwrap();
@@ -940,6 +946,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_warm_common_strings_with_existing_data() {
         let interner = StringInterner::new();
 
