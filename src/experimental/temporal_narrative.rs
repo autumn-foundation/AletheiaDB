@@ -33,8 +33,7 @@ impl<'a> NarrativeGenerator<'a> {
     /// Helper to resolve interned keys to strings.
     fn resolve_key(key_id: InternedString) -> String {
         GLOBAL_INTERNER
-            .resolve(key_id)
-            .map(|s| s.to_string())
+            .resolve_with(key_id, |s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string())
     }
 

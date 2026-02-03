@@ -2021,9 +2021,10 @@ impl CurrentStorage {
             let (candidates, stats) = self.calculate_adaptive_candidates(k, label);
 
             let mut results = index.search_with_filter(query, candidates, |node_id| {
+                // HOT PATH: Use zero-copy label lookup to avoid cloning entire Node
                 self.indexes
-                    .get_node(*node_id)
-                    .map(|n| n.label == label_id)
+                    .get_node_label(*node_id)
+                    .map(|l| l == label_id)
                     .unwrap_or(false)
             })?;
 
