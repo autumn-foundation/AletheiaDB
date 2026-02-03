@@ -53,6 +53,10 @@ pub enum QueryRequest {
     },
     FindNeighbors {
         node_id: u64,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        offset: Option<usize>,
     },
 }
 
@@ -220,23 +224,54 @@ pub async fn handle_query(
                 }
             }
         }
-        QueryRequest::FindNeighbors { node_id } => {
+        QueryRequest::FindNeighbors {
+            node_id,
+            limit,
+            offset,
+        } => {
             match NodeId::new(node_id) {
                 Ok(nid) => {
-                    // Issue 2: Deduplication
-                    // Use a HashSet to track seen node IDs
-                    let mut seen_ids = HashSet::new();
-                    let mut neighbors = Vec::new();
+                    // Safety limits to prevent DoS
+                    let max_limit = 1000;
+                    let max_deep_pagination = 10_000;
 
-                    // Outgoing
-                    let outgoing = db.get_outgoing_edges(nid);
-                    for edge_id in outgoing {
-                        if let Ok(node) = db
-                            .get_edge_target(edge_id)
-                            .and_then(|target| db.get_node(target))
-                        {
-                            let id = node.id.as_u64();
-                            if seen_ids.insert(id) {
+                    let limit_val = limit.unwrap_or(100).min(max_limit);
+                    let offset_val = offset.unwrap_or(0);
+
+                    // Prevent deep pagination attacks (CPU DoS)
+                    if offset_val + limit_val > max_deep_pagination {
+                        return HttpResponse::BadRequest().json(ApiResponse::error(format!(
+                            "Pagination limit exceeded: offset + limit must be <= {}",
+                            max_deep_pagination
+                        )));
+                    }
+
+                    // Deduplication
+                    let mut seen_ids = HashSet::new();
+                    let mut neighbors = Vec::with_capacity(limit_val);
+
+                    // Use zero-allocation iterators
+                    // Outgoing: edge -> target node
+                    let outgoing_iter = db.get_outgoing_edges_iter(nid).map(|edge_id| {
+                        db.get_edge_target(edge_id).ok()
+                    });
+
+                    // Incoming: edge -> source node
+                    let incoming_iter = db.get_incoming_edges_iter(nid).map(|edge_id| {
+                        db.get_edge_source(edge_id).ok()
+                    });
+
+                    // Chain iterators -> filter valid -> filter duplicates -> skip -> take
+                    let combined_iter = outgoing_iter
+                        .chain(incoming_iter)
+                        .flatten() // remove None (failed lookups)
+                        .filter(|&neighbor_id| seen_ids.insert(neighbor_id)) // deduplicate
+                        .skip(offset_val)
+                        .take(limit_val);
+
+                    for neighbor_id in combined_iter {
+                        match db.get_node(neighbor_id) {
+                            Ok(node) => {
                                 let props_json = match property_map_to_json(&node.properties) {
                                     Ok(p) => p,
                                     Err(e) => {
@@ -245,35 +280,15 @@ pub async fn handle_query(
                                     }
                                 };
                                 neighbors.push(json!({
-                                    "id": id,
+                                    "id": node.id.as_u64(),
                                     "label": interned_to_string(node.label),
                                     "properties": props_json
                                 }));
                             }
-                        }
-                    }
-
-                    // Incoming
-                    let incoming = db.get_incoming_edges(nid);
-                    for edge_id in incoming {
-                        if let Ok(node) = db
-                            .get_edge_source(edge_id)
-                            .and_then(|source| db.get_node(source))
-                        {
-                            let id = node.id.as_u64();
-                            if seen_ids.insert(id) {
-                                let props_json = match property_map_to_json(&node.properties) {
-                                    Ok(p) => p,
-                                    Err(e) => {
-                                        return HttpResponse::InternalServerError()
-                                            .json(ApiResponse::error(e));
-                                    }
-                                };
-                                neighbors.push(json!({
-                                    "id": id,
-                                    "label": interned_to_string(node.label),
-                                    "properties": props_json
-                                }));
+                            Err(e) => {
+                                // Node ID found in edge but not in node index? Should be impossible unless corrupted
+                                return HttpResponse::InternalServerError()
+                                    .json(ApiResponse::error(e.to_string()));
                             }
                         }
                     }
