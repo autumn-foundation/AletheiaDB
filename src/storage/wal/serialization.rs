@@ -1,7 +1,10 @@
 //! Serialization logic for WAL entries.
 
-use super::entry::{WalEntry, WalOperation};
+#[cfg(test)]
+use super::entry::WalEntry;
+use super::entry::{LSN, WalOperation};
 use crate::core::interning::InternedString;
+use crate::core::temporal::Timestamp;
 use crate::utils::error::Result;
 
 /// Helper to serialize an InternedString into the buffer (4-byte ID)
@@ -91,23 +94,27 @@ pub(crate) fn estimate_entry_capacity(operation: &WalOperation) -> usize {
     FIXED_OVERHEAD + variable_size
 }
 
-/// Serialize a WAL entry with CRC32 checksum into the provided buffer
+/// Serialize a WAL entry components into the provided buffer
 ///
-/// This function reuses the provided buffer to avoid per-entry allocation.
-/// The caller should clear the buffer before calling this function to maintain its capacity.
-pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Result<()> {
+/// This allows serialization without creating a WalEntry wrapper.
+pub(crate) fn serialize_operation_into(
+    lsn: LSN,
+    timestamp: Timestamp,
+    operation: &WalOperation,
+    buffer: &mut Vec<u8>,
+) -> Result<()> {
     // Write LSN (8 bytes)
-    buffer.extend_from_slice(&entry.lsn.0.to_le_bytes());
+    buffer.extend_from_slice(&lsn.0.to_le_bytes());
 
     // Write timestamp (12 bytes: Phase 2 HybridTimestamp)
-    entry.timestamp.serialize_into(buffer);
+    timestamp.serialize_into(buffer);
 
     // Reserve space for checksum (4 bytes) - will fill in later
     let checksum_offset = buffer.len();
     buffer.extend_from_slice(&[0u8; 4]);
 
     // Write operation type and data with full serialization
-    match &entry.operation {
+    match operation {
         WalOperation::CreateNode {
             node_id,
             label,
@@ -198,6 +205,15 @@ pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Re
     buffer[checksum_offset..checksum_offset + 4].copy_from_slice(&checksum.to_le_bytes());
 
     Ok(())
+}
+
+/// Serialize a WAL entry with CRC32 checksum into the provided buffer
+///
+/// This function reuses the provided buffer to avoid per-entry allocation.
+/// The caller should clear the buffer before calling this function to maintain its capacity.
+#[cfg(test)]
+pub(crate) fn serialize_entry_into(entry: &WalEntry, buffer: &mut Vec<u8>) -> Result<()> {
+    serialize_operation_into(entry.lsn, entry.timestamp, &entry.operation, buffer)
 }
 
 #[cfg(test)]

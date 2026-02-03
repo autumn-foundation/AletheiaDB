@@ -1181,4 +1181,13 @@ mod tests {
             h.join().unwrap();
         }
     }
+
+    #[test]
+    fn test_ring_buffer_getters() {
+        let buf = WalRingBuffer::new(1024);
+        assert_eq!(buf.capacity(), 1024);
+        assert!(!buf.is_closed());
+        buf.close();
+        assert!(buf.is_closed());
+    }
 }
