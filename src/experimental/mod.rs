@@ -7,6 +7,9 @@
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
 #[cfg(feature = "nova")]
+/// Temporal Resonance Engine ("Echo") for finding nodes with similar activity patterns.
+pub mod echo;
+#[cfg(feature = "nova")]
 /// Associative retrieval ("Fishing") module.
 pub mod fishing;
 #[cfg(feature = "nova")]
