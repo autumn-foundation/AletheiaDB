@@ -560,7 +560,21 @@ impl WalRingBuffer {
                         return Ok(());
                     }
                     Err(_) => {
-                        // Lost the race - retry immediately
+                        // Lost the race - treat as contention/backpressure
+                        spin_count += 1;
+
+                        if spin_count >= current_spin_limit {
+                            // Check if we've hit max spins
+                            if current_spin_limit >= self.backpressure.max_spins {
+                                return Err(entry);
+                            }
+                            // Exponential backoff: double the spin limit
+                            current_spin_limit = (current_spin_limit.saturating_mul(2))
+                                .min(self.backpressure.max_spins);
+                            spin_count = 0;
+                        }
+
+                        std::hint::spin_loop();
                         continue;
                     }
                 }
@@ -1180,5 +1194,55 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    #[test]
+    fn test_high_contention_backpressure() {
+        // This test simulates high contention to verify that backpressure logic
+        // works correctly even when the buffer is not full but CAS fails often.
+        // It spawns many threads for a small buffer.
+
+        let buf = Arc::new(WalRingBuffer::new(16)); // Small buffer
+        let num_threads = 50; // High contention
+        let entries_per_thread = 100;
+        let total_expected = num_threads * entries_per_thread;
+
+        let barrier = Arc::new(std::sync::Barrier::new(num_threads + 1));
+
+        // Spawn producers
+        let mut handles = Vec::new();
+        for t in 0..num_threads {
+            let buf = Arc::clone(&buf);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait(); // Synchronize start
+                for i in 0..entries_per_thread {
+                    let entry =
+                        PendingEntry::new_async(LSN((t * entries_per_thread + i) as u64), vec![]);
+                    buf.append_blocking(entry).unwrap();
+                }
+            }));
+        }
+
+        // Spawn consumer
+        let buf_clone = Arc::clone(&buf);
+        let barrier_clone = Arc::clone(&barrier);
+        let consumer = thread::spawn(move || {
+            barrier_clone.wait();
+            let mut drained = 0;
+            while drained < total_expected {
+                let entries = buf_clone.drain();
+                drained += entries.len();
+                if entries.is_empty() {
+                    thread::yield_now();
+                }
+            }
+        });
+
+        // Wait for all
+        for h in handles {
+            h.join().unwrap();
+        }
+        consumer.join().unwrap();
     }
 }
