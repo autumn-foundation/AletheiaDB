@@ -1,4 +1,4 @@
-use gallifreydb::core::history::{EntityHistory, VersionInfo, VersionDiff};
+use gallifreydb::core::history::{EntityHistory, VersionDiff, VersionInfo};
 use gallifreydb::core::id::VersionId;
 use gallifreydb::core::property::PropertyMapBuilder;
 use gallifreydb::core::temporal::{BiTemporalInterval, time};
@@ -35,7 +35,7 @@ fn main() {
         temporal: BiTemporalInterval::current(t2),
         properties: PropertyMapBuilder::new()
             .insert("name", "Alice") // Unchanged
-            .insert("age", 31i64)    // Modified
+            .insert("age", 31i64) // Modified
             .insert("active", false) // Modified (bool)
             // "role" removed
             .insert("department", "Engineering") // Added
@@ -57,12 +57,7 @@ fn main() {
     println!("{}\n", history);
 
     // Create VersionDiff
-    let diff = VersionDiff::compute(
-        &v1.properties,
-        &v2.properties,
-        v1.version_id,
-        v2.version_id,
-    );
+    let diff = VersionDiff::compute(&v1.properties, &v2.properties, v1.version_id, v2.version_id);
 
     // Print VersionDiff
     println!("--- VersionDiff Display ---");

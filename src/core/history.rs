@@ -4,7 +4,7 @@
 //! version information, and version diffs.
 
 use crate::core::id::VersionId;
-use crate::core::interning::{InternedString, GLOBAL_INTERNER};
+use crate::core::interning::{GLOBAL_INTERNER, InternedString};
 use crate::core::property::{PropertyMap, PropertyValue};
 use crate::core::temporal::{BiTemporalInterval, Timestamp};
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
@@ -272,7 +272,11 @@ impl fmt::Display for EntityHistory {
                 }
 
                 if version.properties.len() > 3 {
-                    format!("{}, ... (+{})", parts.join(", "), version.properties.len() - 3)
+                    format!(
+                        "{}, ... (+{})",
+                        parts.join(", "),
+                        version.properties.len() - 3
+                    )
                 } else {
                     parts.join(", ")
                 }
@@ -646,5 +650,179 @@ mod tests {
                 .build(),
             label: "Test".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use crate::core::id::VersionId;
+    use crate::core::property::PropertyMapBuilder;
+    use crate::core::temporal::{BiTemporalInterval, time};
+
+    fn create_dummy_version(ver: u64) -> VersionInfo {
+        let now = time::now();
+        VersionInfo {
+            version_number: ver,
+            version_id: VersionId::new(ver).unwrap(),
+            temporal: BiTemporalInterval::current(now),
+            properties: PropertyMapBuilder::new()
+                .insert("name", "Test")
+                .insert("val", 42i64)
+                .build(),
+            label: "DisplayTest".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_version_info_display() {
+        let v = create_dummy_version(1);
+        let output = format!("{}", v);
+        assert!(output.contains("Version #1"));
+        assert!(output.contains("DisplayTest"));
+        assert!(output.contains("name"));
+        assert!(output.contains("Test"));
+        assert!(output.contains("val"));
+        assert!(output.contains("42"));
+    }
+
+    #[test]
+    fn test_version_info_display_no_props() {
+        let mut v = create_dummy_version(1);
+        v.properties = PropertyMapBuilder::new().build();
+        let output = format!("{}", v);
+        assert!(output.contains("Version #1"));
+        assert!(output.contains("Properties"));
+        assert!(output.contains("None"));
+    }
+
+    #[test]
+    fn test_entity_history_display() {
+        let history = EntityHistory {
+            versions: vec![create_dummy_version(1), create_dummy_version(2)],
+        };
+        let output = format!("{}", history);
+        assert!(output.contains("Ver"));
+        assert!(output.contains("Label"));
+        assert!(output.contains("Properties"));
+        // Check contents
+        assert!(output.contains("name: \"Test\""));
+        assert!(output.contains("val: 42"));
+    }
+
+    #[test]
+    fn test_entity_history_display_empty() {
+        let history = EntityHistory { versions: vec![] };
+        let output = format!("{}", history);
+        assert!(output.contains("No history available"));
+    }
+
+    #[test]
+    fn test_entity_history_display_many_props() {
+        let mut v = create_dummy_version(1);
+        v.properties = PropertyMapBuilder::new()
+            .insert("a", 1)
+            .insert("b", 2)
+            .insert("c", 3)
+            .insert("d", 4)
+            .build();
+        let history = EntityHistory { versions: vec![v] };
+        let output = format!("{}", history);
+        // Should contain truncation indicator
+        assert!(output.contains("... (+1)"));
+    }
+
+    #[test]
+    fn test_entity_history_display_empty_props() {
+        let mut v = create_dummy_version(1);
+        v.properties = PropertyMapBuilder::new().build();
+        let history = EntityHistory { versions: vec![v] };
+        let output = format!("{}", history);
+        // Should show dash for empty properties
+        assert!(output.contains("-"));
+    }
+
+    #[test]
+    fn test_version_diff_display() {
+        let v1 = PropertyMapBuilder::new()
+            .insert("removed_key", "old")
+            .insert("modified_key", "v1")
+            .build();
+
+        let v2 = PropertyMapBuilder::new()
+            .insert("modified_key", "v2")
+            .insert("added_key", "new")
+            .build();
+
+        let diff = VersionDiff::compute(
+            &v1,
+            &v2,
+            VersionId::new(1).unwrap(),
+            VersionId::new(2).unwrap(),
+        );
+
+        let output = format!("{}", diff);
+        assert!(output.contains("ADDED"));
+        assert!(output.contains("added_key"));
+        assert!(output.contains("REMOVED"));
+        assert!(output.contains("removed_key"));
+        assert!(output.contains("MODIFIED"));
+        assert!(output.contains("modified_key"));
+        assert!(output.contains("v1"));
+        assert!(output.contains("v2"));
+    }
+
+    #[test]
+    fn test_version_diff_display_no_changes() {
+        let v1 = PropertyMapBuilder::new().insert("a", 1).build();
+        let diff = VersionDiff::compute(
+            &v1,
+            &v1,
+            VersionId::new(1).unwrap(),
+            VersionId::new(2).unwrap(),
+        );
+        let output = format!("{}", diff);
+        assert!(output.contains("No changes between versions"));
+    }
+
+    #[test]
+    fn test_version_summary_display() {
+        let summary = VersionSummary {
+            version_id: VersionId::new(10).unwrap(),
+            version_number: 10,
+            valid_from: time::now(),
+            transaction_time: time::now(),
+            properties_added: 5,
+            properties_removed: 2,
+            properties_modified: 1,
+        };
+        let output = format!("{}", summary);
+        assert!(output.contains("Version #10"));
+        assert!(output.contains("+5 added"));
+        assert!(output.contains("-2 removed"));
+        assert!(output.contains("~1 modified"));
+    }
+
+    #[test]
+    fn test_format_property_value_cell_colors() {
+        // We can't easily check colors in string output without parsing ANSI codes,
+        // but we can verify the content is correct and the function runs.
+
+        let true_val = PropertyValue::Bool(true);
+        let false_val = PropertyValue::Bool(false);
+        let null_val = PropertyValue::Null;
+        let str_val = PropertyValue::from("simple");
+
+        let cell_true = format_property_value_cell(&true_val);
+        assert_eq!(cell_true.content(), "true");
+
+        let cell_false = format_property_value_cell(&false_val);
+        assert_eq!(cell_false.content(), "false");
+
+        let cell_null = format_property_value_cell(&null_val);
+        assert_eq!(cell_null.content(), "null");
+
+        let cell_str = format_property_value_cell(&str_val);
+        assert_eq!(cell_str.content(), "\"simple\"");
     }
 }
