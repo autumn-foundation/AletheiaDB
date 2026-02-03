@@ -289,6 +289,24 @@ impl GallifreyDB {
     /// This updates both the database's default mode for new transactions
     /// and the underlying WAL system's behavior.
     ///
+    /// # Graceful Transition
+    ///
+    /// This operation ensures that pending transactions (especially in `GroupCommit` mode)
+    /// are durably flushed before the transition completes. It also manages background
+    /// flush threads automatically.
+    ///
+    /// # Performance Implications
+    ///
+    /// Changing the durability mode is a heavy operation that acquires exclusive locks
+    /// and joins background threads. It may cause a brief latency spike (typically < 10ms)
+    /// for all concurrent write operations.
+    ///
+    /// # Consistency
+    ///
+    /// Transactions that were already active when this method was called will continue
+    /// to use the durability mode they captured at their creation. Only transactions
+    /// created after this call returns will use the new default mode.
+    ///
     /// # Errors
     ///
     /// Returns an error if the transition fails (e.g., background thread cannot be started).

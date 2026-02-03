@@ -97,7 +97,6 @@ pub struct WriteTransaction {
 }
 
 impl WriteTransaction {
-
     /// Create a new write transaction with a specific durability mode.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_durability(
@@ -147,6 +146,11 @@ impl WriteTransaction {
     /// Get transaction ID.
     pub fn tx_id(&self) -> TxId {
         self.tx_id
+    }
+
+    /// Get the durability mode for this transaction.
+    pub fn durability_mode(&self) -> DurabilityMode {
+        self.durability_mode
     }
 
     /// Commit the transaction.

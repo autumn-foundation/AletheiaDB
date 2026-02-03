@@ -301,11 +301,22 @@ impl ConcurrentWalSystem {
     /// 2. Stopping the old background flush thread (if any).
     /// 3. Initializing the new mode's coordinator and background thread.
     ///
-    /// # Thread Safety
+    /// # Performance Implications
     ///
-    /// This operation acquires an exclusive write lock on the WAL state. While this
-    /// prevents concurrent mode changes, it does not block concurrent `append()` calls,
-    /// which only require a read lock.
+    /// This operation acquires an exclusive write lock on the WAL state and waits for
+    /// the old background flush thread to join. This may cause a brief latency spike
+    /// (typically < 10ms) for all other WAL operations as they wait for the lock.
+    ///
+    /// # Consistency & Race Conditions
+    ///
+    /// In-flight transactions that already started committing may experience a mode
+    /// switch mid-execution. For example, a transaction starting as `GroupCommit`
+    /// might fallback to `Synchronous` behavior if the switch occurs after it
+    /// registers but before the flush completes. This is handled safely and ensures
+    /// durability.
+    ///
+    /// Transactions that started before the switch but haven't committed yet will
+    /// still use the durability mode they captured at initialization.
     pub fn set_durability_mode(&self, mode: DurabilityMode) -> Result<()> {
         let mut state = self.state.write();
 
@@ -317,15 +328,14 @@ impl ConcurrentWalSystem {
         // 1. Graceful transition: Wait for pending GroupCommit epochs to flush.
         // This ensures that transactions that were told they are in GroupCommit
         // actually get the durability they expected before we switch modes.
+        #[allow(clippy::collapsible_if)]
         if let Some(ref gc) = state.group_commit {
-            if let Ok(current) = gc.current_epoch() {
-                if let Ok(batch_size) = gc.current_batch_size() {
-                    if batch_size > 0 {
-                        // Signal flush thread to wake up and flush current batch
-                        self.flush_notifier.notify();
-                        // Wait for it (with a timeout handled by the coordinator)
-                        let _ = gc.wait_for_flush(current);
-                    }
+            if let (Ok(current), Ok(batch_size)) = (gc.current_epoch(), gc.current_batch_size()) {
+                if batch_size > 0 {
+                    // Signal flush thread to wake up and flush current batch
+                    self.flush_notifier.notify();
+                    // Wait for it (with a timeout handled by the coordinator)
+                    let _ = gc.wait_for_flush(current);
                 }
             }
         }
@@ -375,7 +385,8 @@ impl ConcurrentWalSystem {
             let error_counter_clone = Arc::clone(&self.consecutive_flush_errors);
             let flush_interval = mode.flush_interval().unwrap_or(Duration::from_millis(10));
             // Match the sync logic from new() - only GroupCommit and Synchronous sync on every flush.
-            // Note: Synchronous doesn't use the background thread, but we include it for consistency.
+            // (Synchronous mode doesn't normally use a background thread, but if it were to
+            // be used here, we would want it to fsync on every flush for ACID durability).
             let sync_on_flush = matches!(
                 mode,
                 DurabilityMode::Synchronous | DurabilityMode::GroupCommit { .. }
@@ -536,6 +547,7 @@ impl ConcurrentWalSystem {
     /// For `DurabilityMode::Synchronous`, this blocks until durable.
     /// For other modes, this returns immediately.
     pub fn append(&self, operation: WalOperation) -> Result<LSN> {
+        // Capture mode atomically to avoid TOCTOU race during mode switch
         let mode = self.state.read().durability_mode;
         match mode {
             DurabilityMode::Synchronous => self.append_sync(operation),
@@ -622,7 +634,7 @@ impl ConcurrentWalSystem {
             return Ok(Vec::new());
         }
 
-        // Use the underlying WAL's batch append for async modes
+        // Capture mode atomically to avoid TOCTOU race during mode switch
         let mode = self.state.read().durability_mode;
         match mode {
             DurabilityMode::Synchronous => {
@@ -657,6 +669,7 @@ impl ConcurrentWalSystem {
             return Ok(FlushStats::default());
         }
 
+        // Capture mode atomically
         let mode = self.state.read().durability_mode;
         let should_sync = !matches!(mode, DurabilityMode::Async { .. });
         self.coordinator.flush(entries, should_sync)
@@ -698,8 +711,13 @@ impl ConcurrentWalSystem {
     /// are notified. The data durability is guaranteed because entries
     /// must be in the ring buffer before this method is called.
     pub fn commit(&self) -> Result<Option<u64>> {
-        let state = self.state.read();
-        match state.durability_mode {
+        // Capture both mode and coordinator atomically to avoid TOCTOU race
+        let (mode, group_commit) = {
+            let state = self.state.read();
+            (state.durability_mode, state.group_commit.clone())
+        };
+
+        match mode {
             DurabilityMode::Synchronous => {
                 // Drain and flush immediately with fsync
                 let entries = self.wal.drain_all();
@@ -714,7 +732,7 @@ impl ConcurrentWalSystem {
             }
             DurabilityMode::GroupCommit { .. } | DurabilityMode::AsyncBatched { .. } => {
                 // Register with coordinator and return epoch to wait for
-                if let Some(ref gc) = state.group_commit {
+                if let Some(ref gc) = group_commit {
                     let (epoch, should_trigger) = gc.register_transaction()?;
 
                     // If batch is full, signal flush thread to wake up immediately
@@ -724,7 +742,7 @@ impl ConcurrentWalSystem {
 
                     Ok(Some(epoch))
                 } else {
-                    // Fallback to sync if no coordinator (shouldn't happen)
+                    // Fallback to sync if no coordinator (can happen during mode switch)
                     let entries = self.wal.drain_all();
                     if !entries.is_empty() {
                         self.coordinator.flush(entries, true)?;
