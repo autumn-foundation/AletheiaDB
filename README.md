@@ -326,23 +326,25 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for complete architecture d
 ### Basic Graph Operations
 
 ```rust
-use gallifreydb::{GallifreyDB, PropertyMap};
+use gallifreydb::{GallifreyDB, PropertyMap, PropertyMapBuilder, WriteOps};
 
 // Create a new database
-let db = GallifreyDB::new();
+let db = GallifreyDB::new().unwrap();
 
 // Create nodes using write transactions
 let alice_id = db.write(|tx| {
-    tx.create_node("Person", PropertyMap::from_iter([
-        ("name".into(), "Alice".into()),
-        ("age".into(), 30.into()),
-    ]))
+    tx.create_node("Person", PropertyMapBuilder::new()
+        .insert("name", "Alice")
+        .insert("age", 30)
+        .build()
+    )
 })?;
 
 let bob_id = db.write(|tx| {
-    tx.create_node("Person", PropertyMap::from_iter([
-        ("name".into(), "Bob".into()),
-    ]))
+    tx.create_node("Person", PropertyMapBuilder::new()
+        .insert("name", "Bob")
+        .build()
+    )
 })?;
 
 // Create relationships
@@ -378,7 +380,7 @@ if let Some(old_alice) = historical_alice {
 use gallifreydb::{GallifreyDB, PropertyMapBuilder};
 use gallifreydb::index::vector::{HnswConfig, DistanceMetric};
 
-let db = GallifreyDB::new();
+let db = GallifreyDB::new().unwrap();
 
 // Enable vector indexing
 db.vector_index("embedding")
@@ -664,7 +666,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embeddings = service.embed_batch(&documents).await?;
 
     // 3. Store with vectors
-    let db = GallifreyDB::new();
+    let db = GallifreyDB::new()?;
     for (text, embedding) in documents.iter().zip(embeddings.iter()) {
         db.create_node(
             "Document",
@@ -711,7 +713,7 @@ fn main() {
     let config = observability::Config::from_env();
     observability::init(config);
 
-    let db = gallifreydb::GallifreyDB::new();
+    let db = gallifreydb::GallifreyDB::new().unwrap();
 
     // Metrics automatically collected
     // Check for critical errors
