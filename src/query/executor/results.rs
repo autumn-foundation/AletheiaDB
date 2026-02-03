@@ -464,8 +464,7 @@ impl std::fmt::Display for QueryResult {
                         .map(|(k, v)| {
                             // resolve key
                             let k_str = crate::core::interning::GLOBAL_INTERNER
-                                .resolve(*k)
-                                .map(|s| s.to_string())
+                                .resolve_with(*k, |s| s.to_string())
                                 .unwrap_or_else(|| format!("key:{}", k.as_u32()));
                             format!("{}: {}", k_str, v)
                         })
