@@ -1411,11 +1411,11 @@ impl PropertyMap {
 
     /// Get a property value by key.
     ///
-    /// The key is automatically interned before lookup for efficient comparison.
-    /// Returns None if the key is not found or if interning fails.
+    /// The key is looked up in the interner for efficient comparison.
+    /// Returns None if the key hasn't been interned (and thus cannot be in the map).
     #[inline]
     pub fn get(&self, key: &str) -> Option<&PropertyValue> {
-        let interned_key = GLOBAL_INTERNER.intern(key).ok()?;
+        let interned_key = GLOBAL_INTERNER.get_id(key)?;
         self.get_by_interned_key(&interned_key)
     }
 
@@ -1430,11 +1430,11 @@ impl PropertyMap {
 
     /// Check if a property exists.
     ///
-    /// The key is automatically interned before lookup for efficient comparison.
-    /// Returns false if interning fails (key cannot exist if it can't be interned).
+    /// The key is looked up in the interner for efficient comparison.
+    /// Returns false if the key hasn't been interned (and thus cannot be in the map).
     #[inline]
     pub fn contains_key(&self, key: &str) -> bool {
-        let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
+        let Some(interned_key) = GLOBAL_INTERNER.get_id(key) else {
             return false;
         };
         self.contains_interned_key(&interned_key)
@@ -1886,7 +1886,7 @@ impl PropertyMapBuilder {
 
     /// Remove a property (fallible).
     pub fn try_remove(self, key: &str) -> Result<Self> {
-        let Ok(interned_key) = GLOBAL_INTERNER.intern(key) else {
+        let Some(interned_key) = GLOBAL_INTERNER.get_id(key) else {
             return Ok(self);
         };
         self.try_remove_by_key(&interned_key)
