@@ -1638,9 +1638,15 @@ fn test_traversal_targets_and_sources() {
     let n1 = storage.create_node("Person", Default::default()).unwrap();
     let n2 = storage.create_node("Person", Default::default()).unwrap();
 
-    storage.create_edge(n0, n1, "KNOWS", Default::default()).unwrap();
-    storage.create_edge(n0, n2, "FOLLOWS", Default::default()).unwrap();
-    storage.create_edge(n1, n2, "KNOWS", Default::default()).unwrap();
+    storage
+        .create_edge(n0, n1, "KNOWS", Default::default())
+        .unwrap();
+    storage
+        .create_edge(n0, n2, "FOLLOWS", Default::default())
+        .unwrap();
+    storage
+        .create_edge(n1, n2, "KNOWS", Default::default())
+        .unwrap();
 
     // Outgoing targets
     let targets = storage.get_outgoing_targets(n0);
@@ -1674,11 +1680,15 @@ fn test_iterators_with_delta_and_tombstones() {
     let n2 = storage.create_node("Person", Default::default()).unwrap();
 
     // 1. Frozen edge
-    let e1 = storage.create_edge(n0, n1, "KNOWS", Default::default()).unwrap();
+    let e1 = storage
+        .create_edge(n0, n1, "KNOWS", Default::default())
+        .unwrap();
     storage.compact_adjacency();
 
     // 2. Delta edge
-    let e2 = storage.create_edge(n0, n2, "KNOWS", Default::default()).unwrap();
+    let e2 = storage
+        .create_edge(n0, n2, "KNOWS", Default::default())
+        .unwrap();
 
     // Test iterator sees both
     let edges: Vec<_> = storage.get_outgoing_edges_iter(n0).collect();
@@ -1695,7 +1705,9 @@ fn test_iterators_with_delta_and_tombstones() {
     assert_eq!(edges[0], e2);
 
     // Test labeled iterator
-    let edges: Vec<_> = storage.get_outgoing_edges_with_label_iter(n0, "KNOWS").collect();
+    let edges: Vec<_> = storage
+        .get_outgoing_edges_with_label_iter(n0, "KNOWS")
+        .collect();
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0], e2);
 

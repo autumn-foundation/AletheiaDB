@@ -805,29 +805,44 @@ mod tests {
         use crate::core::interning::InternedString;
         let index = IncrementalAdjacencyIndex::new();
         let node = NodeId::new(1).unwrap();
-        let guard = index.get_adjacency(node);
 
-        // Empty index
-        assert_eq!(guard.capacity_hint(), 0);
-        assert_eq!(guard.fast_len(), Some(0));
+        {
+            let guard = index.get_adjacency(node);
+            // Empty index
+            assert_eq!(guard.capacity_hint(), 0);
+            assert_eq!(guard.fast_len(), Some(0));
+        }
 
         // Add to delta
-        let entry = AdjacencyEntry::new(NodeId::new(2).unwrap(), EdgeId::new(1).unwrap(), InternedString::from_raw(1));
+        let entry = AdjacencyEntry::new(
+            NodeId::new(2).unwrap(),
+            EdgeId::new(1).unwrap(),
+            InternedString::from_raw(1),
+        );
         index.insert(node, entry);
-        let guard = index.get_adjacency(node);
-        assert_eq!(guard.capacity_hint(), 1);
-        assert_eq!(guard.fast_len(), None); // Not fast path anymore because delta is not empty
+
+        {
+            let guard = index.get_adjacency(node);
+            assert_eq!(guard.capacity_hint(), 1);
+            assert_eq!(guard.fast_len(), None); // Not fast path anymore because delta is not empty
+        }
 
         // Compact
         index.compact();
-        let guard = index.get_adjacency(node);
-        assert_eq!(guard.capacity_hint(), 1);
-        assert_eq!(guard.fast_len(), Some(1));
+
+        {
+            let guard = index.get_adjacency(node);
+            assert_eq!(guard.capacity_hint(), 1);
+            assert_eq!(guard.fast_len(), Some(1));
+        }
 
         // Add tombstone
         index.delete(EdgeId::new(1).unwrap());
-        let guard = index.get_adjacency(node);
-        assert_eq!(guard.capacity_hint(), 1); // capacity_hint is upper bound, doesn't account for tombstones
-        assert_eq!(guard.fast_len(), None); // Not fast path anymore because tombstones exist
+
+        {
+            let guard = index.get_adjacency(node);
+            assert_eq!(guard.capacity_hint(), 1); // capacity_hint is upper bound, doesn't account for tombstones
+            assert_eq!(guard.fast_len(), None); // Not fast path anymore because tombstones exist
+        }
     }
 }
