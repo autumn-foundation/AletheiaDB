@@ -415,4 +415,82 @@ mod tests {
         let bytes = sentinel.serialize();
         assert!(HybridTimestamp::deserialize(&bytes).is_ok());
     }
+
+    #[test]
+    fn test_ordering_priority() {
+        // Wallclock difference should dominate logical difference
+        let ts1 = HybridTimestamp::new(1000, 100).unwrap();
+        let ts2 = HybridTimestamp::new(1001, 0).unwrap();
+        assert!(ts1 < ts2);
+
+        // Logical counter breaks ties
+        let ts3 = HybridTimestamp::new(1000, 99).unwrap();
+        assert!(ts3 < ts1);
+
+        // Equality
+        let ts4 = HybridTimestamp::new(1000, 100).unwrap();
+        assert_eq!(ts1, ts4);
+    }
+
+    #[test]
+    fn test_receive_remote_overflow() {
+        let local = HybridTimestamp::new(1000, 0).unwrap();
+        // Remote has same wallclock but MAX logical
+        let msg = HybridTimestamp::new(1000, u32::MAX).unwrap();
+
+        // If receive chooses msg wallclock (because local <= msg), it tries to increment msg.logical
+        // physical_wallclock = 1000 ensures we stay on 1000
+        let result = local.receive(msg, 1000);
+
+        assert!(matches!(
+            result,
+            Err(TemporalError::LogicalCounterOverflow { wallclock: 1000, current_logical })
+            if current_logical == u32::MAX
+        ));
+    }
+
+    #[test]
+    fn test_receive_simultaneous_overflow() {
+        let local = HybridTimestamp::new(1000, u32::MAX).unwrap();
+        let msg = HybridTimestamp::new(1000, u32::MAX).unwrap();
+
+        // Both match, so it tries to increment max(local.logical, msg.logical)
+        let result = local.receive(msg, 1000);
+
+        assert!(matches!(
+            result,
+            Err(TemporalError::LogicalCounterOverflow { wallclock: 1000, current_logical })
+            if current_logical == u32::MAX
+        ));
+    }
+
+    #[test]
+    fn test_from_i64_conversion() {
+        let ts: HybridTimestamp = 12345.into();
+        assert_eq!(ts.wallclock(), 12345);
+        assert_eq!(ts.logical(), 0);
+
+        let ts_neg: HybridTimestamp = (-500).into();
+        assert_eq!(ts_neg.wallclock(), -500);
+        assert_eq!(ts_neg.logical(), 0);
+    }
+
+    #[test]
+    fn test_display_formatting() {
+        let ts = HybridTimestamp::new(12345, 67).unwrap();
+        assert_eq!(format!("{}", ts), "12345.67");
+    }
+
+    #[test]
+    fn test_negative_wallclock() {
+        let ts = HybridTimestamp::new(-1000, 0).unwrap();
+        assert_eq!(ts.wallclock(), -1000);
+
+        // Ensure ordering works correctly with negative numbers
+        let ts2 = HybridTimestamp::new(100, 0).unwrap();
+        assert!(ts < ts2);
+
+        let ts3 = HybridTimestamp::new(-1001, 0).unwrap();
+        assert!(ts3 < ts);
+    }
 }
