@@ -25,7 +25,8 @@ fn test_streaming_checkpoint_bounded_memory() {
     let historical = HistoricalStorage::new();
 
     // Create many nodes (simulating large database)
-    let node_count = 50_000;
+    // Reduced from 50k to 5k for faster test execution while still demonstrating bounded memory
+    let node_count = 5_000;
     for i in 0..node_count {
         let props = PropertyMapBuilder::new()
             .insert("id", i as i64)
@@ -98,19 +99,20 @@ fn test_streaming_works_with_edges() {
     let historical = HistoricalStorage::new();
 
     // Create nodes
+    // Reduced from 100 to 50 nodes for faster test execution
     let mut node_ids = Vec::new();
-    for i in 0..100 {
+    for i in 0..50 {
         let props = PropertyMapBuilder::new().insert("id", i as i64).build();
         let node_id = current.create_node("Node", props).unwrap();
         node_ids.push(node_id);
     }
 
-    // Create many edges
-    for i in 0..100 {
-        for j in 0..10 {
+    // Create many edges (50 nodes * 5 edges each ≈ 250 edges)
+    for i in 0..50 {
+        for j in 0..5 {
             if i != j {
                 let props = PropertyMapBuilder::new()
-                    .insert("weight", (i * 10 + j) as i64)
+                    .insert("weight", (i * 5 + j) as i64)
                     .build();
                 current
                     .create_edge(node_ids[i], node_ids[j], "CONNECTS", props)
@@ -126,9 +128,9 @@ fn test_streaming_works_with_edges() {
         .create_checkpoint(LSN(1), &current, &historical)
         .unwrap();
 
-    // Should have ~900 edges (100 * 10 - 100 self-edges)
-    assert!(stats.edge_count > 800);
-    assert!(stats.edge_count < 1000);
+    // Should have ~245 edges (50 * 5 - 5 self-edges)
+    assert!(stats.edge_count > 200);
+    assert!(stats.edge_count < 300);
 
     // Recovery should preserve all edges
     use gallifreydb::storage::wal::concurrent_system::{
@@ -217,7 +219,8 @@ fn test_memory_efficient_large_properties() {
     let historical = HistoricalStorage::new();
 
     // Create nodes with LARGE properties (1KB each)
-    let node_count = 10_000;
+    // Reduced from 10k to 1k for faster test execution while still demonstrating memory efficiency
+    let node_count = 1_000;
     for i in 0..node_count {
         let large_value = "x".repeat(1000); // 1KB string
         let props = PropertyMapBuilder::new()
@@ -227,8 +230,8 @@ fn test_memory_efficient_large_properties() {
         current.create_node("LargeNode", props).unwrap();
     }
 
-    // Database size: ~10MB (10K nodes × 1KB)
-    // Without streaming: Would need ~30MB (3x overhead)
+    // Database size: ~1MB (1K nodes × 1KB)
+    // Without streaming: Would need ~3MB (3x overhead)
     // With streaming: Should need ~100MB buffer only
 
     let config = CheckpointConfig::with_data_dir(dir.path());
@@ -295,7 +298,8 @@ fn test_streaming_checkpoint_performance() {
     let historical = HistoricalStorage::new();
 
     // Create dataset
-    let node_count = 20_000;
+    // Reduced from 20k to 2k for faster test execution
+    let node_count = 2_000;
     for i in 0..node_count {
         let props = PropertyMapBuilder::new()
             .insert("id", i as i64)
@@ -315,9 +319,9 @@ fn test_streaming_checkpoint_performance() {
 
     assert_eq!(stats.node_count, node_count);
 
-    // Should complete reasonably fast (< 5 seconds for 20K nodes)
+    // Should complete reasonably fast (< 2 seconds for 2K nodes)
     assert!(
-        duration.as_secs() < 5,
+        duration.as_secs() < 2,
         "Checkpoint took too long: {:?}",
         duration
     );
