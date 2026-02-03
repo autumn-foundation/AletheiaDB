@@ -8,8 +8,8 @@
 //! - Snapshot pruning with retention policies
 
 use gallifreydb::core::id::NodeId;
-use gallifreydb::core::temporal::{TimeRange, Timestamp};
 use gallifreydb::core::temporal::time;
+use gallifreydb::core::temporal::{TimeRange, Timestamp};
 use gallifreydb::index::vector::temporal::{
     RetentionPolicy, SnapshotStrategy, TemporalVectorConfig, TemporalVectorIndex,
 };

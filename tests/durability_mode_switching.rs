@@ -176,3 +176,68 @@ fn test_concurrent_mode_switches() {
         h.join().unwrap();
     }
 }
+
+#[test]
+fn test_switch_to_async_batched() {
+    let db = GallifreyDB::new().unwrap();
+    let mode = DurabilityMode::async_batched_validated(10, 100).unwrap();
+
+    db.set_durability_mode(mode).unwrap();
+    assert_eq!(db.default_durability(), mode);
+
+    // Verify writes work
+    db.write(|tx| tx.create_node("AsyncBatched", Default::default()))
+        .unwrap();
+
+    // Verify it doesn't wait (low latency)
+    let start = std::time::Instant::now();
+    db.write(|tx| tx.create_node("Fast", Default::default()))
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    // AsyncBatched should be very fast (< 1ms usually)
+    assert!(elapsed < Duration::from_millis(50));
+}
+
+#[test]
+fn test_switch_async_batched_to_sync() {
+    let db = GallifreyDB::new().unwrap();
+    let mode = DurabilityMode::async_batched_validated(100, 500).unwrap();
+    db.set_durability_mode(mode).unwrap();
+
+    // Add some data
+    db.write(|tx| tx.create_node("Data", Default::default()))
+        .unwrap();
+
+    // Switch to sync
+    db.set_durability_mode(DurabilityMode::Synchronous).unwrap();
+    assert_eq!(db.default_durability(), DurabilityMode::Synchronous);
+
+    db.write(|tx| tx.create_node("Safe", Default::default()))
+        .unwrap();
+}
+
+#[test]
+fn test_switch_all_combinations() {
+    let db = GallifreyDB::new().unwrap();
+    let modes = vec![
+        DurabilityMode::Synchronous,
+        DurabilityMode::async_mode_validated(100).unwrap(),
+        DurabilityMode::group_commit_validated(10, 100).unwrap(),
+        DurabilityMode::async_batched_validated(10, 100).unwrap(),
+    ];
+
+    for &m1 in &modes {
+        for &m2 in &modes {
+            db.set_durability_mode(m1).unwrap();
+            db.write(|tx| tx.create_node("From", Default::default()))
+                .unwrap();
+
+            db.set_durability_mode(m2).unwrap();
+            db.write(|tx| tx.create_node("To", Default::default()))
+                .unwrap();
+
+            assert_eq!(db.default_durability(), m2);
+        }
+    }
+}
