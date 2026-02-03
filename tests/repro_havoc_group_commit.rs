@@ -37,8 +37,7 @@ fn havoc_repro_group_commit_false_success() {
         // Wait for main thread to perform flushes
         barrier_clone.wait();
         // Check status
-        let result = coord_clone.wait_for_flush(epoch1);
-        result
+        coord_clone.wait_for_flush(epoch1)
     });
 
     // 2. Mark Epoch 1 as FAILED
