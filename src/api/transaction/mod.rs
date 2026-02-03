@@ -62,14 +62,14 @@
 pub mod read_tx;
 pub mod types;
 pub mod visibility;
+pub mod write;
 pub mod write_buffer;
-pub mod write_tx;
 
 pub use read_tx::ReadTransaction;
 pub use types::{TxId, TxIdGenerator, TxMetadata, TxState};
 pub use visibility::{CompressionStats, TransactionSnapshot, TxVisibilityManager};
+pub use write::WriteTransaction;
 pub use write_buffer::{BufferedWrite, WriteBuffer};
-pub use write_tx::WriteTransaction;
 
 use crate::core::graph::{Edge, Node};
 #[cfg(test)]
