@@ -1,9 +1,10 @@
-use gallifreydb::core::id::NodeId;
-use gallifreydb::index::vector::{HnswIndexBuilder, DistanceMetric, VectorIndex};
-use tempfile::tempdir;
+use gallifreydb::index::vector::{DistanceMetric, HnswIndexBuilder, VectorIndex};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
+use tempfile::tempdir;
+
+use gallifreydb::core::id::NodeId;
 
 /// 👺 HAVOC DEADLOCK REPRODUCTION
 ///
@@ -25,7 +26,7 @@ fn havoc_deadlock_add_vs_save() {
     let index = Arc::new(
         HnswIndexBuilder::new(128, DistanceMetric::Cosine)
             .build()
-            .expect("Failed to build index")
+            .expect("Failed to build index"),
     );
 
     let node_id = NodeId::new(1).unwrap();
