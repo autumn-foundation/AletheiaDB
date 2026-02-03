@@ -620,8 +620,6 @@ impl CheckpointManager {
         &self,
         snapshot: &crate::storage::snapshot::CurrentStorageSnapshot,
     ) -> Result<GraphIndexData> {
-        use crate::storage::snapshot::StorageSnapshot;
-
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
 

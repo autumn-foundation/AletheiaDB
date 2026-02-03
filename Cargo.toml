@@ -365,8 +365,3 @@ name = "edge_iteration"
 harness = false
 path = "benches/edge_iteration.rs"
 required-features = []
-
-# Experimental features
-[[example]]
-name = "story_demo"
-required-features = ["nova"]

@@ -6,12 +6,3 @@
 #[cfg(feature = "nova")]
 /// Semantic graph clustering ("Cartographer").
 pub mod cartographer;
-#[cfg(feature = "nova")]
-/// Associative retrieval ("Fishing") module.
-pub mod fishing;
-#[cfg(feature = "nova")]
-/// Graph context exporter for LLM integration.
-pub mod graph_context;
-#[cfg(feature = "nova")]
-/// Temporal narrative generator for natural language history logs.
-pub mod temporal_narrative;

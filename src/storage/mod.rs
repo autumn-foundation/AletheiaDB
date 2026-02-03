@@ -45,7 +45,7 @@ pub use redb_cold_storage::{
     RedbColdStorage, RedbConfig, decode_edge_version, decode_node_version, encode_edge_version,
     encode_node_version,
 };
-pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot, StorageSnapshot};
+pub use snapshot::{CurrentStorageSnapshot, HistoricalStorageSnapshot};
 pub use tiered_storage::{
     LatencyPercentiles, TieredStorage, TieredStorageConfig, TieredStorageMetrics,
 };

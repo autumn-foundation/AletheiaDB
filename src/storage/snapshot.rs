@@ -23,8 +23,6 @@
 //! # Usage
 //!
 //! ```ignore
-//! use gallifreydb::storage::snapshot::StorageSnapshot;
-//!
 //! // Create snapshot at specific LSN
 //! let snapshot = current.create_snapshot(lsn);
 //!
@@ -39,42 +37,6 @@ use crate::core::graph::{Edge, Node};
 use crate::core::version::{EdgeVersion, NodeVersion};
 use crate::storage::wal::LSN;
 use std::sync::Arc;
-
-/// Snapshot isolation trait for storage layers.
-///
-/// Provides a consistent point-in-time view of storage that is isolated
-/// from concurrent modifications. Used primarily for checkpointing to
-/// ensure data consistency.
-///
-/// # Design
-///
-/// Snapshots use Arc-based COW:
-/// - Snapshot creation does ONE iteration over DashMap/structures
-/// - Collects `Arc<T>` references (cheap, just pointer + refcount)
-/// - Total memory: 8 bytes × num_entities (not full clones)
-/// - Iteration over snapshot is isolated from concurrent writes
-pub trait StorageSnapshot: Send + Sync {
-    /// Node iterator type (streaming, no Vec allocation)
-    type NodeIter: Iterator<Item = Node>;
-
-    /// Edge iterator type (streaming, no Vec allocation)
-    type EdgeIter: Iterator<Item = Edge>;
-
-    /// Get the LSN at which this snapshot was taken
-    fn lsn(&self) -> LSN;
-
-    /// Get the number of nodes in this snapshot
-    fn node_count(&self) -> usize;
-
-    /// Get the number of edges in this snapshot
-    fn edge_count(&self) -> usize;
-
-    /// Iterate over nodes in snapshot (streaming, isolated)
-    fn iter_nodes(&self) -> Self::NodeIter;
-
-    /// Iterate over edges in snapshot (streaming, isolated)
-    fn iter_edges(&self) -> Self::EdgeIter;
-}
 
 /// Snapshot of CurrentStorage at a specific LSN.
 ///
@@ -108,6 +70,37 @@ impl CurrentStorageSnapshot {
         Self { lsn, nodes, edges }
     }
 
+    /// Get the LSN at which this snapshot was taken
+    pub fn lsn(&self) -> LSN {
+        self.lsn
+    }
+
+    /// Get the number of nodes in this snapshot
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Get the number of edges in this snapshot
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Iterate over nodes in snapshot (streaming, isolated)
+    pub fn iter_nodes(&self) -> CurrentNodeIterator {
+        CurrentNodeIterator {
+            nodes: self.nodes.clone(),
+            index: 0,
+        }
+    }
+
+    /// Iterate over edges in snapshot (streaming, isolated)
+    pub fn iter_edges(&self) -> CurrentEdgeIterator {
+        CurrentEdgeIterator {
+            edges: self.edges.clone(),
+            index: 0,
+        }
+    }
+
     /// Get nodes as a slice (for testing/debugging)
     #[cfg(test)]
     pub fn nodes(&self) -> &[Arc<Node>] {
@@ -118,37 +111,6 @@ impl CurrentStorageSnapshot {
     #[cfg(test)]
     pub fn edges(&self) -> &[Arc<Edge>] {
         &self.edges
-    }
-}
-
-impl StorageSnapshot for CurrentStorageSnapshot {
-    type NodeIter = CurrentNodeIterator;
-    type EdgeIter = CurrentEdgeIterator;
-
-    fn lsn(&self) -> LSN {
-        self.lsn
-    }
-
-    fn node_count(&self) -> usize {
-        self.nodes.len()
-    }
-
-    fn edge_count(&self) -> usize {
-        self.edges.len()
-    }
-
-    fn iter_nodes(&self) -> Self::NodeIter {
-        CurrentNodeIterator {
-            nodes: self.nodes.clone(),
-            index: 0,
-        }
-    }
-
-    fn iter_edges(&self) -> Self::EdgeIter {
-        CurrentEdgeIterator {
-            edges: self.edges.clone(),
-            index: 0,
-        }
     }
 }
 

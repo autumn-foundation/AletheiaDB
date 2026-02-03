@@ -10,7 +10,6 @@ use gallifreydb::core::temporal::time;
 use gallifreydb::storage::checkpoint::{CheckpointConfig, CheckpointManager};
 use gallifreydb::storage::current::CurrentStorage;
 use gallifreydb::storage::historical::HistoricalStorage;
-use gallifreydb::storage::snapshot::StorageSnapshot;
 use gallifreydb::storage::wal::LSN;
 use std::sync::{Arc, Barrier};
 use std::thread;
